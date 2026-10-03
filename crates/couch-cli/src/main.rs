@@ -7,7 +7,8 @@
 //! - `latency-probe`: the M1 latency measurement on one machine;
 //! - `gates`: the rate-control gates (G1, G3 to G5), run and judged;
 //! - `pad-test`: a virtual gamepad that moves by itself;
-//! - `input-sink`: keyboard and mouse injection checked end to end.
+//! - `input-sink`: keyboard and mouse injection checked end to end;
+//! - `release-check`: the host releases input whenever a session ends badly.
 
 mod capture_test;
 mod gates;
@@ -19,6 +20,7 @@ mod latency_probe;
 mod net_args;
 mod pad_test;
 mod probe;
+mod release_check;
 mod screen_probe;
 mod stats;
 mod view;
@@ -184,6 +186,9 @@ enum Cmd {
     /// Inject a scripted keyboard and mouse run into a test window and check
     /// it arrived intact.
     InputSink,
+    /// Kill, close, freeze and stop host and viewer processes, and check the
+    /// host releases the viewer's input each time, in time. About 1 minute.
+    ReleaseCheck,
 }
 
 fn pair<T: Copy>(v: Option<Vec<T>>) -> Option<(T, T)> {
@@ -326,6 +331,7 @@ async fn main() -> ExitCode {
             tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids))
         }
         Cmd::InputSink => tokio::task::block_in_place(input_sink::run),
+        Cmd::ReleaseCheck => tokio::task::block_in_place(release_check::run),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

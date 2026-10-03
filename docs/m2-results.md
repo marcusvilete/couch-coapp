@@ -71,6 +71,7 @@ cargo build --release -p couch-cli -p couch-viewer
 $cli = '.\target\release\couch-cli.exe'
 & $cli pad-test --secs 30                    # then watch joy.cpl
 & $cli input-sink                            # keyboard and mouse injection, checked
+& $cli release-check                         # input released on kill, freeze, close and host stop
 & $cli host --source window --title "<game>" --relay none [--allow-kbm]   # prints TICKET
 & $cli view <ticket> --relay none
 cargo test -p couch-input -p couch-net

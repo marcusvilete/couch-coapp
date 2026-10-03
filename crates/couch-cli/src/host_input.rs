@@ -180,20 +180,22 @@ async fn run(
         let now_status = router.seat(SEAT).map(|s| s.2);
         if now_status != status {
             status = now_status;
-            let what = match status {
-                Some(SeatStatus::Active) => "active",
-                Some(SeatStatus::Suspended) => "suspended, everything released",
-                Some(SeatStatus::Host) => "back with the host",
-                Some(SeatStatus::Granted) | None => "waiting",
+            let (what, event) = match status {
+                Some(SeatStatus::Active) => ("active", "active"),
+                Some(SeatStatus::Suspended) => ("suspended, everything released", "suspended"),
+                Some(SeatStatus::Host) => ("back with the host", "revoked"),
+                Some(SeatStatus::Granted) | None => ("waiting", "waiting"),
             };
             println!("{:8.3}s  seat 0 {what}", started.elapsed().as_secs_f64());
+            event_line(event);
         }
     }
     let effects = router.revoke_all();
     if let Err(e) = router::apply(&effects, &mut kbm, &mut pads) {
         println!("releasing input failed: {e}");
     }
-    let why = if *shutdown.borrow() {
+    let stopping = *shutdown.borrow();
+    let why = if stopping {
         "host stopping"
     } else {
         "viewer gone"
@@ -202,6 +204,14 @@ async fn run(
         "{:8.3}s  {why}: input released",
         started.elapsed().as_secs_f64()
     );
+    event_line(if stopping { "stopped" } else { "gone" });
+}
+
+/// `EVENT <what> <QPC µs>`, for `release-check`, which times releases on the
+/// same clock. What: `active`, `suspended`, `revoked`, `waiting`, and when
+/// input ends, `gone` (the viewer disconnected) or `stopped` (the host).
+fn event_line(what: &str) {
+    println!("EVENT {what} {}", couch_platform_win::clock::now().0);
 }
 
 /// Injects the effects and tells the viewer about seat changes.

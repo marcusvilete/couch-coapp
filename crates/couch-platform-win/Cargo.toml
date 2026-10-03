@@ -17,7 +17,10 @@ tracing.workspace = true
 vigem-rust.workspace = true
 windows = { workspace = true, features = [
     "Win32_Media",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Performance",
+    "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

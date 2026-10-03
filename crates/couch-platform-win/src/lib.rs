@@ -10,6 +10,7 @@ pub mod capture;
 pub mod clock;
 pub mod foreground;
 pub mod keymap;
+pub mod process;
 pub mod sendinput;
 pub mod timer;
 pub mod vigem;
