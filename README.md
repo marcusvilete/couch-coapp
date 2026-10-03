@@ -24,6 +24,10 @@ In a new terminal, run `. .\scripts\dev.ps1` first. It puts cargo and the native
 cargo test --workspace                       # all tests; no GPU or drivers needed
 cargo run -p couch-cli -- probe              # what this machine can do (build couch-viewer first)
 cd apps/desktop; npm run tauri dev           # the desktop app
+
+# Streaming spike (M1): build both binaries, then measure end-to-end latency on this machine
+cargo build --release -p couch-cli -p couch-viewer
+.\target\release\couch-cli.exe latency-probe --secs 30 --relay none
 ```
 
 More are in [CLAUDE.md](CLAUDE.md#commands).
@@ -32,4 +36,5 @@ More are in [CLAUDE.md](CLAUDE.md#commands).
 
 - [Architecture](docs/architecture.md): processes, crates, data paths, safety rules
 - [Protocol](docs/protocol.md): wire format and viewer IPC
+- [M1 results](docs/m1-results.md): the streaming latency and network gates
 - [Decision records](docs/adr/)

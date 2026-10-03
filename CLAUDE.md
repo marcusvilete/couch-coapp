@@ -33,6 +33,19 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 
 To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`.
 
+**Streaming and measurement.** Build both binaries in release first: `cargo build --release -p couch-cli -p couch-viewer`. `couch-cli` finds `couch-viewer` next to its own exe.
+
+| Task | Command |
+|---|---|
+| Stream a window to a viewer | `couch-cli host --source window --title "<substring>"` prints `TICKET ...`; then `couch-cli view <ticket>` |
+| Stream the test pattern | `couch-cli host --source testpattern --pattern-size 1280 720 --fps 30` |
+| End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
+| Rate-control gates G1 and G3–G5, run and judged | `couch-cli gates --quick` (4 min) or `couch-cli gates` (12 min). The `rate-control-gates` skill covers traces and reading a failure. |
+| Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
+| Audio datagrams behind a keyframe (timing test) | `cargo test --release -p couch-net --features netem --test datagrams -- --ignored --nocapture` |
+
+`--netem "<profile>"` (on `host`, `view` and `latency-probe`) replaces IP and relays with a loopback test transport that impairs the sending direction, e.g. `delay=20ms,loss=1%` or `rate=25mbit,at10s=rate:5mbit`. Without `--netem-viewer`, both sides get the same profile.
+
 ## Architecture in brief
 
 **Main process.** The Tauri app. Its Rust side links `couch-engine`, which owns:
@@ -87,5 +100,7 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 - Exact pins: `iroh` and `sdl3` (`=`). `windows` stays on 0.62 to match `windows-capture`'s COM types.
 
 **Relays.** `RelayChoice::N0Public` (iroh's public relays) is for development only. Production uses only our own iroh-relay (`RelayChoice::Custom`). Tests use `RelayChoice::Disabled`.
+
+**Congestion control lives in the rate controller** (`couch_media::ratecontrol`, ADR 0005). QUIC runs `couch_net::congestion::MediaCongestion`, which deliberately ignores isolated losses. A change to either can collapse the bitrate under random loss or stall recovery after an outage. Run `couch-cli gates` after touching them, or the video transport or encoder bitrate handling (the `rate-control-gates` skill has the procedure); `docs/m1-results.md` has the reference numbers.
 
 **Tests.** `cargo test --workspace` must pass without a GPU, a gamepad driver or internet access. Tests that need those are opt-in (`#[ignore]` or a `gpu-tests` feature).

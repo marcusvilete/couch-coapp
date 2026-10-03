@@ -7,10 +7,12 @@
 //!
 //! Protocol rules (versioning, frozen payloads) are in `docs/protocol.md`.
 
+mod bytes;
 pub mod control;
 pub mod envelope;
 pub mod ids;
 pub mod ipc;
+pub mod media;
 
 /// ALPN protocol id for connections between room members.
 ///

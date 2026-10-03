@@ -31,6 +31,12 @@ windows = "0.62"
 windows-capture = "2.0.1"
 vigem-rust = "0.2"
 
+# Viewer rendering
+egui = "0.36"
+egui-wgpu = { version = "0.36", default-features = false }
+pollster = "1"
+wgpu = "30"
+
 # App shell
 tauri = "2.12"
 tauri-build = "2.7"

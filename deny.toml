@@ -35,7 +35,12 @@ allow = [
 ]
 # Anything else (WTFPL, GPL, LGPL crates, ...) fails the check and needs a
 # deliberate decision recorded here as an exception.
-exceptions = []
+exceptions = [
+    # egui's built-in fonts (Ubuntu-Light, Hack, Noto Emoji) for the viewer
+    # HUD. Font licenses that allow bundling with software under any license;
+    # their texts must ship with the installer's notices (M10).
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
 
 [licenses.private]
 # Our own crates are `publish = false` and unlicensed until the license is chosen.

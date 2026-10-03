@@ -22,6 +22,12 @@ The host must encode with whichever GPU it has: NVENC, AMF or Quick Sync. Viewer
 - **LGPL obligations.** Ship the DLLs unmodified and replaceable, with the license notice and a source offer (M10). The build must not include `--enable-gpl` or `--enable-nonfree`; `cargo xtask doctor` checks this.
 - **Version gap.** rsmpeg 0.18 targets FFmpeg 8.0 and hasn't had a release in 13 months. We build it against 8.1 headers, which keep 8.0's library major versions.
 - **Risky code is contained.** Unsafe hardware-frame code stays in one small crate.
+- **Bitrate changes cost a keyframe.** FFmpeg 8.1's `h264_nvenc` resets the encoder with a forced IDR on any change to `bit_rate`. Found in M1.
+  - The other wrappers read the rate only when they open, so `FfmpegEncoder` reopens them on a bitrate change. That also starts with a keyframe.
+  - Only libopenh264 is tested on this machine; AMF and Quick Sync are untested.
+  - `EncoderCaps::bitrate_change_costs_keyframe` tells the rate controller, which then batches increases.
+  - Calling the NVENC API directly (M9) reconfigures without an IDR.
+- **Colour.** Encoders that don't take BGRA get it converted by swscale with an explicit BT.709 limited-range matrix, matching the stream's tags. swscale's default is BT.601.
 
 ## Alternatives, if rsmpeg stalls
 

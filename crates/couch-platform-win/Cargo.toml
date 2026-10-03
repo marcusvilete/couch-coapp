@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytes.workspace = true
 couch-input.workspace = true
 couch-media.workspace = true
 thiserror.workspace = true
@@ -14,6 +15,8 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 vigem-rust.workspace = true
+windows = { workspace = true, features = ["Win32_Media", "Win32_System_Performance"] }
+windows-capture.workspace = true
 
 [lints]
 workspace = true

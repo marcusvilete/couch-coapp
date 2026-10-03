@@ -24,6 +24,16 @@ pub struct BgraFrame {
 }
 
 impl BgraFrame {
+    /// The same frame with an odd width or height trimmed by one pixel, since
+    /// 4:2:0 encoders need even dimensions. Shares the pixel data.
+    pub fn cropped_to_even(&self) -> BgraFrame {
+        BgraFrame {
+            width: self.width & !1,
+            height: self.height & !1,
+            ..self.clone()
+        }
+    }
+
     /// The `[b, g, r, a]` value at `(x, y)`.
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = (y * self.stride + x * 4) as usize;
@@ -97,6 +107,9 @@ pub struct EncoderCaps {
     /// Backend name, e.g. `h264_nvenc`.
     pub name: String,
     pub hardware: bool,
+    /// Changing the bitrate forces a keyframe. FFmpeg's NVENC wrapper resets
+    /// the encoder on every bitrate change, so rate control batches increases.
+    pub bitrate_change_costs_keyframe: bool,
 }
 
 /// Interleaved 32-bit float PCM.
@@ -144,14 +157,21 @@ pub struct ReceivedFrame {
 pub struct FeedbackSnapshot {
     /// Receive rate measured by the viewer.
     pub delivery_rate_bps: u64,
+    /// Rate at which video was handed to the transport. Below the bitrate
+    /// when the encoder has little to send (a static scene).
+    pub send_rate_bps: u64,
     /// Bytes sent in the current epoch that the viewer has not reported yet.
     pub outstanding_bytes: u64,
     pub rtt_us: u32,
     pub min_rtt_us: u32,
     /// Growth of one-way delay over its recent minimum.
     pub delay_trend_us: i32,
+    /// Packets sent and lost on the current path, cumulative.
+    pub sent_packets: u64,
     pub lost_packets: u64,
     pub congestion_events: u64,
+    /// The transport's congestion window, if it has one (0 otherwise).
+    pub cwnd_bytes: u64,
     /// The path currently goes through a relay server.
     pub relayed: bool,
     /// Time since the last receiver report.

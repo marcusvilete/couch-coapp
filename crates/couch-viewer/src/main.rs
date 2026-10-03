@@ -4,18 +4,36 @@
 //! written to stdout; logs go to stderr.
 //!
 //! Modes:
-//! - no arguments: serve the IPC pipe until the parent closes it (M0 drains it;
-//!   decode and render arrive in M1);
+//! - no arguments: show the stream arriving on the IPC pipe until it closes;
+//! - `--clock [x y]`: the latency clock window (see `clock.rs`);
 //! - `--probe`: print SDL3 and gamepad information as one JSON line, for
 //!   `couch-cli probe`;
 //! - `--version`.
 
 #![deny(clippy::print_stdout)]
 
+mod clock;
+mod gpu;
+mod hud;
+mod pipe;
+mod viewer;
+
 use std::io::Write;
 
-use anyhow::{Context, anyhow, bail};
-use couch_proto::ipc;
+use anyhow::{anyhow, bail};
+use couch_media::Micros;
+
+/// Now, on the clock frames are stamped with (QPC on Windows).
+pub fn now_us() -> Micros {
+    #[cfg(windows)]
+    {
+        couch_platform_win::clock::now()
+    }
+    #[cfg(not(windows))]
+    {
+        compile_error!("couch-viewer needs a cross-process clock on this platform")
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -25,7 +43,12 @@ fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None => serve_pipe(),
+        None | Some("--pos" | "--size" | "--no-hud") => viewer::run(window_options(&args)?),
+        Some("--clock") => {
+            let coord =
+                |i: usize, default| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);
+            clock::run(coord(1, 80), coord(2, 80))
+        }
         Some("--probe") => probe(),
         Some("--version") => {
             writeln!(std::io::stdout().lock(), "{}", env!("CARGO_PKG_VERSION"))?;
@@ -33,6 +56,26 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => bail!("unknown argument {other:?}"),
     }
+}
+
+/// `--pos X Y` and `--size W H` for the stream window.
+fn window_options(args: &[String]) -> anyhow::Result<viewer::WindowOptions> {
+    let mut options = viewer::WindowOptions::default();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let mut number = || -> anyhow::Result<i64> {
+            rest.next()
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| anyhow!("{flag} needs two numbers"))
+        };
+        match flag.as_str() {
+            "--pos" => options.position = Some((number()? as i32, number()? as i32)),
+            "--size" => options.size = (number()? as u32, number()? as u32),
+            "--no-hud" => options.hide_hud = true,
+            other => bail!("unknown argument {other:?}"),
+        }
+    }
+    Ok(options)
 }
 
 fn probe() -> anyhow::Result<()> {
@@ -57,18 +100,5 @@ fn probe() -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     serde_json::to_writer(&mut out, &report)?;
     writeln!(out)?;
-    Ok(())
-}
-
-fn serve_pipe() -> anyhow::Result<()> {
-    let mut stdin = std::io::stdin().lock();
-    let mut frames = 0u64;
-    while let Some(frame) = ipc::read_frame(&mut stdin).context("reading the IPC pipe")? {
-        frames += 1;
-        if frame.kind == ipc::kinds::SHUTDOWN {
-            break;
-        }
-    }
-    tracing::info!(frames, "IPC pipe closed");
     Ok(())
 }

@@ -14,6 +14,21 @@ pub mod type_ids {
     use super::MUST_UNDERSTAND;
 
     pub const HELLO: u16 = MUST_UNDERSTAND | 0x0001;
+    pub const KEYFRAME_REQUEST: u16 = MUST_UNDERSTAND | 0x0101;
+}
+
+/// A viewer can't decode without a fresh keyframe (start, decoder error).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyframeRequest {
+    /// The newest epoch the viewer has seen.
+    pub epoch: u32,
+    pub reason: KeyframeReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyframeReason {
+    Start,
+    DecoderError,
 }
 
 /// Sent first, by both sides, on every control stream.
@@ -30,6 +45,7 @@ pub struct Hello {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlMessage {
     Hello(Hello),
+    KeyframeRequest(KeyframeRequest),
 }
 
 /// The result of reading one control frame.
@@ -60,6 +76,7 @@ impl ControlMessage {
     pub fn type_id(&self) -> u16 {
         match self {
             Self::Hello(_) => type_ids::HELLO,
+            Self::KeyframeRequest(_) => type_ids::KEYFRAME_REQUEST,
         }
     }
 
@@ -67,6 +84,7 @@ impl ControlMessage {
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
         let payload = match self {
             Self::Hello(m) => postcard::to_stdvec(m)?,
+            Self::KeyframeRequest(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -76,6 +94,9 @@ impl ControlMessage {
     pub fn from_frame(frame: &Frame) -> Result<Decoded, DecodeError> {
         match frame.msg_type {
             type_ids::HELLO => Ok(Decoded::Message(Self::Hello(payload(frame)?))),
+            type_ids::KEYFRAME_REQUEST => {
+                Ok(Decoded::Message(Self::KeyframeRequest(payload(frame)?)))
+            }
             other if frame.must_understand() => Err(DecodeError::UnknownRequired(other)),
             other => Ok(Decoded::SkippedOptional(other)),
         }

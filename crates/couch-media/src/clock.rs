@@ -8,6 +8,24 @@ use std::time::Instant;
 
 use crate::Micros;
 
+/// Title of the latency clock window (`couch-viewer --clock`), which paints
+/// the current time as a barcode for capture-to-present measurements.
+pub const LATENCY_CLOCK_TITLE: &str = "Couch Co-App latency clock";
+
+/// Barcode cell size and margin inside the latency clock window.
+pub const LATENCY_CLOCK_CELL: u32 = 16;
+pub const LATENCY_CLOCK_MARGIN: u32 = 16;
+/// Height of the clock's millisecond digits.
+pub const LATENCY_CLOCK_DIGIT_HEIGHT: u32 = 120;
+
+/// The latency clock window's size: a barcode row over a row of digits.
+pub const fn latency_clock_size() -> (u32, u32) {
+    (
+        LATENCY_CLOCK_MARGIN * 2 + crate::barcode::TOTAL_CELLS * LATENCY_CLOCK_CELL,
+        LATENCY_CLOCK_MARGIN * 3 + LATENCY_CLOCK_CELL + LATENCY_CLOCK_DIGIT_HEIGHT,
+    )
+}
+
 pub trait Clock: Send + Sync {
     fn now(&self) -> Micros;
 }

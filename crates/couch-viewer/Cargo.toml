@@ -8,11 +8,20 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+couch-codec-ffmpeg.workspace = true
+couch-media.workspace = true
 couch-proto.workspace = true
-sdl3.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+pollster.workspace = true
+sdl3 = { workspace = true, features = ["raw-window-handle"] }
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+wgpu.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+couch-platform-win.workspace = true
 
 [lints]
 workspace = true

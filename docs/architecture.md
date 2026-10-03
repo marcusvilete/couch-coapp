@@ -11,8 +11,8 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | Milestone | Scope | State |
 |---|---|---|
 | M0 | Toolchain, workspace, probe, docs | done |
-| M1 | Video over iroh between two processes; latency gates | next |
-| M2 | Input: SDL3 capture, ViGEm pad, `SendInput` | |
+| M1 | Video over iroh between two processes; latency gates | done ([results](m1-results.md)) |
+| M2 | Input: SDL3 capture, ViGEm pad, `SendInput` | next |
 | M3 | Audio | |
 | M4a / M4b | Rooms in the engine / lobby UI | |
 | M5 | Sessions and control | |
@@ -51,12 +51,12 @@ Host machine                                    Viewer machine
 | `couch-media` | Frame types; capture, codec, transport and audio traits; rate controller; test pattern; timestamp barcode | nothing internal |
 | `couch-input` | Input model (HID usages, pad state), injection traits; seat router and safety filters from M2 | `couch-proto` |
 | `couch-room` | Room, session and seat state machines, sans-IO | `couch-proto` |
-| `couch-net` | iroh endpoint, identity; control and media channels from M1; admission and mesh from M4a | `couch-proto` |
+| `couch-net` | iroh endpoint and congestion controller, control and video channels, netem test transport; admission and mesh from M4a | `couch-proto`, `couch-media` |
 | `couch-codec-ffmpeg` | Everything that touches FFmpeg | `couch-media` |
 | `couch-platform-win` | Everything that calls Windows APIs | `couch-media`, `couch-input` |
 | `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out; session orchestration | everything above |
 | `couch-viewer` | The viewer binary | `couch-proto`, media and codec crates |
-| `couch-cli` | Developer harness: `probe`, and the M1 spike commands | anything |
+| `couch-cli` | Developer harness: `probe`, `host`, `view`, `latency-probe`, `gates`, `capture-test`, `screen-scan` | anything |
 | `couch-testkit` | Fakes (recording injector and pad, test pattern helpers); dev-dependency only | trait crates |
 | `xtask` | `fetch-deps`, `stage-dlls`, `doctor` | none |
 | `apps/desktop/src-tauri` | Thin Tauri adapter over `couch-engine` | `couch-engine` |
@@ -89,10 +89,27 @@ Rules that keep this layering useful:
 
 The first versions copy frames through CPU memory on both ends. Zero-copy GPU paths arrive in M9 behind the same traits, which is why `EncoderInput` and `DecodedFrame` are non-exhaustive enums.
 
+## Measuring latency
+
+All timestamps are QPC microseconds, so on one machine the host's and the viewer's clocks are the same clock.
+
+- **The latency clock.** `couch-viewer --clock X Y` opens a small window that paints the QPC time every frame:
+  - as a barcode of 66 cells, 16 px each: a white and a black sync cell, then 48 bits of the value and a CRC-16/CCITT-FALSE;
+  - and as digits, for people.
+- **Clock to present.** The host captures that window. The viewer reads the barcode out of each decoded frame (`couch_media::barcode`) and compares it with the QPC time at present. This is the end-to-end number for gate G1. It includes the clock's own render and the compositor before capture, about 9 ms.
+- **On screen.** `latency-probe --screen` captures the whole monitor, where the clock and the viewer's copy of it sit side by side, and reads both barcodes (gate G1b). Only values from the last 2 s count, which rejects false matches.
+- **Capture to present** uses the capture timestamp Windows.Graphics.Capture attaches to each frame. That timestamp runs slightly ahead of when the frame is actually delivered, so this figure understates latency. Trust the barcode figure.
+- **Impaired networks** come from `couch_net::netem`, a test-only iroh transport over loopback UDP. It adds delay, random loss, a rate limit with a drop-tail queue, and scheduled blackouts or rate changes.
+  - iroh can't switch off its own multipath and NAT traversal, so a tool like clumsy would see traffic on paths it doesn't impair.
+  - A blackout set on the host's side cuts both directions.
+- **Rate-control traces.** `host --rc-trace file.csv` (or `latency-probe --rc-trace`) writes every controller tick. `view --timings-csv` writes every presented frame. Both use QPC time, so the two files line up. With `--netem`, the host's trace also records the time since the netem link started (`netem_us`), which places scheduled blackouts and rate changes exactly.
+- **Gates.** `couch-cli gates` runs G1 and G3 to G5 through `latency-probe` and judges them from those traces. The `rate-control-gates` skill (`.claude/skills/`) has the procedure and how to read a failure.
+
 ## Connectivity
 
 - **One transport.** Every pair of room members shares one iroh (QUIC) connection. It carries control, video, audio and input ([ADR 0001](adr/0001-iroh-for-all-traffic.md)).
 - **Connection setup.** iroh hole-punches a direct path when it can, which is about 9 pairs in 10, and falls back to a relay server otherwise.
+- **Congestion control.** The per-viewer rate controller does it. It is delay-based, much like WebRTC's GCC. QUIC runs our `MediaCongestion` controller, which ignores isolated losses and probes quickly after an outage ([ADR 0005](adr/0005-media-congestion-control.md)). Stock Cubic and BBR v3 cut the bitrate to a tenth under 1% random loss.
 - **Relays** (`couch_net::endpoint::RelayChoice`):
   - Development: iroh's public relays (`N0Public`), whose terms cover hobby use only.
   - Production: only our own `iroh-relay` on a small VPS, with no third-party address lookup (`Custom`).

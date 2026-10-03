@@ -6,6 +6,8 @@
 
 use thiserror::Error;
 
+use crate::bytes::{Reader, Writer};
+
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
 pub const IPC_VERSION: u16 = 0;
@@ -25,6 +27,8 @@ pub mod kinds {
     pub const HUD_STATE: u8 = 0x04;
     /// main -> viewer: close the window and exit.
     pub const SHUTDOWN: u8 = 0x05;
+    /// main -> viewer: the connection's path, for the HUD.
+    pub const NET_STATS: u8 = 0x06;
 
     /// viewer -> main: a local input event for the host.
     pub const INPUT: u8 = 0x81;
@@ -32,6 +36,124 @@ pub mod kinds {
     pub const FRAME_TIMING: u8 = 0x82;
     /// viewer -> main: something the user did in the HUD (request control, leave).
     pub const USER_ACTION: u8 = 0x83;
+    /// viewer -> main: the decoder lost sync and needs a keyframe.
+    pub const KEYFRAME_REQUEST: u8 = 0x84;
+}
+
+/// Header of a [`kinds::VIDEO_FRAME`] payload; the access unit follows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoFrameHeader {
+    pub epoch: u32,
+    pub seq: u32,
+    pub keyframe: bool,
+    /// Capture time on the host's clock.
+    pub capture_us: u64,
+    pub encode_us: u32,
+    /// When the frame finished arriving, on this machine's clock.
+    pub arrived_us: u64,
+}
+
+impl VideoFrameHeader {
+    pub const LEN: usize = 4 + 4 + 1 + 8 + 4 + 8;
+
+    /// Appends the header and then `access_unit`, forming a complete payload.
+    pub fn write(&self, access_unit: &[u8], out: &mut Vec<u8>) {
+        out.reserve(Self::LEN + access_unit.len());
+        Writer(out)
+            .u32(self.epoch)
+            .u32(self.seq)
+            .u8(u8::from(self.keyframe))
+            .u64(self.capture_us)
+            .u32(self.encode_us)
+            .u64(self.arrived_us);
+        out.extend_from_slice(access_unit);
+    }
+
+    /// Splits a payload into its header and access unit.
+    pub fn read(payload: &[u8]) -> Option<(Self, &[u8])> {
+        let mut r = Reader(payload);
+        let header = Self {
+            epoch: r.u32()?,
+            seq: r.u32()?,
+            keyframe: r.u8()? != 0,
+            capture_us: r.u64()?,
+            encode_us: r.u32()?,
+            arrived_us: r.u64()?,
+        };
+        Some((header, r.rest()))
+    }
+}
+
+/// Payload of [`kinds::FRAME_TIMING`]: what happened to one presented frame.
+/// All times are microseconds on this machine's clock except `capture_us`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameTiming {
+    pub epoch: u32,
+    pub seq: u32,
+    pub capture_us: u64,
+    pub arrived_us: u64,
+    pub decoded_us: u64,
+    pub presented_us: u64,
+    /// The time read from a latency-clock barcode in the frame; 0 if none.
+    pub barcode_us: u64,
+}
+
+impl FrameTiming {
+    pub const LEN: usize = 4 + 4 + 8 * 5;
+
+    pub fn write(&self, out: &mut Vec<u8>) {
+        Writer(out)
+            .u32(self.epoch)
+            .u32(self.seq)
+            .u64(self.capture_us)
+            .u64(self.arrived_us)
+            .u64(self.decoded_us)
+            .u64(self.presented_us)
+            .u64(self.barcode_us);
+    }
+
+    pub fn read(payload: &[u8]) -> Option<Self> {
+        let mut r = Reader(payload);
+        Some(Self {
+            epoch: r.u32()?,
+            seq: r.u32()?,
+            capture_us: r.u64()?,
+            arrived_us: r.u64()?,
+            decoded_us: r.u64()?,
+            presented_us: r.u64()?,
+            barcode_us: r.u64()?,
+        })
+    }
+}
+
+/// Payload of [`kinds::NET_STATS`], sent a few times a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NetStats {
+    pub rtt_us: u32,
+    /// The path goes through a relay server.
+    pub relayed: bool,
+    /// Video received over the last interval.
+    pub receive_bps: u32,
+}
+
+impl NetStats {
+    pub const LEN: usize = 4 + 1 + 4;
+
+    pub fn write(&self, out: &mut Vec<u8>) {
+        Writer(out)
+            .u32(self.rtt_us)
+            .u8(u8::from(self.relayed))
+            .u32(self.receive_bps);
+    }
+
+    pub fn read(payload: &[u8]) -> Option<Self> {
+        let mut r = Reader(payload);
+        Some(Self {
+            rtt_us: r.u32()?,
+            relayed: r.u8()? != 0,
+            receive_bps: r.u32()?,
+        })
+    }
 }
 
 /// One decoded IPC frame.
@@ -142,6 +264,54 @@ mod tests {
         encode(kinds::INPUT, &[1, 2, 3], &mut buf).unwrap();
         buf.pop();
         assert!(read_frame(&mut buf.as_slice()).is_err());
+    }
+
+    #[test]
+    fn video_frame_payload_roundtrip() {
+        let header = VideoFrameHeader {
+            epoch: 2,
+            seq: 77,
+            keyframe: true,
+            capture_us: 1_000,
+            encode_us: 1_500,
+            arrived_us: 9_000,
+        };
+        let mut payload = Vec::new();
+        header.write(b"annex-b", &mut payload);
+        assert_eq!(
+            VideoFrameHeader::read(&payload),
+            Some((header, &b"annex-b"[..]))
+        );
+    }
+
+    #[test]
+    fn frame_timing_roundtrip() {
+        let timing = FrameTiming {
+            epoch: 1,
+            seq: 2,
+            capture_us: 3,
+            arrived_us: 4,
+            decoded_us: 5,
+            presented_us: 6,
+            barcode_us: 7,
+        };
+        let mut buf = Vec::new();
+        timing.write(&mut buf);
+        assert_eq!(buf.len(), FrameTiming::LEN);
+        assert_eq!(FrameTiming::read(&buf), Some(timing));
+    }
+
+    #[test]
+    fn net_stats_roundtrip() {
+        let stats = NetStats {
+            rtt_us: 42_000,
+            relayed: true,
+            receive_bps: 2_000_000,
+        };
+        let mut buf = Vec::new();
+        stats.write(&mut buf);
+        assert_eq!(buf.len(), NetStats::LEN);
+        assert_eq!(NetStats::read(&buf), Some(stats));
     }
 
     #[test]

@@ -10,7 +10,10 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 couch-codec-ffmpeg.workspace = true
-couch-net.workspace = true
+couch-media.workspace = true
+couch-net = { workspace = true, features = ["netem"] }
+couch-proto.workspace = true
+iroh-tickets.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
