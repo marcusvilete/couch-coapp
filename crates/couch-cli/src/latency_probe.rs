@@ -1,6 +1,7 @@
 //! `couch-cli latency-probe`: the M1 measurement on one machine. Starts the
 //! latency clock window, a host capturing it, and a viewer showing the stream
 //! next to it; collects the viewer's numbers and checks them against the gates.
+//! With `--audio`, the clock's clicks are timed too (M3, `audio_probe`).
 
 use std::{
     fs::File,
@@ -18,7 +19,11 @@ use tokio::{
     process::{Child, Command},
 };
 
-use crate::{net_args::NetArgs, screen_probe::ScreenProbe};
+use crate::{
+    audio_probe::{AudioProbe, AudioResult},
+    net_args::NetArgs,
+    screen_probe::ScreenProbe,
+};
 
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -27,6 +32,8 @@ pub struct Args {
     pub max_mbps: f64,
     /// Also measure from screen captures (gate G1b).
     pub screen: bool,
+    /// Also measure audio latency (gate A1, and click to playback).
+    pub audio: bool,
     pub timings_csv: Option<PathBuf>,
     pub rc_trace: Option<PathBuf>,
     /// The viewer's netem profile, when it should differ from the host's.
@@ -70,12 +77,16 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
     let exe = std::env::current_exe()?;
     let viewer_exe = exe.with_file_name(format!("couch-viewer{}", std::env::consts::EXE_SUFFIX));
 
-    let mut clock = Command::new(&viewer_exe)
-        .args([
-            "--clock",
-            &CLOCK_POS.0.to_string(),
-            &CLOCK_POS.1.to_string(),
-        ])
+    let mut clock = Command::new(&viewer_exe);
+    clock.args([
+        "--clock",
+        &CLOCK_POS.0.to_string(),
+        &CLOCK_POS.1.to_string(),
+    ]);
+    if args.audio {
+        clock.arg("--clicks");
+    }
+    let mut clock = clock
         .kill_on_drop(true)
         .spawn()
         .context("starting the latency clock")?;
@@ -126,6 +137,14 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
         .spawn()
         .context("starting the viewer")?;
 
+    let audio = if args.audio {
+        let (Some(clock_pid), Some(view_pid)) = (clock.id(), view.id()) else {
+            bail!("the clock or the viewer already exited");
+        };
+        Some(AudioProbe::start(clock_pid, view_pid).context("starting the audio probe")?)
+    } else {
+        None
+    };
     let screen = if args.screen {
         tokio::time::sleep(Duration::from_secs(2)).await;
         Some(ScreenProbe::start().context("starting the screen probe")?)
@@ -143,6 +162,9 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
     }
     let _ = view.wait().await;
     let screen = screen.map(ScreenProbe::finish);
+    let audio = audio
+        .map(|probe| tokio::task::block_in_place(|| probe.finish()))
+        .transpose()?;
     // Wait for both to exit, so a probe right after this one can't find the
     // old clock window.
     let _ = host.kill().await;
@@ -166,7 +188,68 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
         };
         echo.line(&format!("G1b (screen: median <= 50 ms): {verdict}"));
     }
+    if let Some(audio) = audio {
+        for line in audio_report(&audio, &result, g1) {
+            echo.line(&line);
+        }
+    }
     Ok(result)
+}
+
+/// The audio lines: what our pipeline adds (judged as A1 when the run was
+/// unimpaired), the jitter buffer's counts, and for information the whole
+/// click-to-playback time and the offset from video. The last two include
+/// Windows' own playback path, 25 to 40 ms on a typical device, which a game
+/// played locally pays too (docs/m3-results.md).
+fn audio_report(audio: &AudioResult, result: &serde_json::Value, judge: bool) -> Vec<String> {
+    let a = &result["audio"];
+    let count = |k: &str| a[k].as_u64().unwrap_or(0);
+    let total = (count("played") + count("concealed")).max(1);
+    let ours_p95 = a["capture_to_queue_p95_ms"].as_f64().filter(|&v| v > 0.0);
+    let mut lines = vec![
+        format!(
+            "audio capture -> handed to the device  p50 {:.1} ms  p95 {}  buffer {:.0} ms (target {:.0})",
+            a["capture_to_queue_ms"].as_f64().unwrap_or(0.0),
+            ours_p95.map_or("-".into(), |v| format!("{v:.0} ms")),
+            a["buffered_ms"].as_f64().unwrap_or(0.0),
+            a["target_ms"].as_f64().unwrap_or(0.0),
+        ),
+        format!(
+            "audio click -> playback  {}  ({} clicks)",
+            audio.latency.summary_ms(),
+            audio.clicks
+        ),
+        format!(
+            "audio concealed {} of {} ({:.2}%)  late {}  dropped {}  underruns {}",
+            count("concealed"),
+            total,
+            count("concealed") as f64 * 100.0 / total as f64,
+            count("late"),
+            count("dropped"),
+            count("underruns"),
+        ),
+    ];
+    let video_p50 = result["clock_to_present_ms"]["p50"].as_f64();
+    let offset = audio
+        .latency
+        .percentile(50.0)
+        .zip(video_p50)
+        .map(|(a, v)| a - v);
+    if let Some(offset) = offset {
+        lines.push(format!("audio behind video by {offset:.1} ms (medians)"));
+    }
+    if judge {
+        let a1 = match ours_p95 {
+            // The histogram reports a bucket's top: p95 <= 25 ms is "25".
+            Some(p95) if p95 <= 25.0 => "PASS",
+            Some(_) => "FAIL",
+            None => "NO DATA",
+        };
+        lines.push(format!(
+            "A1 (capture -> handed to the device: p95 <= 25 ms): {a1}"
+        ));
+    }
+    lines
 }
 
 /// Reads the host's stdout until it prints its ticket, then keeps echoing it.

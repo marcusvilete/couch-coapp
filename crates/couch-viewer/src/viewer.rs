@@ -15,6 +15,7 @@ use couch_proto::ipc::{FrameTiming, LocalInput, NetStats};
 use sdl3::event::{Event, WindowEvent};
 
 use crate::{
+    audio::AudioOut,
     clock, gpu,
     hud::Hud,
     input::{Action, InputCapture},
@@ -49,11 +50,22 @@ impl Default for WindowOptions {
 }
 
 pub fn run(options: WindowOptions) -> Result<()> {
+    InputCapture::allow_background_pads();
+    let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
+    // Audio first, so the pipe reader has somewhere to put packets.
+    let (audio, audio_feed) = match AudioOut::open(&sdl) {
+        Ok((out, feed)) => (Some(out), Some(feed)),
+        Err(e) => {
+            tracing::warn!("no audio: {e:#}");
+            (None, None)
+        }
+    };
+
     let (in_tx, in_rx) = mpsc::channel();
     let (window_tx, window_rx) = mpsc::channel();
     let (out_tx, out_rx) = mpsc::channel();
     let net = Arc::new(std::sync::Mutex::new(None));
-    pipe::spawn_reader(in_tx, window_tx, net.clone());
+    pipe::spawn_reader(in_tx, window_tx, net.clone(), audio_feed);
     let writer = pipe::spawn_writer(out_rx);
 
     let decoded = Arc::new(Mailbox::new());
@@ -67,8 +79,6 @@ pub fn run(options: WindowOptions) -> Result<()> {
             .spawn(move || decode_loop(in_rx, &decoded, &out_tx, &decoder_name))?;
     }
 
-    InputCapture::allow_background_pads();
-    let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
     let mouse = sdl.mouse();
     let mut input = InputCapture::new(&sdl)?;
@@ -76,6 +86,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     // Proof of life for the main process, from the thread that pumps input.
     const ALIVE_EVERY: Duration = Duration::from_millis(100);
     let mut last_alive = Instant::now() - ALIVE_EVERY;
+    let mut last_audio_stats = Instant::now();
     let mut builder = video.window("Couch Co-App", options.size.0, options.size.1);
     match options.position {
         Some((x, y)) => builder.position(x, y),
@@ -134,6 +145,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
         for event in local.drain(..) {
             let _ = out_tx.send(Outgoing::Input(event));
         }
+        if let Some(audio) = &audio
+            && last_audio_stats.elapsed() >= Duration::from_secs(1)
+        {
+            last_audio_stats = Instant::now();
+            let _ = out_tx.send(Outgoing::AudioStats(audio.stats()));
+        }
 
         let timing = match decoded.take_timeout(Duration::from_millis(4)) {
             Ok(Some(Decoded { frame, timing })) => {
@@ -191,6 +208,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
             *net.lock().unwrap(),
         );
         lines.insert(2, input.hud_line());
+        lines.insert(
+            3,
+            audio
+                .as_ref()
+                .map_or_else(|| "audio: no device".to_string(), AudioOut::hud_line),
+        );
         let mut buffers = hud.paint(&gpu.device, &gpu.queue, &mut encoder, &view, size, &lines);
         buffers.push(encoder.finish());
         gpu.queue.submit(buffers);
@@ -216,6 +239,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     }
     let _ = out_tx.send(Outgoing::Close);
     drop(out_tx);
+    drop(audio);
     drop(gpu);
     let _ = writer.join();
     Ok(())

@@ -17,7 +17,12 @@ tracing.workspace = true
 vigem-rust.workspace = true
 windows = { workspace = true, features = [
     "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
+    "Win32_System_Variant",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Performance",
     "Win32_System_Threading",
@@ -25,6 +30,8 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-capture.workspace = true
+# `#[implement]` expands to paths in windows-core.
+windows-core.workspace = true
 
 [lints]
 workspace = true

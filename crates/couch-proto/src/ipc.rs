@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 1;
+pub const IPC_VERSION: u16 = 2;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -26,7 +26,7 @@ pub mod kinds {
     pub const HELLO: u8 = 0x01;
     /// main -> viewer: one encoded video frame with its header.
     pub const VIDEO_FRAME: u8 = 0x02;
-    /// main -> viewer: one Opus packet.
+    /// main -> viewer: one Opus packet ([`super::AudioPacket`]).
     pub const AUDIO_PACKET: u8 = 0x03;
     /// main -> viewer: HUD state (members, who holds control).
     pub const HUD_STATE: u8 = 0x04;
@@ -47,6 +47,8 @@ pub mod kinds {
     pub const USER_ACTION: u8 = 0x83;
     /// viewer -> main: the decoder lost sync and needs a keyframe.
     pub const KEYFRAME_REQUEST: u8 = 0x84;
+    /// viewer -> main: audio playback counters ([`super::AudioStats`]), every second.
+    pub const AUDIO_STATS: u8 = 0x85;
 }
 
 /// Header of a [`kinds::VIDEO_FRAME`] payload; the access unit follows it.
@@ -208,6 +210,43 @@ pub struct SeatState {
 pub struct RumbleState {
     pub low: u8,
     pub high: u8,
+}
+
+/// Payload of [`kinds::AUDIO_PACKET`] (postcard): an audio datagram as it
+/// arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioPacket {
+    pub seq: u32,
+    /// Capture time on the host's clock.
+    pub capture_us: u64,
+    /// When the datagram arrived, on this machine's clock.
+    pub arrived_us: u64,
+    pub packet: Vec<u8>,
+}
+
+/// Payload of [`kinds::AUDIO_STATS`] (postcard): playback since the viewer
+/// started. Counts are in 10 ms packets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AudioStats {
+    /// Packets played as received.
+    pub played: u64,
+    /// Packets missing at their turn and replaced by Opus's concealment.
+    pub concealed: u64,
+    /// Packets that arrived after their turn and were dropped.
+    pub late: u64,
+    /// Packets dropped to bring a too-full buffer back down.
+    pub dropped: u64,
+    /// Times the buffer ran dry and playback waited for it to refill.
+    pub underruns: u64,
+    /// Buffered audio and the buffer's current target, microseconds.
+    pub buffered_us: u32,
+    pub target_us: u32,
+    /// Capture to handing the samples to the audio device, microseconds:
+    /// the median over the last second, and the 95th percentile over the
+    /// session. They compare clocks of two machines, so they only mean
+    /// something when host and viewer run on one machine.
+    pub capture_to_queue_us: u32,
+    pub capture_to_queue_p95_us: u32,
 }
 
 /// The postcard encoding of an IPC payload.
@@ -402,6 +441,24 @@ mod tests {
         let mut extra = to_payload(&RumbleState { low: 1, high: 2 });
         extra.push(0);
         assert_eq!(from_payload::<RumbleState>(&extra), None);
+    }
+
+    #[test]
+    fn audio_payloads_roundtrip() {
+        let packet = AudioPacket {
+            seq: 7,
+            capture_us: 1_000,
+            arrived_us: 3_000,
+            packet: vec![1, 2, 3],
+        };
+        assert_eq!(from_payload(&to_payload(&packet)), Some(packet));
+        let stats = AudioStats {
+            played: 100,
+            concealed: 1,
+            buffered_us: 20_000,
+            ..Default::default()
+        };
+        assert_eq!(from_payload(&to_payload(&stats)), Some(stats));
     }
 
     #[test]

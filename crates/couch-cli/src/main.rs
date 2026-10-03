@@ -10,9 +10,11 @@
 //! - `input-sink`: keyboard and mouse injection checked end to end;
 //! - `release-check`: the host releases input whenever a session ends badly.
 
+mod audio_probe;
 mod capture_test;
 mod gates;
 mod host;
+mod host_audio;
 mod host_input;
 mod input_sink;
 mod ipc_async;
@@ -43,6 +45,20 @@ enum SourceArg {
     Window,
     Monitor,
     Testpattern,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AudioArg {
+    /// The game for a window, everything but this app for the monitor, test
+    /// clicks for the test pattern.
+    Auto,
+    /// The captured window's process and its children.
+    Game,
+    /// Everything this PC plays, except this app.
+    System,
+    /// Test clicks, twice a second.
+    Tone,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -107,6 +123,9 @@ enum Cmd {
         /// skips; some games only accept the real ones.
         #[arg(long)]
         real_pad_ids: bool,
+        /// Whose sound to stream.
+        #[arg(long, value_enum, default_value = "auto")]
+        audio: AudioArg,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -147,6 +166,10 @@ enum Cmd {
         /// Also read both barcodes from screen captures (G1b).
         #[arg(long)]
         screen: bool,
+        /// Also time audio: what the pipeline adds (A1), and the clock's
+        /// clicks from the clock to the viewer's playback.
+        #[arg(long)]
+        audio: bool,
         /// Write every presented frame's timings to this CSV file.
         #[arg(long)]
         timings_csv: Option<PathBuf>,
@@ -238,6 +261,7 @@ async fn main() -> ExitCode {
             rc_trace,
             allow_kbm,
             real_pad_ids,
+            audio,
             net,
         } => {
             host::run(host::Args {
@@ -264,6 +288,13 @@ async fn main() -> ExitCode {
                     couch_input::Permissions::GUEST_DEFAULT
                 },
                 real_pad_ids,
+                audio: match audio {
+                    AudioArg::Auto => host_audio::AudioChoice::Auto,
+                    AudioArg::Game => host_audio::AudioChoice::Game,
+                    AudioArg::System => host_audio::AudioChoice::System,
+                    AudioArg::Tone => host_audio::AudioChoice::Tone,
+                    AudioArg::Off => host_audio::AudioChoice::Off,
+                },
                 net,
             })
             .await
@@ -296,6 +327,7 @@ async fn main() -> ExitCode {
             fps,
             max_mbps,
             screen,
+            audio,
             timings_csv,
             rc_trace,
             netem_viewer,
@@ -305,6 +337,7 @@ async fn main() -> ExitCode {
             fps,
             max_mbps,
             screen,
+            audio,
             timings_csv,
             rc_trace,
             netem_viewer,

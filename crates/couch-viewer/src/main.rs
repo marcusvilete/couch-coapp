@@ -5,7 +5,7 @@
 //!
 //! Modes:
 //! - no arguments: show the stream arriving on the IPC pipe until it closes;
-//! - `--clock [x y]`: the latency clock window (see `clock.rs`);
+//! - `--clock [x y] [--clicks]`: the latency clock window (see `clock.rs`);
 //! - `--input-sink FILE`: a window that records the input it receives (see
 //!   `sink.rs`);
 //! - `--probe`: print SDL3 and gamepad information as one JSON line, for
@@ -14,6 +14,7 @@
 
 #![deny(clippy::print_stdout)]
 
+mod audio;
 mod clock;
 mod gpu;
 mod hud;
@@ -51,7 +52,8 @@ fn main() -> anyhow::Result<()> {
         Some("--clock") => {
             let coord =
                 |i: usize, default| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);
-            clock::run(coord(1, 80), coord(2, 80))
+            let clicks = args.iter().any(|a| a == "--clicks");
+            clock::run(coord(1, 80), coord(2, 80), clicks)
         }
         Some("--input-sink") => {
             let path = args

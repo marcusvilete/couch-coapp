@@ -47,6 +47,8 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 | Keyboard and mouse injection, checked on one machine | `couch-cli input-sink` |
 | Input released when a session ends badly (killed, frozen, closed, host stopped) | `couch-cli release-check` (about 1 minute). The `input-safety-checks` skill says when to run it and what to ask the user to try |
 | Audio datagrams behind a keyframe (timing test) | `cargo test --release -p couch-net --features netem --test datagrams -- --ignored --nocapture` |
+| Audio latency (gate A1) and click to playback | `couch-cli latency-probe --secs 30 --relay none --audio` (it clicks through the speakers). Add `--netem "delay=10ms,loss=1%"` for the loss check. The `audio-checks` skill covers reading the results and what to ask the user to listen for |
+| Which sound `host` streams | `--audio auto` (default: the game's process tree for a window, everything but us for the monitor, clicks for the test pattern), or `game`, `system`, `tone`, `off` |
 
 `--netem "<profile>"` (on `host`, `view` and `latency-probe`) replaces IP and relays with a loopback test transport that impairs the sending direction, e.g. `delay=20ms,loss=1%` or `rate=25mbit,at10s=rate:5mbit`. Without `--netem-viewer`, both sides get the same profile.
 
@@ -73,8 +75,9 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 - `couch-proto`: wire and IPC types. Depends on no other internal crate.
 - `couch-media`, `couch-input`, `couch-room`: pure logic, with no OS APIs, FFmpeg or networking.
   - `couch-room` is sans-IO: `(state, input, now) -> effects`, with no clocks or threads inside.
-- `couch-codec-ffmpeg`: the only crate that links FFmpeg.
-- `couch-platform-win`: the only crate that calls Windows APIs. It compiles to nothing elsewhere (`#![cfg(windows)]`).
+- `couch-codec-ffmpeg`: the only crate that links FFmpeg (video).
+- `couch-codec-opus`: the only crate that links libopus. FFmpeg's libopus wrapper can't do loss concealment, so audio doesn't go through FFmpeg.
+- `couch-platform-win`: the only crate that calls Windows APIs. It compiles to nothing elsewhere (`#![cfg(windows)]`). Before writing unsafe Windows, COM or SDL code, read the `windows-ffi-pitfalls` skill.
 - `couch-engine`: knows nothing about Tauri. `apps/desktop/src-tauri` stays a thin adapter.
 - `couch-testkit`: fakes; dev-dependency only.
 
@@ -101,6 +104,7 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 
 **Native dependencies and pins**
 - FFmpeg and SDL3 are pinned by URL and SHA-256 in `xtask/src/deps.rs`.
+- libopus is compiled from source by the `opus` crate, which needs CMake (`doctor` checks). Its CMake build fails past Windows' 260-character path limit, so keep `target/` at a short path.
 - The FFmpeg FFI bindings in `crates/couch-codec-ffmpeg/bindings/` are generated and committed. rusty_ffmpeg's build-time bindgen 0.71 produces fieldless structs with libclang 22 or later. Regenerate the bindings whenever the FFmpeg pin changes; `doctor` flags stale ones.
 - Exact pins: `iroh` and `sdl3` (`=`). `windows` stays on 0.62 to match `windows-capture`'s COM types.
 

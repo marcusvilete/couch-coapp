@@ -7,8 +7,11 @@ use std::{
 };
 
 use couch_proto::ipc::{
-    self, FrameTiming, LocalInput, NetStats, RumbleState, SeatState, VideoFrameHeader,
+    self, AudioPacket, AudioStats, FrameTiming, LocalInput, NetStats, RumbleState, SeatState,
+    VideoFrameHeader,
 };
+
+use crate::audio::AudioFeed;
 
 /// What the main process sends for the decoder.
 pub enum Incoming {
@@ -27,17 +30,20 @@ pub enum Outgoing {
     Timing(FrameTiming),
     KeyframeRequest,
     Input(LocalInput),
+    AudioStats(AudioStats),
     /// Write what is queued before this, then stop. Other threads (the
     /// decoder) still hold senders, so the channel alone never closes.
     Close,
 }
 
 /// Reads stdin until the main process closes it; then the channel closes too.
-/// Network stats only feed the HUD, so they go straight to `net`.
+/// Network stats only feed the HUD, so they go straight to `net`; audio goes
+/// straight to the player's buffer (dropped if there is no audio device).
 pub fn spawn_reader(
     tx: mpsc::Sender<Incoming>,
     window_tx: mpsc::Sender<ForWindow>,
     net: Arc<Mutex<Option<NetStats>>>,
+    audio: Option<AudioFeed>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("ipc-read".into())
@@ -61,6 +67,17 @@ pub fn spawn_reader(
                         }
                     },
                     ipc::kinds::SHUTDOWN => Incoming::Shutdown,
+                    ipc::kinds::AUDIO_PACKET => {
+                        match ipc::from_payload::<AudioPacket>(&frame.payload) {
+                            Some(packet) => {
+                                if let Some(audio) = &audio {
+                                    audio.push(packet);
+                                }
+                            }
+                            None => tracing::warn!("malformed audio packet on the IPC pipe"),
+                        }
+                        continue;
+                    }
                     ipc::kinds::NET_STATS => {
                         *net.lock().unwrap() = NetStats::read(&frame.payload);
                         continue;
@@ -114,6 +131,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>) -> JoinHandle<()> {
                     Outgoing::Input(input) => {
                         payload = ipc::to_payload(&input);
                         ipc::kinds::INPUT
+                    }
+                    Outgoing::AudioStats(stats) => {
+                        payload = ipc::to_payload(&stats);
+                        ipc::kinds::AUDIO_STATS
                     }
                     Outgoing::Close => break,
                 };

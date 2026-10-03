@@ -1,0 +1,15 @@
+[package]
+name = "couch-codec-opus"
+description = "Opus encode and decode with packet-loss concealment, through libopus built from source."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+couch-media.workspace = true
+couch-proto.workspace = true
+opus.workspace = true
+
+[lints]
+workspace = true

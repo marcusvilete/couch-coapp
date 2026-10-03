@@ -15,7 +15,10 @@ use couch_platform_win::clock::QpcClock;
 use couch_proto::{
     control::{ControlMessage, KeyframeReason, KeyframeRequest},
     input::RumbleDatagram,
-    ipc::{self, FrameTiming, LocalInput, NetStats, RumbleState, SeatState, VideoFrameHeader},
+    ipc::{
+        self, AudioPacket, AudioStats, FrameTiming, LocalInput, NetStats, RumbleState, SeatState,
+        VideoFrameHeader,
+    },
     media::{datagram, decode_payload},
 };
 use iroh_tickets::endpoint::EndpointTicket;
@@ -136,6 +139,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     });
     let datagrams = Datagrams::start(conn.clone());
     let mut rumbles = datagrams.subscribe(datagram::RUMBLE);
+    let mut audio = couch_net::audio::receive_audio(&datagrams);
     let input_out = InputSender::start(conn.clone());
     let mut forwarder = Forwarder::new();
     control_tx
@@ -181,16 +185,23 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         latency.csv = Some(csv);
     }
     let latency = Arc::new(Mutex::new(latency));
+    let audio_stats = Arc::new(Mutex::new(AudioStats::default()));
     let (keyframe_tx, mut keyframe_rx) = mpsc::unbounded_channel();
     let (local_tx, mut local_rx) = mpsc::unbounded_channel::<LocalInput>();
     {
         let latency = latency.clone();
+        let audio_stats = audio_stats.clone();
         tokio::spawn(async move {
             while let Ok(Some(frame)) = ipc_async::read_frame(&mut viewer_out).await {
                 match frame.kind {
                     ipc::kinds::FRAME_TIMING => {
                         if let Some(t) = FrameTiming::read(&frame.payload) {
                             latency.lock().unwrap().record(&t);
+                        }
+                    }
+                    ipc::kinds::AUDIO_STATS => {
+                        if let Some(stats) = ipc::from_payload(&frame.payload) {
+                            *audio_stats.lock().unwrap() = stats;
                         }
                     }
                     ipc::kinds::KEYFRAME_REQUEST => {
@@ -257,6 +268,21 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 }
                 .write(&frame.data, &mut payload);
                 if ipc_async::write_frame(&mut viewer_in, ipc::kinds::VIDEO_FRAME, &payload, &mut scratch)
+                    .await
+                    .is_err()
+                {
+                    println!("the viewer window closed");
+                    break;
+                }
+            }
+            Some(packet) = audio.recv() => {
+                payload = ipc::to_payload(&AudioPacket {
+                    seq: packet.seq,
+                    capture_us: packet.capture_us,
+                    arrived_us: couch_platform_win::clock::now().0,
+                    packet: packet.packet,
+                });
+                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::AUDIO_PACKET, &payload, &mut scratch)
                     .await
                     .is_err()
                 {
@@ -353,14 +379,21 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 let mut l = latency.lock().unwrap();
                 let w = std::mem::take(&mut l.window);
                 let p = |s: &Samples, q| s.percentile(q).map_or("   -".into(), |v| format!("{v:4.1}"));
+                let a = *audio_stats.lock().unwrap();
                 println!(
-                    "{:3} fps  clock->present p50 {} p95 {} ms  arrive->present p50 {} ms  {} {:.1} Mbit/s",
+                    "{:3} fps  clock->present p50 {} p95 {} ms  arrive->present p50 {} ms  {} {:.1} Mbit/s  \
+                     audio buffer {:.0}/{:.0} ms  concealed {}  late {}  underruns {}",
                     w.frames,
                     p(&w.clock_to_present, 50.0),
                     p(&w.clock_to_present, 95.0),
                     p(&w.arrive_to_present, 50.0),
                     if net.is_some_and(|n| n.relayed) { "RELAY" } else { "direct" },
                     f64::from(net.map_or(0, |n| n.receive_bps)) / 1e6,
+                    f64::from(a.buffered_us) / 1000.0,
+                    f64::from(a.target_us) / 1000.0,
+                    a.concealed,
+                    a.late,
+                    a.underruns,
                 );
             }
             () = &mut deadline => {
@@ -398,7 +431,19 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             l.all.arrive_to_present.summary_ms()
         );
         if args.measure_secs.is_some() {
+            let a = *audio_stats.lock().unwrap();
             let result = serde_json::json!({
+                "audio": {
+                    "played": a.played,
+                    "concealed": a.concealed,
+                    "late": a.late,
+                    "dropped": a.dropped,
+                    "underruns": a.underruns,
+                    "buffered_ms": f64::from(a.buffered_us) / 1000.0,
+                    "target_ms": f64::from(a.target_us) / 1000.0,
+                    "capture_to_queue_ms": f64::from(a.capture_to_queue_us) / 1000.0,
+                    "capture_to_queue_p95_ms": f64::from(a.capture_to_queue_p95_us) / 1000.0,
+                },
                 "frames": l.all.frames,
                 "fps": l.fps(),
                 "clock_to_present_ms": percentiles(&l.all.clock_to_present),

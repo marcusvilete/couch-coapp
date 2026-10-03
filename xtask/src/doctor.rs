@@ -35,6 +35,13 @@ pub fn run(root: &Path) -> ExitCode {
 
     checks.require("Rust toolchain", rust_toolchain(root));
     checks.recommend("libclang", libclang());
+    // The `opus` crate builds libopus from source with it.
+    checks.require(
+        "CMake",
+        output_of("cmake", &["--version"])
+            .map(|v| v.lines().next().unwrap_or_default().to_string())
+            .map_err(|e| format!("{e} (winget install Kitware.CMake)")),
+    );
     checks.require("FFmpeg bindings", ffmpeg_bindings(root));
     for dep in deps::DEPS {
         let result = if deps::is_installed(root, dep) {

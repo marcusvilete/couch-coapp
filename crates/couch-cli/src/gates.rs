@@ -168,6 +168,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             fps: 60,
             max_mbps: MAX_MBPS,
             screen: false,
+            audio: false,
             timings_csv: Some(view_csv.clone()),
             rc_trace: Some(rc_csv.clone()),
             netem_viewer: spec.netem_viewer.map(Into::into),

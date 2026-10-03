@@ -1,16 +1,24 @@
 //! `couch-viewer --clock`: a borderless window that paints the current QPC
 //! time every vsync, as a barcode (for `couch-cli latency-probe`) and as
-//! digits (for side-by-side screenshots). Esc closes it.
+//! digits (for side-by-side screenshots). With `--clicks` it also clicks
+//! twice a second (for `latency-probe --audio`). Esc closes it.
 
 use anyhow::{Result, anyhow};
 use couch_media::{
+    audio::{CHANNELS, ClickTrack, SAMPLE_RATE},
     barcode,
     clock::{
         LATENCY_CLOCK_CELL, LATENCY_CLOCK_DIGIT_HEIGHT, LATENCY_CLOCK_MARGIN, LATENCY_CLOCK_TITLE,
         latency_clock_size,
     },
 };
-use sdl3::{event::Event, keyboard::Keycode, pixels::Color, render::FRect};
+use sdl3::{
+    audio::{AudioCallback, AudioFormat, AudioSpec, AudioStream, AudioStreamWithCallback},
+    event::Event,
+    keyboard::Keycode,
+    pixels::Color,
+    render::FRect,
+};
 
 use crate::now_us;
 
@@ -24,7 +32,8 @@ const DIGIT_GAP: f32 = 20.0;
 const SEGMENT: f32 = 12.0;
 const DIGITS: usize = 8;
 
-pub fn run(x: i32, y: i32) -> Result<()> {
+/// `clicks`: also play the click track.
+pub fn run(x: i32, y: i32, clicks: bool) -> Result<()> {
     sdl3::hint::set("SDL_RENDER_VSYNC", "1");
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
@@ -36,6 +45,19 @@ pub fn run(x: i32, y: i32) -> Result<()> {
         .build()?;
     let mut canvas = window.into_canvas();
     let mut events = sdl.event_pump().map_err(|e| anyhow!("SDL events: {e}"))?;
+    // Clicks for the audio latency measurement. The clock still works
+    // without an audio device.
+    let _clicks = if clicks {
+        match ClickStream::open(&sdl) {
+            Ok(stream) => Some(stream),
+            Err(e) => {
+                tracing::warn!("no clicks: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     loop {
         for event in events.poll_iter() {
@@ -75,6 +97,56 @@ pub fn run(x: i32, y: i32) -> Result<()> {
             }
         }
         canvas.present();
+    }
+}
+
+/// Plays [`ClickTrack`] on SDL's audio thread.
+struct Clicks {
+    track: ClickTrack,
+    buf: Vec<f32>,
+}
+
+impl AudioCallback<f32> for Clicks {
+    fn callback(&mut self, stream: &mut AudioStream, requested: i32) {
+        self.buf
+            .resize(usize::try_from(requested).unwrap_or(0), 0.0);
+        self.track.fill(&mut self.buf);
+        let _ = stream.put_data_f32(&self.buf);
+    }
+}
+
+/// The playing click stream. Stops its callbacks before the SDL wrapper
+/// frees them (see `audio::AudioOut`'s Drop).
+struct ClickStream(AudioStreamWithCallback<Clicks>);
+
+impl ClickStream {
+    fn open(sdl: &sdl3::Sdl) -> Result<Self> {
+        let audio = sdl.audio().map_err(|e| anyhow!("SDL audio: {e}"))?;
+        let spec = AudioSpec::new(
+            Some(SAMPLE_RATE as i32),
+            Some(i32::from(CHANNELS)),
+            Some(AudioFormat::f32_sys()),
+        );
+        let stream = audio
+            .open_playback_stream(
+                &spec,
+                Clicks {
+                    track: ClickTrack::new(),
+                    buf: Vec::new(),
+                },
+            )
+            .map_err(|e| anyhow!("opening audio playback: {e}"))?;
+        stream
+            .resume()
+            .map_err(|e| anyhow!("starting clicks: {e}"))?;
+        Ok(Self(stream))
+    }
+}
+
+impl Drop for ClickStream {
+    fn drop(&mut self) {
+        let _ = self.0.pause();
+        drop(self.0.lock());
     }
 }
 

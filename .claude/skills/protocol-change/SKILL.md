@@ -1,6 +1,6 @@
 ---
 name: protocol-change
-description: Checklist for adding or changing anything on Couch Co-App's wire or viewer IPC — a control message, an input-stream message, a datagram, a stream kind, or an IPC kind or payload in couch_proto. Use whenever editing crates/couch-proto (control.rs, input.rs, media.rs, ipc.rs, envelope.rs, ids.rs) or code that sends or parses those messages in couch-net, couch-cli or couch-viewer.
+description: Checklist for adding or changing anything on Couch Co-App's wire or viewer IPC — a control message, an input-stream message, a datagram (input, audio, reports), a stream kind, or an IPC kind or payload in couch_proto. Use whenever editing crates/couch-proto (control.rs, input.rs, media.rs, ipc.rs, envelope.rs, ids.rs) or code that sends or parses those messages in couch-net, couch-cli or couch-viewer.
 ---
 
 # Protocol change checklist
@@ -22,6 +22,8 @@ The wire format is in `docs/protocol.md`. Rules that hold everywhere:
 
 A datagram must be safe to lose. Send full state or running totals, as the pad snapshots and mouse totals do, never deltas or one-off events.
 
+**A datagram must fit about 1100 bytes**, tag included. QUIC starts with 1200-byte packets and only discovers a larger path MTU later; relay paths may never get one. A bigger datagram fails to send, and that is logged only at debug level. Cap anything variable-length below that, even if its format allows more: audio packets are capped at 1000 bytes although Opus allows 1275.
+
 ## Steps
 
 1. **Type id.**
@@ -39,7 +41,7 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
 4. **Tests in `couch-proto`:**
    - a roundtrip through the envelope (or the datagram tag);
    - trailing bytes rejected;
-   - for datagrams, a size check at extreme values (they must fit one packet; the receiver report test keeps under 1100 bytes);
+   - for datagrams, a size check at extreme values, under 1100 bytes (as the receiver report and audio datagram tests do);
    - an unknown type is skipped or rejected according to its bit.
 5. **IPC:** bump `ipc::IPC_VERSION` on any IPC payload change, and handle the new kind in both `couch-viewer/src/pipe.rs` and `couch-cli/src/view.rs`. Logs and anything else go to stderr, never the viewer's stdout.
 6. **Docs:** update `docs/protocol.md` in the same change: the type table, the channel table or the IPC table, plus any rule the receiver enforces.
@@ -47,3 +49,4 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
    - `cargo test -p couch-proto -p couch-net`, plus clippy.
    - **Input:** run the `input-safety-checks` skill.
    - **Video or reports:** run the `rate-control-gates` skill.
+   - **Audio:** run the `audio-checks` skill.

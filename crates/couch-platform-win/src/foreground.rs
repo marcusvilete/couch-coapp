@@ -47,6 +47,14 @@ pub fn pointer_over(window: WindowId) -> bool {
     root(unsafe { WindowFromPoint(point) }) == Some(window)
 }
 
+/// The process that owns `window`, if it still exists.
+pub fn window_process(window: WindowId) -> Option<u32> {
+    let mut pid = 0u32;
+    // SAFETY: accepts any handle value; the out-parameter is a live local.
+    unsafe { GetWindowThreadProcessId(HWND(window.0 as *mut _), Some(&mut pid)) };
+    (pid != 0).then_some(pid)
+}
+
 /// The process id behind the foreground window, if there is one.
 pub fn foreground_process() -> Option<u32> {
     // SAFETY: both calls take no pointers but the out-parameter, which points

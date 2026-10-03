@@ -15,6 +15,7 @@ couch-net = { path = "crates/couch-net" }
 couch-room = { path = "crates/couch-room" }
 couch-media = { path = "crates/couch-media" }
 couch-codec-ffmpeg = { path = "crates/couch-codec-ffmpeg" }
+couch-codec-opus = { path = "crates/couch-codec-opus" }
 couch-input = { path = "crates/couch-input" }
 couch-platform-win = { path = "crates/couch-platform-win" }
 couch-engine = { path = "crates/couch-engine" }
@@ -26,8 +27,12 @@ iroh-tickets = "1.0"
 
 # Media and platform. sdl3 is pinned exactly because its releases churn.
 rsmpeg = "0.18"
+# Builds libopus (BSD-3-Clause) from source with CMake. FFmpeg's wrapper
+# can't do packet-loss concealment.
+opus = "0.4"
 sdl3 = "=0.20.0"
 windows = "0.62"
+windows-core = "0.62"
 windows-capture = "2.0.1"
 vigem-rust = "0.2"
 

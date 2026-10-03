@@ -1,5 +1,5 @@
-//! `couch-cli host`: stream a window, the monitor or the test pattern to one
-//! viewer at a time, with rate control.
+//! `couch-cli host`: stream a window, the monitor or the test pattern, with
+//! its audio, to one viewer at a time, with rate control.
 
 use std::{
     fs::File,
@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicIsize, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -35,6 +35,7 @@ use iroh_tickets::endpoint::EndpointTicket;
 use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
+    host_audio::{self, AudioChoice},
     host_input,
     net_args::{NetArgs, dial_addr},
 };
@@ -59,6 +60,7 @@ pub struct Args {
     /// What the viewer may send: the gamepad by default.
     pub permissions: Permissions,
     pub real_pad_ids: bool,
+    pub audio: AudioChoice,
     pub net: NetArgs,
 }
 
@@ -175,6 +177,18 @@ async fn serve(
         });
     }
 
+    let audio_sent = Arc::new(AtomicU64::new(0));
+    let audio = host_audio::spawn(
+        conn.clone(),
+        host_audio::Options {
+            choice: args.audio,
+            video: args.source.clone(),
+            game_window: game_window.clone(),
+        },
+        stop.clone(),
+        audio_sent.clone(),
+    );
+
     let video = HostVideo::start(conn.clone(), 1, &datagrams);
     let media = {
         let (args, keyframe, stop) = (args.clone(), keyframe.clone(), stop.clone());
@@ -186,17 +200,22 @@ async fn serve(
                 &stop,
                 netem.as_deref(),
                 &game_window,
+                &audio_sent,
             )
         })
     };
-    tokio::select! {
-        result = media => result.context("media thread")?,
+    let result = tokio::select! {
+        result = media => result.context("media thread").and_then(|r| r),
         error = conn.closed() => {
-            stop.store(true, Ordering::SeqCst);
             println!("viewer disconnected: {error}");
             Ok(())
         }
+    };
+    stop.store(true, Ordering::SeqCst);
+    if let Some(audio) = audio {
+        let _ = tokio::task::spawn_blocking(move || audio.join()).await;
     }
+    result
 }
 
 /// The capturer, and the captured window if the source is one.
@@ -234,6 +253,7 @@ fn media_loop(
     stop: &AtomicBool,
     netem: Option<&NetemTransport>,
     game_window: &AtomicIsize,
+    audio_sent: &AtomicU64,
 ) -> anyhow::Result<()> {
     let (mut capturer, window) = open_capturer(args)?;
     if let Some(window) = window {
@@ -354,7 +374,11 @@ fn media_loop(
 
         if stats.started.elapsed() >= Duration::from_secs(1) {
             let applied = controller.as_ref().map_or(0, |c| c.applied_bps());
-            println!("{}", stats.line(applied));
+            println!(
+                "{}  audio {}",
+                stats.line(applied),
+                audio_sent.swap(0, Ordering::Relaxed)
+            );
             stats = PeriodStats::new();
         }
     }

@@ -5,6 +5,7 @@ The wire protocol between room members, and the pipe between the main process an
 **Status:**
 - M1 implemented and validated the control envelope with `Hello` and `KeyframeRequest`, video epoch streams, receiver reports and the viewer IPC.
 - M2 added input: the input stream, the gamepad, mouse and rumble datagrams, and the seat messages.
+- M3 added audio: the audio datagram, and the audio packet and stats on the viewer IPC.
 - The rest is a draft for later milestones.
 
 ## Versioning
@@ -47,14 +48,39 @@ Each pair of room members shares one iroh connection.
 | Control | Bidirectional stream, opened first by the dialer | both | Envelope messages above |
 | Video | One unidirectional stream per epoch | host to viewer | Preamble `{kind 0x01, version u8, session u64, epoch u32, codec u8 (1 = H.264), width u16, height u16, fps u16}`, then frames `{seq u32, flags u8 (bit 0 = keyframe), capture_us u64, encode_us u32, len u32 (at most 8 MiB), Annex-B access unit}` |
 | Input | One unidirectional stream, priority 100 (video streams have 0) | viewer to host | Kind byte `0x02`, then messages framed like the control stream (see [Input](#input)) |
-| `0x01` Audio | Datagram | host to viewer | `{seq, ts (48 kHz), Opus 10 ms}` |
+| `0x01` Audio | Datagram | host to viewer | `{seq u32, capture_us u64, packet}`: one Opus packet of 10 ms (see [Audio](#audio)) |
 | `0x02` Gamepad | Datagram | viewer to host | `{seat u8, seat_epoch u32, seq u32, pad}`, on change and every 100 ms while holding a seat. `pad` is `{buttons u16 (XInput bits), left_trigger u8, right_trigger u8, left_x, left_y, right_x, right_y i16 (up positive)}` |
 | `0x03` Mouse motion | Datagram | viewer to host | `{seat, seat_epoch, totals}`, on change and every 100 ms. `totals` is `{version u32, x, y, wheel_x, wheel_y i32}` |
-| `0x04` Receiver report | Datagram | viewer to host | Every 50 ms, postcard: `{epoch, epoch_bytes_received, total_bytes_received, frames_received, delays: up to 32 × (seq, arrival − capture µs), decode_errors}`. Audio fields come in M3. |
+| `0x04` Receiver report | Datagram | viewer to host | Every 50 ms, postcard: `{epoch, epoch_bytes_received, total_bytes_received, frames_received, delays: up to 32 × (seq, arrival − capture µs), decode_errors}`. Audio has no fields here: the host doesn't adapt it |
 | `0x05` Rumble | Datagram | host to viewer | `{seat u8, low u8, high u8}`, on change |
 
 - **Epochs.** An epoch is one keyframe plus the frames that depend on it. With an infinite GOP, every frame depends on the one before, so frames must be decoded in order anyway. Resetting a whole epoch is the only useful discard. See [ADR 0003](adr/0003-epoch-streams-for-video.md).
 - **Datagram payloads** are postcard after the tag byte; trailing bytes are rejected. One reader per connection hands each datagram to the subscriber for its tag (`couch_net::datagrams`).
+
+## Audio
+
+Code: `couch_platform_win::audio` and `couch-cli`'s `host_audio` on the host, `couch_net::audio` between, `couch-viewer`'s `audio` module with `couch_media::audio::JitterBuffer` on the viewer.
+
+**Format.** Opus (RFC 6716), 48 kHz stereo, one 10 ms frame per packet, 96 kbit/s constant bitrate, low-delay (CELT-only) mode: 120-byte packets, 2.5 ms of algorithmic delay. Fixed by the protocol version; a different format would get a new datagram tag.
+
+**Datagram** `0x01`, postcard `{seq u32, capture_us u64, packet: bytes}`.
+- `seq` grows by one per packet and wraps. A gap is a lost packet.
+- `capture_us` is the packet's first sample on the host's capture clock, like a video frame's.
+- `packet` is at most 1000 bytes, so the datagram fits QUIC's initial 1200-byte packets (Opus allows 1275, but 10 ms at its 510 kbit/s maximum is 638). Longer is rejected, as are trailing bytes. The viewer also rejects a packet that doesn't decode to exactly 10 ms.
+- Process loopback keeps delivering silence while the game plays nothing, so the stream normally never pauses. If the capture does stall, the host resumes with the next `seq`, and the viewer must not mistake the pause for network jitter (it doesn't: see the target below).
+
+**Host**
+- The source is the captured window's process and its children (WASAPI process loopback). For a monitor, everything except our own processes. For the test pattern, test clicks. `host --audio` overrides.
+- Packets are cut from the capture in 10 ms frames. A gap of more than 20 ms in the capture's timestamps finishes the current frame with silence rather than joining audio across the gap.
+
+**Viewer jitter buffer** (`couch_media::audio::JitterBuffer`)
+- **Target:** the spread of transit times (arrival on the viewer's clock minus `capture_us`; the offset between the clocks cancels) over the last 2 s, 95th percentile minus minimum, plus one frame, between 10 and 40 ms. Late packets count towards it; a host that paused its sending doesn't. Playback starts, and restarts after running dry, once the target's worth is buffered.
+- **A missing packet with newer ones present** is lost: concealed by Opus and skipped. If it arrives later, it is dropped as late.
+- **A missing packet with nothing newer** is probably late: one frame is concealed and playback waits for it. After three such frames playback stops and waits to refill: that is an underrun (a network stall, or a stall of the host's capture). Packets that already missed their turn stay rejected while refilling.
+- **A hole of more than three frames** before audio that has arrived is skipped after one concealed frame.
+- **Too much buffered** (more than target + 60 ms): the oldest packets are dropped down to the target.
+- **Playback ratio:** while the average level over the last 50 frames is more than 2.5 ms off target, playback runs faster or slower by error ÷ 2 s, at most 2%. This trims the delay that waiting for late packets added, and absorbs the drift between the two machines' audio clocks.
+- **Restart:** a packet more than 50 frames behind or ahead of the newest means the host started over, or everything in between is lost; the buffer resets. This also bounds what a broken or hostile sequence can do.
 
 ## Input
 
@@ -174,7 +200,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 |---|---|---|
 | `0x01` | main to viewer | Hello: IPC version and session parameters |
 | `0x02` | main to viewer | Video frame |
-| `0x03` | main to viewer | Audio packet |
+| `0x03` | main to viewer | Audio packet (postcard): `{seq, capture_us, arrived_us, packet}`, the datagram plus its arrival time on this machine |
 | `0x04` | main to viewer | HUD state |
 | `0x05` | main to viewer | Shutdown |
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
@@ -184,8 +210,9 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x82` | viewer to main | Frame timing: `{epoch, seq, capture_us, arrived_us, decoded_us, presented_us, barcode_us}` |
 | `0x83` | viewer to main | User action (request control, leave) |
 | `0x84` | viewer to main | Keyframe request (decoder error) |
+| `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
 
-`IPC_VERSION` (now 1) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 2) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Viewer hotkeys.** Keys pressed with Ctrl+Alt+Shift held stay in the viewer:
 - H shows or hides the HUD; F3 does too, unless the keyboard is being forwarded.

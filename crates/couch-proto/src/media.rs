@@ -119,6 +119,40 @@ pub mod datagram {
     pub const RUMBLE: u8 = 0x05;
 }
 
+/// Audio on the wire: Opus, 48 kHz stereo, one 10 ms frame per datagram.
+pub mod audio {
+    pub const SAMPLE_RATE: u32 = 48_000;
+    pub const CHANNELS: u16 = 2;
+    /// Samples per channel in one packet (10 ms).
+    pub const FRAME_SAMPLES: usize = 480;
+    pub const FRAME_US: u64 = 10_000;
+    /// Largest packet accepted. Below Opus's own 1275-byte limit so that a
+    /// datagram fits QUIC's initial 1200-byte packets, before path MTU
+    /// discovery and on relays. 10 ms at Opus's 510 kbit/s maximum is 638
+    /// bytes; our 96 kbit/s packets are 120.
+    pub const MAX_PACKET: usize = 1000;
+}
+
+/// Datagram [`datagram::AUDIO`], host to viewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDatagram {
+    /// One more for every packet. A gap is a lost packet, which the viewer
+    /// conceals; the host doesn't send while its source is silent.
+    pub seq: u32,
+    /// Capture time of the packet's first sample on the host's clock,
+    /// microseconds, like a video frame's `capture_us`.
+    pub capture_us: u64,
+    /// One Opus packet of one 10 ms frame, at most [`audio::MAX_PACKET`] bytes.
+    pub packet: Vec<u8>,
+}
+
+impl AudioDatagram {
+    /// Decodes a payload, rejecting packets longer than Opus allows.
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        decode_payload::<Self>(payload).filter(|d| d.packet.len() <= audio::MAX_PACKET)
+    }
+}
+
 /// Sent by a viewer every 50 ms; the host's rate controller runs on it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReceiverReport {
@@ -235,6 +269,33 @@ mod tests {
         let (tag, payload) = datagram_tag(&datagram).unwrap();
         assert_eq!(tag, datagram::RECEIVER_REPORT);
         assert_eq!(decode_payload::<ReceiverReport>(payload), Some(report));
+    }
+
+    #[test]
+    fn audio_datagram_roundtrip_and_limits() {
+        let audio = AudioDatagram {
+            seq: u32::MAX,
+            capture_us: u64::MAX,
+            packet: vec![0xAB; audio::MAX_PACKET],
+        };
+        let datagram = encode_datagram(datagram::AUDIO, &audio);
+        // The largest packet fits a datagram in QUIC's initial 1200-byte
+        // packets, like the receiver report.
+        assert!(datagram.len() < 1100, "{} bytes", datagram.len());
+        let (tag, payload) = datagram_tag(&datagram).unwrap();
+        assert_eq!(tag, datagram::AUDIO);
+        assert_eq!(AudioDatagram::decode(payload), Some(audio.clone()));
+
+        let too_long = AudioDatagram {
+            packet: vec![0; audio::MAX_PACKET + 1],
+            ..audio.clone()
+        };
+        let datagram = encode_datagram(datagram::AUDIO, &too_long);
+        assert_eq!(AudioDatagram::decode(&datagram[1..]), None);
+
+        let mut trailing = encode_datagram(datagram::AUDIO, &audio);
+        trailing.push(0);
+        assert_eq!(AudioDatagram::decode(&trailing[1..]), None);
     }
 
     #[test]

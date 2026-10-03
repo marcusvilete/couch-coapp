@@ -1,7 +1,8 @@
 //! Networking on iroh: the endpoint and its media congestion controller, the
 //! control stream, video over per-epoch QUIC streams with receiver reports,
-//! and input. Admission and the room mesh arrive in M4a.
+//! audio, and input. Admission and the room mesh arrive in M4a.
 
+pub mod audio;
 pub mod congestion;
 pub mod control;
 pub mod datagrams;
