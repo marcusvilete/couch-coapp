@@ -1,0 +1,15 @@
+[package]
+name = "couch-testkit"
+description = "Fakes and test harnesses. Only ever a dev-dependency."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+couch-input.workspace = true
+couch-media.workspace = true
+couch-proto.workspace = true
+
+[lints]
+workspace = true

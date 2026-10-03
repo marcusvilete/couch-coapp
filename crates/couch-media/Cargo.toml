@@ -1,0 +1,17 @@
+[package]
+name = "couch-media"
+description = "Media traits, frame types, rate control, framing and the test pattern. Pure Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

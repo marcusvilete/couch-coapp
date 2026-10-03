@@ -1,0 +1,23 @@
+[package]
+name = "couch-cli"
+description = "Developer harness: probe, spike host and viewer, latency tools."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+couch-codec-ffmpeg.workspace = true
+couch-net.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+couch-platform-win.workspace = true
+
+[lints]
+workspace = true

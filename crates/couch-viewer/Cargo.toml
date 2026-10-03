@@ -1,0 +1,18 @@
+[package]
+name = "couch-viewer"
+description = "The stream viewer process: decode, render, audio out, input capture, HUD."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+couch-proto.workspace = true
+sdl3.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

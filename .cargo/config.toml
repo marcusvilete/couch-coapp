@@ -1,0 +1,15 @@
+# Build environment for Windows development. `cargo xtask fetch-deps` fills third_party/.
+[env]
+FFMPEG_LIBS_DIR = { value = "third_party/ffmpeg/lib", relative = true }
+# rusty_ffmpeg defaults to static linking on Windows; ours is a shared (DLL) build.
+FFMPEG_LINK_MODE = "dynamic"
+# Pre-generated bindings (cargo xtask gen-ffmpeg-bindings). rusty_ffmpeg's own
+# bindgen breaks with current libclang, and this way builds need no LLVM.
+FFMPEG_BINDING_PATH = { value = "crates/couch-codec-ffmpeg/bindings/ffmpeg-x86_64-pc-windows-msvc.rs", relative = true }
+# Only used by `cargo xtask gen-ffmpeg-bindings`.
+LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
+COUCH_SDL3_DIR = { value = "third_party/sdl3", relative = true }
+TS_RS_EXPORT_DIR = { value = "apps/desktop/src/bindings", relative = true }
+
+[alias]
+xtask = "run -p xtask --"

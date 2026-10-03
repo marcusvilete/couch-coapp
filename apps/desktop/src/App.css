@@ -1,0 +1,110 @@
+:root {
+  font-family: "Segoe UI", Inter, system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #1d1d21;
+  background-color: #f4f4f6;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.8rem;
+}
+
+h2 {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+}
+
+.muted {
+  color: #6b6b76;
+  margin: 4px 0 0;
+}
+
+.error {
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #fde8e8;
+  color: #9b1c1c;
+}
+
+.card {
+  margin-top: 20px;
+  padding: 18px 20px;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+
+dt {
+  color: #6b6b76;
+}
+
+dd {
+  margin: 0;
+}
+
+.path {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+button {
+  border: 1px solid #c9c9d1;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font: inherit;
+  background: #ffffff;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #5b5bd6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #ececf1;
+    background-color: #1b1b1f;
+  }
+
+  .card,
+  button {
+    background: #26262c;
+  }
+
+  button {
+    border-color: #3d3d46;
+  }
+
+  .muted,
+  dt {
+    color: #a0a0ab;
+  }
+
+  .error {
+    background: #4a1d1d;
+    color: #fbd5d5;
+  }
+}

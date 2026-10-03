@@ -1,0 +1,54 @@
+# cargo-deny policy. Run `cargo deny check` before adding or bumping dependencies.
+#
+# The app's own license is undecided, so dependencies must keep every option
+# open: permissive licenses only. FFmpeg (LGPL) is not a crate; it is linked
+# dynamically from third_party/ and covered by its own notice.
+
+[graph]
+# Windows first. Add Linux and macOS triples when their backends land.
+targets = ["x86_64-pc-windows-msvc"]
+all-features = false
+no-default-features = false
+
+[advisories]
+ignore = [
+    # `paste` is unmaintained, not vulnerable: a compile-time macro used by rsmpeg.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled in by rsmpeg; no runtime code" },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "MPL-2.0",
+    "ISC",
+    "Unicode-3.0",
+    "CC0-1.0",
+    # Mozilla's root-certificate data (webpki-root-certs, via iroh's TLS).
+    "CDLA-Permissive-2.0",
+]
+# Anything else (WTFPL, GPL, LGPL crates, ...) fails the check and needs a
+# deliberate decision recorded here as an exception.
+exceptions = []
+
+[licenses.private]
+# Our own crates are `publish = false` and unlicensed until the license is chosen.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

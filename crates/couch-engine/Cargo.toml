@@ -1,0 +1,23 @@
+[package]
+name = "couch-engine"
+description = "UI-agnostic engine facade (commands in, events out) and session orchestration."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+couch-proto.workspace = true
+couch-room.workspace = true
+dirs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

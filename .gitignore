@@ -1,0 +1,12 @@
+/target/
+
+# Downloaded native dependencies (cargo xtask fetch-deps)
+/third_party/*
+!/third_party/README.md
+
+# Per-developer editor settings
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+*.log

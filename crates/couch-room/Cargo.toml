@@ -1,0 +1,18 @@
+[package]
+name = "couch-room"
+description = "Sans-IO room, session and seat state machines."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+couch-proto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

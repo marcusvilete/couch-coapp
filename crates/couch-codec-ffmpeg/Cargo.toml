@@ -1,0 +1,16 @@
+[package]
+name = "couch-codec-ffmpeg"
+description = "The only crate that touches FFmpeg: hardware video encode/decode and Opus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+couch-media.workspace = true
+rsmpeg.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
