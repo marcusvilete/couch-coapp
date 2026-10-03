@@ -15,7 +15,12 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 vigem-rust.workspace = true
-windows = { workspace = true, features = ["Win32_Media", "Win32_System_Performance"] }
+windows = { workspace = true, features = [
+    "Win32_Media",
+    "Win32_System_Performance",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-capture.workspace = true
 
 [lints]

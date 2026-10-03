@@ -2,7 +2,10 @@
 
 The wire protocol between room members, and the pipe between the main process and `couch-viewer`.
 
-**Status:** M1 implemented and validated these: the control envelope with `Hello` and `KeyframeRequest`, video epoch streams, receiver reports and the viewer IPC. The rest is a draft for later milestones.
+**Status:**
+- M1 implemented and validated the control envelope with `Hello` and `KeyframeRequest`, video epoch streams, receiver reports and the viewer IPC.
+- M2 added input: the input stream, the gamepad, mouse and rumble datagrams, and the seat messages.
+- The rest is a draft for later milestones.
 
 ## Versioning
 
@@ -24,12 +27,14 @@ u32 len (big-endian) | u16 type | payload (postcard)
 |---|---|---|
 | `0x8001` | `Hello` | First message in both directions |
 | `0x8101` | `KeyframeRequest { epoch, reason: Start \| DecoderError }` | Viewer to host: decoding can't go on without a keyframe |
+| `0x8201` | `SeatAssigned { seat u8, seat_epoch u32, permissions u8 }` | Host to member: you hold this seat; tag input with this epoch. Permissions: bit 0 gamepad, 1 keyboard, 2 mouse |
+| `0x8202` | `SeatReleased { seat u8, seat_epoch u32 }` | Host to member: your hold on the seat (with that epoch) ended |
 
 Message families still to come, all on this stream:
 - **Admission:** `AdmitStart`, `AdmitReply`, `AdmitConfirm`, `AdmitResult`.
 - **Room:** `RoomSnapshot`, `MemberJoined`/`MemberLeft`, `Presence`, `MemberAddrUpdate`, `RoomPolicy`.
 - **Session directory and participation:** `SessionAnnounce`, `SessionUpdate`, `SessionEnded{reason}`, `SessionJoin`, `SessionWelcome`, `SessionLeave`.
-- **Control:** `ControlRequest`, `ControlCancel`, `ControlDecision`, `SeatAssigned`, `SeatReleased`, `ControlRevoked`.
+- **Control:** `ControlRequest`, `ControlCancel`, `ControlDecision`, `ControlRevoked`.
 - **Media control:** `VideoConfig`, `KeyframeRequest`, `BitrateHint`.
 - **Liveness:** `Ping`/`Pong` every second, `Goodbye{reason}`.
 
@@ -41,17 +46,53 @@ Each pair of room members shares one iroh connection.
 |---|---|---|---|
 | Control | Bidirectional stream, opened first by the dialer | both | Envelope messages above |
 | Video | One unidirectional stream per epoch | host to viewer | Preamble `{kind 0x01, version u8, session u64, epoch u32, codec u8 (1 = H.264), width u16, height u16, fps u16}`, then frames `{seq u32, flags u8 (bit 0 = keyframe), capture_us u64, encode_us u32, len u32 (at most 8 MiB), Annex-B access unit}` |
-| Input | Unidirectional stream, highest priority | viewer to host | `KeyEvent{seat_epoch, seq, hid_usage, down}`, `MouseButton{..., cum_dx, cum_dy}`, `HeldKeysSync` bitmap every second |
+| Input | One unidirectional stream, priority 100 (video streams have 0) | viewer to host | Kind byte `0x02`, then messages framed like the control stream (see [Input](#input)) |
 | `0x01` Audio | Datagram | host to viewer | `{seq, ts (48 kHz), Opus 10 ms}` |
-| `0x02` Gamepad | Datagram | viewer to host | `{seat, seat_epoch, seq, buttons, triggers, sticks}` on change and every 100 ms |
-| `0x03` Mouse motion | Datagram | viewer to host | `{seat, seat_epoch, seq, cumulative dx, dy, wheel}` |
+| `0x02` Gamepad | Datagram | viewer to host | `{seat u8, seat_epoch u32, seq u32, pad}`, on change and every 100 ms while holding a seat. `pad` is `{buttons u16 (XInput bits), left_trigger u8, right_trigger u8, left_x, left_y, right_x, right_y i16 (up positive)}` |
+| `0x03` Mouse motion | Datagram | viewer to host | `{seat, seat_epoch, totals}`, on change and every 100 ms. `totals` is `{version u32, x, y, wheel_x, wheel_y i32}` |
 | `0x04` Receiver report | Datagram | viewer to host | Every 50 ms, postcard: `{epoch, epoch_bytes_received, total_bytes_received, frames_received, delays: up to 32 × (seq, arrival − capture µs), decode_errors}`. Audio fields come in M3. |
-| `0x05` Rumble | Datagram | host to viewer | `{seat, low, high}` |
+| `0x05` Rumble | Datagram | host to viewer | `{seat u8, low u8, high u8}`, on change |
 
 - **Epochs.** An epoch is one keyframe plus the frames that depend on it. With an infinite GOP, every frame depends on the one before, so frames must be decoded in order anyway. Resetting a whole epoch is the only useful discard. See [ADR 0003](adr/0003-epoch-streams-for-video.md).
-- **Mouse motion as running totals.** Each datagram carries the running totals, so a lost datagram's motion arrives with the next one. Button events carry the totals too, so the host applies pending motion before the click.
-- **Gamepad as full snapshots.** A lost packet can never leave a button stuck.
-- **Seat epochs.** Input tagged with anything but the seat's current epoch is dropped, which discards stragglers from a previous holder.
+- **Datagram payloads** are postcard after the tag byte; trailing bytes are rejected. One reader per connection hands each datagram to the subscriber for its tag (`couch_net::datagrams`).
+
+## Input
+
+Code: `couch_input::forward` on the viewer's side, `couch_input::router` on the host's, `couch_net::input` between them.
+
+**Input stream messages** (`u32 len | u16 type | postcard`, like the control stream)
+
+| Type | Message | Notes |
+|---|---|---|
+| `0x8301` | `Key { seat, seat_epoch, usage u16, down }` | A USB HID keyboard usage (page 7), 0x04 to 0xE7: a physical key position, never a character |
+| `0x8302` | `MouseButton { seat, seat_epoch, button u8, down, totals }` | Buttons: 1 left, 2 right, 3 middle, 4 back, 5 forward |
+| `0x8303` | `Held { seat, seat_epoch, keys [u8; 32], buttons u8 }` | Every second: a bitmap of held usages, and held buttons (bit `button − 1`) |
+
+**Encoding rules**
+- **Gamepad as full snapshots.** A lost datagram can never leave a button stuck. `seq` grows per datagram within a seat epoch; the host drops older ones.
+- **Mouse motion as running totals** since the seat epoch began, wrapping. A lost datagram's motion arrives with the next one. `version` counts changes: the host applies totals only if they are newer than the last it applied (wrapping comparison), so a late datagram never moves the pointer backwards. Button events carry the totals too, so the pointer moves to where the click happened first.
+- **The wheel** counts in 1/120 notches (Windows' `WHEEL_DELTA`), up and right positive.
+- **The pad datagram is the heartbeat.** It goes every 100 ms while holding a seat, whatever the permissions. It stands for the viewer process, not the main process: the viewer sends `Alive` over IPC every 100 ms from its window loop, and after 250 ms without anything from the viewer the main process stops the heartbeat. A hung viewer therefore trips the host's dead-man timer.
+- **Rumble** goes only to the seat's holder. A running rumble is repeated every 500 ms, and the viewer runs each one for 1 s, so a lost "stop" ends within a second. Losing the seat stops it.
+
+**What the host accepts** (the seat router). Input reaches the game only if all hold:
+- it comes from the seat's holder, tagged with the seat's current epoch;
+- the holder has the permission for that kind of input;
+- for keyboard and mouse, the captured game window (not just its process) is in the foreground. The host checks right before each input, not only on its 10 ms tick;
+- for a mouse button press, the pointer is over the game window too. Otherwise a click could reach the taskbar or another app. Motion and releases still go through;
+- it isn't blocked: the Windows keys always; Tab while Alt is held; Esc while Alt or Ctrl is held. Held modifiers count across every seat, so two holders can't combine into Alt+Tab. The pad's Guide bit is cleared.
+
+**What the host releases**
+- Releases (key up, button up) only ever let go of something the router pressed, so keys held when a seat is granted stay ignored until released.
+- `Held` only releases: anything pressed that isn't in it goes up. It never presses.
+- **Dead-man:** nothing from the holder for 300 ms suspends the seat. Every key and button goes up and the pad goes neutral. Input resumes it. The first input after a grant arms the timer.
+- **Lapses:** suspended for 10 s, or granted and never heard from in 10 s, the seat returns to the host. So does a third suspension within 5 minutes; the member needs a new grant.
+- Every grant, revocation, disconnect and loss of foreground releases first. So does stopping the host (Ctrl+C, Ctrl+Break, closing its console): Windows keeps injected keys down after the process that pressed them exits.
+
+**Injection on Windows** (`couch-platform-win`)
+- Keys go in as set-1 scancodes through `SendInput`, so the host's layout decides what they type. Pause and Num Lock go by virtual-key code. Media and power keys are not sent.
+- The mouse moves relatively; the wheel goes as `MOUSEEVENTF_WHEEL` and `HWHEEL`.
+- The pad is a ViGEmBus Xbox 360 controller. Development builds give it USB ids 1209:0001 (pid.codes' test range), which a viewer on the same machine skips so the host's own pad isn't captured and sent back.
 
 ## Bitrate control (per viewer, 20 times a second)
 
@@ -137,9 +178,17 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x04` | main to viewer | HUD state |
 | `0x05` | main to viewer | Shutdown |
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
-| `0x81` | viewer to main | Input event |
+| `0x07` | main to viewer | Seat state (postcard): `{holding, permissions}`. The viewer captures the mouse only while holding with mouse permission |
+| `0x08` | main to viewer | Rumble (postcard): `{low u8, high u8}` |
+| `0x81` | viewer to main | Local input (postcard `LocalInput`): `Key{usage, down}`, `MouseButton{button, down}`, `MouseMotion{dx, dy}`, `Wheel{dx, dy}`, `Pad(snapshot)` or `Alive` (every 100 ms). Deltas; the main process keeps the running totals |
 | `0x82` | viewer to main | Frame timing: `{epoch, seq, capture_us, arrived_us, decoded_us, presented_us, barcode_us}` |
 | `0x83` | viewer to main | User action (request control, leave) |
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 
-`IPC_VERSION` changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 1) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+
+**Viewer hotkeys.** Keys pressed with Ctrl+Alt+Shift held stay in the viewer:
+- H shows or hides the HUD; F3 does too, unless the keyboard is being forwarded.
+- M frees the mouse; clicking the window captures it again.
+
+Losing the focus releases every forwarded key and button. Gamepads keep working in the background.

@@ -10,6 +10,7 @@ use common::{bind, connect};
 use couch_media::{Codec, EncodedFrame, Micros, VideoParams, VideoSender, clock::ProcessClock};
 use couch_net::{
     SecretKey,
+    datagrams::Datagrams,
     endpoint::{EndpointOptions, RelayChoice},
     video::{HostVideo, ViewerVideo},
 };
@@ -44,7 +45,8 @@ async fn frames_arrive_in_order_and_reports_clear_the_backlog() {
     .await;
     let (host_conn, viewer_conn) = connect(&host, &viewer, host.addr()).await;
 
-    let mut video = HostVideo::start(host_conn, 7);
+    let datagrams = Datagrams::start(host_conn.clone());
+    let mut video = HostVideo::start(host_conn, 7, &datagrams);
     let mut received = ViewerVideo::start(viewer_conn, Arc::new(ProcessClock::new()));
 
     video.start_epoch(&PARAMS).unwrap();

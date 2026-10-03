@@ -6,14 +6,15 @@ use std::{
     io::{LineWriter, Write},
     path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicIsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use couch_codec_ffmpeg::FfmpegEncoder;
+use couch_input::Permissions;
 use couch_media::{
     CaptureEvent, Capturer, Codec, EncoderConfig, EncoderInput, VideoEncoder, VideoParams,
     VideoSender,
@@ -21,15 +22,22 @@ use couch_media::{
     ratecontrol::{RateAction, RateConfig, RateController},
     testpattern::TestPattern,
 };
-use couch_net::{Connection, control, endpoint, netem::NetemTransport, video::HostVideo};
+use couch_net::{
+    Connection, control, datagrams::Datagrams, endpoint, netem::NetemTransport, video::HostVideo,
+};
+use couch_platform_win::foreground::WindowId;
 use couch_platform_win::{
     capture::{CaptureOptions, CaptureSource, WgcCapturer},
     clock::QpcClock,
 };
 use couch_proto::control::ControlMessage;
 use iroh_tickets::endpoint::EndpointTicket;
+use tokio::{sync::watch, task::JoinHandle};
 
-use crate::net_args::{NetArgs, dial_addr};
+use crate::{
+    host_input,
+    net_args::{NetArgs, dial_addr},
+};
 
 #[derive(Debug, Clone)]
 pub enum Source {
@@ -48,6 +56,9 @@ pub struct Args {
     pub relay_max_mbps: f64,
     /// Write every rate-controller tick (feedback and action) to this CSV file.
     pub rc_trace: Option<PathBuf>,
+    /// What the viewer may send: the gamepad by default.
+    pub permissions: Permissions,
+    pub real_pad_ids: bool,
     pub net: NetArgs,
 }
 
@@ -64,30 +75,91 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     println!("TICKET {}", EndpointTicket::new(addr));
     println!("waiting for a viewer (Ctrl+C to stop)");
 
-    while let Some(incoming) = endpoint.accept().await {
-        let conn = match incoming.accept().context("accepting")?.await {
-            Ok(conn) => conn,
-            Err(e) => {
-                println!("connection failed: {e}");
-                continue;
+    // Stopping must release whatever a viewer holds: Windows keeps injected
+    // keys down after the process that pressed them exits.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let inputs: Mutex<Vec<JoinHandle<()>>> = Mutex::default();
+    let serving = async {
+        while let Some(incoming) = endpoint.accept().await {
+            let conn = match incoming.accept().context("accepting")?.await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    println!("connection failed: {e}");
+                    continue;
+                }
+            };
+            println!("viewer {} connected", conn.remote_id().fmt_short());
+            if let Err(e) = serve(
+                conn.clone(),
+                &args,
+                netem.clone(),
+                shutdown_rx.clone(),
+                &inputs,
+            )
+            .await
+            {
+                println!("session ended: {e:#}");
             }
-        };
-        println!("viewer {} connected", conn.remote_id().fmt_short());
-        if let Err(e) = serve(conn.clone(), &args, netem.clone()).await {
-            println!("session ended: {e:#}");
+            conn.close(0u32.into(), b"bye");
         }
-        conn.close(0u32.into(), b"bye");
+        Ok(())
+    };
+    tokio::select! {
+        result = serving => result,
+        () = stop_requested() => {
+            println!("stopping");
+            shutdown_tx.send_replace(true);
+            let handles = std::mem::take(&mut *inputs.lock().unwrap());
+            for handle in handles {
+                let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+            }
+            Ok(())
+        }
     }
-    Ok(())
+}
+
+/// Ctrl+C, Ctrl+Break, or the console window closing.
+async fn stop_requested() {
+    use tokio::signal::windows::{ctrl_break, ctrl_close};
+    match (ctrl_break(), ctrl_close()) {
+        (Ok(mut brk), Ok(mut close)) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = brk.recv() => {}
+                _ = close.recv() => {}
+            }
+        }
+        _ => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
 }
 
 async fn serve(
     conn: Connection,
     args: &Args,
     netem: Option<Arc<NetemTransport>>,
+    shutdown: watch::Receiver<bool>,
+    inputs: &Mutex<Vec<JoinHandle<()>>>,
 ) -> anyhow::Result<()> {
-    let (_control_tx, mut control_rx, hello) = control::accept(&conn).await?;
+    let (control_tx, mut control_rx, hello) = control::accept(&conn).await?;
     println!("viewer app {}", hello.app_version);
+    let datagrams = Datagrams::start(conn.clone());
+    // Set by the capture thread once it has the window.
+    let game_window = Arc::new(AtomicIsize::new(0));
+    let handle = host_input::spawn(
+        conn.clone(),
+        &datagrams,
+        control_tx,
+        host_input::Options {
+            permissions: args.permissions,
+            real_pad_ids: args.real_pad_ids,
+            game_window: game_window.clone(),
+            window_source: matches!(args.source, Source::Window(_)),
+        },
+        shutdown,
+    );
+    inputs.lock().unwrap().push(handle);
 
     let keyframe = Arc::new(AtomicBool::new(true));
     let stop = Arc::new(AtomicBool::new(false));
@@ -103,11 +175,18 @@ async fn serve(
         });
     }
 
-    let video = HostVideo::start(conn.clone(), 1);
+    let video = HostVideo::start(conn.clone(), 1, &datagrams);
     let media = {
         let (args, keyframe, stop) = (args.clone(), keyframe.clone(), stop.clone());
         tokio::task::spawn_blocking(move || {
-            media_loop(&args, video, &keyframe, &stop, netem.as_deref())
+            media_loop(
+                &args,
+                video,
+                &keyframe,
+                &stop,
+                netem.as_deref(),
+                &game_window,
+            )
         })
     };
     tokio::select! {
@@ -120,23 +199,31 @@ async fn serve(
     }
 }
 
-fn open_capturer(args: &Args) -> anyhow::Result<Box<dyn Capturer>> {
+/// The capturer, and the captured window if the source is one.
+fn open_capturer(args: &Args) -> anyhow::Result<(Box<dyn Capturer>, Option<WindowId>)> {
     let options = CaptureOptions {
         min_interval: Duration::from_secs(1) / args.fps,
         cursor: true,
     };
     Ok(match &args.source {
-        Source::Window(title) => Box::new(WgcCapturer::start(
-            &CaptureSource::WindowTitle(title.clone()),
-            options,
-        )?),
-        Source::Monitor => Box::new(WgcCapturer::start(&CaptureSource::PrimaryMonitor, options)?),
-        &Source::TestPattern { width, height } => Box::new(TestPattern::new(
-            width,
-            height,
-            args.fps,
-            Arc::new(QpcClock),
-        )),
+        Source::Window(title) => {
+            let capturer = WgcCapturer::start(&CaptureSource::WindowTitle(title.clone()), options)?;
+            let window = capturer.window();
+            (Box::new(capturer), window)
+        }
+        Source::Monitor => (
+            Box::new(WgcCapturer::start(&CaptureSource::PrimaryMonitor, options)?),
+            None,
+        ),
+        &Source::TestPattern { width, height } => (
+            Box::new(TestPattern::new(
+                width,
+                height,
+                args.fps,
+                Arc::new(QpcClock),
+            )),
+            None,
+        ),
     })
 }
 
@@ -146,8 +233,12 @@ fn media_loop(
     keyframe: &AtomicBool,
     stop: &AtomicBool,
     netem: Option<&NetemTransport>,
+    game_window: &AtomicIsize,
 ) -> anyhow::Result<()> {
-    let mut capturer = open_capturer(args)?;
+    let (mut capturer, window) = open_capturer(args)?;
+    if let Some(window) = window {
+        game_window.store(window.0, Ordering::Release);
+    }
     let mbps = |v: f64| (v * 1e6) as u32;
     let mut encoder: Option<FfmpegEncoder> = None;
     let mut controller: Option<RateController> = None;

@@ -7,7 +7,10 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use crate::envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND};
+use crate::{
+    envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND},
+    ids::{Permissions, SeatEpoch, SeatId},
+};
 
 /// Type ids for control messages.
 pub mod type_ids {
@@ -15,6 +18,23 @@ pub mod type_ids {
 
     pub const HELLO: u16 = MUST_UNDERSTAND | 0x0001;
     pub const KEYFRAME_REQUEST: u16 = MUST_UNDERSTAND | 0x0101;
+    pub const SEAT_ASSIGNED: u16 = MUST_UNDERSTAND | 0x0201;
+    pub const SEAT_RELEASED: u16 = MUST_UNDERSTAND | 0x0202;
+}
+
+/// Host to a member: you now hold this seat. Input must carry `seat_epoch`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatAssigned {
+    pub seat: SeatId,
+    pub seat_epoch: SeatEpoch,
+    pub permissions: Permissions,
+}
+
+/// Host to a member: you no longer hold this seat (the epoch that ended).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatReleased {
+    pub seat: SeatId,
+    pub seat_epoch: SeatEpoch,
 }
 
 /// A viewer can't decode without a fresh keyframe (start, decoder error).
@@ -46,6 +66,8 @@ pub struct Hello {
 pub enum ControlMessage {
     Hello(Hello),
     KeyframeRequest(KeyframeRequest),
+    SeatAssigned(SeatAssigned),
+    SeatReleased(SeatReleased),
 }
 
 /// The result of reading one control frame.
@@ -77,6 +99,8 @@ impl ControlMessage {
         match self {
             Self::Hello(_) => type_ids::HELLO,
             Self::KeyframeRequest(_) => type_ids::KEYFRAME_REQUEST,
+            Self::SeatAssigned(_) => type_ids::SEAT_ASSIGNED,
+            Self::SeatReleased(_) => type_ids::SEAT_RELEASED,
         }
     }
 
@@ -85,6 +109,8 @@ impl ControlMessage {
         let payload = match self {
             Self::Hello(m) => postcard::to_stdvec(m)?,
             Self::KeyframeRequest(m) => postcard::to_stdvec(m)?,
+            Self::SeatAssigned(m) => postcard::to_stdvec(m)?,
+            Self::SeatReleased(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -97,13 +123,16 @@ impl ControlMessage {
             type_ids::KEYFRAME_REQUEST => {
                 Ok(Decoded::Message(Self::KeyframeRequest(payload(frame)?)))
             }
+            type_ids::SEAT_ASSIGNED => Ok(Decoded::Message(Self::SeatAssigned(payload(frame)?))),
+            type_ids::SEAT_RELEASED => Ok(Decoded::Message(Self::SeatReleased(payload(frame)?))),
             other if frame.must_understand() => Err(DecodeError::UnknownRequired(other)),
             other => Ok(Decoded::SkippedOptional(other)),
         }
     }
 }
 
-fn payload<T: DeserializeOwned>(frame: &Frame) -> Result<T, DecodeError> {
+/// A frame's postcard payload, with nothing left over.
+pub(crate) fn payload<T: DeserializeOwned>(frame: &Frame) -> Result<T, DecodeError> {
     let malformed = |reason: String| DecodeError::Payload {
         msg_type: frame.msg_type,
         reason,
@@ -137,6 +166,29 @@ mod tests {
             ControlMessage::from_frame(&frame).unwrap(),
             Decoded::Message(hello())
         );
+    }
+
+    #[test]
+    fn seat_messages_roundtrip() {
+        for message in [
+            ControlMessage::SeatAssigned(SeatAssigned {
+                seat: SeatId(0),
+                seat_epoch: SeatEpoch(3),
+                permissions: Permissions::GAMEPAD | Permissions::KEYBOARD,
+            }),
+            ControlMessage::SeatReleased(SeatReleased {
+                seat: SeatId(1),
+                seat_epoch: SeatEpoch(u32::MAX),
+            }),
+        ] {
+            let mut buf = Vec::new();
+            message.encode(&mut buf).unwrap();
+            let (frame, _) = envelope::decode(&buf).unwrap().unwrap();
+            assert_eq!(
+                ControlMessage::from_frame(&frame).unwrap(),
+                Decoded::Message(message)
+            );
+        }
     }
 
     #[test]

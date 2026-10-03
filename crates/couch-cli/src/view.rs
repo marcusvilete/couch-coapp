@@ -9,11 +9,14 @@ use std::{
 };
 
 use anyhow::Context;
-use couch_net::{control, endpoint, video::ViewerVideo};
+use couch_input::{Permissions, forward::Forwarder};
+use couch_net::{control, datagrams::Datagrams, endpoint, input::InputSender, video::ViewerVideo};
 use couch_platform_win::clock::QpcClock;
 use couch_proto::{
     control::{ControlMessage, KeyframeReason, KeyframeRequest},
-    ipc::{self, FrameTiming, NetStats, VideoFrameHeader},
+    input::RumbleDatagram,
+    ipc::{self, FrameTiming, LocalInput, NetStats, RumbleState, SeatState, VideoFrameHeader},
+    media::{datagram, decode_payload},
 };
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::{process::Command, sync::mpsc};
@@ -113,12 +116,28 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         .connect(ticket.endpoint_addr().clone(), couch_proto::ALPN)
         .await
         .context("connecting to the host")?;
-    let (mut control_tx, _control_rx, hello) = control::open(&conn).await?;
+    let (mut control_tx, mut control_rx, hello) = control::open(&conn).await?;
     println!(
         "connected to {} (app {})",
         conn.remote_id().fmt_short(),
         hello.app_version
     );
+    let (seat_tx, mut seat_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok(Some(message)) = control_rx.recv().await {
+            if matches!(
+                message,
+                ControlMessage::SeatAssigned(_) | ControlMessage::SeatReleased(_)
+            ) && seat_tx.send(message).is_err()
+            {
+                return;
+            }
+        }
+    });
+    let datagrams = Datagrams::start(conn.clone());
+    let mut rumbles = datagrams.subscribe(datagram::RUMBLE);
+    let input_out = InputSender::start(conn.clone());
+    let mut forwarder = Forwarder::new();
     control_tx
         .send(&ControlMessage::KeyframeRequest(KeyframeRequest {
             epoch: 0,
@@ -163,6 +182,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     }
     let latency = Arc::new(Mutex::new(latency));
     let (keyframe_tx, mut keyframe_rx) = mpsc::unbounded_channel();
+    let (local_tx, mut local_rx) = mpsc::unbounded_channel::<LocalInput>();
     {
         let latency = latency.clone();
         tokio::spawn(async move {
@@ -175,6 +195,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     }
                     ipc::kinds::KEYFRAME_REQUEST => {
                         let _ = keyframe_tx.send(());
+                    }
+                    ipc::kinds::INPUT => {
+                        if let Some(input) = ipc::from_payload(&frame.payload) {
+                            let _ = local_tx.send(input);
+                        }
                     }
                     _ => {}
                 }
@@ -202,6 +227,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     tokio::pin!(deadline);
     let mut report = tokio::time::interval(Duration::from_secs(1));
     let mut net_tick = tokio::time::interval(Duration::from_millis(250));
+    let mut input_tick = tokio::time::interval(Duration::from_millis(10));
+    input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut net_since = Instant::now();
     let mut received_bytes = 0u64;
     let mut net: Option<NetStats> = None;
@@ -230,6 +257,57 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 }
                 .write(&frame.data, &mut payload);
                 if ipc_async::write_frame(&mut viewer_in, ipc::kinds::VIDEO_FRAME, &payload, &mut scratch)
+                    .await
+                    .is_err()
+                {
+                    println!("the viewer window closed");
+                    break;
+                }
+            }
+            Some(local) = local_rx.recv() => {
+                for out in forwarder.local(local, Instant::now()) {
+                    input_out.send(out);
+                }
+            }
+            _ = input_tick.tick() => {
+                for out in forwarder.tick(Instant::now()) {
+                    input_out.send(out);
+                }
+            }
+            Some(message) = seat_rx.recv() => {
+                match message {
+                    ControlMessage::SeatAssigned(s) => {
+                        println!("you control seat {} ({:?})", s.seat.0, s.permissions);
+                        for out in forwarder.seat_assigned(s.seat, s.seat_epoch, s.permissions, Instant::now()) {
+                            input_out.send(out);
+                        }
+                    }
+                    ControlMessage::SeatReleased(s) => {
+                        println!("seat {} went back to the host", s.seat.0);
+                        forwarder.seat_released(s.seat, s.seat_epoch);
+                    }
+                    _ => continue,
+                }
+                let state = SeatState {
+                    holding: forwarder.holding().is_some(),
+                    permissions: forwarder.holding().map_or(Permissions::empty(), |h| h.1),
+                };
+                payload = ipc::to_payload(&state);
+                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::SEAT, &payload, &mut scratch)
+                    .await
+                    .is_err()
+                {
+                    println!("the viewer window closed");
+                    break;
+                }
+            }
+            Some(rumble) = rumbles.recv() => {
+                let Some(r) = decode_payload::<RumbleDatagram>(&rumble) else {
+                    continue;
+                };
+                println!("rumble from the host: low {} high {}", r.low, r.high);
+                payload = ipc::to_payload(&RumbleState { low: r.low, high: r.high });
+                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::RUMBLE, &payload, &mut scratch)
                     .await
                     .is_err()
                 {

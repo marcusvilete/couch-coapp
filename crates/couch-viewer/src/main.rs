@@ -6,6 +6,8 @@
 //! Modes:
 //! - no arguments: show the stream arriving on the IPC pipe until it closes;
 //! - `--clock [x y]`: the latency clock window (see `clock.rs`);
+//! - `--input-sink FILE`: a window that records the input it receives (see
+//!   `sink.rs`);
 //! - `--probe`: print SDL3 and gamepad information as one JSON line, for
 //!   `couch-cli probe`;
 //! - `--version`.
@@ -15,7 +17,9 @@
 mod clock;
 mod gpu;
 mod hud;
+mod input;
 mod pipe;
+mod sink;
 mod viewer;
 
 use std::io::Write;
@@ -48,6 +52,12 @@ fn main() -> anyhow::Result<()> {
             let coord =
                 |i: usize, default| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);
             clock::run(coord(1, 80), coord(2, 80))
+        }
+        Some("--input-sink") => {
+            let path = args
+                .get(1)
+                .ok_or_else(|| anyhow!("--input-sink needs a file"))?;
+            sink::run(std::path::Path::new(path))
         }
         Some("--probe") => probe(),
         Some("--version") => {
@@ -88,9 +98,21 @@ fn probe() -> anyhow::Result<()> {
         .map_err(|e| anyhow!("listing gamepads failed: {e}"))?
         .into_iter()
         .map(|id| {
-            gamepads
+            let name = gamepads
                 .name_for_id(id)
-                .unwrap_or_else(|e| format!("<unnamed: {e}>"))
+                .unwrap_or_else(|e| format!("<unnamed: {e}>"));
+            let ids = (
+                gamepads.vendor_for_id(id).unwrap_or(0),
+                gamepads.product_for_id(id).unwrap_or(0),
+            );
+            if ids == couch_input::DEV_PAD_IDS {
+                format!(
+                    "{name} ({:04x}:{:04x}, a host's virtual pad: skipped)",
+                    ids.0, ids.1
+                )
+            } else {
+                format!("{name} ({:04x}:{:04x})", ids.0, ids.1)
+            }
         })
         .collect();
     let report = serde_json::json!({

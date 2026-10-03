@@ -4,6 +4,8 @@
 //! - [`control`]: typed control messages and their type ids.
 //! - [`ipc`]: framing for the pipe between the main process and `couch-viewer`.
 //! - [`ids`]: identifiers and permission flags that appear on the wire.
+//! - [`media`]: video framing and datagram tags.
+//! - [`input`]: input stream messages and input datagrams.
 //!
 //! Protocol rules (versioning, frozen payloads) are in `docs/protocol.md`.
 
@@ -11,6 +13,7 @@ mod bytes;
 pub mod control;
 pub mod envelope;
 pub mod ids;
+pub mod input;
 pub mod ipc;
 pub mod media;
 

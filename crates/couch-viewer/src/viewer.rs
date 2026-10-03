@@ -11,17 +11,15 @@ use std::{
 use anyhow::{Result, anyhow};
 use couch_codec_ffmpeg::FfmpegDecoder;
 use couch_media::{DecodedFrame, Micros, Nv12Frame, VideoDecoder, barcode, mailbox::Mailbox};
-use couch_proto::ipc::{FrameTiming, NetStats};
-use sdl3::{
-    event::{Event, WindowEvent},
-    keyboard::Keycode,
-};
+use couch_proto::ipc::{FrameTiming, LocalInput, NetStats};
+use sdl3::event::{Event, WindowEvent};
 
 use crate::{
     clock, gpu,
     hud::Hud,
+    input::{Action, InputCapture},
     now_us,
-    pipe::{self, Incoming, Outgoing},
+    pipe::{self, ForWindow, Incoming, Outgoing},
 };
 
 /// A decoded frame and what we know about its journey so far.
@@ -52,9 +50,10 @@ impl Default for WindowOptions {
 
 pub fn run(options: WindowOptions) -> Result<()> {
     let (in_tx, in_rx) = mpsc::channel();
+    let (window_tx, window_rx) = mpsc::channel();
     let (out_tx, out_rx) = mpsc::channel();
     let net = Arc::new(std::sync::Mutex::new(None));
-    pipe::spawn_reader(in_tx, net.clone());
+    pipe::spawn_reader(in_tx, window_tx, net.clone());
     let writer = pipe::spawn_writer(out_rx);
 
     let decoded = Arc::new(Mailbox::new());
@@ -68,8 +67,15 @@ pub fn run(options: WindowOptions) -> Result<()> {
             .spawn(move || decode_loop(in_rx, &decoded, &out_tx, &decoder_name))?;
     }
 
+    InputCapture::allow_background_pads();
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
+    let mouse = sdl.mouse();
+    let mut input = InputCapture::new(&sdl)?;
+    let mut local = Vec::new();
+    // Proof of life for the main process, from the thread that pumps input.
+    const ALIVE_EVERY: Duration = Duration::from_millis(100);
+    let mut last_alive = Instant::now() - ALIVE_EVERY;
     let mut builder = video.window("Couch Co-App", options.size.0, options.size.1);
     match options.position {
         Some((x, y)) => builder.position(x, y),
@@ -104,15 +110,29 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     }
                     _ => {}
                 },
-                Event::KeyDown {
-                    keycode: Some(Keycode::F3),
-                    ..
-                } => {
-                    hud.visible = !hud.visible;
-                    redraw = true;
-                }
                 _ => {}
             }
+            if input.event(&event, &mut local) == Some(Action::ToggleHud) {
+                hud.visible = !hud.visible;
+                redraw = true;
+            }
+        }
+        while let Ok(message) = window_rx.try_recv() {
+            match message {
+                ForWindow::Seat(seat) => {
+                    input.set_seat(seat);
+                    redraw = true;
+                }
+                ForWindow::Rumble(rumble) => input.rumble(rumble),
+            }
+        }
+        input.sync_capture(&mouse, &window);
+        if last_alive.elapsed() >= ALIVE_EVERY {
+            last_alive = Instant::now();
+            local.push(LocalInput::Alive);
+        }
+        for event in local.drain(..) {
+            let _ = out_tx.send(Outgoing::Input(event));
         }
 
         let timing = match decoded.take_timeout(Duration::from_millis(4)) {
@@ -162,7 +182,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
             });
             video_pass.draw(&mut pass, gpu::letterbox(frame_size, size));
         }
-        let lines = stats.lines(
+        let mut lines = stats.lines(
             frame_size,
             &decoder_name.lock().unwrap(),
             &gpu.adapter_name,
@@ -170,6 +190,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
             decoded.replaced_count(),
             *net.lock().unwrap(),
         );
+        lines.insert(2, input.hud_line());
         let mut buffers = hud.paint(&gpu.device, &gpu.queue, &mut encoder, &view, size, &lines);
         buffers.push(encoder.finish());
         gpu.queue.submit(buffers);
@@ -186,6 +207,14 @@ pub fn run(options: WindowOptions) -> Result<()> {
         }
     }
 
+    // Let go of anything still held, then stop the writer once it has sent
+    // that. Waiting for the channel to close would hang: the decode thread
+    // holds a sender while it waits for more video.
+    input.release_all(&mut local);
+    for event in local.drain(..) {
+        let _ = out_tx.send(Outgoing::Input(event));
+    }
+    let _ = out_tx.send(Outgoing::Close);
     drop(out_tx);
     drop(gpu);
     let _ = writer.join();
@@ -397,7 +426,7 @@ impl Stats {
             ),
             format!("arrive -> decoded   {}", fmt(median(&self.decode_ms))),
             format!("decoder {decoder}, {present_mode:?}, {dropped} skipped"),
-            format!("GPU {adapter}   (F3 hides this)"),
+            format!("GPU {adapter}   (Ctrl+Alt+Shift+H hides this)"),
         ]
     }
 }

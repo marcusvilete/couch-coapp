@@ -1,6 +1,6 @@
 //! Windows backends. Everything that calls Windows APIs lives here: the QPC
-//! clock, Windows.Graphics.Capture and the ViGEm probe now; WASAPI audio,
-//! `SendInput`, virtual pads and process watching from M2 to M6.
+//! clock, Windows.Graphics.Capture, `SendInput` and ViGEm virtual pads now;
+//! WASAPI audio and process watching from M3 to M6.
 //!
 //! Compiles to nothing on other platforms; their backends get sibling crates.
 
@@ -8,5 +8,8 @@
 
 pub mod capture;
 pub mod clock;
+pub mod foreground;
+pub mod keymap;
+pub mod sendinput;
 pub mod timer;
 pub mod vigem;

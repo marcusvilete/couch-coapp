@@ -6,24 +6,37 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use couch_proto::ipc::{self, FrameTiming, NetStats, VideoFrameHeader};
+use couch_proto::ipc::{
+    self, FrameTiming, LocalInput, NetStats, RumbleState, SeatState, VideoFrameHeader,
+};
 
-/// What the main process sends.
+/// What the main process sends for the decoder.
 pub enum Incoming {
     Video(VideoFrameHeader, Vec<u8>),
     Shutdown,
+}
+
+/// What the main process sends for the window's thread.
+pub enum ForWindow {
+    Seat(SeatState),
+    Rumble(RumbleState),
 }
 
 /// What the viewer sends back.
 pub enum Outgoing {
     Timing(FrameTiming),
     KeyframeRequest,
+    Input(LocalInput),
+    /// Write what is queued before this, then stop. Other threads (the
+    /// decoder) still hold senders, so the channel alone never closes.
+    Close,
 }
 
 /// Reads stdin until the main process closes it; then the channel closes too.
 /// Network stats only feed the HUD, so they go straight to `net`.
 pub fn spawn_reader(
     tx: mpsc::Sender<Incoming>,
+    window_tx: mpsc::Sender<ForWindow>,
     net: Arc<Mutex<Option<NetStats>>>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
@@ -50,6 +63,20 @@ pub fn spawn_reader(
                     ipc::kinds::SHUTDOWN => Incoming::Shutdown,
                     ipc::kinds::NET_STATS => {
                         *net.lock().unwrap() = NetStats::read(&frame.payload);
+                        continue;
+                    }
+                    ipc::kinds::SEAT | ipc::kinds::RUMBLE => {
+                        let message = if frame.kind == ipc::kinds::SEAT {
+                            ipc::from_payload(&frame.payload).map(ForWindow::Seat)
+                        } else {
+                            ipc::from_payload(&frame.payload).map(ForWindow::Rumble)
+                        };
+                        match message {
+                            Some(m) => {
+                                let _ = window_tx.send(m);
+                            }
+                            None => tracing::warn!("malformed IPC kind {:#04x}", frame.kind),
+                        }
                         continue;
                     }
                     ipc::kinds::HELLO => continue,
@@ -84,6 +111,11 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>) -> JoinHandle<()> {
                         ipc::kinds::FRAME_TIMING
                     }
                     Outgoing::KeyframeRequest => ipc::kinds::KEYFRAME_REQUEST,
+                    Outgoing::Input(input) => {
+                        payload = ipc::to_payload(&input);
+                        ipc::kinds::INPUT
+                    }
+                    Outgoing::Close => break,
                 };
                 ipc::encode(kind, &payload, &mut buf).expect("small IPC frames");
                 if stdout

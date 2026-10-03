@@ -4,13 +4,18 @@
 //! The main process writes to the viewer's stdin and reads its stdout, so the
 //! viewer must never print to stdout; its logs go to stderr.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::bytes::{Reader, Writer};
+use crate::{
+    bytes::{Reader, Writer},
+    ids::Permissions,
+    input::PadSnapshot,
+};
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 0;
+pub const IPC_VERSION: u16 = 1;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -29,8 +34,12 @@ pub mod kinds {
     pub const SHUTDOWN: u8 = 0x05;
     /// main -> viewer: the connection's path, for the HUD.
     pub const NET_STATS: u8 = 0x06;
+    /// main -> viewer: whether this member holds a seat, and what it may send.
+    pub const SEAT: u8 = 0x07;
+    /// main -> viewer: rumble the local gamepad.
+    pub const RUMBLE: u8 = 0x08;
 
-    /// viewer -> main: a local input event for the host.
+    /// viewer -> main: a local input event for the host ([`super::LocalInput`]).
     pub const INPUT: u8 = 0x81;
     /// viewer -> main: decode and present times, for receiver reports.
     pub const FRAME_TIMING: u8 = 0x82;
@@ -154,6 +163,61 @@ impl NetStats {
             receive_bps: r.u32()?,
         })
     }
+}
+
+/// Payload of [`kinds::INPUT`] (postcard): one local input event. Mouse
+/// motion and wheel are deltas; the main process keeps the running totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LocalInput {
+    /// A USB HID keyboard usage (SDL scancodes are the same numbers).
+    Key {
+        usage: u16,
+        down: bool,
+    },
+    /// A [`crate::input::mouse_button`] code.
+    MouseButton {
+        button: u8,
+        down: bool,
+    },
+    MouseMotion {
+        dx: i32,
+        dy: i32,
+    },
+    /// In 1/120 notches.
+    Wheel {
+        dx: i32,
+        dy: i32,
+    },
+    /// The local gamepad's whole state; neutral when it disconnects.
+    Pad(PadSnapshot),
+    /// Sent every 100 ms from the viewer's window loop. While these stop (the
+    /// viewer hung), the main process stops the heartbeat, so the host
+    /// releases this member's input.
+    Alive,
+}
+
+/// Payload of [`kinds::SEAT`] (postcard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatState {
+    pub holding: bool,
+    pub permissions: Permissions,
+}
+
+/// Payload of [`kinds::RUMBLE`] (postcard): motor strengths, 0 to 255.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RumbleState {
+    pub low: u8,
+    pub high: u8,
+}
+
+/// The postcard encoding of an IPC payload.
+pub fn to_payload<T: Serialize>(value: &T) -> Vec<u8> {
+    postcard::to_stdvec(value).expect("serializing to a Vec cannot fail")
+}
+
+/// Decodes a postcard IPC payload, rejecting trailing bytes.
+pub fn from_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<T> {
+    crate::media::decode_payload(payload)
 }
 
 /// One decoded IPC frame.
@@ -312,6 +376,32 @@ mod tests {
         stats.write(&mut buf);
         assert_eq!(buf.len(), NetStats::LEN);
         assert_eq!(NetStats::read(&buf), Some(stats));
+    }
+
+    #[test]
+    fn input_payloads_roundtrip() {
+        for input in [
+            LocalInput::Key {
+                usage: 0x04,
+                down: true,
+            },
+            LocalInput::MouseMotion { dx: -3, dy: 9 },
+            LocalInput::Pad(PadSnapshot {
+                buttons: 0x1000,
+                left_x: -32768,
+                ..Default::default()
+            }),
+        ] {
+            assert_eq!(from_payload(&to_payload(&input)), Some(input));
+        }
+        let seat = SeatState {
+            holding: true,
+            permissions: Permissions::GAMEPAD,
+        };
+        assert_eq!(from_payload(&to_payload(&seat)), Some(seat));
+        let mut extra = to_payload(&RumbleState { low: 1, high: 2 });
+        extra.push(0);
+        assert_eq!(from_payload::<RumbleState>(&extra), None);
     }
 
     #[test]

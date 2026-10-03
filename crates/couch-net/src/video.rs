@@ -19,10 +19,12 @@ use couch_media::{
 };
 use couch_proto::media::{
     DelaySample, EpochPreamble, FrameHeader, MAX_DELAY_SAMPLES, ReceiverReport, datagram,
-    datagram_tag, decode_payload, encode_datagram, reset_code, stream_kind,
+    decode_payload, encode_datagram, reset_code, stream_kind,
 };
 use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
 use tokio::sync::{mpsc, watch};
+
+use crate::datagrams::Datagrams;
 
 /// The selected path's statistics, in the shape the rate controller wants.
 pub fn selected_path(conn: &Connection) -> PathSample {
@@ -63,12 +65,15 @@ pub struct HostVideo {
 
 impl HostVideo {
     /// Starts the writer and report-reader tasks. Call inside a tokio runtime.
-    pub fn start(conn: Connection, session: u64) -> Self {
+    pub fn start(conn: Connection, session: u64, datagrams: &Datagrams) -> Self {
         let (commands, rx) = mpsc::unbounded_channel();
         let (epoch_tx, epoch_rx) = watch::channel(0);
         let tracker = Arc::new(Mutex::new(FeedbackTracker::new(Instant::now())));
         tokio::spawn(write_video(conn.clone(), rx, epoch_rx));
-        tokio::spawn(read_reports(conn.clone(), tracker.clone()));
+        tokio::spawn(read_reports(
+            datagrams.subscribe(datagram::RECEIVER_REPORT),
+            tracker.clone(),
+        ));
         Self {
             conn,
             commands,
@@ -202,15 +207,9 @@ async fn epoch_changed(rx: &mut watch::Receiver<u32>, epoch: u32) {
     }
 }
 
-async fn read_reports(conn: Connection, tracker: Arc<Mutex<FeedbackTracker>>) {
-    while let Ok(datagram) = conn.read_datagram().await {
-        let Some((tag, payload)) = datagram_tag(&datagram) else {
-            continue;
-        };
-        if tag != datagram::RECEIVER_REPORT {
-            continue;
-        }
-        let Some(report) = decode_payload::<ReceiverReport>(payload) else {
+async fn read_reports(mut reports: mpsc::Receiver<Bytes>, tracker: Arc<Mutex<FeedbackTracker>>) {
+    while let Some(payload) = reports.recv().await {
+        let Some(report) = decode_payload::<ReceiverReport>(&payload) else {
             tracing::debug!("malformed receiver report");
             continue;
         };

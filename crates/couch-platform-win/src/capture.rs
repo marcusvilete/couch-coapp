@@ -20,7 +20,7 @@ use windows_capture::{
     window::Window,
 };
 
-use crate::clock;
+use crate::{clock, foreground::WindowId};
 
 /// What to capture.
 #[derive(Debug, Clone)]
@@ -113,6 +113,7 @@ pub struct WgcCapturer {
     shared: Arc<Shared>,
     control: Option<CaptureControl<Handler, Box<dyn std::error::Error + Send + Sync>>>,
     closed_reported: bool,
+    window: Option<WindowId>,
 }
 
 impl WgcCapturer {
@@ -126,10 +127,12 @@ impl WgcCapturer {
             CursorCaptureSettings::WithoutCursor
         };
         let interval = MinimumUpdateIntervalSettings::Custom(options.min_interval);
+        let mut captured = None;
         let control = match source {
             CaptureSource::WindowTitle(title) => {
                 let window = Window::from_contains_name(title)
                     .map_err(|e| MediaError::Backend(format!("no window titled {title:?}: {e}")))?;
+                captured = Some(WindowId(window.as_raw_hwnd() as isize));
                 Handler::start_free_threaded(settings(window, cursor, interval, shared.clone()))
             }
             CaptureSource::PrimaryMonitor => {
@@ -142,7 +145,13 @@ impl WgcCapturer {
             shared,
             control: Some(control),
             closed_reported: false,
+            window: captured,
         })
+    }
+
+    /// The captured window; `None` for a monitor.
+    pub fn window(&self) -> Option<WindowId> {
+        self.window
     }
 
     /// Frames dropped because the consumer fell behind.

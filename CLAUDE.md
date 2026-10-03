@@ -42,6 +42,9 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 | End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
 | Rate-control gates G1 and G3–G5, run and judged | `couch-cli gates --quick` (4 min) or `couch-cli gates` (12 min). The `rate-control-gates` skill covers traces and reading a failure. |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
+| Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine |
+| Virtual pad (needs ViGEmBus) | `couch-cli pad-test`, then watch it in `joy.cpl`. `--real-pad-ids` on `pad-test` or `host` gives it a real Xbox 360 controller's ids, which a viewer on this machine would capture and send back |
+| Keyboard and mouse injection, checked on one machine | `couch-cli input-sink` |
 | Audio datagrams behind a keyframe (timing test) | `cargo test --release -p couch-net --features netem --test datagrams -- --ignored --nocapture` |
 
 `--netem "<profile>"` (on `host`, `view` and `latency-probe`) replaces IP and relays with a loopback test transport that impairs the sending direction, e.g. `delay=20ms,loss=1%` or `rate=25mbit,at10s=rate:5mbit`. Without `--netem-viewer`, both sides get the same profile.
@@ -87,6 +90,7 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 - The Windows key and its combinations, Alt+Tab, Ctrl+Esc, Ctrl+Shift+Esc and the gamepad Guide button are never forwarded.
 - Every handoff, disconnect and teardown releases held keys and sends `PadState::NEUTRAL`.
 - Input with a stale `SeatEpoch` is dropped.
+- Remote input reaches `KbmInjector` and `VirtualPad` only through `couch_input::router::SeatRouter`, which enforces all of the above. Its tests are the guard; don't weaken them.
 - Peer data is size-limited: 64 KiB control frames, 16 MiB IPC frames.
 
 **Licensing.** The app's license is undecided.

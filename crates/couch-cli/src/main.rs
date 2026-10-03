@@ -5,14 +5,19 @@
 //! - `capture-test`: the capture, encode and decode pipeline without a network;
 //! - `host` / `view`: stream between two processes over iroh;
 //! - `latency-probe`: the M1 latency measurement on one machine;
-//! - `gates`: the rate-control gates (G1, G3 to G5), run and judged.
+//! - `gates`: the rate-control gates (G1, G3 to G5), run and judged;
+//! - `pad-test`: a virtual gamepad that moves by itself;
+//! - `input-sink`: keyboard and mouse injection checked end to end.
 
 mod capture_test;
 mod gates;
 mod host;
+mod host_input;
+mod input_sink;
 mod ipc_async;
 mod latency_probe;
 mod net_args;
+mod pad_test;
 mod probe;
 mod screen_probe;
 mod stats;
@@ -91,6 +96,15 @@ enum Cmd {
         /// Write every rate-controller tick to this CSV file.
         #[arg(long)]
         rc_trace: Option<PathBuf>,
+        /// Let the viewer use keyboard and mouse, not just the gamepad. This
+        /// is remote control of this PC while the captured window is in front.
+        #[arg(long)]
+        allow_kbm: bool,
+        /// Give the virtual pad a real Xbox 360 controller's USB ids. Without
+        /// it the pad uses development ids, which a viewer on this machine
+        /// skips; some games only accept the real ones.
+        #[arg(long)]
+        real_pad_ids: bool,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -159,6 +173,17 @@ enum Cmd {
         #[arg(long, value_enum, default_value = "media")]
         congestion: CongestionArg,
     },
+    /// Plug a virtual Xbox 360 pad and move it; watch it in joy.cpl.
+    PadTest {
+        #[arg(long, default_value_t = 30)]
+        secs: u64,
+        /// Use a real Xbox 360 controller's USB ids.
+        #[arg(long)]
+        real_pad_ids: bool,
+    },
+    /// Inject a scripted keyboard and mouse run into a test window and check
+    /// it arrived intact.
+    InputSink,
 }
 
 fn pair<T: Copy>(v: Option<Vec<T>>) -> Option<(T, T)> {
@@ -206,6 +231,8 @@ async fn main() -> ExitCode {
             max_mbps,
             relay_max_mbps,
             rc_trace,
+            allow_kbm,
+            real_pad_ids,
             net,
         } => {
             host::run(host::Args {
@@ -226,6 +253,12 @@ async fn main() -> ExitCode {
                 max_mbps,
                 relay_max_mbps,
                 rc_trace,
+                permissions: if allow_kbm {
+                    couch_input::Permissions::all()
+                } else {
+                    couch_input::Permissions::GUEST_DEFAULT
+                },
+                real_pad_ids,
                 net,
             })
             .await
@@ -289,6 +322,10 @@ async fn main() -> ExitCode {
             })
             .await
         }
+        Cmd::PadTest { secs, real_pad_ids } => {
+            tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids))
+        }
+        Cmd::InputSink => tokio::task::block_in_place(input_sink::run),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

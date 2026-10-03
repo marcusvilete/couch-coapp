@@ -12,7 +12,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 |---|---|---|
 | M0 | Toolchain, workspace, probe, docs | done |
 | M1 | Video over iroh between two processes; latency gates | done ([results](m1-results.md)) |
-| M2 | Input: SDL3 capture, ViGEm pad, `SendInput` | next |
+| M2 | Input: SDL3 capture, ViGEm pad, `SendInput` | done, except keyboard and mouse end to end, which needs a second machine ([results](m2-results.md)) |
 | M3 | Audio | |
 | M4a / M4b | Rooms in the engine / lobby UI | |
 | M5 | Sessions and control | |
@@ -49,14 +49,14 @@ Host machine                                    Viewer machine
 |---|---|---|
 | `couch-proto` | Wire and IPC types, framing, versioning, ids | nothing internal |
 | `couch-media` | Frame types; capture, codec, transport and audio traits; rate controller; test pattern; timestamp barcode | nothing internal |
-| `couch-input` | Input model (HID usages, pad state), injection traits; seat router and safety filters from M2 | `couch-proto` |
+| `couch-input` | Input model (HID usages, pad state), injection traits; the seat router, the viewer-side forwarder and the blocked-key filter, all sans-IO | `couch-proto` |
 | `couch-room` | Room, session and seat state machines, sans-IO | `couch-proto` |
-| `couch-net` | iroh endpoint and congestion controller, control and video channels, netem test transport; admission and mesh from M4a | `couch-proto`, `couch-media` |
+| `couch-net` | iroh endpoint and congestion controller, control, video and input channels, datagram routing, netem test transport; admission and mesh from M4a | `couch-proto`, `couch-media`, `couch-input` |
 | `couch-codec-ffmpeg` | Everything that touches FFmpeg | `couch-media` |
-| `couch-platform-win` | Everything that calls Windows APIs | `couch-media`, `couch-input` |
+| `couch-platform-win` | Everything that calls Windows APIs, including `SendInput` and ViGEm pads | `couch-media`, `couch-input` |
 | `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out; session orchestration | everything above |
-| `couch-viewer` | The viewer binary | `couch-proto`, media and codec crates |
-| `couch-cli` | Developer harness: `probe`, `host`, `view`, `latency-probe`, `gates`, `capture-test`, `screen-scan` | anything |
+| `couch-viewer` | The viewer binary | `couch-proto`, `couch-input`, media and codec crates |
+| `couch-cli` | Developer harness: `probe`, `host`, `view`, `latency-probe`, `gates`, `pad-test`, `input-sink`, `capture-test`, `screen-scan` | anything |
 | `couch-testkit` | Fakes (recording injector and pad, test pattern helpers); dev-dependency only | trait crates |
 | `xtask` | `fetch-deps`, `stage-dlls`, `doctor` | none |
 | `apps/desktop/src-tauri` | Thin Tauri adapter over `couch-engine` | `couch-engine` |
@@ -81,11 +81,12 @@ Rules that keep this layering useful:
 3. The viewer decodes it (D3D11VA) and presents it immediately; there is no jitter buffer for video.
 4. Decode and present times go back over stdout and become receiver reports.
 
-**Input, viewer to host.**
-1. SDL3 captures local input in the viewer.
-2. It travels to the main process over stdout, then over iroh to the host.
-3. On the host, the seat router accepts input only from the seat's holder, with the current seat epoch and permissions.
-4. Accepted input drives the ViGEm pad or `SendInput`.
+**Input, viewer to host** ([protocol.md](protocol.md#input)).
+1. SDL3 captures local input in the viewer: keys as scancodes, which are HID usages; the mouse in relative mode; gamepads, also in the background.
+2. It travels to the main process over stdout. There `couch_input::forward` adds the seat and its epoch, keeps the running mouse totals and sends the heartbeat.
+3. Keys and buttons go over iroh on the input stream; pad state and mouse motion go as datagrams.
+4. On the host, `couch_input::router` lets input through only from the seat's holder, with the current seat epoch and permissions, and keyboard and mouse only while the game is in front.
+5. Accepted input drives the ViGEm pad or `SendInput`. Rumble goes back as a datagram.
 
 The first versions copy frames through CPU memory on both ends. Zero-copy GPU paths arrive in M9 behind the same traits, which is why `EncoderInput` and `DecodedFrame` are non-exhaustive enums.
 
@@ -133,6 +134,7 @@ These hold in every milestone. Tests guard them from M2 on.
 - Remote members can't send the Windows key combinations, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, or the gamepad Guide button.
 - A host panic key revokes all control; it ignores injected keystrokes.
 - Every handoff, disconnect and teardown releases held keys and sends a neutral pad state first.
+- Remote input reaches the injectors only through the seat router (`couch_input::router`), which enforces the rules above and the 300 ms dead-man release.
 - Data from peers is size-limited and parsed defensively. Envelope frames are capped at 64 KiB and IPC frames at 16 MiB.
 
 ## Platform limits

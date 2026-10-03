@@ -858,6 +858,7 @@ dependencies = [
  "anyhow",
  "clap",
  "couch-codec-ffmpeg",
+ "couch-input",
  "couch-media",
  "couch-net",
  "couch-platform-win",
@@ -933,6 +934,7 @@ name = "couch-net"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "couch-input",
  "couch-media",
  "couch-platform-win",
  "couch-proto",
@@ -997,6 +999,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "couch-codec-ffmpeg",
+ "couch-input",
  "couch-media",
  "couch-platform-win",
  "couch-proto",
