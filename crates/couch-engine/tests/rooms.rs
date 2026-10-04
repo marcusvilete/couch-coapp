@@ -9,8 +9,8 @@ use std::{
 };
 
 use couch_engine::{
-    Command, Engine, EngineError, EngineOptions, Event, MemberLink, Profile, Response, RoomGone,
-    RoomView, secrets::Unprotected,
+    Command, Engine, EngineError, EngineOptions, Event, InvitePreview, InviteStatus, MemberLink,
+    Profile, Response, RoomGone, RoomView, secrets::Unprotected,
 };
 use couch_net::endpoint::RelayChoice;
 use couch_proto::invite::Invite;
@@ -39,6 +39,7 @@ fn options(port: u16) -> EngineOptions {
         },
         tick: Duration::from_millis(50),
         invite_valid_for: Duration::from_secs(3600),
+        profile_wait: Duration::from_secs(2),
     }
 }
 
@@ -703,6 +704,108 @@ async fn invites_carry_no_ip_addresses_when_relays_are_configured() {
         other => panic!("unexpected: {other:?}"),
     }
     engine.shutdown().await;
+}
+
+async fn preview(m: &Member, invite: String) -> Result<InvitePreview, EngineError> {
+    match m.handle(Command::PreviewInvite { invite }).await? {
+        Response::InvitePreview(preview) => Ok(preview),
+        other => panic!("expected a preview, got {other:?}"),
+    }
+}
+
+/// The join screen: a link the app was opened with waits for the UI, and an
+/// invite is previewed before any password is asked for.
+#[tokio::test]
+async fn an_opened_invite_is_previewed_before_joining() {
+    let mut a = Member::new("Ana").await;
+    let mut b = Member::new("Bia").await;
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+
+    // Opening a link only keeps it for the UI, once.
+    let mut events = b.engine().subscribe();
+    b.engine().open_link(&invite);
+    assert_eq!(events.recv().await.unwrap(), Event::InviteOpened);
+    let take = || b.handle(Command::TakeOpenedInvite);
+    assert_eq!(
+        take().await.unwrap(),
+        Response::OpenedInvite {
+            link: Some(invite.clone())
+        }
+    );
+    assert_eq!(take().await.unwrap(), Response::OpenedInvite { link: None });
+    b.engine()
+        .open_link(&"x".repeat(couch_proto::invite::MAX_CHARS + 1));
+    assert_eq!(take().await.unwrap(), Response::OpenedInvite { link: None });
+
+    let seen = preview(&b, invite.clone()).await.unwrap();
+    assert_eq!(
+        (seen.room.as_str(), seen.name.as_str(), seen.status),
+        (room.as_str(), "Sofá", InviteStatus::Ready)
+    );
+    assert!((3590..=3600).contains(&seen.expires_in_secs), "{seen:?}");
+    assert_eq!(
+        preview(&a, invite.clone()).await.unwrap().status,
+        InviteStatus::Own
+    );
+    let err = preview(&b, "hello there".into()).await.unwrap_err();
+    assert!(matches!(err, EngineError::Invite(_)), "{err}");
+
+    b.join(&invite, PASSWORD).await.unwrap();
+    assert_eq!(
+        preview(&b, invite.clone()).await.unwrap().status,
+        InviteStatus::Member
+    );
+    // Expiry has its own owner: an invite that lasts a second can't also be
+    // joined with reliably (expiry counts whole seconds).
+    let short = EngineOptions {
+        invite_valid_for: Duration::from_secs(1),
+        ..options(free_port())
+    };
+    let mut c = Member::with_options("Caio", short).await;
+    let short_room = c.create("Rápido").await.id;
+    let short_invite = c.invite(&short_room).await;
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let seen = preview(&b, short_invite).await.unwrap();
+    assert_eq!(
+        (seen.status, seen.expires_in_secs),
+        (InviteStatus::Expired, 0)
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+async fn change(m: &Member, room: &str, password: &str) -> Result<Response, EngineError> {
+    m.handle(Command::ChangePassword {
+        room: room.into(),
+        password: password.into(),
+    })
+    .await
+}
+
+/// Only the owner changes the password; it lasts across restarts, and
+/// members stay.
+#[tokio::test]
+async fn the_owner_changes_the_password() {
+    let mut a = Member::new("Ana").await;
+    let mut b = Member::new("Bia").await;
+    let mut c = Member::new("Caio").await;
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+    b.join(&invite, PASSWORD).await.unwrap();
+
+    let err = change(&b, &room, "mine now").await.unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    let err = change(&a, &room, "  ").await.unwrap_err();
+    assert!(matches!(err, EngineError::EmptyPassword), "{err}");
+    change(&a, &room, "board games").await.unwrap();
+    a.restart().await;
+
+    let err = c.join(&invite, PASSWORD).await.unwrap_err();
+    assert!(matches!(err, EngineError::WrongPassword), "{err}");
+    let mut d = Member::new("Duda").await;
+    d.join(&invite, "board games").await.unwrap();
+    full_mesh(&room, &[&a, &b, &d]).await;
+    stop_all(&mut [&mut a, &mut b, &mut c, &mut d]).await;
 }
 
 #[tokio::test]

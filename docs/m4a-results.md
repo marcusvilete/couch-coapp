@@ -104,7 +104,7 @@ While fixing: **a leaving member's last word broke the dialer's handshake.** A m
 
 - **Joining needs the owner's app running.** No clicks are needed. If the owner is away, someone else can create a room and invite the others. Members reconnect among themselves without the owner.
 - **The owner is a single point** for joins and bans. A lost owner identity leaves a room that can't grow or ban, though members keep playing in it. Handing over ownership, or admins the owner picks, is future work.
-- **No password change yet.** It would now be simple, since only the owner holds the password key; it just isn't built.
+- **No password change yet.** It would now be simple, since only the owner holds the password key; it just isn't built. (Added in M4b.)
 - **Guessing budget**, all at the owner:
   - 5 wrong passwords per invite;
   - about 10 failures an hour per room, after which joining pauses;
@@ -122,7 +122,7 @@ While fixing: **a leaving member's last word broke the dialer's handshake.** A m
 - **M4b**: the lobby UI over these commands, with the members' direct and relay badges, the `JoinsPaused` warning, error texts for a failed join, and the invite's expiry.
 - **M7**: our relay. Production invites will then name it, and members find each other by id after restarts. Its rate limits also matter here, because anyone who knows an endpoint id can occupy the 32 admission slots for 10 s at a time.
 - **Before any public release:** an outside review of the admission composition (ADR 0006).
-- **Later:** ownership transfer or admins; a password change.
+- **Later:** ownership transfer or admins; a password change (done in M4b).
 
 ## How to reproduce
 

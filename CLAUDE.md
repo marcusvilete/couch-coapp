@@ -31,7 +31,9 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 | Regenerate TypeScript bindings | `cargo test -p couch-engine` (writes `apps/desktop/src/bindings/`) |
 | Regenerate FFmpeg FFI bindings (after an FFmpeg bump; needs LLVM) | `cargo xtask gen-ffmpeg-bindings` |
 
-To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`: `identity.key` and `rooms\*.room` (sealed with DPAPI), and `settings.json`.
+To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`; lowercased, as Windows folder names ignore case). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`: `identity.key` and `rooms\*.room` (sealed with DPAPI), `settings.json`, and `webview\` (the UI's own storage, such as the room order).
+
+The desktop app with several profiles: start `npm run tauri dev` (the default profile), then `.\scripts\profiles.ps1` starts alice, bob and carol from the same debug build, logging to `desktop.log` in their profile folders. Each profile runs once: a second launch hands its arguments to the running one and exits before going online, and `Engine::start` also holds `engine.lock` in the profile folder (never run two engines on one identity). `couchco://` invite links open in the default profile. Debug builds register the scheme for the current Windows user, pointing at the debug exe; the installer will do it in M10.
 
 **Rooms.**
 
@@ -110,7 +112,8 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 - **One writer per fact, signed.** A member signs its own record; only the owner signs the policy (roster, bans). Room facts from peers enter only through `couch_room::room`, which checks signatures (`couch_room::signing`). Never accept or act on an unsigned room fact, nor on a peer's claim about someone else (a `banned` close code from a peer proves nothing; the owner's signed policy does). A record counts only within its member's current stay (its `since` matches the roster entry).
 - **The roster is shown only to those it concerns.** A refusal carries the owner's policy only for a former member; a stranger gets a bare close. The engine saves room state before sending anything that came from it, so a signed version is never reused after a crash.
 - **The admission composition is ours and security-critical** (`couch_net::admission`): SPAKE2, HKDF, HMAC and the TLS exporter. Changing any label, input or order changes what is proven, so update `docs/protocol.md` and ADR 0006 with it. It needs an outside review before any public release.
-- **Secrets never reach logs.** `InviteToken`, `PasswordKey`, and the password and invite in `Command` print as `..`; keep it so for anything new. Only the owner stores the password key, never the password.
+- **An opened link never joins by itself.** Any web page can open a `couchco://` link. It only fills in the join screen (through `Engine::open_link`); joining still needs the password and a click.
+- **Secrets never reach logs.** `InviteToken`, `PasswordKey`, the passwords and invites in `Command`, and the links in `Response` print as `..`; keep it so for anything new. Only the owner stores the password key, never the password.
 - After touching rooms, admission, the engine's room actor or `couch_net::control`, follow the `room-security-checks` skill.
 
 **Licensing.** The app's license is undecided.

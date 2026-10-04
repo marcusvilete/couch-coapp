@@ -12,15 +12,25 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Couch Co-App",
         "width": 960,
         "height": 640,
         "minWidth": 720,
-        "minHeight": 480
+        "minHeight": 480,
+        "dragDropEnabled": false
       }
     ],
     "security": {
       "csp": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["couchco"]
+      }
     }
   },
   "bundle": {

@@ -35,7 +35,10 @@ cargo test -p couch-engine --test rooms                 # three engines, ~20 s
 | Leaving and closing reach the absent | `Leaving`, `mark_told`, `refused` | `a_member_who_leaves_alone_tells_the_room_later`, `a_closed_room_reaches_members_who_were_offline`, engine `a_member_who_leaves_alone_tells_the_room_later` and `a_closed_room_reaches_a_member_who_was_offline` |
 | A dialer gets a snapshot first | `Room::connected`, `final_word` | the check in the simulator's `link` |
 | Saved before sent | `Actor::apply` | none automatic: read the diff |
-| Secrets never in logs | manual `Debug` on `Command`, `Response`, `RememberedRoom`, `InviteToken`, `PasswordKey` | none automatic: read the diff |
+| Secrets never in logs | manual `Debug` on `Command`, `Response`, `RememberedRoom`, `InviteToken`, `PasswordKey` | `passwords_and_invites_stay_out_of_debug` (engine commands and replies; extend it for new ones), and read the diff for `tracing` calls |
+| An opened link never joins by itself, nor replaces an invite a password was typed for | `Engine::open_link` keeps it for the UI; `App.tsx` queues it; `JoinRoomDialog` takes it only while idle and clears the password when the invite changes | engine `an_opened_invite_is_previewed_before_joining`; read the UI diff |
+| One engine per identity | `lock_profile` (`engine.lock`), lowercased profile names, the single-instance plugin | `one_engine_per_profile`, `names_ignore_case` |
+| Only the owner changes the password | `Actor::change_password` (`owned`) | engine `the_owner_changes_the_password` |
 
 ## Review the diff for
 
@@ -43,6 +46,7 @@ cargo test -p couch-engine --test rooms                 # three engines, ~20 s
 - **Acting on a peer's word about someone else**: a close code, a presence report or a relayed record. Only a signature from the right writer counts.
 - **Verification order**: cheap checks first (room, stay, version), then the signature. Never act before the signature.
 - **Anything sent to a dialer that isn't yet accepted**: only the proof for a former member, and nothing for a stranger.
+- **A new way for outside input to start a join or reach the network**: a link, a command-line argument, a drop. It must stop at the join screen.
 - **A new effect order in `apply`**: Save before any Send; Removed and Departed only after the last word is queued.
 - **A new field or type in a signed body**: it changes the signed bytes, so it needs the `protocol-change` skill. A change to `SavedRoom` needs a new `ROOM_MAGIC` in `store.rs`.
 - **Anything in `couch_net::admission`**: labels, inputs and order change what is proven. Update `docs/protocol.md` and ADR 0006 together, and keep the outside-review follow-up.
@@ -51,7 +55,7 @@ cargo test -p couch-engine --test rooms                 # three engines, ~20 s
 
 ## What isn't covered automatically
 
-- **Several profiles on one machine**, once the lobby UI exists (M4b): `COUCH_PROFILE=alice`, `bob`, `carol`, each running the app. Ask the user to join, ban, leave and close a room with one of them closed meanwhile.
+- **Several profiles on one machine**: `npm run tauri dev` in `apps\desktop`, then `.\scripts\profiles.ps1` (alice, bob, carol). Ask the user to join, ban, leave and close a room with one of them closed meanwhile, and to open an invite link from a browser. `docs/m4b-results.md` has the full list.
 - **Across networks and NATs**: needs our relay (M7) and a second machine.
 - **The admission composition itself**: needs an outside review before any public release.
 

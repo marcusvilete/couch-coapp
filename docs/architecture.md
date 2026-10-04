@@ -15,7 +15,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M2 | Input: SDL3 capture, ViGEm pad, `SendInput` | done, except keyboard and mouse end to end, which needs a second machine ([results](m2-results.md)) |
 | M3 | Audio: game process loopback, Opus, jitter buffer, SDL3 playback | done ([results](m3-results.md)) |
 | M4a | Rooms in the engine: identity, invites, admission, the mesh | done ([results](m4a-results.md)) |
-| M4b | Lobby UI | |
+| M4b | Lobby UI: rooms, invites and deep links, members with their links, profiles side by side | done ([results](m4b-results.md)) |
 | M5 | Sessions and control | |
 | M6 | Lifecycle and safety | |
 | M7 | Own relay, real-network tests | |

@@ -1,12 +1,19 @@
 //! Thin Tauri adapter over couch-engine: one command in, one event channel out.
 //! UI logic belongs in the React app, behaviour in couch-engine.
+//!
+//! Each profile (`COUCH_PROFILE`) runs as its own single instance, with its
+//! own webview data. `couchco://` invite links open in the default profile:
+//! Windows runs one command per link scheme, without our environment.
 
 use couch_engine::{Command, Engine, EngineOptions, Profile, Response};
-use tauri::{Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tokio::sync::broadcast::error::RecvError;
 
 /// The event the UI listens on for `couch_engine::Event`s.
 const ENGINE_EVENT: &str = "engine-event";
+const MAIN_WINDOW: &str = "main";
+const INVITE_SCHEME: &str = "couchco";
 
 #[tauri::command]
 async fn engine_command(
@@ -18,32 +25,62 @@ async fn engine_command(
 
 pub fn run() {
     tracing_subscriber::fmt()
+        // Plain text when logging to a file (scripts/profiles.ps1).
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let profile = match Profile::from_env() {
-        Ok(profile) => profile,
-        Err(e) => {
-            eprintln!("Couch Co-App: {e}");
-            std::process::exit(2);
-        }
-    };
-    tracing::info!(profile = profile.name(), data_dir = %profile.data_dir().display(), "starting");
-    let engine = match tauri::async_runtime::block_on(Engine::start(
-        profile,
-        EngineOptions::development(),
-    )) {
-        Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("Couch Co-App: {e}");
-            std::process::exit(2);
-        }
-    };
-    let mut events = engine.subscribe();
+    let profile = Profile::from_env().unwrap_or_else(|e| fail(e));
+    let mut context = tauri::generate_context!();
+    if !profile.is_default() {
+        // The single-instance lock is named after the identifier, so this
+        // lets alice, bob and carol run side by side.
+        let config = context.config_mut();
+        config.identifier = format!("{}.{}", config.identifier, profile.name());
+    }
 
+    let window_profile = profile.clone();
     let app = tauri::Builder::default()
-        .manage(engine)
+        // First, so a second launch of this profile hands its arguments (an
+        // invite link) to the running one and exits inside `build`, before
+        // it brings our identity online.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .setup(move |app| {
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == MAIN_WINDOW)
+                .cloned()
+                .ok_or("no main window in tauri.conf.json")?;
+            let mut window = WebviewWindowBuilder::from_config(app.handle(), &config)?
+                .data_directory(window_profile.data_dir().join("webview"));
+            if !window_profile.is_default() {
+                window = window.title(format!("{} · {}", config.title, window_profile.name()));
+            }
+            window.build()?;
+
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                open_links(&handle, event.urls());
+            });
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                open_links(app.handle(), urls);
+            }
+            // Development only: point `couchco://` at this build. The
+            // installer registers it for release builds (M10).
+            if cfg!(debug_assertions)
+                && window_profile.is_default()
+                && let Err(e) = app.deep_link().register_all()
+            {
+                tracing::warn!("could not register invite links: {e}");
+            }
+
+            let mut events = app.state::<Engine>().subscribe();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -63,8 +100,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine_command])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building Couch Co-App");
+
+    // Past `build`, we are this profile's only instance.
+    tracing::info!(profile = profile.name(), data_dir = %profile.data_dir().display(), "starting");
+    let engine =
+        tauri::async_runtime::block_on(Engine::start(profile, EngineOptions::development()))
+            .unwrap_or_else(|e| fail(e));
+    app.manage(engine);
 
     app.run(|app, event| {
         // Tell the rooms we are going, so members don't wait for a timeout.
@@ -73,4 +117,29 @@ pub fn run() {
             tauri::async_runtime::block_on(engine.shutdown());
         }
     });
+}
+
+/// Hands invite links to the engine, which keeps them for the UI. Never
+/// logged: an invite is half of what lets someone in.
+fn open_links(app: &AppHandle, urls: impl IntoIterator<Item = tauri::Url>) {
+    let engine = app.state::<Engine>();
+    for url in urls {
+        if url.scheme() == INVITE_SCHEME {
+            engine.open_link(url.as_str());
+        }
+    }
+    show_main_window(app);
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn fail(error: impl std::fmt::Display) -> ! {
+    eprintln!("Couch Co-App: {error}");
+    std::process::exit(2);
 }

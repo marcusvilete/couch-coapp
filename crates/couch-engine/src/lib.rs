@@ -14,7 +14,11 @@ mod rooms;
 pub mod secrets;
 mod store;
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use couch_net::endpoint::RelayChoice;
 use couch_proto::invite::InviteError;
@@ -48,6 +52,13 @@ pub enum Command {
     ListRooms,
     /// A new room owned by this profile. Only the owner lets people in.
     CreateRoom { name: String, password: String },
+    /// What an invite (a link or its bare payload) leads to, shown before
+    /// asking for the password. Nothing is sent anywhere.
+    PreviewInvite { invite: String },
+    /// The invite link the app was last opened with, if any. Taken: a
+    /// second call answers `None`. Opening a link only fills in the join
+    /// screen; joining still needs the password and a click.
+    TakeOpenedInvite,
     /// Joins with an invite link (or its bare payload) and the password.
     /// The room's owner must be online.
     JoinRoom { invite: String, password: String },
@@ -56,6 +67,9 @@ pub enum Command {
     /// never our IP address, so right after startup it may wait a few
     /// seconds for the relay.
     GetInvite { room: String },
+    /// Owner only: newcomers need this password from now on. Members stay,
+    /// and invites keep working with the new password.
+    ChangePassword { room: String, password: String },
     /// Owner only: every invite made so far stops working.
     RevokeInvites { room: String },
     /// Leaves for good: the others are told, and the room is forgotten. The
@@ -77,6 +91,8 @@ pub enum Response {
     Rooms { rooms: Vec<RoomView> },
     Room(RoomView),
     Invite { link: String },
+    InvitePreview(InvitePreview),
+    OpenedInvite { link: Option<String> },
     Done,
 }
 
@@ -95,9 +111,15 @@ impl fmt::Debug for Command {
                 .debug_struct("CreateRoom")
                 .field("name", name)
                 .finish_non_exhaustive(),
+            Self::PreviewInvite { .. } => f.write_str("PreviewInvite { .. }"),
+            Self::TakeOpenedInvite => f.write_str("TakeOpenedInvite"),
             // The invite holds the token that, with the password, lets one in.
             Self::JoinRoom { .. } => f.write_str("JoinRoom { .. }"),
             Self::GetInvite { room } => f.debug_struct("GetInvite").field("room", room).finish(),
+            Self::ChangePassword { room, .. } => f
+                .debug_struct("ChangePassword")
+                .field("room", room)
+                .finish_non_exhaustive(),
             Self::RevokeInvites { room } => {
                 f.debug_struct("RevokeInvites").field("room", room).finish()
             }
@@ -120,6 +142,11 @@ impl fmt::Debug for Response {
             Self::Rooms { rooms } => f.debug_struct("Rooms").field("rooms", rooms).finish(),
             Self::Room(room) => f.debug_tuple("Room").field(room).finish(),
             Self::Invite { .. } => f.write_str("Invite { .. }"),
+            Self::InvitePreview(preview) => f.debug_tuple("InvitePreview").field(preview).finish(),
+            Self::OpenedInvite { link } => f
+                .debug_struct("OpenedInvite")
+                .field("link", &link.as_ref().map(|_| ".."))
+                .finish(),
             Self::Done => f.write_str("Done"),
         }
     }
@@ -169,6 +196,33 @@ pub struct MemberView {
     pub link: MemberLink,
 }
 
+/// What an invite leads to. Anyone can make up an invite, so its name is
+/// only what the invite claims until the owner admits us.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct InvitePreview {
+    /// Lowercase hex.
+    pub room: String,
+    pub name: String,
+    pub status: InviteStatus,
+    /// Until the owner stops accepting it; 0 once expired.
+    pub expires_in_secs: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum InviteStatus {
+    /// Joining can be tried: it needs the password and the owner online.
+    Ready,
+    Expired,
+    /// We are in this room already.
+    Member,
+    /// Our own room's invite.
+    Own,
+}
+
 /// How a member is connected to us.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -216,6 +270,9 @@ pub enum Event {
         room: String,
         minutes: u32,
     },
+    /// The app was opened with an invite link: [`Command::TakeOpenedInvite`]
+    /// has it.
+    InviteOpened,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -253,6 +310,9 @@ pub enum EngineError {
     Random(String),
     #[error("the engine has stopped")]
     Stopped,
+    /// Another Couch Co-App is running as this profile (or still closing).
+    #[error("profile {0:?} is already running in another Couch Co-App")]
+    ProfileInUse(String),
 }
 
 /// How the engine runs. Tests shorten the timings and turn relays off.
@@ -266,6 +326,9 @@ pub struct EngineOptions {
     pub tick: Duration,
     /// How long an invite works.
     pub invite_valid_for: Duration,
+    /// How long to wait for another engine on this profile to finish
+    /// closing, as when the app is reopened right after closing it.
+    pub profile_wait: Duration,
     /// A fixed UDP port instead of a random one. Members find each other
     /// again after restarts through the relay; without one (a LAN, the
     /// tests) only a fixed port keeps saved addresses valid.
@@ -284,6 +347,40 @@ impl EngineOptions {
             tick: Duration::from_millis(200),
             invite_valid_for: Duration::from_secs(7 * 24 * 3600),
             port: None,
+            profile_wait: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Takes the profile's lock file, waiting up to `wait` for another engine
+/// to let go. Two engines on one identity would bring it online twice and
+/// write the same room files. The desktop app's single-instance check
+/// usually stops a second one earlier, but it lets go before our shutdown
+/// finishes, and its lock name is not the folder. The OS releases the lock
+/// when the file closes, even after a crash.
+async fn lock_profile(profile: &Profile, wait: Duration) -> Result<std::fs::File, EngineError> {
+    let io = |source| StoreError::Io {
+        path: profile.data_dir().to_path_buf(),
+        source,
+    };
+    std::fs::create_dir_all(profile.data_dir()).map_err(io)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(profile.data_dir().join("engine.lock"))
+        .map_err(io)?;
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(EngineError::ProfileInUse(profile.name().to_string()));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(io(e).into()),
         }
     }
 }
@@ -293,12 +390,17 @@ pub struct Engine {
     member_id: String,
     events: broadcast::Sender<Event>,
     actor: mpsc::Sender<rooms::Input>,
+    /// The invite link the app was last opened with, until the UI takes it.
+    opened: Mutex<Option<String>>,
+    /// Held while this engine runs; see [`lock_profile`].
+    _lock: std::fs::File,
 }
 
 impl Engine {
     /// Loads (or creates) the profile's identity, binds the endpoint and
     /// reconnects every remembered room.
     pub async fn start(profile: Profile, options: EngineOptions) -> Result<Self, EngineError> {
+        let lock = lock_profile(&profile, options.profile_wait).await?;
         let (events, _) = broadcast::channel(256);
         let started = rooms::start(&profile, options, events.clone()).await?;
         Ok(Self {
@@ -306,6 +408,8 @@ impl Engine {
             member_id: started.member_id.to_hex(),
             events,
             actor: started.inbox,
+            opened: Mutex::new(None),
+            _lock: lock,
         })
     }
 
@@ -316,6 +420,22 @@ impl Engine {
     /// Our member id, lowercase hex.
     pub fn member_id(&self) -> &str {
         &self.member_id
+    }
+
+    /// The app was opened with `link` (from the OS: a click on a
+    /// `couchco://` link, perhaps on a web page). It is kept for the UI,
+    /// which asks for the password before anything is sent; a newer link
+    /// replaces it. Text too long to be an invite is dropped.
+    pub fn open_link(&self, link: &str) {
+        if link.len() > couch_proto::invite::MAX_CHARS {
+            tracing::warn!(
+                len = link.len(),
+                "ignored an opened link too long to be an invite"
+            );
+            return;
+        }
+        *self.opened.lock().unwrap_or_else(PoisonError::into_inner) = Some(link.to_string());
+        let _ = self.events.send(Event::InviteOpened);
     }
 
     /// A new subscription to engine events. Slow subscribers miss events
@@ -337,6 +457,13 @@ impl Engine {
                 let _ = self.events.send(Event::Pong { nonce });
                 Ok(Response::Pong { nonce })
             }
+            Command::TakeOpenedInvite => Ok(Response::OpenedInvite {
+                link: self
+                    .opened
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take(),
+            }),
             command => {
                 let (reply, response) = oneshot::channel();
                 self.actor
@@ -399,6 +526,29 @@ mod tests {
         engine.shutdown().await;
     }
 
+    /// Two engines on one profile would bring the same identity online twice
+    /// and write the same room files.
+    #[tokio::test]
+    async fn one_engine_per_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = engine(dir.path()).await;
+        let options = EngineOptions {
+            relays: RelayChoice::Disabled,
+            secret_store: Arc::new(secrets::Unprotected),
+            profile_wait: Duration::from_millis(300),
+            ..EngineOptions::development()
+        };
+        let again =
+            |name: &str| Engine::start(Profile::new(name, dir.path()).unwrap(), options.clone());
+        assert!(matches!(
+            again("TEST").await,
+            Err(EngineError::ProfileInUse(name)) if name == "test"
+        ));
+        first.shutdown().await;
+        drop(first);
+        again("test").await.unwrap().shutdown().await;
+    }
+
     #[tokio::test]
     async fn info_names_the_profile() {
         let dir = tempfile::tempdir().unwrap();
@@ -409,6 +559,55 @@ mod tests {
         assert_eq!(info.profile, "test");
         assert_eq!(info.protocol, "couch-coapp/0");
         engine.shutdown().await;
+    }
+
+    #[test]
+    fn passwords_and_invites_stay_out_of_debug() {
+        let secret = "hunter2-SECRETLINK";
+        let shown = [
+            format!(
+                "{:?}",
+                Command::CreateRoom {
+                    name: "Couch".into(),
+                    password: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Command::JoinRoom {
+                    invite: secret.into(),
+                    password: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Command::ChangePassword {
+                    room: "00".into(),
+                    password: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Command::PreviewInvite {
+                    invite: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Response::Invite {
+                    link: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Response::OpenedInvite {
+                    link: Some(secret.into())
+                }
+            ),
+        ];
+        for text in shown {
+            assert!(!text.contains(secret), "{text}");
+        }
     }
 
     /// The TypeScript bindings assume this JSON shape.

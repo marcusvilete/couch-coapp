@@ -22,7 +22,9 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Profile `name` stored under `base/profiles/name`.
+    /// Profile `name` stored under `base/profiles/name`. Names are
+    /// lowercased: Windows folder names ignore case, and `Alice` must be the
+    /// same profile as `alice`, not a second app on the same identity.
     pub fn new(name: &str, base: impl AsRef<Path>) -> Result<Self, ProfileError> {
         let valid = (1..=32).contains(&name.len())
             && name
@@ -31,9 +33,10 @@ impl Profile {
         if !valid {
             return Err(ProfileError::InvalidName(name.to_string()));
         }
+        let name = name.to_ascii_lowercase();
         Ok(Self {
-            name: name.to_string(),
-            data_dir: base.as_ref().join("profiles").join(name),
+            data_dir: base.as_ref().join("profiles").join(&name),
+            name,
         })
     }
 
@@ -67,6 +70,16 @@ mod tests {
         for bad in ["", "..", "a/b", r"a\b", "with space", &"x".repeat(33)] {
             assert!(Profile::new(bad, "base").is_err(), "{bad:?} was accepted");
         }
+    }
+
+    #[test]
+    fn names_ignore_case() {
+        let profile = Profile::new("Default", "base").unwrap();
+        assert!(profile.is_default());
+        assert_eq!(
+            Profile::new("ALICE", "base").unwrap(),
+            Profile::new("alice", "base").unwrap()
+        );
     }
 
     #[test]

@@ -1,110 +1,684 @@
+/* Layout after Discord; colours after VS Code's "Default High Contrast"
+   theme: black, white text, thin bright borders, an orange focus ring.
+   Change the palette here. */
 :root {
-  font-family: "Segoe UI", Inter, system-ui, sans-serif;
+  --bg: #000000;
+  --bg-raised: #0a0a0a;
+  --bg-hover: #1a1a1a;
+  --fg: #ffffff;
+  --fg-muted: #b8b8b8;
+  --border: #6fc3df;
+  --border-quiet: #3a3a3a;
+  --focus: #f38518;
+  --accent: #6fc3df;
+  --accent-fg: #000000;
+  --danger: #f48771;
+  --warn: #ffd700;
+  --link-direct: #89d185;
+  --link-relay: #ffd700;
+  --link-online: #6fc3df;
+  --link-offline: #8a8a8a;
+  --radius: 6px;
+
+  font-family: "Segoe UI", system-ui, sans-serif;
   font-size: 15px;
-  line-height: 1.5;
-  color: #1d1d21;
-  background-color: #f4f4f6;
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--bg);
+  color-scheme: dark;
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
 }
 
+* {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
+  background: var(--bg);
+  overflow: hidden;
 }
 
-.app {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 32px 24px;
-}
-
-h1 {
-  margin: 0;
-  font-size: 1.8rem;
-}
-
-h2 {
-  margin: 0 0 12px;
-  font-size: 1.05rem;
-}
-
-.muted {
-  color: #6b6b76;
-  margin: 4px 0 0;
-}
-
-.error {
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: #fde8e8;
-  color: #9b1c1c;
-}
-
-.card {
-  margin-top: 20px;
-  padding: 18px 20px;
-  border-radius: 12px;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-}
-
-dl {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 6px 16px;
+h1,
+h2,
+p {
   margin: 0;
 }
 
-dt {
-  color: #6b6b76;
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
-dd {
-  margin: 0;
+button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  cursor: pointer;
 }
 
-.path {
-  font-family: Consolas, "Cascadia Mono", monospace;
+button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #9ad6ea;
+}
+
+button.danger,
+button.primary.danger {
+  border-color: var(--danger);
+}
+
+button.primary.danger {
+  background: var(--danger);
+  color: #000;
+}
+
+button.icon {
+  border-color: transparent;
+  padding: 2px 8px;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+button.icon:hover:not(:disabled) {
+  border-color: var(--border);
+}
+
+button.wide {
+  width: 100%;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  width: 100%;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.mono {
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 0.85rem;
   word-break: break-all;
 }
 
-button {
-  border: 1px solid #c9c9d1;
-  border-radius: 8px;
-  padding: 7px 14px;
-  font: inherit;
-  background: #ffffff;
-  color: inherit;
-  cursor: pointer;
+.hint {
+  color: var(--fg-muted);
+  font-size: 0.9rem;
 }
 
-button:hover {
-  border-color: #5b5bd6;
+.error {
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  padding: 8px 12px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #ececf1;
-    background-color: #1b1b1f;
-  }
+.warn-text {
+  color: var(--warn);
+}
 
-  .card,
-  button {
-    background: #26262c;
-  }
+/* Columns: rail | room column | stage. */
+.app {
+  display: grid;
+  grid-template-columns: 72px 248px 1fr;
+  height: 100vh;
+}
 
-  button {
-    border-color: #3d3d46;
-  }
+.rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
 
-  .muted,
-  dt {
-    color: #a0a0ab;
-  }
+/* Scrolls on its own, so the add button below never goes out of sight. */
+.rail-rooms {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+}
 
-  .error {
-    background: #4a1d1d;
-    color: #fbd5d5;
-  }
+.rail-footer {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--border-quiet);
+}
+
+.rail-room.dragging {
+  opacity: 0.4;
+}
+
+/* Where a dragged room would land. */
+.rail-room.drop-before::after,
+.rail-room.drop-after::after {
+  content: "";
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--focus);
+  pointer-events: none;
+}
+
+.rail-room.drop-before::after {
+  top: -7px;
+}
+
+.rail-room.drop-after::after {
+  bottom: -7px;
+}
+
+.rail-room,
+.rail-add {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border-quiet);
+  position: relative;
+  flex: none;
+}
+
+.rail-room .avatar {
+  border: none;
+}
+
+.rail-room.selected {
+  border: 2px solid var(--fg);
+}
+
+.rail-room.selected::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 8px;
+  bottom: 8px;
+  width: 4px;
+  border-radius: 0 4px 4px 0;
+  background: var(--fg);
+}
+
+.rail-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--link-direct);
+  border-color: var(--link-direct);
+}
+
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--border-quiet);
+  font-weight: 600;
+  user-select: none;
+}
+
+.avatar.small {
+  width: 32px;
+  height: 32px;
+  font-size: 0.8rem;
+}
+
+.avatar.large {
+  width: 46px;
+  height: 46px;
+  font-size: 1rem;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  min-width: 0;
+}
+
+.column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 52px;
+  padding: 0 8px 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.column-header h1 {
+  font-size: 1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.column-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.banner {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+}
+
+.banner.warn {
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.members h2 {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  margin: 4px 4px 6px;
+}
+
+.members ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 6px;
+  border-radius: var(--radius);
+}
+
+.member:hover {
+  background: var(--bg-hover);
+}
+
+.member.link-offline .member-name,
+.member.link-offline .avatar {
+  opacity: 0.55;
+}
+
+.presence {
+  position: relative;
+  display: inline-flex;
+}
+
+.dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+  background: var(--link-offline);
+}
+
+.link-me .dot,
+.link-direct .dot {
+  background: var(--link-direct);
+}
+
+.link-relay .dot {
+  background: var(--link-relay);
+}
+
+.link-online .dot {
+  background: var(--link-online);
+}
+
+.link-offline .dot {
+  background: var(--bg);
+  box-shadow: inset 0 0 0 2px var(--link-offline);
+}
+
+.member-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.owner {
+  color: var(--warn);
+}
+
+.link-label {
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+}
+
+.link-relay .link-label {
+  color: var(--link-relay);
+}
+
+.member .ban {
+  display: none;
+  padding: 1px 8px;
+  font-size: 0.8rem;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.member:hover .ban,
+.member .ban:focus-visible {
+  display: inline-block;
+}
+
+.member:hover .link-label {
+  display: none;
+}
+
+.user-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.user-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.user-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-profile {
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+}
+
+/* Room menu. */
+.menu {
+  position: relative;
+}
+
+.menu-items {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.menu-items button {
+  text-align: left;
+  border-color: transparent;
+}
+
+.menu-items button:hover {
+  border-color: var(--border);
+}
+
+.menu-items button.danger {
+  color: var(--danger);
+}
+
+/* Stage. */
+.stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.stage-empty,
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  max-width: 520px;
+}
+
+.stage-empty h2,
+.welcome h2 {
+  font-size: 1.4rem;
+}
+
+.welcome-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+  width: 100%;
+}
+
+button.big {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 16px;
+  text-align: left;
+}
+
+button.big span {
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+
+button.big:not(.primary) span {
+  color: var(--fg-muted);
+}
+
+/* Dialogs. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.modal {
+  width: min(480px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal:focus {
+  outline: none;
+}
+
+.modal h2 {
+  font-size: 1.15rem;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.invite-preview {
+  border: 1px solid var(--border-quiet);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Notices. */
+.notices {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 8px 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.notice span {
+  flex: 1;
+}
+
+.notice.warn {
+  border-color: var(--warn);
+}
+
+.fatal {
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Password fields with our own show/hide button; WebView2's built-in one
+   vanishes for good once the field loses focus. */
+.password {
+  position: relative;
+  display: block;
+}
+
+.password input {
+  padding-right: 40px;
+}
+
+.password input::-ms-reveal,
+.password input::-ms-clear {
+  display: none;
+}
+
+.password .reveal {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  padding: 4px 6px;
+  color: var(--fg-muted);
+}
+
+.password .reveal:hover:not(:disabled) {
+  color: var(--fg);
+}
+
+/* Scroll bars: thin, square-ended, in the palette. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-quiet);
+  border: 2px solid var(--bg);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.banner.offer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }

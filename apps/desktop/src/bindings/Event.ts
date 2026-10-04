@@ -5,4 +5,4 @@ import type { RoomView } from "./RoomView";
 /**
  * Things the engine announces on its own.
  */
-export type Event = { "type": "pong", nonce: number, } | { "type": "roomChanged", room: RoomView, } | { "type": "roomRemoved", room: string, reason: RoomGone, } | { "type": "joinsPaused", room: string, minutes: number, };
+export type Event = { "type": "pong", nonce: number, } | { "type": "roomChanged", room: RoomView, } | { "type": "roomRemoved", room: string, reason: RoomGone, } | { "type": "joinsPaused", room: string, minutes: number, } | { "type": "inviteOpened" };

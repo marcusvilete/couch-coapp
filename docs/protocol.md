@@ -285,6 +285,8 @@ Each exchange must finish within 10 s. At most 32 incoming connections are being
 - **The address is the owner's own.** With relays configured that is its relay alone, never an IP address, so an invite posted in a chat publishes nobody's address. If the relay isn't known yet (just after startup), making the invite waits up to 10 s for it, then fails with "not connected to the relay yet". Without relays (a LAN, the tests), direct addresses are all there is.
 - **Parsing** accepts the bare payload or anything ending in `#<payload>`, in any case, with whitespace ignored, up to 4096 characters.
 - **Joining needs the owner online.** Nobody else admits newcomers, so a join while the owner's app is closed fails with "the room's owner isn't online".
+- **Opening a link only fills in the join screen.** Any web page can open a `couchco://` link, so the app previews the invite (the room's name, which only the invite claims, and whether it expired) and sends nothing until the user types the password and clicks Join. Links open in the default profile, since Windows runs one command per link scheme.
+- **Changing the password** (the owner) replaces the owner's password key. Members stay; invites already sent keep working with the new password.
 
 ## Close and reset codes
 

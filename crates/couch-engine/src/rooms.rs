@@ -46,9 +46,9 @@ use tokio::{
 };
 
 use crate::{
-    Command, EngineError, EngineOptions, Event, MemberLink, MemberView, Profile, ProfileView,
-    Response, RoomGone, RoomView,
-    store::{RememberedRoom, Settings, Store},
+    Command, EngineError, EngineOptions, Event, InvitePreview, InviteStatus, MemberLink,
+    MemberView, Profile, ProfileView, Response, RoomGone, RoomView,
+    store::{RememberedRoom, Settings, Store, StoreError},
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -456,7 +456,9 @@ impl Actor {
     fn command(&mut self, command: Command, reply: Reply, now: Instant) {
         let result = match command {
             // Answered by the engine itself.
-            Command::GetInfo | Command::Ping { .. } => Err(EngineError::Stopped),
+            Command::GetInfo | Command::Ping { .. } | Command::TakeOpenedInvite => {
+                Err(EngineError::Stopped)
+            }
             Command::GetProfile => Ok(Response::Profile(self.profile_view())),
             Command::SetDisplayName { name } => self.set_display_name(name, now),
             Command::ListRooms => {
@@ -469,6 +471,7 @@ impl Actor {
                 Ok(Response::Rooms { rooms })
             }
             Command::CreateRoom { name, password } => self.create(&name, &password, now),
+            Command::PreviewInvite { invite } => self.preview(&invite, now),
             Command::JoinRoom { invite, password } => {
                 // Answers later, from `joined`.
                 self.join(&invite, &password, reply);
@@ -482,6 +485,7 @@ impl Actor {
                 }
                 Err(e) => Err(e),
             },
+            Command::ChangePassword { room, password } => self.change_password(&room, &password),
             Command::RevokeInvites { room } => self.revoke_invites(&room, now),
             Command::LeaveRoom { room } => self.leave(&room, now),
             Command::BanMember { room, member } => self.ban(&room, &member, now),
@@ -626,6 +630,23 @@ impl Actor {
         })
     }
 
+    fn change_password(&mut self, room: &str, password: &str) -> Result<Response, EngineError> {
+        if password.trim().is_empty() {
+            return Err(EngineError::EmptyPassword);
+        }
+        let id = self.owned(room)?;
+        let entry = self.rooms.get_mut(&id).expect("owned");
+        let old = entry.password.replace(PasswordKey::derive(id, password));
+        // Saying "changed" when the old password would be back after a
+        // restart is worse than an error.
+        if let Err(e) = self.try_save(id) {
+            self.rooms.get_mut(&id).expect("owned").password = old;
+            return Err(e.into());
+        }
+        tracing::info!(room = ?id, "changed the room password");
+        Ok(Response::Done)
+    }
+
     fn revoke_invites(&mut self, room: &str, now: Instant) -> Result<Response, EngineError> {
         let id = self.owned(room)?;
         let fx = self
@@ -637,6 +658,27 @@ impl Actor {
         tracing::info!(room = ?id, "revoked every invite");
         self.apply(id, fx, now);
         Ok(Response::Done)
+    }
+
+    fn preview(&self, invite: &str, now: Instant) -> Result<Response, EngineError> {
+        let invite = Invite::parse(invite)?;
+        let room = room_id(invite.owner, invite.nonce);
+        let expires_in = invite.expires.saturating_sub(unix_now());
+        let status = if invite.owner == self.me {
+            InviteStatus::Own
+        } else if self.view(room, now).is_some() {
+            InviteStatus::Member
+        } else if expires_in == 0 {
+            InviteStatus::Expired
+        } else {
+            InviteStatus::Ready
+        };
+        Ok(Response::InvitePreview(InvitePreview {
+            room: room.to_hex(),
+            name: invite.name,
+            status,
+            expires_in_secs: u32::try_from(expires_in).unwrap_or(u32::MAX),
+        }))
     }
 
     fn join(&mut self, invite: &str, password: &str, reply: Reply) {
@@ -1011,16 +1053,20 @@ impl Actor {
     }
 
     fn save(&self, room: RoomId) {
+        if let Err(e) = self.try_save(room) {
+            tracing::error!("could not save room {room:?}: {e}");
+        }
+    }
+
+    fn try_save(&self, room: RoomId) -> Result<(), StoreError> {
         let Some(entry) = self.rooms.get(&room) else {
-            return;
+            return Ok(());
         };
         let remembered = RememberedRoom {
             saved: entry.room.saved(),
             password: entry.password.map(|p| p.0),
         };
-        if let Err(e) = self.store.save_room(room, &remembered) {
-            tracing::error!("could not save room {room:?}: {e}");
-        }
+        self.store.save_room(room, &remembered)
     }
 
     /// Drops the room for good; tells the UI why, unless it already knows.
