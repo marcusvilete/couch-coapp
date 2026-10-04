@@ -4,7 +4,7 @@
 
 use couch_proto::{
     PROTOCOL_MINOR,
-    control::{ControlMessage, Decoded, Hello},
+    control::{ControlMessage, DecodeError, Decoded, Hello},
     envelope,
 };
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -32,6 +32,15 @@ impl ControlSender {
             .await
             .map_err(|e| NetError::Connection(e.to_string()))
     }
+
+    /// Ends the stream and waits, at most `wait`, until the peer has
+    /// acknowledged everything sent. Closing a connection discards data not
+    /// yet delivered, so call this before closing on purpose.
+    pub async fn finish(&mut self, wait: std::time::Duration) {
+        if self.stream.finish().is_ok() {
+            let _ = tokio::time::timeout(wait, self.stream.stopped()).await;
+        }
+    }
 }
 
 impl ControlReceiver {
@@ -43,9 +52,10 @@ impl ControlReceiver {
                 envelope::decode(&self.buf).map_err(|e| NetError::Protocol(e.to_string()))?
             {
                 self.buf.drain(..used);
-                match ControlMessage::from_frame(&frame)
-                    .map_err(|e| NetError::Protocol(e.to_string()))?
-                {
+                match ControlMessage::from_frame(&frame).map_err(|e| match e {
+                    DecodeError::UnknownRequired(kind) => NetError::Version(kind),
+                    other => NetError::Protocol(other.to_string()),
+                })? {
                     Decoded::Message(message) => return Ok(Some(message)),
                     Decoded::SkippedOptional(kind) => {
                         tracing::debug!("skipping unknown optional control message {kind:#06x}");

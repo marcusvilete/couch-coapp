@@ -7,17 +7,26 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+couch-net.workspace = true
 couch-proto.workspace = true
 couch-room.workspace = true
 dirs.workspace = true
+getrandom.workspace = true
+postcard.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+couch-platform-win.workspace = true
+
 [dev-dependencies]
-serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

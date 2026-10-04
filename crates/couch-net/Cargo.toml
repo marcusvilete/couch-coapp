@@ -17,8 +17,13 @@ bytes.workspace = true
 couch-input.workspace = true
 couch-media.workspace = true
 couch-proto.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
+sha2.workspace = true
+spake2.workspace = true
+unicode-normalization.workspace = true
 # Exactly iroh's versions: these name types in iroh's API.
 noq-proto = "=1.3.0"
 iroh-base = { version = "=1.3.0", optional = true }

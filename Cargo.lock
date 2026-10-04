@@ -918,14 +918,20 @@ dependencies = [
 name = "couch-engine"
 version = "0.1.0"
 dependencies = [
+ "couch-net",
+ "couch-platform-win",
  "couch-proto",
  "couch-room",
  "dirs 6.0.0",
+ "getrandom 0.4.3",
+ "postcard",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "ts-rs",
 ]
 
@@ -957,15 +963,20 @@ dependencies = [
  "couch-media",
  "couch-platform-win",
  "couch-proto",
+ "hkdf",
+ "hmac",
  "iroh",
  "iroh-base",
  "iroh-tickets",
  "n0-watcher",
  "noq-proto",
  "noq-udp",
+ "sha2 0.11.0",
+ "spake2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -988,6 +999,7 @@ name = "couch-proto"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
+ "data-encoding",
  "postcard",
  "proptest",
  "serde",
@@ -999,8 +1011,10 @@ name = "couch-room"
 version = "0.1.0"
 dependencies = [
  "couch-proto",
+ "ed25519-dalek",
  "proptest",
  "serde",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
 ]
 
@@ -1373,6 +1387,7 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid",
  "crypto-common 0.2.2",
+ "ctutils",
 ]
 
 [[package]]
@@ -2470,6 +2485,24 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest 0.11.3",
+]
 
 [[package]]
 name = "html5ever"
@@ -5750,6 +5783,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "spake2"
+version = "0.5.0-pre.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d5601a88f45d069ad786f75c4fb13e7f127b0aadda913fb2cd65948d3c9a561"
+dependencies = [
+ "curve25519-dalek",
+ "getrandom 0.4.3",
+ "hkdf",
+ "rand_core 0.10.1",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "spez"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6736,6 +6782,15 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"

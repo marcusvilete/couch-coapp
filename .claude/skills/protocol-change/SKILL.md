@@ -1,6 +1,6 @@
 ---
 name: protocol-change
-description: Checklist for adding or changing anything on Couch Co-App's wire or viewer IPC — a control message, an input-stream message, a datagram (input, audio, reports), a stream kind, or an IPC kind or payload in couch_proto. Use whenever editing crates/couch-proto (control.rs, input.rs, media.rs, ipc.rs, envelope.rs, ids.rs) or code that sends or parses those messages in couch-net, couch-cli or couch-viewer.
+description: Checklist for adding or changing anything on Couch Co-App's wire or viewer IPC — a control message (including admission and room messages, close codes and invites), an input-stream message, a datagram (input, audio, reports), a stream kind, or an IPC kind or payload in couch_proto. Use whenever editing crates/couch-proto (control.rs, admission.rs, room.rs, invite.rs, input.rs, media.rs, ipc.rs, envelope.rs, ids.rs) or code that sends or parses those messages in couch-net, couch-room, couch-engine, couch-cli or couch-viewer.
 ---
 
 # Protocol change checklist
@@ -20,6 +20,10 @@ The wire format is in `docs/protocol.md`. Rules that hold everywhere:
 | Bulk, its own lifetime | A new unidirectional stream kind | `media.rs`: `stream_kind`; the first byte of the stream |
 | Main process ↔ viewer | IPC kind, `u32 len \| u8 kind \| payload` | `ipc.rs`: `kinds` (below 0x80 to the viewer, above from it) |
 
+**Signed bodies** (member records, the room policy) are verified over `domain || postcard(body)`, re-encoded on receipt. Any field change alters what old peers verify, so a new field means a new body type with its own domain, not an edit. Bump the domain's `/vN` if the meaning changes.
+
+**Close codes** live in `control::close_code`; add a name in `couch_net::admission::close_name` and a row in protocol.md's table.
+
 A datagram must be safe to lose. Send full state or running totals, as the pad snapshots and mouse totals do, never deltas or one-off events.
 
 **A datagram must fit about 1100 bytes**, tag included. QUIC starts with 1200-byte packets and only discovers a larger path MTU later; relay paths may never get one. A bigger datagram fails to send, and that is logged only at debug level. Cap anything variable-length below that, even if its format allows more: audio packets are capped at 1000 bytes although Opus allows 1275.
@@ -27,7 +31,7 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
 ## Steps
 
 1. **Type id.**
-   - Control families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats. Input stream: `0x03xx`.
+   - Control families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x04xx` admission, `0x05xx` rooms. Input stream: `0x03xx`.
    - Set `MUST_UNDERSTAND` (`0x8000`) if a peer that doesn't know the message can't work correctly. An unknown must-understand type closes the connection; an unknown optional one is skipped.
    - A message only some peers understand: advertise a feature bit in `Hello.features`, and send the message only to peers that set it.
 2. **Payload struct** with `Serialize`/`Deserialize`.
@@ -50,3 +54,4 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
    - **Input:** run the `input-safety-checks` skill.
    - **Video or reports:** run the `rate-control-gates` skill.
    - **Audio:** run the `audio-checks` skill.
+   - **Admission or rooms:** `cargo test -p couch-room -p couch-net -p couch-engine` (the three-engine scenarios are `--test rooms`).

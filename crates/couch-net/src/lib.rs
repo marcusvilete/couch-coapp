@@ -1,7 +1,10 @@
 //! Networking on iroh: the endpoint and its media congestion controller, the
-//! control stream, video over per-epoch QUIC streams with receiver reports,
-//! audio, and input. Admission and the room mesh arrive in M4a.
+//! control stream and the password check that admits a connection into a
+//! room, video over per-epoch QUIC streams with receiver reports, audio, and
+//! input. The room mesh itself is `couch_room::room`, driven by the engine.
 
+pub mod addr;
+pub mod admission;
 pub mod audio;
 pub mod congestion;
 pub mod control;
@@ -12,7 +15,10 @@ pub mod input;
 pub mod netem;
 pub mod video;
 
-pub use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, endpoint::Connection};
+pub use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey,
+    endpoint::{Connection, Incoming, WeakConnectionHandle},
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
@@ -22,4 +28,7 @@ pub enum NetError {
     Connection(String),
     #[error("protocol: {0}")]
     Protocol(String),
+    /// A message type we must understand and don't: the peer is newer.
+    #[error("unknown message type {0:#06x} that must be understood")]
+    Version(u16),
 }

@@ -31,7 +31,15 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 | Regenerate TypeScript bindings | `cargo test -p couch-engine` (writes `apps/desktop/src/bindings/`) |
 | Regenerate FFmpeg FFI bindings (after an FFmpeg bump; needs LLVM) | `cargo xtask gen-ffmpeg-bindings` |
 
-To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`.
+To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`: `identity.key` and `rooms\*.room` (sealed with DPAPI), and `settings.json`.
+
+**Rooms.**
+
+| Task | Command |
+|---|---|
+| Rooms end to end: engines over loopback (join through the owner, wrong passwords and rate limits, ban, owner offline, catching up, simultaneous restart, leave and close, including with the others offline, invite expiry) | `cargo test -p couch-engine --test rooms` (~20 s) |
+| Join through iroh's public relay (needs internet) | `cargo test -p couch-engine --test rooms -- --ignored` |
+| The room state machine, including the simulated network and its property test | `cargo test -p couch-room` |
 
 **Streaming and measurement.** Build both binaries in release first: `cargo build --release -p couch-cli -p couch-viewer`. `couch-cli` finds `couch-viewer` next to its own exe.
 
@@ -74,11 +82,11 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 **Crate boundaries.** Keep these intact:
 - `couch-proto`: wire and IPC types. Depends on no other internal crate.
 - `couch-media`, `couch-input`, `couch-room`: pure logic, with no OS APIs, FFmpeg or networking.
-  - `couch-room` is sans-IO: `(state, input, now) -> effects`, with no clocks or threads inside.
+  - `couch-room` is sans-IO: `(state, input, now) -> effects`, with no clocks, threads or randomness inside (invite tokens and wall-clock seconds come in as arguments). Its Ed25519 and SHA-256 are pure Rust.
 - `couch-codec-ffmpeg`: the only crate that links FFmpeg (video).
 - `couch-codec-opus`: the only crate that links libopus. FFmpeg's libopus wrapper can't do loss concealment, so audio doesn't go through FFmpeg.
 - `couch-platform-win`: the only crate that calls Windows APIs. It compiles to nothing elsewhere (`#![cfg(windows)]`). Before writing unsafe Windows, COM or SDL code, read the `windows-ffi-pitfalls` skill.
-- `couch-engine`: knows nothing about Tauri. `apps/desktop/src-tauri` stays a thin adapter.
+- `couch-engine`: knows nothing about Tauri. `apps/desktop/src-tauri` stays a thin adapter. Its room actor (`rooms.rs`) is the only owner of room state; other tasks report to it over a channel.
 - `couch-testkit`: fakes; dev-dependency only.
 
 ## Rules that aren't obvious from the code
@@ -96,6 +104,14 @@ To run several instances with separate identities on one machine, set `COUCH_PRO
 - Input with a stale `SeatEpoch` is dropped.
 - Remote input reaches `KbmInjector` and `VirtualPad` only through `couch_input::router::SeatRouter`, which enforces all of the above. Its tests are the guard; don't weaken them. After touching input or teardown code, follow the `input-safety-checks` skill.
 - Peer data is size-limited: 64 KiB control frames, 16 MiB IPC frames.
+
+**Rooms** ([ADR 0006](docs/adr/0006-rooms-without-a-server.md), `docs/protocol.md` Rooms and Admission)
+- **Only the owner lets people in.** The owner signs the roster; members accept connections only from ids on it (iroh authenticates the ids), and only the owner admits newcomers, with an invite it made and the password. Never add a way for a non-owner to admit, or to put anyone on the roster.
+- **One writer per fact, signed.** A member signs its own record; only the owner signs the policy (roster, bans). Room facts from peers enter only through `couch_room::room`, which checks signatures (`couch_room::signing`). Never accept or act on an unsigned room fact, nor on a peer's claim about someone else (a `banned` close code from a peer proves nothing; the owner's signed policy does). A record counts only within its member's current stay (its `since` matches the roster entry).
+- **The roster is shown only to those it concerns.** A refusal carries the owner's policy only for a former member; a stranger gets a bare close. The engine saves room state before sending anything that came from it, so a signed version is never reused after a crash.
+- **The admission composition is ours and security-critical** (`couch_net::admission`): SPAKE2, HKDF, HMAC and the TLS exporter. Changing any label, input or order changes what is proven, so update `docs/protocol.md` and ADR 0006 with it. It needs an outside review before any public release.
+- **Secrets never reach logs.** `InviteToken`, `PasswordKey`, and the password and invite in `Command` print as `..`; keep it so for anything new. Only the owner stores the password key, never the password.
+- After touching rooms, admission, the engine's room actor or `couch_net::control`, follow the `room-security-checks` skill.
 
 **Licensing.** The app's license is undecided.
 - Only permissive crates are allowed (`deny.toml`).

@@ -14,7 +14,8 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M1 | Video over iroh between two processes; latency gates | done ([results](m1-results.md)) |
 | M2 | Input: SDL3 capture, ViGEm pad, `SendInput` | done, except keyboard and mouse end to end, which needs a second machine ([results](m2-results.md)) |
 | M3 | Audio: game process loopback, Opus, jitter buffer, SDL3 playback | done ([results](m3-results.md)) |
-| M4a / M4b | Rooms in the engine / lobby UI | |
+| M4a | Rooms in the engine: identity, invites, admission, the mesh | done ([results](m4a-results.md)) |
+| M4b | Lobby UI | |
 | M5 | Sessions and control | |
 | M6 | Lifecycle and safety | |
 | M7 | Own relay, real-network tests | |
@@ -50,12 +51,12 @@ Host machine                                    Viewer machine
 | `couch-proto` | Wire and IPC types, framing, versioning, ids | nothing internal |
 | `couch-media` | Frame types; capture, codec, transport and audio traits; rate controller; audio framing, jitter buffer and click track; test pattern; timestamp barcode | nothing internal |
 | `couch-input` | Input model (HID usages, pad state), injection traits; the seat router, the viewer-side forwarder and the blocked-key filter, all sans-IO | `couch-proto` |
-| `couch-room` | Room, session and seat state machines, sans-IO | `couch-proto` |
-| `couch-net` | iroh endpoint and congestion controller, control, video, audio and input channels, datagram routing, netem test transport; admission and mesh from M4a | `couch-proto`, `couch-media`, `couch-input` |
+| `couch-room` | Room (membership, the owner's policy, the mesh), admission rate limits, session and seat state machines, all sans-IO; Ed25519 signatures on room facts | `couch-proto` |
+| `couch-net` | iroh endpoint, its gate and congestion controller; the password check (SPAKE2); control, video, audio and input channels, datagram routing, netem test transport | `couch-proto`, `couch-media`, `couch-input` |
 | `couch-codec-ffmpeg` | Everything that touches FFmpeg (video) | `couch-media` |
 | `couch-codec-opus` | Opus encode, decode and loss concealment, through libopus built from source (the `opus` crate, needs CMake) | `couch-media`, `couch-proto` |
-| `couch-platform-win` | Everything that calls Windows APIs, including WASAPI loopback capture, `SendInput` and ViGEm pads | `couch-media`, `couch-input` |
-| `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out; session orchestration | everything above |
+| `couch-platform-win` | Everything that calls Windows APIs, including WASAPI loopback capture, `SendInput`, ViGEm pads and DPAPI | `couch-media`, `couch-input` |
+| `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out. Runs the rooms over iroh; keeps the identity and remembered rooms (DPAPI-sealed) in the profile folder; sessions from M5 | everything above |
 | `couch-viewer` | The viewer binary | `couch-proto`, `couch-input`, media and codec crates |
 | `couch-cli` | Developer harness: `probe`, `host`, `view`, `latency-probe`, `gates`, `pad-test`, `input-sink`, `release-check`, `capture-test`, `screen-scan` | anything |
 | `couch-testkit` | Fakes (recording injector and pad, test pattern helpers); dev-dependency only | trait crates |
@@ -123,7 +124,18 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
   - Development: iroh's public relays (`N0Public`), whose terms cover hobby use only.
   - Production: only our own `iroh-relay` on a small VPS, with no third-party address lookup (`Custom`).
   - Tests: no relays (`Disabled`).
-- **Joining a room.** An invite link carries the room id, a random room secret and members' addresses. The room password is checked peer-to-peer with SPAKE2 and never published.
+- **Joining a room.** Only the room's owner admits newcomers. An invite link carries the room's owner and nonce (which make its id), the invite's own token and the owner's relay (or addresses on a LAN). The newcomer and the owner check the room password with SPAKE2; it never leaves either machine.
+
+## Rooms
+
+([protocol.md](protocol.md#rooms), [ADR 0006](adr/0006-rooms-without-a-server.md))
+
+- **Identity.** Each profile has one Ed25519 key, which is both its iroh endpoint id and its member id. It lives in `identity.key` in the profile folder, sealed with DPAPI.
+- **Who is in.** The owner (the creator) signs the roster. Only the owner admits newcomers, with an invite it made and the password, and only the owner removes anyone: a ban, a departure, or closing the room is a new roster.
+- **The mesh.** Every member connects to every other member of a room. Members accept a connection only from an id on the owner's roster; the dialer shows its copy first, so a member who missed a join catches up. Members dial everyone they know; crossed dials settle on the one the lower id made. They reconnect after restarts without the owner.
+- **State.** `couch_room::room::Room` holds one room as one member sees it: the owner's signed policy, signed member records, the connections, and, for the owner, its invites. It is sans-IO. `couch-engine`'s room actor runs one per room. It owns the connections, carries out the machine's effects (dial, send, close, save) and turns its status into the UI's `RoomView`.
+- **Remembered rooms.** One file per room in the profile folder (`rooms/<id>.room`), sealed with DPAPI: the saved state and, for rooms we own, the invites and the password key (never the password). At start every remembered room dials all its members; a room with nobody online waits for others to dial in.
+- **Gate and limits.** The endpoint's post-handshake hook refuses ids in backoff before any of our protocol runs. The owner checks the rest when a newcomer names its room and invite.
 
 ## Sessions and control
 

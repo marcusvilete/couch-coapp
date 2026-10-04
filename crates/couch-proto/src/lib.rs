@@ -1,7 +1,10 @@
 //! Wire and IPC vocabulary shared by every Couch Co-App process.
 //!
 //! - [`envelope`]: control-stream framing (`u32 len | u16 type | payload`).
-//! - [`control`]: typed control messages and their type ids.
+//! - [`control`]: typed control messages, their type ids, close codes.
+//! - [`admission`]: the password check's messages.
+//! - [`room`]: member records, the owner's policy, snapshots, presence.
+//! - [`invite`]: invite links.
 //! - [`ipc`]: framing for the pipe between the main process and `couch-viewer`.
 //! - [`ids`]: identifiers and permission flags that appear on the wire.
 //! - [`media`]: video framing and datagram tags.
@@ -9,13 +12,16 @@
 //!
 //! Protocol rules (versioning, frozen payloads) are in `docs/protocol.md`.
 
+pub mod admission;
 mod bytes;
 pub mod control;
 pub mod envelope;
 pub mod ids;
 pub mod input;
+pub mod invite;
 pub mod ipc;
 pub mod media;
+pub mod room;
 
 /// ALPN protocol id for connections between room members.
 ///

@@ -6,8 +6,11 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, RelayMode, RelayUrl, SecretKey,
-    endpoint::{QuicTransportConfig, VarInt, presets},
+    Endpoint, EndpointId, RelayMode, RelayUrl, SecretKey,
+    endpoint::{
+        AfterHandshakeOutcome, Connection, EndpointHooks, QuicTransportConfig, Side, VarInt,
+        presets,
+    },
 };
 use noq_proto::congestion;
 
@@ -38,10 +41,41 @@ pub enum Congestion {
     NewReno,
 }
 
+/// Decides, as soon as the TLS handshake names an incoming peer, whether its
+/// connection may go on: `Some(close code)` refuses it before any of our
+/// protocol runs. Used for admission backoff (`couch_room::limits`).
+#[derive(Clone)]
+pub struct Gate(pub Arc<dyn Fn(EndpointId) -> Option<u32> + Send + Sync>);
+
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Gate")
+    }
+}
+
+impl EndpointHooks for Gate {
+    async fn after_handshake(&self, conn: &Connection) -> AfterHandshakeOutcome {
+        // Our own dials are not ours to refuse.
+        if conn.side() == Side::Client {
+            return AfterHandshakeOutcome::Accept;
+        }
+        match (self.0)(conn.remote_id()) {
+            Some(code) => AfterHandshakeOutcome::Reject {
+                error_code: VarInt::from_u32(code),
+                reason: crate::admission::close_name(code).as_bytes().to_vec(),
+            },
+            None => AfterHandshakeOutcome::Accept,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EndpointOptions {
     pub secret_key: SecretKey,
     pub relays: RelayChoice,
+    /// Refuses incoming connections early; `None` takes everyone to the
+    /// next step.
+    pub gate: Option<Gate>,
     /// Bind IP sockets to this port (IPv4 and IPv6) instead of a random one.
     pub port: Option<u16>,
     /// Use only the relay: no direct IP paths at all (the G6 relay test).
@@ -58,6 +92,7 @@ impl EndpointOptions {
         Self {
             secret_key,
             relays,
+            gate: None,
             port: None,
             relay_only: false,
             congestion: Congestion::Media,
@@ -113,6 +148,9 @@ pub async fn bind(options: EndpointOptions) -> Result<Endpoint, NetError> {
         .secret_key(options.secret_key)
         .alpns(vec![couch_proto::ALPN.to_vec()])
         .transport_config(transport_config(options.congestion));
+    if let Some(gate) = options.gate {
+        builder = builder.hooks(gate);
+    }
 
     // The impaired link must be the only path, so nothing below (a fixed
     // port) may add IP transports back.

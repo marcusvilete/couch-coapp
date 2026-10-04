@@ -1,8 +1,8 @@
 //! Thin Tauri adapter over couch-engine: one command in, one event channel out.
 //! UI logic belongs in the React app, behaviour in couch-engine.
 
-use couch_engine::{Command, Engine, Profile, Response};
-use tauri::Emitter;
+use couch_engine::{Command, Engine, EngineOptions, Profile, Response};
+use tauri::{Emitter, Manager, RunEvent};
 use tokio::sync::broadcast::error::RecvError;
 
 /// The event the UI listens on for `couch_engine::Event`s.
@@ -29,10 +29,19 @@ pub fn run() {
         }
     };
     tracing::info!(profile = profile.name(), data_dir = %profile.data_dir().display(), "starting");
-    let engine = Engine::new(profile);
+    let engine = match tauri::async_runtime::block_on(Engine::start(
+        profile,
+        EngineOptions::development(),
+    )) {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("Couch Co-App: {e}");
+            std::process::exit(2);
+        }
+    };
     let mut events = engine.subscribe();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(engine)
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -54,6 +63,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine_command])
-        .run(tauri::generate_context!())
-        .expect("error while running Couch Co-App");
+        .build(tauri::generate_context!())
+        .expect("error while building Couch Co-App");
+
+    app.run(|app, event| {
+        // Tell the rooms we are going, so members don't wait for a timeout.
+        if let RunEvent::Exit = event {
+            let engine = app.state::<Engine>();
+            tauri::async_runtime::block_on(engine.shutdown());
+        }
+    });
 }

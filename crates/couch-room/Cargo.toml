@@ -8,7 +8,11 @@ publish.workspace = true
 
 [dependencies]
 couch-proto.workspace = true
+# Pure-Rust signatures for member records and the owner's policy; the same
+# keys as the iroh endpoint ids.
+ed25519-dalek.workspace = true
 serde.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

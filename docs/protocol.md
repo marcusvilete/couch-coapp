@@ -6,6 +6,7 @@ The wire protocol between room members, and the pipe between the main process an
 - M1 implemented and validated the control envelope with `Hello` and `KeyframeRequest`, video epoch streams, receiver reports and the viewer IPC.
 - M2 added input: the input stream, the gamepad, mouse and rumble datagrams, and the seat messages.
 - M3 added audio: the audio datagram, and the audio packet and stats on the viewer IPC.
+- M4a added rooms: admission, signed member records, the owner's policy, presence, invites and close codes.
 - The rest is a draft for later milestones.
 
 ## Versioning
@@ -27,17 +28,26 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | Type | Message | Notes |
 |---|---|---|
 | `0x8001` | `Hello` | First message in both directions |
+| `0x8002` | `Goodbye { reason: LeftRoom \| Shutdown }` | Before closing a connection on purpose |
 | `0x8101` | `KeyframeRequest { epoch, reason: Start \| DecoderError }` | Viewer to host: decoding can't go on without a keyframe |
 | `0x8201` | `SeatAssigned { seat u8, seat_epoch u32, permissions u8 }` | Host to member: you hold this seat; tag input with this epoch. Permissions: bit 0 gamepad, 1 keyboard, 2 mouse |
 | `0x8202` | `SeatReleased { seat u8, seat_epoch u32 }` | Host to member: your hold on the seat (with that epoch) ended |
+| `0x8401` | `JoinStart { room [16], invite [16], pake [33] }` | Newcomer to owner, first after `Hello` (see [Admission](#admission)) |
+| `0x8402` | `MemberHello { room [16], policy }` | Member to member, first after `Hello`: the dialer's copy of the owner's policy |
+| `0x8403` | `AdmitReply { pake [33], confirm [32] }` | Owner's SPAKE2 message and key confirmation |
+| `0x8404` | `AdmitConfirm { confirm [32] }` | Newcomer's key confirmation |
+| `0x8501` | `RoomSnapshot { policy, members }` | The owner's signed policy and every member's record ([Rooms](#rooms)) |
+| `0x8502` | `MemberUpdate { record }` | One signed member record |
+| `0x8503` | `PolicyUpdate { policy }` | The owner's signed policy; also the proof shown when refusing someone it no longer lists |
+| `0x0504` | `Presence { connected: [member id] }` | Optional: who the sender is connected to |
 
 Message families still to come, all on this stream:
-- **Admission:** `AdmitStart`, `AdmitReply`, `AdmitConfirm`, `AdmitResult`.
-- **Room:** `RoomSnapshot`, `MemberJoined`/`MemberLeft`, `Presence`, `MemberAddrUpdate`, `RoomPolicy`.
 - **Session directory and participation:** `SessionAnnounce`, `SessionUpdate`, `SessionEnded{reason}`, `SessionJoin`, `SessionWelcome`, `SessionLeave`.
 - **Control:** `ControlRequest`, `ControlCancel`, `ControlDecision`, `ControlRevoked`.
-- **Media control:** `VideoConfig`, `KeyframeRequest`, `BitrateHint`.
-- **Liveness:** `Ping`/`Pong` every second, `Goodbye{reason}`.
+- **Media control:** `VideoConfig`, `BitrateHint`.
+- **Liveness:** `Ping`/`Pong` every second.
+
+Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms.
 
 ## Channels
 
@@ -170,27 +180,132 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
 
 **Decoder:** single thread, `AV_CODEC_FLAG_LOW_DELAY`. After a decode error the viewer drops frames until the next keyframe and asks for one at most every 500 ms. It does the same when a frame waited more than 200 ms for the decoder: decoding can't keep up, and the host can't see that queue.
 
-## Admission (M4a)
+## Rooms
 
-1. TLS handshake. iroh authenticates both endpoint ids.
-2. The `after_handshake` hook rejects banned or rate-limited ids.
-3. `Hello`.
-4. Asymmetric SPAKE2. The dialer is A, the acceptor B. Identities are `"couch/v1" || room_id || endpoint_id`.
-5. Key confirmation within 10 s.
+Code: `couch_room::room` (the state machine), `couch-engine`'s `rooms` (runs it over iroh), `couch_net::admission` (admission). The design and its reasons: [ADR 0006](adr/0006-rooms-without-a-server.md).
 
-**Derivations**
-- Password input = `HKDF-SHA256(salt = room_secret, ikm = NFKC(password), info = "couch/pake-pw/v1" || room_id)`.
-- Confirmation keys = `HKDF(spake2_key, salt = export_keying_material("couch-coapp pake v1", room_id))`. This binds them to the QUIC connection.
-- Each side sends `HMAC(k_A or k_B, H(room_id || id_A || id_B || msg_A || msg_B))`. Compare in constant time.
+**The owner decides who is in.**
+- The owner is the room's creator, bound into its id: room id = the first 16 bytes of SHA-256(`"couch/room-id/v1"` || owner id || nonce [16]). Invites carry the owner and the nonce, so nobody can pass a room off as having another owner.
+- **Only the owner admits newcomers**, with an invite it made and the room password, and puts them on the roster.
+- **Members accept connections only from ids on the roster** (iroh has already authenticated the ids). Members never run the password check among themselves.
+- **Taking someone out is a new roster.** That covers a ban, a member leaving, and the owner closing the room. Every connection to someone no longer on it is closed, after showing them the policy as proof.
 
-**Rate limits**
-- Per remote id: exponential backoff.
-- Per room: 10 failures per hour pause new attempts for 10 minutes.
+**Who writes what.** Each fact has one writer, who signs it, and any member relays it.
+- **Policy** `{room, version u32, name, roster (at most 64), banned (at most 64)}`, signed by the owner. A higher `version` replaces a lower. It holds nothing secret.
+  - Each roster entry is `{id, since}`: `since` is the policy version that put the member on the roster. It marks the member's *stay*: leaving and being let in again starts a new one.
+  - The owner saves each policy before sending it, so a crash never makes it sign a different policy under a version already out.
+- **Member record** `{room, id, since u32, version u64, name, addr {relay?, ips (at most 8)}, left}`, signed by that member. A higher `version` replaces a lower, within one stay.
+  - A record counts only if its `since` matches the member's roster entry. Records of anyone else, or of an earlier stay, are dropped unverified, so a replayed `left` record from before a member came back can't remove it again.
+  - A member that sees a record of itself, for its current stay, at least as new as its own (left over from before a crash) publishes a higher version.
+- **Signatures** are Ed25519 by the writer's endpoint key, over `domain || postcard(body)`. The domains are `couch/member-record/v1` and `couch/room-policy/v1`. Receivers re-encode the body they decoded, so a non-canonical encoding fails the check.
+- **Names** (display and room) are 1 to 96 bytes with no control characters, direction overrides or zero-width characters (the zero-width joiner stays, for emoji), so one name can't pass for another.
+
+**Connections.** One iroh connection per pair of members *per room*. Members open it with `MemberHello` (see [Admission](#admission)); the acceptor then sends `RoomSnapshot`, and both send `Presence`. When two connections join the same pair in the same room:
+- **dialed by different sides:** both sides keep the one the lower member id dialed (bytewise) and close the other with `duplicate`;
+- **dialed by the same side:** the newer replaces the older, because the dialer only redials when it thinks the old one is dead.
+
+**Gossip.**
+- A record or policy that is new to a member goes on to every other member it is connected to.
+- Every 30 s, each member sends a full snapshot to every peer, as repair. A snapshot with everything at its largest fits a 64 KiB frame.
+- Signatures are checked only for news: a record or policy no newer than what we hold is dropped unverified.
+- Messages from a peer no longer on the roster are ignored while its connection closes.
+
+**Presence** (optional) is sent whenever a member's connections change. A member shows anyone a peer reports as "online", and dials them now rather than at the end of a backoff.
+
+**Dialing.**
+- Every member with a record is dialed at start and as soon as its record arrives. A member without one yet (it just joined) dials us instead.
+- After a drop or a failed dial: after 1 s, doubling up to 60 s.
+- A member that sent `Goodbye { Shutdown }` is dialed again after 60 s. It normally dials back first, when it starts.
+
+**Leaving and removal.**
+- **A member leaving** sends a `RoomSnapshot` (holding its `left` record) and `Goodbye { LeftRoom }` to everyone it is connected to, flushes, and closes with `left_room`. The others pass the record on, and the owner takes the member off the roster when it sees it. Coming back takes a new invite.
+  - **Leaving takes delivery.** If no member was connected, the leaver keeps the room, hidden from the UI and across restarts, and keeps dialing the others until one of them has the record. A member that refuses it with the owner's policy already knows; one that answers `unknown_room` isn't in the room any more and is crossed off.
+- **The owner leaving closes the room:** it signs a policy with an empty roster and sends it to everyone connected; they forget the room.
+  - **Every former member must hear it.** The owner keeps the closed room, hidden and across restarts, until each one has. It dials those it hasn't told, its `MemberHello` carrying the closing policy, and shows that policy to any former member that dials it.
+- **While leaving**, a member ignores anything about the room it receives and takes no part in it; it only tries to get the word out.
+- **A ban** (owner only) takes the member off the roster, adds it to `banned`, and revokes every outstanding invite, since the banned member may hold one. The banned member learns of it from the owner's signature, never from a peer's say-so. If it was offline, every member it dials refuses it with that same proof.
+
+**Size.** The owner admits nobody new once the roster has 12 members (`room_full`). The UI stops at 8.
+
+## Admission
+
+What a connection between room members exchanges after `Hello`, before it carries anything else.
+
+**Member to member: `MemberHello { room, policy }`.** The dialer sends its copy of the owner's policy.
+- The acceptor first adopts it if it is newer and the owner signed it. That way a member who missed a change (someone joined meanwhile) can decide anyway.
+- **If the dialer is on the roster** and not leaving, the acceptor answers with its `RoomSnapshot`.
+- **Otherwise it refuses**, closing with `banned` or `not_member`.
+  - **A former member is shown why first:** `PolicyUpdate` with the policy, if the dialer's own copy, signed by the owner, lists it. A dialer that finds itself banned or dropped by the owner's signature forgets the room.
+  - **A stranger is shown nothing**, so it learns nobody's id or name from knocking.
+  - If the acceptor isn't in the room at all, it closes with `unknown_room`.
+
+**Newcomer to owner: the password check.**
+1. **Newcomer → `JoinStart { room, invite, pake }`.** `invite` names the invite without revealing its token: the first 16 bytes of SHA-256(`"couch/invite-tag/v1"` || token). The owner closes the connection, with the code shown, if:
+   - the newcomer's id is in backoff (`rate_limited`; the endpoint's gate already refuses those right after the TLS handshake);
+   - it isn't the owner of that room (`protocol`), or isn't in it (`unknown_room`);
+   - the newcomer is banned (`banned`), after sending it `PolicyUpdate` as proof;
+   - the invite is unknown, expired, revoked or worn out (`invite_expired`);
+   - the room has 12 members and the newcomer isn't one (`room_full`);
+   - the rate limits say no (`rate_limited`, below).
+2. **Owner → `AdmitReply`.**
+3. **The newcomer checks the owner's confirmation.** A mismatch closes with `admission_failed` (wrong password). Otherwise it sends `AdmitConfirm`.
+4. **The owner checks the newcomer's**, closing with `admission_failed` on a mismatch.
+5. **The owner checks the rest again**, since it may have changed during the check: a ban (`banned`), the invite revoked or expired (`invite_expired`), the room filled (`room_full`). Then the newcomer goes on the roster.
+6. **The owner sends `RoomSnapshot`**, whose policy now lists the newcomer. The newcomer builds its room from it, publishes its record, and dials the other members, showing that policy.
+
+Each exchange must finish within 10 s. At most 32 incoming connections are being admitted at once; more are refused.
+
+**Keys** (`couch_net::admission`)
+- **Password key** = HKDF-SHA256(salt = room id, ikm = NFKC(trimmed password), info = `"couch/pw/v1"`). Only the owner keeps it; nobody keeps the password.
+- **SPAKE2 password** = HKDF-SHA256(salt = the invite's token, ikm = password key, info = `"couch/pake-pw/v2"` || room id). A guess is worthless without the invite.
+- **SPAKE2**, asymmetric, Ed25519 group. The newcomer is A and the owner B. The identities are `"couch/v1"` || room id || endpoint id. Messages are 33 bytes: a side byte and a point.
+- **Exported** = 32 bytes from the TLS exporter (RFC 5705), label `"couch-coapp pake v1"`, context the room id. It binds the confirmations to this QUIC connection.
+- **(k_A, k_B)** = HKDF-SHA256(salt = exported, ikm = the SPAKE2 key, info = `"couch/confirm/v1"`): 64 bytes, split in half.
+- **Transcript** = SHA-256(`"couch/join/v1"` || room id || invite tag || id_A || id_B || msg_A || msg_B).
+- **confirm_B** = HMAC-SHA256(k_B, transcript); **confirm_A** = HMAC-SHA256(k_A, transcript). Both are compared in constant time.
+
+**Limits** (on the owner). Any check that started and didn't end in admission counts as a failure. That includes a newcomer that disconnects after reading the owner's confirmation, which lets it test one guess offline.
+- **Per invite:** 5 failures and the invite stops working. Checks still running with it count too, so at most 5 run at once, fewer as failures add up.
+- **Per remote id:** refused for 1 s after a failure, doubling up to 10 minutes; forgotten an hour after the last failure. The endpoint's post-handshake hook enforces it. One check at a time per id and room.
+- **Per room:** 10 failures by non-members within an hour pause joining for 10 minutes, and the UI is told (`JoinsPaused`).
+- **Running checks count:** checks still running count as failures against that threshold, so a burst of parallel guesses can't get past it before the first result lands. After a pause, while the hour still holds 10 failures, newcomers get one check at a time, and a failure pauses again.
+
+**This composition is ours.** SPAKE2 comes from RustCrypto's `spake2` 0.5.0-pre.0; the way it is put together here needs an outside review before any public release.
+
+## Invites
+
+`couchco://join#<payload>`. The payload is unpadded lowercase base32 of:
+- the magic bytes `CC`, which keep other base32 text from passing as an invite;
+- a version byte, now 1;
+- postcard `{owner, nonce [16], name, token [32], expires u64, addr {relay?, ips}}`.
+
+**Rules**
+- **Only the owner makes invites**, and each has its own random token, which the owner keeps.
+- **Lifetime.** An invite works for 7 days (`expires`, seconds since 1970, also shown to the joiner) and for anyone who has it and the password. It stops working on expiry, on the owner's "revoke invites", on a ban, or after 5 wrong passwords. At most 32 are kept; making another drops the one closest to expiring.
+- **The address is the owner's own.** With relays configured that is its relay alone, never an IP address, so an invite posted in a chat publishes nobody's address. If the relay isn't known yet (just after startup), making the invite waits up to 10 s for it, then fails with "not connected to the relay yet". Without relays (a LAN, the tests), direct addresses are all there is.
+- **Parsing** accepts the bare payload or anything ending in `#<payload>`, in any case, with whitespace ignored, up to 4096 characters.
+- **Joining needs the owner online.** Nobody else admits newcomers, so a join while the owner's app is closed fails with "the room's owner isn't online".
 
 ## Close and reset codes
 
-- **Connection close:** `normal`, `admission_failed`, `banned`, `duplicate`, `version`, `rate_limited`, `room_full`.
-- **Stream reset:** `SKIP_AHEAD`, `SESSION_END`, `VIEWER_REMOVED`.
+**Connection close** (`couch_proto::control::close_code`):
+
+| Code | Name | Meaning |
+|---|---|---|
+| 0 | `normal` | Closed on purpose, nothing wrong |
+| 1 | `admission_failed` | Wrong password, or the check didn't finish |
+| 2 | `banned` | The owner banned this member |
+| 3 | `duplicate` | Another connection between the same pair and room is kept |
+| 4 | `version` | An unknown must-understand message |
+| 5 | `rate_limited` | Too many failed checks; try later |
+| 6 | `room_full` | The room has 12 members |
+| 7 | `left_room` | The sender left the room |
+| 8 | `invite_expired` | The invite expired, was revoked, or took too many wrong passwords |
+| 9 | `unknown_room` | The acceptor isn't in that room (any more) |
+| 10 | `protocol` | A malformed or unexpected message |
+| 11 | `not_member` | Not on the owner's member list (any more) |
+
+**Stream reset:** `SKIP_AHEAD` (1) now; `SESSION_END` and `VIEWER_REMOVED` in M5.
 
 ## Viewer IPC
 
