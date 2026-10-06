@@ -13,13 +13,14 @@ use couch_engine::pipeline::{
     platform_backend,
     source::REPLACE_GRACE,
 };
-use couch_input::{MemberId, Permissions, SeatEpoch, router::SeatStatus};
+use couch_input::{MemberId, Permissions, SeatEpoch, SeatId, router::SeatStatus};
 use couch_media::clock::LATENCY_CLOCK_TITLE;
 use couch_net::{
     Connection, NetError, admission, control, datagrams::Datagrams, endpoint, streams::Streams,
 };
-use couch_proto::control::{
-    ALIVE_EVERY, Alive, ControlMessage, SeatAssigned, SeatReleased, close_code,
+use couch_proto::{
+    control::{ALIVE_EVERY, Alive, ControlMessage, SeatAssigned, SeatReleased, close_code},
+    session::SeatKind,
 };
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::sync::mpsc;
@@ -39,8 +40,11 @@ pub struct Args {
     pub max_viewers: usize,
     /// Write every rate-controller tick to CSV files, one per viewer.
     pub rc_trace: Option<PathBuf>,
-    /// What the viewer holding the seat may send: the gamepad by default.
+    /// What the viewer holding seat 0 may send: the gamepad by default.
     pub permissions: Permissions,
+    /// Virtual pads, one per seat: each viewer that connects gets the first
+    /// free seat (only seat 0 may have keyboard and mouse).
+    pub pads: u8,
     pub real_pad_ids: bool,
     pub audio: AudioChoice,
     pub net: NetArgs,
@@ -99,6 +103,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             },
             upload_bps: args.upload_mbps.map(mbps),
             audio: args.audio,
+            seats: vec![SeatKind::Controller; usize::from(args.pads.max(1))],
             real_pad_ids: args.real_pad_ids,
             session: 1,
             first_epoch: SeatEpoch(0),
@@ -120,7 +125,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     tokio::spawn(accept_viewers(endpoint.clone(), from_viewers));
 
     let mut viewers: HashMap<MemberId, Viewer> = HashMap::new();
-    let mut holder: Option<MemberId> = None;
+    let mut holders: Vec<Option<MemberId>> = vec![None; usize::from(args.pads.max(1))];
     let started = std::time::Instant::now();
     let since = || started.elapsed().as_secs_f64();
     let stop = stop_requested();
@@ -138,9 +143,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     println!("viewer {} connected", short(member));
                     let channels = (Datagrams::start(conn.clone()), Streams::start(conn.clone()));
                     stream.add_viewer(member, conn.clone(), &channels.0, &channels.1);
-                    if holder.is_none() {
-                        holder = Some(member);
-                        stream.grant(member, args.permissions);
+                    if let Some(free) = holders.iter().position(Option::is_none) {
+                        holders[free] = Some(member);
+                        let permissions = if free == 0 { args.permissions } else { Permissions::GAMEPAD };
+                        stream.grant(SeatId(free as u8), member, permissions);
                     }
                     viewers.insert(member, Viewer { conn, control, _channels: channels });
                 }
@@ -150,8 +156,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                         println!("viewer {} disconnected", short(member));
                         stream.remove_viewer(member);
                     }
-                    if holder == Some(member) {
-                        holder = None;
+                    for holder in &mut holders {
+                        if *holder == Some(member) {
+                            *holder = None;
+                        }
                     }
                 }
             },
@@ -212,14 +220,14 @@ fn on_event(
                 }));
             }
         }
-        HostEvent::Seat { status, at } => {
+        HostEvent::Seat { seat, status, at } => {
             let (what, event) = match status {
                 SeatStatus::Active => ("active", "active"),
                 SeatStatus::Suspended => ("suspended, everything released", "suspended"),
                 SeatStatus::Host => ("back with the host", "revoked"),
                 SeatStatus::Granted => ("waiting", "waiting"),
             };
-            println!("{secs:8.3}s  seat 0 {what}");
+            println!("{secs:8.3}s  seat {} {what}", seat.0);
             event_line(event, at.0);
         }
         HostEvent::ViewerGone { at, .. } => {
@@ -256,6 +264,15 @@ fn on_event(
             event_line("followed", at.0);
         }
         HostEvent::CaptureFailed(e) => return Some(Err(anyhow::anyhow!("capture failed: {e}"))),
+        HostEvent::GameFocus(in_front) => {
+            let (what, event) = if in_front {
+                ("in front", "game-front")
+            } else {
+                ("not in front: keyboard and mouse held back", "game-away")
+            };
+            println!("{secs:8.3}s  the captured window is {what}");
+            event_line(event, qpc_now());
+        }
         HostEvent::Note(text) => println!("{text}"),
     }
     None

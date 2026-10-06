@@ -3,7 +3,9 @@
 // The engine decides everything; these only show its state and send commands.
 import { useEffect, useState, type FormEvent } from "react";
 import type { Command } from "./bindings/Command";
+import type { InputSetup } from "./bindings/InputSetup";
 import type { RoomView } from "./bindings/RoomView";
+import type { SeatChoice } from "./bindings/SeatChoice";
 import type { SessionView } from "./bindings/SessionView";
 import type { ShortcutView } from "./bindings/ShortcutView";
 import type { SourceList } from "./bindings/SourceList";
@@ -28,9 +30,28 @@ export function nameOf(room: RoomView, member: string | null | undefined): strin
   return room.members.find((m) => m.id === member)?.name ?? "someone";
 }
 
-/** Who plays: the controller, or the host while nobody holds it. */
-export function playerOf(session: SessionView): string {
-  return session.controller ?? session.host;
+/** Who plays: each seat's holder, and the host while a seat is free. */
+export function playersOf(session: SessionView): string[] {
+  const holders = session.seats.flatMap((s) => (s.holder ? [s.holder] : []));
+  return holders.length < session.seats.length ? [...holders, session.host] : holders;
+}
+
+/** A seat's label in a sentence: "the controller", "Controller 2". */
+export function seatPhrase(label: string): string {
+  return /\d$/.test(label) ? label : `the ${label.toLowerCase()}`;
+}
+
+/** "Bia is playing" (the host while nobody holds the one seat), or per seat:
+ * "Controller 1: Bia · Controller 2: free · Ana: own controller", the host
+ * playing on their own devices beside the seats. */
+function whoPlays(room: RoomView, s: SessionView): string {
+  if (s.seats.length === 1) return `${nameOf(room, s.seats[0].holder ?? s.host)} is playing`;
+  const seats = s.seats.map((seat) => `${seat.label}: ${seat.holder ? nameOf(room, seat.holder) : "free"}`);
+  return [...seats, `${nameOf(room, s.host)}: own controller`].join(" · ");
+}
+
+function allowsKbm(s: SessionView): boolean {
+  return s.seats.some((seat) => seat.keyboardMouse);
 }
 
 /** Runs one command at a time, showing failures as notices. */
@@ -123,7 +144,8 @@ function StageCard(props: {
   const { room, session: s } = props;
   const { busy, run } = useRun(props.notify, props.onRoom);
   const host = nameOf(room, s.host);
-  const player = nameOf(room, playerOf(s));
+  // This profile is listed first.
+  const me = room.members[0]?.id;
   const full = s.viewers.length >= s.maxViewers;
   const watchBlocked =
     props.busy.hosting ? "Stop streaming first." : props.busy.watching ? "You're watching another stream." : full ? "Full: the host chose how many can watch." : null;
@@ -148,26 +170,43 @@ function StageCard(props: {
       actions = <StopWatching run={run} busy={busy} />;
       break;
     default: {
-      const control: Record<string, [string, Command]> = {
-        watching: ["Ask for the controller", { type: "requestControl" }],
-        asking: ["Withdraw the request", { type: "cancelControl" }],
-        controlling: ["Give it back", { type: "cancelControl" }],
-      };
-      const [label, command] = control[s.role];
-      const paused = s.role === "watching" && s.controlPaused;
+      const mine = s.seats.findIndex((seat) => seat.holder != null && seat.holder === me);
+      const asked = s.askedSeat;
+      const seatName = (i: number | null) => (i == null || i < 0 ? "a seat" : seatPhrase(s.seats[i].label));
       state =
-        s.role === "controlling"
-          ? "You're playing."
-          : s.role === "asking"
-            ? `You asked ${host} for the controller.`
-            : paused
+        s.role === "asking"
+          ? mine >= 0
+            ? `You're playing on ${s.seats[mine].label}, and asked ${host} for ${seatName(asked)}.`
+            : `You asked ${host} for ${seatName(asked)}.`
+          : mine >= 0
+            ? s.seats.length > 1
+              ? `You're playing, on ${s.seats[mine].label}.`
+              : "You're playing."
+            : s.controlPaused
               ? `You're watching. ${host} paused control for now.`
               : "You're watching.";
+      // Any seat but ours: a free one, someone else's (the host decides),
+      // or another than ours (a move).
+      const asks = s.seats.map((seat, i) =>
+        i === mine ? null : (
+          <button key={i} disabled={busy != null || s.controlPaused || asked === i} onClick={() => run(`ask-${i}`, { type: "requestControl", seat: i })}>
+            {asked === i ? `Asked for ${seatPhrase(seat.label)}` : `Ask for ${seatPhrase(seat.label)}`}
+          </button>
+        ),
+      );
       actions = (
         <>
-          <button disabled={busy != null || paused} onClick={() => run("control", command)}>
-            {label}
-          </button>
+          {asks}
+          {s.role === "asking" && (
+            <button disabled={busy != null} onClick={() => run("cancel", { type: "cancelControl" })}>
+              Withdraw the request
+            </button>
+          )}
+          {s.role === "controlling" && (
+            <button disabled={busy != null} onClick={() => run("cancel", { type: "cancelControl" })}>
+              Give it back
+            </button>
+          )}
           <StopWatching run={run} busy={busy} />
         </>
       );
@@ -188,8 +227,8 @@ function StageCard(props: {
         <span className="playing" aria-hidden="true">
           🎮
         </span>{" "}
-        {player} is playing · {s.viewers.length} of {s.maxViewers} watching
-        {s.keyboardMouse && " · keyboard and mouse allowed"}
+        {whoPlays(room, s)} · {s.viewers.length} of {s.maxViewers} watching
+        {allowsKbm(s) && " · keyboard and mouse allowed"}
       </p>
       {state && <p className="card-state">{state}</p>}
       <div className="card-actions">{actions}</div>
@@ -213,7 +252,9 @@ function HostPanel(props: {
 }) {
   const { room, session: s } = props;
   const { busy, run } = useRun(props.notify, props.onRoom);
-  const playing = s.controller ? nameOf(room, s.controller) : null;
+  const seatOf = (member: string) => s.seats.findIndex((seat) => seat.holder === member);
+  const single = s.seats.length === 1;
+  const pass = (member: string, seat: number) => run(`pass-${member}`, { type: "passControl", member, seat });
   return (
     <section className="host-panel" aria-label="Your stream">
       <div className="host-head">
@@ -221,7 +262,7 @@ function HostPanel(props: {
         <h3 title={s.title}>{s.title}</h3>
         <span className="hint">
           {s.viewers.length} of {s.maxViewers} watching
-          {s.keyboardMouse && " · keyboard and mouse allowed"}
+          {allowsKbm(s) && " · keyboard and mouse allowed"}
         </span>
         <button className="danger" disabled={busy != null} onClick={() => run("stop", { type: "stopLive" })}>
           {busy === "stop" ? "Stopping…" : "Stop streaming"}
@@ -239,12 +280,15 @@ function HostPanel(props: {
 
       {s.requests.length > 0 && (
         <div className="host-list requests">
-          <h4>Asking for the controller</h4>
+          <h4>Asking to play</h4>
           <ul>
-            {s.requests.map((id) => (
+            {s.requests.map(({ member: id, seat }) => (
               <li key={id}>
                 <Avatar name={nameOf(room, id)} />
-                <span className="member-name">{nameOf(room, id)}</span>
+                <span className="member-name">
+                  {nameOf(room, id)}
+                  <span className="hint"> asks for {seatPhrase(s.seats[seat]?.label ?? "a seat")}</span>
+                </span>
                 <button className="primary" disabled={busy != null} onClick={() => run(`accept-${id}`, { type: "answerControl", member: id, accept: true })}>
                   Accept
                 </button>
@@ -257,6 +301,44 @@ function HostPanel(props: {
         </div>
       )}
 
+      {!single && (
+        <div className="host-list">
+          <h4>Seats — {s.seats.length}</h4>
+          <ul>
+            <li className="own-devices">
+              <span className="seat-kind" aria-hidden="true">
+                🎮
+              </span>
+              <span className="member-name">
+                Your own controller, keyboard and mouse
+                <span className="hint"> · you, beside the seats</span>
+              </span>
+            </li>
+            {s.seats.map((seat, i) => (
+              <li key={i}>
+                <span className="seat-kind" aria-hidden="true">
+                  {seat.pad ? "🎮" : "⌨"}
+                </span>
+                <span className="member-name">
+                  {seat.label}
+                  <span className="hint"> · {seat.holder ? nameOf(room, seat.holder) : "free"}</span>
+                </span>
+                {seat.holder && (
+                  <button disabled={busy != null} onClick={() => run(`take-${i}`, { type: "takeBackControl", seat: i })}>
+                    Take back
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          <p className="hint">
+            The game numbers its players itself, usually in the order controllers join, and your own controller counts:
+            it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat
+            doesn't respond, move them to another one.
+          </p>
+        </div>
+      )}
+
       <div className="host-list">
         <h4>Watching — {s.viewers.length}</h4>
         {s.viewers.length === 0 ? (
@@ -264,31 +346,52 @@ function HostPanel(props: {
         ) : (
           <ul>
             {s.viewers.map((id) => {
-              const plays = s.controller === id;
+              const seat = seatOf(id);
+              const blocked = busy != null || s.controlPaused;
+              const why = s.controlPaused ? "Allow control first" : undefined;
               return (
                 <li key={id}>
                   <Avatar name={nameOf(room, id)} />
                   <span className="member-name">
                     {nameOf(room, id)}
-                    {plays && (
-                      <span className="playing" title="Playing" aria-label="playing">
+                    {seat >= 0 && (
+                      <span className="playing" title={`Playing: ${s.seats[seat].label}`} aria-label="playing">
                         {" "}
-                        🎮
+                        🎮{!single && <span className="hint"> {s.seats[seat].label}</span>}
                       </span>
                     )}
                   </span>
-                  {plays ? (
-                    <button disabled={busy != null} onClick={() => run("take", { type: "takeBackControl" })}>
-                      Take back
-                    </button>
+                  {single ? (
+                    seat >= 0 ? (
+                      <button disabled={busy != null} onClick={() => run("take", { type: "takeBackControl", seat: 0 })}>
+                        Take back
+                      </button>
+                    ) : (
+                      <button disabled={blocked} title={why} onClick={() => pass(id, 0)}>
+                        Pass control
+                      </button>
+                    )
                   ) : (
-                    <button
-                      disabled={busy != null || s.controlPaused}
-                      title={s.controlPaused ? "Allow control first" : undefined}
-                      onClick={() => run(`pass-${id}`, { type: "passControl", member: id })}
+                    <select
+                      className="pass-seat"
+                      aria-label={`Give ${nameOf(room, id)} a seat`}
+                      value=""
+                      disabled={blocked}
+                      title={why}
+                      onChange={(e) => pass(id, Number(e.target.value))}
                     >
-                      Pass control
-                    </button>
+                      <option value="" disabled>
+                        {seat >= 0 ? "Move to…" : "Pass a seat…"}
+                      </option>
+                      {s.seats.map((other, i) =>
+                        i === seat ? null : (
+                          <option key={i} value={i}>
+                            {other.label}
+                            {other.holder ? ` (${nameOf(room, other.holder)}'s)` : ""}
+                          </option>
+                        ),
+                      )}
+                    </select>
                   )}
                 </li>
               );
@@ -298,7 +401,11 @@ function HostPanel(props: {
       </div>
 
       <p className="hint">
-        {playing ? `${playing} is playing.` : "You're playing."}{" "}
+        {single
+          ? s.seats[0].holder
+            ? `${nameOf(room, s.seats[0].holder)} is playing; your own controller, keyboard and mouse still work too.`
+            : "You're playing."
+          : "You play on your own controller, keyboard and mouse, beside the seats."}{" "}
         {s.panicKey ? (
           <>
             <kbd>{s.panicKey}</kbd> takes the controller back from anyone at once, even from inside the game.
@@ -334,7 +441,10 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
   const [limitUpload, setLimitUpload] = useState(false);
   const [upload, setUpload] = useState("50");
   const [viewers, setViewers] = useState(4);
-  const [kbm, setKbm] = useState(false);
+  const [mode, setMode] = useState<"single" | "multi">("single");
+  const [seatChoice, setSeatChoice] = useState<SeatChoice>("controller");
+  const [controllers, setControllers] = useState(2);
+  const [kbmSeat, setKbmSeat] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -346,11 +456,32 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
   };
   useEffect(load, []);
 
-  const pick = (p: Picked) => {
+  const pick = (p: Picked, remembered?: InputSetup | null) => {
     setPicked(p);
     if (!titleEdited) setTitle(truncateBytes(p.title.trim()));
-    if (p.kind === "screen") setKbm(false);
+    // The setup last used with this program comes back; otherwise the
+    // default (one controller), never the last program's choice, which may
+    // have handed out keyboard and mouse.
+    const setup: InputSetup = remembered ?? { mode: "single", seat: "controller" };
+    if (setup.mode === "single") {
+      setMode("single");
+      setSeatChoice(setup.seat);
+    } else {
+      setMode("multi");
+      setControllers(setup.controllers);
+      setKbmSeat(setup.keyboardMouse);
+    }
+    // Keyboard and mouse need a window.
+    if (p.kind === "screen") {
+      setSeatChoice("controller");
+      setKbmSeat(false);
+    }
   };
+
+  const input: InputSetup =
+    mode === "single" ? { mode: "single", seat: seatChoice } : { mode: "multi", controllers, keyboardMouse: kbmSeat };
+  const kbm = mode === "single" ? seatChoice !== "controller" : kbmSeat;
+  const isWindow = picked?.kind !== "screen";
 
   // Whole Mbit/s only: "50abc" or "1e9" isn't a limit.
   const uploadMbps = limitUpload ? (/^\s*\d{1,5}\s*$/.test(upload) ? Number(upload) : Number.NaN) : null;
@@ -382,7 +513,7 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
           max_mbps: quality,
           upload_mbps: uploadMbps,
           max_viewers: viewers,
-          keyboard_mouse: kbm,
+          input,
         },
         "room",
       );
@@ -426,7 +557,12 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
             <div className="source-list" role="radiogroup">
               {sources.windows.map((w) => (
                 <label key={`w${w.id}`} className={`source${isPicked("window", w.id) ? " picked" : ""}`}>
-                  <input type="radio" name="source" checked={isPicked("window", w.id)} onChange={() => pick({ kind: "window", id: w.id, title: w.title })} />
+                  <input
+                    type="radio"
+                    name="source"
+                    checked={isPicked("window", w.id)}
+                    onChange={() => pick({ kind: "window", id: w.id, title: w.title }, w.inputSetup)}
+                  />
                   <span className="source-title" title={w.title}>
                     {w.title}
                   </span>
@@ -527,20 +663,70 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
           </label>
         )}
 
-        <label className={`check${picked?.kind === "screen" ? " disabled" : ""}`}>
-          <input type="checkbox" checked={kbm} disabled={picked?.kind === "screen"} onChange={(e) => setKbm(e.target.checked)} />
-          Let whoever plays use keyboard and mouse too
-        </label>
+        <fieldset className="input-setup">
+          <legend>How the game takes input</legend>
+          <div className="segmented" role="radiogroup">
+            <label className={mode === "single" ? "picked" : ""}>
+              <input type="radio" name="mode" checked={mode === "single"} onChange={() => setMode("single")} />
+              Single player
+            </label>
+            <label className={mode === "multi" ? "picked" : ""}>
+              <input type="radio" name="mode" checked={mode === "multi"} onChange={() => setMode("multi")} />
+              Multiplayer
+            </label>
+          </div>
+          {mode === "single" ? (
+            <label>
+              One player at a time, with
+              <select value={seatChoice} onChange={(e) => setSeatChoice(e.target.value as SeatChoice)}>
+                <option value="controller">A controller</option>
+                <option value="keyboardMouse" disabled={!isWindow}>
+                  Keyboard and mouse
+                </option>
+                <option value="both" disabled={!isWindow}>
+                  A controller, keyboard and mouse
+                </option>
+              </select>
+            </label>
+          ) : (
+            <>
+              <label>
+                Controllers: one per player, each its own virtual pad
+                <select value={controllers} onChange={(e) => setControllers(Number(e.target.value))}>
+                  {[1, 2, 3, 4].map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className={`check${isWindow ? "" : " disabled"}`}>
+                <input type="checkbox" checked={kbmSeat} disabled={!isWindow} onChange={(e) => setKbmSeat(e.target.checked)} />
+                Plus a seat with keyboard and mouse
+              </label>
+              {(sources?.controllers ?? 0) > 0 && (
+                <p className="banner warn" role="status">
+                  A controller is plugged into this PC. Games may give it a player's place, and then a guest's controller
+                  may not work. If that happens, unplug yours and play on a seat like the others.
+                </p>
+              )}
+            </>
+          )}
+          <p className="hint">
+            Guests ask for a seat and you decide. The setup is remembered for this program
+            {picked?.kind === "window" ? "" : " (for a window)"}.
+          </p>
+        </fieldset>
         {kbm ? (
           <p className="banner warn">
-            That is control of your PC. Their keys and clicks reach only the game, and only while its window is in front;
-            the Windows key, Alt+Tab, Alt+F4, Ctrl+Esc and Ctrl+Shift+Esc never go through. Allow it only for people you
-            trust.
+            Keyboard and mouse are control of your PC. Whoever holds that seat types only into the game, and only while
+            its window is in front; the Windows key, Alt+Tab, Alt+F4, Ctrl+Esc and Ctrl+Shift+Esc never go through. Give
+            that seat only to people you trust.
           </p>
         ) : (
           <p className="hint">
-            {picked?.kind === "screen" ? "Keyboard and mouse need a window, not a whole screen. " : ""}
-            Otherwise guests play with their gamepad only.
+            {isWindow ? "" : "Keyboard and mouse need a window, not a whole screen. "}
+            Guests play with their gamepad only.
           </p>
         )}
         <p className="hint">

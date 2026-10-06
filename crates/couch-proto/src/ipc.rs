@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 3;
+pub const IPC_VERSION: u16 = 4;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -214,17 +214,35 @@ pub struct HudState {
     /// The host's display name.
     pub host: String,
     pub role: HudRole,
-    /// The guest who plays, by display name; `None` while the host plays.
-    pub controller: Option<String>,
+    /// The session's seats, by seat id.
+    pub seats: Vec<HudSeat>,
     pub viewers: u8,
-    /// Whoever plays may use keyboard and mouse too.
-    pub keyboard_mouse: bool,
     /// The host took control back with the panic key; asking is pointless
     /// until the host allows control again.
     pub control_paused: bool,
+    /// The streamed window is in front on the host. While it isn't, keyboard
+    /// and mouse don't reach the game, and many games ignore controllers.
+    pub game_in_front: bool,
     /// A short line to show for a few seconds, such as "request declined";
     /// empty for none.
     pub note: String,
+}
+
+/// One seat as the HUD shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HudSeat {
+    /// Such as "Controller 2" or "Keyboard and mouse".
+    pub label: String,
+    /// Its holder drives a virtual controller.
+    pub pad: bool,
+    /// Its holder may use keyboard and mouse.
+    pub keyboard_mouse: bool,
+    /// Its holder's display name; `None` while the host has it.
+    pub holder: Option<String>,
+    /// This viewer holds it.
+    pub mine: bool,
+    /// This viewer asked for it and waits for the host.
+    pub asked: bool,
 }
 
 /// Where this viewer stands.
@@ -240,7 +258,8 @@ pub enum HudRole {
 /// the session from the viewer (a hotkey or the HUD's bar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserAction {
-    RequestControl,
+    /// Ask for this seat (by [`crate::ids::SeatId`]'s number).
+    RequestControl(u8),
     /// Withdraw the request, or give control back.
     CancelControl,
     /// Stop watching.
@@ -491,15 +510,32 @@ mod tests {
             title: "Celeste".into(),
             host: "Ana".into(),
             role: HudRole::Asking,
-            controller: Some("Bia".into()),
+            seats: vec![
+                HudSeat {
+                    label: "Controller 1".into(),
+                    pad: true,
+                    keyboard_mouse: false,
+                    holder: Some("Bia".into()),
+                    mine: false,
+                    asked: true,
+                },
+                HudSeat {
+                    label: "Controller 2".into(),
+                    pad: true,
+                    keyboard_mouse: false,
+                    holder: None,
+                    mine: false,
+                    asked: false,
+                },
+            ],
             viewers: 3,
-            keyboard_mouse: false,
             control_paused: false,
+            game_in_front: false,
             note: "request declined".into(),
         };
         assert_eq!(from_payload(&to_payload(&hud)), Some(hud));
         for action in [
-            UserAction::RequestControl,
+            UserAction::RequestControl(1),
             UserAction::CancelControl,
             UserAction::Leave,
         ] {

@@ -11,6 +11,12 @@ description: Verify that Couch Co-App's remote input stays safe after a change, 
 
 **The rules live in `couch_input::router::SeatRouter`** (docs/protocol.md, "Input"). Its tests are the first guard. Never weaken or delete one to make a change pass. If a rule seems wrong, say so and ask the user.
 
+**Several seats** (P1). Each seat has its own holder, epoch and pad; a pad effect goes only to its seat's pad (`router::apply`, pads by seat, `None` for a seat without one). Two rules beyond the router's per-seat ones:
+- **Keyboard and mouse on one seat at a time.** `SeatRouter::grant` refuses a grant with keyboard or mouse while another seat's holder has them (`only_one_holder_at_a_time_has_keyboard_or_mouse`).
+- **One seat per viewer.** `HostSession::grant` revokes the viewer from every other seat before the grant, on the same ordered channel. The session property test checks that the router never sees a member on two seats, even with reports arriving late. Never reorder those effects.
+
+The session scenarios `two_guests_play_two_pads_at_once`, `moving_to_another_seat_lets_go_of_the_old_one_first` and `a_keyboard_seat_types_and_never_drives_a_pad` cover it end to end with recording pads.
+
 ## Run
 
 ```powershell
@@ -80,6 +86,8 @@ Ctrl+C and closing the host's console run the same code path as Ctrl+Break. Ctrl
 ## What isn't covered automatically; ask the user
 
 - **`pad-test`:** run it and watch `joy.cpl` (Game Controllers → the Xbox 360 controller → Properties). Needs ViGEmBus. Each run plugs a pad, and Steam announces it: say so before running it repeatedly.
+  - `--count 2` plugs two: each must show in its own slot (pad 2 a button ahead of pad 1), and the printed count of game controllers must rise by two (`couch_platform_win::controllers`, which Go live's multiplayer warning reads).
+  - Several real pads end to end: `couch-cli host --pads 2` and two `view`s; `xinput-watch.ps1` must show each viewer's input only in its own slot.
 - **A guest's pad reaches the host:** with a session live and a guest holding the controller, `.\scripts\xinput-watch.ps1` on the host must show every button and stick under the right name in the virtual pad's slot. That is the check for our side; a game ignoring the pad on one PC is usually the game binding to the guest's physical controller (the `app-manual-run` skill).
 - **A real game:**
   - put it in windowed mode and turn off Steam Input for it;

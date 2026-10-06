@@ -69,7 +69,7 @@ From the code review (a subagent read the whole change; each finding was checked
 - **Full screen: an observation, not a known bug.** It failed once in M5b's two-PC test and worked in M6's run; at the polishing stage, first check whether it reproduces at all.
 - **Tell players when the host's game isn't in front** (your observation, for polishing): the stream window should say so, since keyboard and mouse only go in while it is, and many games ignore a controller in the background. The host already checks the foreground before every input; the viewer would need a new (optional) message to hear it.
 - **Editing shortcuts.**
-- **M7:** our own relay and real-network tests.
+- **M7, our own relay: moved to just before packaging (M10)**, your decision. iroh's public relays serve development and real-network tests until then. Before it: tests across the internet and NAT (they don't need our relay), and possibly dev builds on the production endpoint setup (`Minimal`, no address lookup) with the public relays' URLs, so M7 only swaps the URL.
 
 ## How to reproduce
 

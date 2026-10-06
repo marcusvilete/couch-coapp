@@ -22,7 +22,7 @@ use std::{
 };
 
 use couch_net::endpoint::RelayChoice;
-use couch_proto::invite::InviteError;
+use couch_proto::{invite::InviteError, session::SeatKind};
 use couch_room::{
     limits::LimitConfig,
     room::{RoomError, Timings},
@@ -122,9 +122,10 @@ pub enum Command {
         upload_mbps: Option<u32>,
         /// 1 to 7.
         max_viewers: u8,
-        /// Whoever plays may use keyboard and mouse too, while the window is
-        /// in front. A window source only.
-        keyboard_mouse: bool,
+        /// How the game takes input: its seats. Keyboard and mouse need a
+        /// window source; they go in only while it is in front. Remembered
+        /// for the window's program.
+        input: InputSetup,
     },
     StopLive,
     /// Watches `host`'s stream in `room`, in a viewer window. Answers once
@@ -134,21 +135,27 @@ pub enum Command {
         host: String,
     },
     StopWatching,
-    /// While watching: asks the host for control.
-    RequestControl,
-    /// While watching: withdraws the request, or gives control back.
+    /// While watching: asks the host for a seat (free, or someone else's).
+    RequestControl {
+        seat: u8,
+    },
+    /// While watching: withdraws the request, or gives the seat back.
     CancelControl,
     /// While streaming: accepts or declines a viewer's request.
     AnswerControl {
         member: String,
         accept: bool,
     },
-    /// While streaming: hands control to a viewer who didn't ask.
+    /// While streaming: hands a seat to a viewer who didn't ask. A viewer
+    /// holding another seat moves.
     PassControl {
         member: String,
+        seat: u8,
     },
-    /// While streaming: play again.
-    TakeBackControl,
+    /// While streaming: take a seat back, or every seat with `None`.
+    TakeBackControl {
+        seat: Option<u8>,
+    },
     /// While streaming: let viewers have control again after the panic key.
     AllowControl,
 }
@@ -191,6 +198,96 @@ pub enum SourceChoice {
 pub struct SourceList {
     pub windows: Vec<WindowView>,
     pub screens: Vec<ScreenView>,
+    /// Game controllers plugged into this PC. In a multiplayer game, one
+    /// can take a guest's place, so Go live warns.
+    pub controllers: u32,
+}
+
+/// How the game takes input, chosen when going live and remembered per
+/// program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+#[ts(export)]
+pub enum InputSetup {
+    /// One player at a time, on one seat.
+    Single { seat: SeatChoice },
+    /// A seat per player: 1 to 4 controllers, each its own virtual pad, and
+    /// optionally one seat with keyboard and mouse.
+    #[serde(rename_all = "camelCase")]
+    Multi {
+        controllers: u8,
+        keyboard_mouse: bool,
+    },
+}
+
+/// What a single-player seat takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum SeatChoice {
+    Controller,
+    KeyboardMouse,
+    Both,
+}
+
+impl Default for InputSetup {
+    /// What guests get unless the host says otherwise: a controller.
+    fn default() -> Self {
+        Self::Single {
+            seat: SeatChoice::Controller,
+        }
+    }
+}
+
+impl InputSetup {
+    /// The seats, by seat id: the controllers first, then the keyboard seat.
+    /// Not checked: `couch_room::session` refuses a bad setup.
+    pub fn seats(&self) -> Vec<SeatKind> {
+        match *self {
+            Self::Single { seat } => vec![match seat {
+                SeatChoice::Controller => SeatKind::Controller,
+                SeatChoice::KeyboardMouse => SeatKind::KeyboardMouse,
+                SeatChoice::Both => SeatKind::Both,
+            }],
+            Self::Multi {
+                controllers,
+                keyboard_mouse,
+            } => {
+                let mut seats = vec![SeatKind::Controller; usize::from(controllers)];
+                if keyboard_mouse {
+                    seats.push(SeatKind::KeyboardMouse);
+                }
+                seats
+            }
+        }
+    }
+
+    pub fn keyboard_mouse(&self) -> bool {
+        self.seats().iter().any(|s| s.has_keyboard_mouse())
+    }
+}
+
+/// One seat of a [`SessionView`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SeatView {
+    /// Such as "Controller 2" or "Keyboard and mouse".
+    pub label: String,
+    /// It drives a virtual controller.
+    pub pad: bool,
+    pub keyboard_mouse: bool,
+    /// The viewer holding it; `None` while the host has it.
+    pub holder: Option<String>,
+}
+
+/// A viewer asking for a seat, for the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RequestView {
+    pub member: String,
+    pub seat: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -205,6 +302,8 @@ pub struct WindowView {
     /// and mouse can't reach it, and the panic key doesn't work while it is
     /// in front (measured in M6).
     pub elevated: bool,
+    /// The input setup last used with this program, if any.
+    pub input_setup: Option<InputSetup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -226,18 +325,19 @@ pub struct SessionView {
     /// The host's member id.
     pub host: String,
     pub title: String,
-    pub keyboard_mouse: bool,
     pub max_viewers: u8,
     /// Member ids, in the order they joined.
     pub viewers: Vec<String>,
-    /// The viewer who plays; `None` while the host does.
-    pub controller: Option<String>,
+    /// The seats players can hold, by seat id; one is single player.
+    pub seats: Vec<SeatView>,
     /// The host took control back with the panic key and hasn't allowed it
     /// again.
     pub control_paused: bool,
     pub role: SessionRole,
-    /// For the host: viewers asking for control, oldest first.
-    pub requests: Vec<String>,
+    /// For the host: viewers asking for a seat, oldest first.
+    pub requests: Vec<RequestView>,
+    /// For a viewer: the seat it asked for and waits on.
+    pub asked_seat: Option<u8>,
     /// For the host: the panic key's keys, while its hook is in place;
     /// `None` if it couldn't be installed (the app warns).
     pub panic_key: Option<String>,
@@ -353,7 +453,7 @@ impl fmt::Debug for Command {
                 max_mbps,
                 upload_mbps,
                 max_viewers,
-                keyboard_mouse,
+                input,
                 ..
             } => f
                 .debug_struct("GoLive")
@@ -362,7 +462,7 @@ impl fmt::Debug for Command {
                 .field("max_mbps", max_mbps)
                 .field("upload_mbps", upload_mbps)
                 .field("max_viewers", max_viewers)
-                .field("keyboard_mouse", keyboard_mouse)
+                .field("input", input)
                 .finish_non_exhaustive(),
             Self::StopLive => f.write_str("StopLive"),
             Self::Watch { room, host } => f
@@ -371,18 +471,25 @@ impl fmt::Debug for Command {
                 .field("host", host)
                 .finish(),
             Self::StopWatching => f.write_str("StopWatching"),
-            Self::RequestControl => f.write_str("RequestControl"),
+            Self::RequestControl { seat } => f
+                .debug_struct("RequestControl")
+                .field("seat", seat)
+                .finish(),
             Self::CancelControl => f.write_str("CancelControl"),
             Self::AnswerControl { member, accept } => f
                 .debug_struct("AnswerControl")
                 .field("member", member)
                 .field("accept", accept)
                 .finish(),
-            Self::PassControl { member } => f
+            Self::PassControl { member, seat } => f
                 .debug_struct("PassControl")
                 .field("member", member)
+                .field("seat", seat)
                 .finish(),
-            Self::TakeBackControl => f.write_str("TakeBackControl"),
+            Self::TakeBackControl { seat } => f
+                .debug_struct("TakeBackControl")
+                .field("seat", seat)
+                .finish(),
             Self::AllowControl => f.write_str("AllowControl"),
         }
     }
@@ -539,10 +646,12 @@ pub enum Event {
     /// The app was opened with an invite link: [`Command::TakeOpenedInvite`]
     /// has it.
     InviteOpened,
-    /// A viewer asks for control of our stream.
+    /// A viewer asks for a seat in our stream.
     ControlRequested {
         room: String,
         member: String,
+        /// The seat's label, such as "Controller 2".
+        seat: String,
     },
     /// Our stream ended other than by [`Command::StopLive`].
     SessionEnded {
@@ -808,16 +917,19 @@ impl Engine {
             }),
             Command::ListSources => {
                 let backend = self.backend.clone();
-                let sources = tokio::task::spawn_blocking(move || backend.sources())
-                    .await
-                    .map_err(|_| EngineError::Stopped)?
-                    .map_err(|e| EngineError::Media(e.to_string()))?;
+                let (sources, controllers) =
+                    tokio::task::spawn_blocking(move || (backend.sources(), backend.controllers()))
+                        .await
+                        .map_err(|_| EngineError::Stopped)?;
+                let sources = sources.map_err(|e| EngineError::Media(e.to_string()))?;
+                let setups = store::input_setups(self.profile.data_dir());
                 Ok(Response::Sources(SourceList {
                     windows: sources
                         .windows
                         .into_iter()
                         .map(|w| WindowView {
                             id: w.id.to_string(),
+                            input_setup: setups.get(&w.app.to_lowercase()).copied(),
                             title: w.title,
                             app: w.app,
                             elevated: w.elevated,
@@ -834,17 +946,50 @@ impl Engine {
                             primary: s.primary,
                         })
                         .collect(),
+                    controllers: u32::try_from(controllers).unwrap_or(u32::MAX),
                 }))
             }
-            command => {
-                let (reply, response) = oneshot::channel();
-                self.actor
-                    .send(rooms::Input::Command(command, reply))
-                    .await
-                    .map_err(|_| EngineError::Stopped)?;
-                response.await.map_err(|_| EngineError::Stopped)?
+            Command::GoLive {
+                source: SourceChoice::Window { ref id },
+                input,
+                ..
+            } => {
+                let window = id.parse::<pipeline::NativeId>().ok();
+                let response = self.forward(command).await;
+                // Live: remember the setup for the window's program.
+                if response.is_ok()
+                    && let Some(window) = window
+                {
+                    let backend = self.backend.clone();
+                    let dir = self.profile.data_dir().to_path_buf();
+                    tokio::task::spawn_blocking(move || {
+                        let app = backend
+                            .sources()
+                            .ok()
+                            .and_then(|s| s.windows.into_iter().find(|w| w.id == window))
+                            .map(|w| w.app)
+                            .filter(|app| !app.is_empty());
+                        if let Some(app) = app
+                            && let Err(e) = store::save_input_setup(&dir, &app, input)
+                        {
+                            tracing::warn!("couldn't remember the input setup: {e}");
+                        }
+                    });
+                }
+                response
             }
+            command => self.forward(command).await,
         }
+    }
+
+    /// Hands a command to the room actor and waits for its answer.
+    async fn forward(&self, command: Command) -> Result<Response, EngineError> {
+        let (reply, response) = oneshot::channel();
+        self.actor
+            .send(rooms::Input::Command(command, reply))
+            .await
+            .map_err(|_| EngineError::Stopped)?;
+        response.await.map_err(|_| EngineError::Stopped)?
     }
 
     /// Tells every connected member we are going, then closes the endpoint.
@@ -912,7 +1057,7 @@ mod tests {
                 max_mbps: 20,
                 upload_mbps: None,
                 max_viewers: 4,
-                keyboard_mouse: false,
+                input: InputSetup::default(),
             }
         );
         assert!(!shown.contains("Bank"), "{shown}");
@@ -924,8 +1069,10 @@ mod tests {
                     title: "Bank of Somewhere - Chrome".into(),
                     app: "chrome.exe".into(),
                     elevated: false,
+                    input_setup: None,
                 }],
                 screens: Vec::new(),
+                controllers: 0,
             })
         );
         assert!(!list.contains("Bank"), "{list}");

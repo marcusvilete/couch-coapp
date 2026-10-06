@@ -13,8 +13,8 @@ use crate::{
     ids::{Permissions, SeatEpoch, SeatId},
     room::{Goodbye, MemberRecord, Presence, RoomPolicy, RoomSnapshot, Signed},
     session::{
-        ControlCancel, ControlDeclined, ControlRequest, SessionAnnounce, SessionEnded, SessionJoin,
-        SessionJoinReply, SessionLeave, SessionStatus,
+        ControlCancel, ControlDeclined, ControlRequest, GameFocus, SessionAnnounce, SessionEnded,
+        SessionJoin, SessionJoinReply, SessionLeave, SessionStatus,
     },
 };
 
@@ -49,6 +49,8 @@ pub mod type_ids {
     pub const SESSION_JOIN: u16 = MUST_UNDERSTAND | 0x0604;
     pub const SESSION_JOIN_REPLY: u16 = MUST_UNDERSTAND | 0x0605;
     pub const SESSION_LEAVE: u16 = MUST_UNDERSTAND | 0x0606;
+    /// Optional: without it, players only miss the "not in front" note.
+    pub const GAME_FOCUS: u16 = 0x0607;
 }
 
 /// QUIC application close codes for connections between members.
@@ -154,6 +156,7 @@ pub enum ControlMessage {
     ControlRequest(ControlRequest),
     ControlCancel(ControlCancel),
     ControlDeclined(ControlDeclined),
+    GameFocus(GameFocus),
 }
 
 impl ControlMessage {
@@ -171,6 +174,7 @@ impl ControlMessage {
                 | Self::ControlRequest(_)
                 | Self::ControlCancel(_)
                 | Self::ControlDeclined(_)
+                | Self::GameFocus(_)
                 | Self::SeatAssigned(_)
                 | Self::SeatReleased(_)
                 | Self::KeyframeRequest(_)
@@ -228,6 +232,7 @@ impl ControlMessage {
             Self::ControlRequest(_) => type_ids::CONTROL_REQUEST,
             Self::ControlCancel(_) => type_ids::CONTROL_CANCEL,
             Self::ControlDeclined(_) => type_ids::CONTROL_DECLINED,
+            Self::GameFocus(_) => type_ids::GAME_FOCUS,
         }
     }
 
@@ -257,6 +262,7 @@ impl ControlMessage {
             Self::ControlRequest(m) => postcard::to_stdvec(m)?,
             Self::ControlCancel(m) => postcard::to_stdvec(m)?,
             Self::ControlDeclined(m) => postcard::to_stdvec(m)?,
+            Self::GameFocus(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -288,6 +294,7 @@ impl ControlMessage {
             type_ids::CONTROL_REQUEST => Self::ControlRequest(payload(frame)?),
             type_ids::CONTROL_CANCEL => Self::ControlCancel(payload(frame)?),
             type_ids::CONTROL_DECLINED => Self::ControlDeclined(payload(frame)?),
+            type_ids::GAME_FOCUS => Self::GameFocus(payload(frame)?),
             other if frame.must_understand() => return Err(DecodeError::UnknownRequired(other)),
             other => return Ok(Decoded::SkippedOptional(other)),
         };
@@ -448,21 +455,20 @@ mod tests {
     fn session_messages_roundtrip() {
         use crate::{
             ids::{MemberId, SessionId},
-            session::{EndReason, JoinResult, SessionMode},
+            session::{EndReason, JoinResult, SeatKind},
         };
         let session = SessionId(0x0123_4567_89ab_cdef);
         for message in [
             ControlMessage::SessionAnnounce(SessionAnnounce {
                 session,
                 title: "Celeste".into(),
-                mode: SessionMode::SinglePlayer,
-                keyboard_mouse: true,
+                seats: vec![SeatKind::Controller, SeatKind::KeyboardMouse],
                 max_viewers: 7,
             }),
             ControlMessage::SessionStatus(SessionStatus {
                 session,
                 viewers: vec![MemberId([1; 32]), MemberId([2; 32])],
-                controller: Some(MemberId([2; 32])),
+                holders: vec![None, Some(MemberId([2; 32]))],
                 control_paused: true,
             }),
             ControlMessage::SessionEnded(SessionEnded {
@@ -475,9 +481,19 @@ mod tests {
                 result: JoinResult::Full,
             }),
             ControlMessage::SessionLeave(SessionLeave { session }),
-            ControlMessage::ControlRequest(ControlRequest { session }),
-            ControlMessage::ControlCancel(ControlCancel { session }),
+            ControlMessage::ControlRequest(ControlRequest {
+                session,
+                seat: SeatId(1),
+            }),
+            ControlMessage::ControlCancel(ControlCancel {
+                session,
+                what: crate::session::Cancel::Seat,
+            }),
             ControlMessage::ControlDeclined(ControlDeclined { session }),
+            ControlMessage::GameFocus(GameFocus {
+                session,
+                in_front: false,
+            }),
         ] {
             assert!(message.is_session());
             roundtrip(message);
@@ -492,6 +508,7 @@ mod tests {
             type_ids::SESSION_ANNOUNCE,
             type_ids::SESSION_STATUS,
             type_ids::SESSION_ENDED,
+            type_ids::GAME_FOCUS,
         ] {
             assert_eq!(id & MUST_UNDERSTAND, 0, "{id:#06x}");
         }

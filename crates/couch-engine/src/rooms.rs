@@ -33,7 +33,7 @@ use couch_net::{
 use couch_proto::{
     admission::{JoinStart, MemberHello},
     control::{ALIVE_EVERY, Alive, ControlMessage, close_code},
-    ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce, SessionId},
+    ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce, SeatId, SessionId},
     invite::Invite,
     room::{PeerAddr, RoomPolicy, RoomSnapshot, Signed, valid_name},
 };
@@ -582,7 +582,7 @@ impl Actor {
                 max_mbps,
                 upload_mbps,
                 max_viewers,
-                keyboard_mouse,
+                input,
             } => {
                 let go = sessions::GoLive {
                     room,
@@ -592,7 +592,7 @@ impl Actor {
                     max_mbps,
                     upload_mbps,
                     max_viewers,
-                    keyboard_mouse,
+                    input,
                 };
                 // Answers later, once the stream has started.
                 if let Err(e) = self.go_live(go, reply, now) {
@@ -607,11 +607,11 @@ impl Actor {
                 return;
             }
             Command::StopWatching => self.stop_watching(now),
-            Command::RequestControl => self.request_control(now),
+            Command::RequestControl { seat } => self.request_control(SeatId(seat), now),
             Command::CancelControl => self.cancel_control(now),
             Command::AnswerControl { member, accept } => self.answer_control(&member, accept, now),
-            Command::PassControl { member } => self.pass_control(&member, now),
-            Command::TakeBackControl => self.take_back_control(now),
+            Command::PassControl { member, seat } => self.pass_control(&member, SeatId(seat), now),
+            Command::TakeBackControl { seat } => self.take_back_control(seat.map(SeatId), now),
             Command::AllowControl => self.allow_control(now),
         };
         let _ = reply.send(result);

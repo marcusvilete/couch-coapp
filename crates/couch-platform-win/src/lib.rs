@@ -10,6 +10,7 @@
 pub mod audio;
 pub mod capture;
 pub mod clock;
+pub mod controllers;
 pub mod dpapi;
 pub mod fake_game;
 pub mod foreground;

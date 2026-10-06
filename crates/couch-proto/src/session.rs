@@ -10,19 +10,88 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ids::{MemberId, SessionId},
+    ids::{MemberId, Permissions, SeatId, SessionId},
     room::{MAX_ROSTER, valid_name},
 };
 
 /// Viewers a [`SessionStatus`] may list. The room's size bounds it, not the
 /// host's limit, so that limit can change without a protocol change.
 pub const MAX_VIEWERS_LISTED: usize = MAX_ROSTER;
+/// Seats with a virtual pad a session may have: XInput's four slots.
+pub const MAX_PAD_SEATS: usize = 4;
+/// Every seat: the pads, plus one with keyboard and mouse.
+pub const MAX_SEATS: usize = MAX_PAD_SEATS + 1;
 
-/// How many players control the game at once.
+/// What a seat's holder plays with. The seat decides the permissions: the
+/// host approves every holder, so handing someone a seat with keyboard and
+/// mouse is the trust decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionMode {
-    /// One seat. The host starts with it and can pass it to any viewer.
-    SinglePlayer,
+pub enum SeatKind {
+    /// A virtual Xbox 360 pad of its own.
+    Controller,
+    /// The host's keyboard and pointer, while the game window is in front.
+    KeyboardMouse,
+    /// Both: a pad, and keyboard and mouse.
+    Both,
+}
+
+impl SeatKind {
+    pub fn permissions(self) -> Permissions {
+        match self {
+            Self::Controller => Permissions::GAMEPAD,
+            Self::KeyboardMouse => Permissions::KEYBOARD | Permissions::MOUSE,
+            Self::Both => Permissions::GAMEPAD | Permissions::KEYBOARD | Permissions::MOUSE,
+        }
+    }
+
+    pub fn has_pad(self) -> bool {
+        matches!(self, Self::Controller | Self::Both)
+    }
+
+    pub fn has_keyboard_mouse(self) -> bool {
+        matches!(self, Self::KeyboardMouse | Self::Both)
+    }
+}
+
+/// What the seats are called, by seat: "Controller" (numbered when there
+/// are several), "Keyboard and mouse", "Controller, keyboard and mouse".
+pub fn seat_labels(seats: &[SeatKind]) -> Vec<String> {
+    let pads = seats.iter().filter(|s| s.has_pad()).count();
+    let mut pad = 0;
+    seats
+        .iter()
+        .map(|kind| match kind {
+            SeatKind::KeyboardMouse => "Keyboard and mouse".to_string(),
+            SeatKind::Both => "Controller, keyboard and mouse".to_string(),
+            SeatKind::Controller => {
+                pad += 1;
+                if pads > 1 {
+                    format!("Controller {pad}")
+                } else {
+                    "Controller".to_string()
+                }
+            }
+        })
+        .collect()
+}
+
+/// A seat's label in a sentence: "the controller", "Controller 2", "the
+/// keyboard and mouse".
+pub fn seat_phrase(label: &str) -> String {
+    if label.ends_with(|c: char| c.is_ascii_digit()) {
+        label.to_string()
+    } else {
+        format!("the {}", label.to_lowercase())
+    }
+}
+
+/// A session's seats: 1 to [`MAX_SEATS`], at most [`MAX_PAD_SEATS`] with a
+/// pad, and at most one with keyboard and mouse (Windows has one keyboard
+/// and one pointer).
+pub fn valid_seats(seats: &[SeatKind]) -> bool {
+    let pads = seats.iter().filter(|s| s.has_pad()).count();
+    let kbm = seats.iter().filter(|s| s.has_keyboard_mouse()).count();
+    (1..=MAX_SEATS).contains(&seats.len()) && pads <= MAX_PAD_SEATS && kbm <= 1
 }
 
 /// Host to each connected member, optional: a session is live. Sent on going
@@ -32,16 +101,16 @@ pub struct SessionAnnounce {
     pub session: SessionId,
     /// What the host called it (a name: 1 to 96 bytes, nothing invisible).
     pub title: String,
-    pub mode: SessionMode,
-    /// Whoever holds the seat may use keyboard and mouse, not just a gamepad.
-    pub keyboard_mouse: bool,
+    /// The seats players can hold, by [`SeatId`] (their index). One seat is
+    /// a single-player session.
+    pub seats: Vec<SeatKind>,
     /// The most viewers the host takes at once.
     pub max_viewers: u8,
 }
 
 impl SessionAnnounce {
     pub fn is_valid(&self) -> bool {
-        valid_name(&self.title) && self.max_viewers >= 1
+        valid_name(&self.title) && valid_seats(&self.seats) && self.max_viewers >= 1
     }
 }
 
@@ -51,18 +120,41 @@ impl SessionAnnounce {
 pub struct SessionStatus {
     pub session: SessionId,
     pub viewers: Vec<MemberId>,
-    /// The viewer holding the seat; `None` while the host plays.
-    pub controller: Option<MemberId>,
+    /// Each seat's holder, by seat; `None` while the host has it. As long as
+    /// the announcement's seats (the receiver checks).
+    pub holders: Vec<Option<MemberId>>,
     /// The host took control back with the panic key; requests are declined
     /// until the host allows control again.
     pub control_paused: bool,
 }
 
 impl SessionStatus {
+    /// Every holder is a viewer, and no viewer holds two seats.
     pub fn is_valid(&self) -> bool {
+        let held: Vec<MemberId> = self.holders.iter().flatten().copied().collect();
         self.viewers.len() <= MAX_VIEWERS_LISTED
-            && self.controller.is_none_or(|c| self.viewers.contains(&c))
+            && self.holders.len() <= MAX_SEATS
+            && held.iter().all(|h| self.viewers.contains(h))
+            && held.iter().enumerate().all(|(i, h)| !held[..i].contains(h))
     }
+
+    /// The seat `member` holds, if any.
+    pub fn seat_of(&self, member: MemberId) -> Option<SeatId> {
+        self.holders
+            .iter()
+            .position(|h| *h == Some(member))
+            .map(|i| SeatId(i as u8))
+    }
+}
+
+/// Host to its viewers, optional: whether the streamed window is in front
+/// on the host. Keyboard and mouse reach the game only while it is, and many
+/// games ignore controllers in the background. Sent on a change (coalesced)
+/// and to each new viewer; never for a screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameFocus {
+    pub session: SessionId,
+    pub in_front: bool,
 }
 
 /// Why a session ended.
@@ -117,16 +209,29 @@ pub struct SessionLeave {
     pub session: SessionId,
 }
 
-/// Viewer to host: may I play?
+/// Viewer to host: may I play on this seat? It may be free or held by
+/// another viewer; the host decides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlRequest {
     pub session: SessionId,
+    pub seat: SeatId,
 }
 
-/// Viewer to host: withdraws my request, or gives control back if I have it.
+/// Viewer to host: withdraws my request, or gives my seat back. Which one is
+/// explicit: a withdraw that crosses a decline must never cost the seat the
+/// viewer plays on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlCancel {
     pub session: SessionId,
+    pub what: Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Cancel {
+    /// Withdraw the pending request, if any; the seat held stays.
+    Request,
+    /// Give back the seat held, if any.
+    Seat,
 }
 
 /// Host to viewer: your request was declined (or dropped: the host took
@@ -140,13 +245,42 @@ pub struct ControlDeclined {
 mod tests {
     use super::*;
 
+    use SeatKind::*;
+
+    #[test]
+    fn seats_are_checked() {
+        assert!(valid_seats(&[Controller]));
+        assert!(valid_seats(&[KeyboardMouse]));
+        assert!(valid_seats(&[Both]));
+        assert!(valid_seats(&[
+            Controller,
+            Controller,
+            Controller,
+            Controller,
+            KeyboardMouse
+        ]));
+        assert!(!valid_seats(&[]));
+        assert!(!valid_seats(&[Controller; MAX_PAD_SEATS + 1]), "five pads");
+        assert!(
+            !valid_seats(&[KeyboardMouse, Controller, KeyboardMouse]),
+            "two keyboard seats"
+        );
+        assert!(!valid_seats(&[Both, KeyboardMouse]), "two keyboard seats");
+        assert_eq!(Controller.permissions(), Permissions::GUEST_DEFAULT);
+        assert_eq!(seat_labels(&[Controller]), ["Controller"]);
+        assert_eq!(
+            seat_labels(&[Controller, Controller, KeyboardMouse]),
+            ["Controller 1", "Controller 2", "Keyboard and mouse"]
+        );
+        assert!(!KeyboardMouse.permissions().contains(Permissions::GAMEPAD));
+    }
+
     #[test]
     fn announcements_and_statuses_are_checked() {
         let announce = SessionAnnounce {
             session: SessionId(1),
             title: "Celeste".into(),
-            mode: SessionMode::SinglePlayer,
-            keyboard_mouse: false,
+            seats: vec![Controller],
             max_viewers: 4,
         };
         assert!(announce.is_valid());
@@ -160,31 +294,56 @@ mod tests {
         assert!(
             !SessionAnnounce {
                 max_viewers: 0,
+                ..announce.clone()
+            }
+            .is_valid()
+        );
+        assert!(
+            !SessionAnnounce {
+                seats: vec![],
                 ..announce
             }
             .is_valid()
         );
 
         let bia = MemberId([1; 32]);
+        let cai = MemberId([2; 32]);
         let status = SessionStatus {
             session: SessionId(1),
-            viewers: vec![bia],
-            controller: Some(bia),
+            viewers: vec![bia, cai],
+            holders: vec![Some(bia), None, Some(cai)],
             control_paused: false,
         };
         assert!(status.is_valid());
+        assert_eq!(status.seat_of(cai), Some(SeatId(2)));
+        assert_eq!(status.seat_of(MemberId([3; 32])), None);
         assert!(
             !SessionStatus {
-                controller: Some(MemberId([2; 32])),
+                holders: vec![Some(MemberId([3; 32]))],
                 ..status.clone()
             }
             .is_valid(),
-            "the controller must be a viewer"
+            "a holder must be a viewer"
+        );
+        assert!(
+            !SessionStatus {
+                holders: vec![Some(bia), Some(bia)],
+                ..status.clone()
+            }
+            .is_valid(),
+            "nobody holds two seats"
+        );
+        assert!(
+            !SessionStatus {
+                holders: vec![None; MAX_SEATS + 1],
+                ..status.clone()
+            }
+            .is_valid()
         );
         assert!(
             !SessionStatus {
                 viewers: vec![bia; MAX_VIEWERS_LISTED + 1],
-                controller: None,
+                holders: vec![None],
                 ..status
             }
             .is_valid()
@@ -197,7 +356,7 @@ mod tests {
         let status = SessionStatus {
             session: SessionId(u64::MAX),
             viewers: vec![MemberId([0xff; 32]); MAX_VIEWERS_LISTED],
-            controller: Some(MemberId([0xff; 32])),
+            holders: vec![Some(MemberId([0xff; 32])); MAX_SEATS],
             control_paused: true,
         };
         let len = postcard::to_stdvec(&status).unwrap().len();

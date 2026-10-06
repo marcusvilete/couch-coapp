@@ -2,4 +2,9 @@
 import type { ScreenView } from "./ScreenView";
 import type { WindowView } from "./WindowView";
 
-export type SourceList = { windows: Array<WindowView>, screens: Array<ScreenView>, };
+export type SourceList = { windows: Array<WindowView>, screens: Array<ScreenView>, 
+/**
+ * Game controllers plugged into this PC. In a multiplayer game, one
+ * can take a guest's place, so Go live warns.
+ */
+controllers: number, };

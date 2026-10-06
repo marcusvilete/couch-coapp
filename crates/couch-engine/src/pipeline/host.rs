@@ -57,6 +57,7 @@ use couch_net::{
 use couch_proto::{
     input::RumbleDatagram,
     media::{AudioDatagram, reset_code},
+    session::SeatKind,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -69,8 +70,6 @@ use super::{
     source::{self, Game, SourceWatch, Verdict},
 };
 
-/// Single player: one seat.
-const SEAT: SeatId = SeatId(0);
 /// How often the dead-man timer, the foreground check and rumble run.
 const INPUT_TICK: Duration = Duration::from_millis(10);
 /// A running rumble goes out again this often.
@@ -83,6 +82,9 @@ const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const WINDOW_WAIT: Duration = Duration::from_secs(10);
 /// No share of an upload cap.
 const NO_SHARE: u32 = u32::MAX;
+/// Changes of the game window's focus closer together than this are
+/// reported once, as the latest: switching windows mustn't flood viewers.
+const FOCUS_COALESCE: Duration = Duration::from_millis(250);
 
 /// Bitrate bounds for each viewer's rate controller, bit/s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +118,10 @@ pub struct HostOptions {
     /// The host's upload cap, split between its viewers.
     pub upload_bps: Option<u32>,
     pub audio: AudioChoice,
-    /// Plug the pad in with a real Xbox 360 controller's ids.
+    /// The seats, by seat id; one virtual pad is plugged in for each that
+    /// has one, in seat order.
+    pub seats: Vec<SeatKind>,
+    /// Plug the pads in with a real Xbox 360 controller's ids.
     pub real_pad_ids: bool,
     /// Named in every epoch preamble; viewers refuse other sessions' video.
     pub session: u64,
@@ -135,22 +140,29 @@ pub struct HostOptions {
 /// What a host stream reports.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
-    /// The router handed the seat to `member`: tell it (`SeatAssigned`).
+    /// The router handed `seat` to `member`: tell it (`SeatAssigned`).
     Granted {
         member: MemberId,
         seat: SeatId,
         epoch: SeatEpoch,
         permissions: Permissions,
     },
-    /// The router took the seat back from `member`: tell it
-    /// (`SeatReleased`).
+    /// The router took `seat` back from `member`: tell it (`SeatReleased`).
     Revoked {
         member: MemberId,
         seat: SeatId,
         epoch: SeatEpoch,
     },
-    /// The seat's status changed, at `at` on the host's clock.
-    Seat { status: SeatStatus, at: Micros },
+    /// A seat's status changed, at `at` on the host's clock.
+    Seat {
+        seat: SeatId,
+        status: SeatStatus,
+        at: Micros,
+    },
+    /// The streamed window came to the front on the host, or left it.
+    /// Changes within [`FOCUS_COALESCE`] are reported once, as the latest;
+    /// never reported for a screen.
+    GameFocus(bool),
     /// A viewer left; whatever it held was released at `at`.
     ViewerGone { member: MemberId, at: Micros },
     /// Stopping: everything was released at `at`.
@@ -427,17 +439,25 @@ impl Shared {
 }
 
 impl HostStream {
-    /// Plugs in the virtual pad (which can take seconds) and starts the
-    /// input task. Capture and sound start with the first viewer.
+    /// Plugs in a virtual pad for each seat that has one, in seat order
+    /// (which can take seconds), and starts the input task. Capture and
+    /// sound start with the first viewer.
     pub async fn start(
         backend: Arc<dyn Backend>,
         options: HostOptions,
     ) -> (Self, mpsc::UnboundedReceiver<HostEvent>) {
         let (events, events_rx) = mpsc::unbounded_channel();
-        let pad = {
+        let plugged = {
             let backend = backend.clone();
             let real_ids = options.real_pad_ids;
-            tokio::task::spawn_blocking(move || backend.plug_pad(real_ids)).await
+            let seats = options.seats.clone();
+            tokio::task::spawn_blocking(move || {
+                seats
+                    .iter()
+                    .map(|kind| kind.has_pad().then(|| backend.plug_pad(real_ids)))
+                    .collect::<Vec<_>>()
+            })
+            .await
         };
         let window = match options.source {
             Source::Window(id) => id,
@@ -467,20 +487,29 @@ impl HostStream {
             audio_sent: AtomicU64::new(0),
             grants_paused: Arc::new(AtomicBool::new(false)),
         });
-        let pad = match pad {
-            Ok(Ok(pad)) => {
-                shared.note("virtual Xbox 360 pad plugged in".into());
-                Some(pad)
-            }
-            Ok(Err(e)) => {
-                shared.note(format!(
-                    "no virtual pad ({e}); gamepad input will be dropped"
-                ));
-                None
-            }
+        // By seat: a seat without a pad (a keyboard seat, or one whose pad
+        // failed) drops gamepad input.
+        let pads: Vec<Option<Box<dyn VirtualPad>>> = match plugged {
+            Ok(plugged) => plugged
+                .into_iter()
+                .enumerate()
+                .map(|(seat, pad)| match pad {
+                    None => None,
+                    Some(Ok(pad)) => {
+                        shared.note(format!("seat {seat}: virtual Xbox 360 pad plugged in"));
+                        Some(pad)
+                    }
+                    Some(Err(e)) => {
+                        shared.note(format!(
+                            "seat {seat}: no virtual pad ({e}); its gamepad input will be dropped"
+                        ));
+                        None
+                    }
+                })
+                .collect(),
             Err(e) => {
-                shared.note(format!("no virtual pad ({e})"));
-                None
+                shared.note(format!("no virtual pads ({e})"));
+                Vec::new()
             }
         };
         if window != 0 {
@@ -488,7 +517,7 @@ impl HostStream {
             let _ = tokio::task::spawn_blocking(move || sh.watch_game(window)).await;
         }
         let (input, cmds) = mpsc::unbounded_channel();
-        let input_task = tokio::spawn(input_loop(shared.clone(), pad, cmds));
+        let input_task = tokio::spawn(input_loop(shared.clone(), pads, cmds));
         let housekeeping = tokio::spawn(housekeeping(Arc::downgrade(&shared))).abort_handle();
         (
             Self {
@@ -606,18 +635,20 @@ impl HostStream {
         }
     }
 
-    /// Hands the seat to `member`, ending any other hold first.
-    pub fn grant(&self, member: MemberId, permissions: Permissions) {
+    /// Hands `seat` to `member`, ending any other hold on it first. Commands
+    /// reach the router in the order they were sent.
+    pub fn grant(&self, seat: SeatId, member: MemberId, permissions: Permissions) {
         let _ = self.input.send(InputCmd::Grant {
+            seat,
             member,
             permissions,
         });
     }
 
-    /// The host plays again: from `holder` only if it still holds the seat,
+    /// The host has `seat` again: from `holder` only if it still holds it,
     /// or from whoever does with `None`.
-    pub fn revoke(&self, holder: Option<MemberId>) {
-        let _ = self.input.send(InputCmd::Revoke(holder));
+    pub fn revoke(&self, seat: SeatId, holder: Option<MemberId>) {
+        let _ = self.input.send(InputCmd::Revoke { seat, holder });
     }
 
     /// Every seat back to the host at once.
@@ -1256,16 +1287,28 @@ enum InputCmd {
     },
     RemoveViewer(MemberId),
     Grant {
+        seat: SeatId,
         member: MemberId,
         permissions: Permissions,
     },
     /// Only from this holder, or from whoever holds the seat.
-    Revoke(Option<MemberId>),
+    Revoke {
+        seat: SeatId,
+        holder: Option<MemberId>,
+    },
     RevokeAll,
     /// Release everything, then answer: the first step of stopping.
     ReleaseAll(oneshot::Sender<()>),
-    /// Unplug the pad and end, then answer: the last step.
+    /// Unplug the pads and end, then answer: the last step.
     Shutdown(oneshot::Sender<()>),
+}
+
+/// One seat's rumble: the game's current one, and what last went out, to
+/// whom, when.
+#[derive(Clone, Copy)]
+struct SeatRumble {
+    now: Rumble,
+    sent: (Option<MemberId>, Rumble, Instant),
 }
 
 /// The input task's state: the router, what it injects into, and where
@@ -1274,16 +1317,29 @@ struct Inputs {
     shared: Arc<Shared>,
     router: SeatRouter,
     kbm: Box<dyn KbmInjector>,
-    pads: Vec<Box<dyn VirtualPad>>,
+    /// By seat; `None` for a seat without a pad.
+    pads: Vec<Option<Box<dyn VirtualPad>>>,
     /// Each viewer's forwarding task, and its connection (for rumble).
     viewers: HashMap<MemberId, (tokio::task::JoinHandle<()>, Connection)>,
-    status: Option<SeatStatus>,
-    /// The game's current rumble, and what last went out, to whom, when.
-    rumble: Rumble,
-    rumble_sent: (Option<MemberId>, Rumble, Instant),
+    /// By seat, as last reported.
+    status: Vec<Option<SeatStatus>>,
+    rumble: Vec<SeatRumble>,
+    /// Whether the game window is in front now, and what was last reported
+    /// and when. `None` for a screen: nothing to report.
+    focus: Option<FocusReport>,
+}
+
+struct FocusReport {
+    now: bool,
+    reported: Option<bool>,
+    at: Instant,
 }
 
 impl Inputs {
+    fn seats(&self) -> impl Iterator<Item = SeatId> + use<> {
+        (0..self.shared.options.seats.len()).map(|i| SeatId(i as u8))
+    }
+
     /// Updates the router's view of where keyboard and mouse would land.
     /// Called right before every input, not just on the tick: a window that
     /// just took the foreground must not get a key meant for the game.
@@ -1292,8 +1348,25 @@ impl Inputs {
             0 => Focus::default(),
             window => self.shared.backend.focus(window),
         };
+        if let Some(report) = &mut self.focus {
+            report.now = focus.foreground;
+        }
         self.router.set_pointer_inside(focus.pointer_inside);
         self.router.set_foreground(focus.foreground)
+    }
+
+    /// Reports the game window's focus when it changed, at most once per
+    /// [`FOCUS_COALESCE`]; the tick catches up with the latest.
+    fn report_focus(&mut self, now: Instant) {
+        let Some(report) = &mut self.focus else {
+            return;
+        };
+        if report.reported == Some(report.now) || now.duration_since(report.at) < FOCUS_COALESCE {
+            return;
+        }
+        report.reported = Some(report.now);
+        report.at = now;
+        self.shared.event(HostEvent::GameFocus(report.now));
     }
 
     /// Injects the effects and reports grants, revocations and status
@@ -1327,12 +1400,15 @@ impl Inputs {
                 _ => {}
             }
         }
-        let status = self.router.seat(SEAT).map(|s| s.2);
-        if status != self.status {
-            self.status = status;
-            if let Some(status) = status {
-                let at = self.shared.now();
-                self.shared.event(HostEvent::Seat { status, at });
+        for seat in self.seats() {
+            let status = self.router.seat(seat).map(|s| s.2);
+            let slot = &mut self.status[usize::from(seat.0)];
+            if status != *slot {
+                *slot = status;
+                if let Some(status) = status {
+                    let at = self.shared.now();
+                    self.shared.event(HostEvent::Seat { seat, status, at });
+                }
             }
         }
     }
@@ -1341,60 +1417,79 @@ impl Inputs {
         let mut effects = self.router.tick(now);
         effects.extend(self.refresh_focus());
         self.deliver(effects);
+        self.report_focus(now);
         self.send_rumble(now);
     }
 
-    /// Rumble goes only to the seat's holder. A running rumble is repeated,
-    /// so a lost "stop" can't leave a controller shaking: the viewer ends
-    /// each one after a second.
+    /// A seat's rumble goes only to its holder. A running rumble is
+    /// repeated, so a lost "stop" can't leave a controller shaking: the
+    /// viewer ends each one after a second.
     fn send_rumble(&mut self, now: Instant) {
-        for pad in &mut self.pads {
-            if let Some(r) = pad.take_rumble() {
-                self.rumble = r;
+        for seat in self.seats() {
+            let i = usize::from(seat.0);
+            if let Some(Some(pad)) = self.pads.get_mut(i)
+                && let Some(r) = pad.take_rumble()
+            {
+                self.rumble[i].now = r;
                 self.shared.event(HostEvent::Rumble(r));
             }
+            let rumble = &mut self.rumble[i];
+            let Some(holder) = self.router.seat(seat).and_then(|s| s.1) else {
+                rumble.sent = (None, Rumble::default(), now);
+                continue;
+            };
+            let (to, sent, at) = rumble.sent;
+            let repeat = rumble.now != Rumble::default() && now.duration_since(at) >= RUMBLE_REPEAT;
+            if to == Some(holder) && sent == rumble.now && !repeat {
+                continue;
+            }
+            if let Some((_, conn)) = self.viewers.get(&holder) {
+                send_rumble(
+                    conn,
+                    RumbleDatagram {
+                        seat,
+                        low: rumble.now.low_frequency,
+                        high: rumble.now.high_frequency,
+                    },
+                );
+            }
+            rumble.sent = (Some(holder), rumble.now, now);
         }
-        let holder = self.router.seat(SEAT).and_then(|s| s.1);
-        let Some(holder) = holder else {
-            self.rumble_sent = (None, Rumble::default(), now);
-            return;
-        };
-        let (to, sent, at) = self.rumble_sent;
-        let repeat = self.rumble != Rumble::default() && now.duration_since(at) >= RUMBLE_REPEAT;
-        if to == Some(holder) && sent == self.rumble && !repeat {
-            return;
-        }
-        if let Some((_, conn)) = self.viewers.get(&holder) {
-            send_rumble(
-                conn,
-                RumbleDatagram {
-                    seat: SEAT,
-                    low: self.rumble.low_frequency,
-                    high: self.rumble.high_frequency,
-                },
-            );
-        }
-        self.rumble_sent = (Some(holder), self.rumble, now);
     }
 }
 
 async fn input_loop(
     shared: Arc<Shared>,
-    pad: Option<Box<dyn VirtualPad>>,
+    pads: Vec<Option<Box<dyn VirtualPad>>>,
     mut cmds: mpsc::UnboundedReceiver<InputCmd>,
 ) {
     let (tx, mut inputs) = mpsc::channel::<(MemberId, Input)>(1024);
+    let seats = shared.options.seats.len();
+    let start = Instant::now();
     let mut st = Inputs {
         kbm: shared.backend.kbm(),
-        router: SeatRouter::starting_at(1, shared.options.first_epoch),
-        pads: pad.into_iter().collect(),
+        router: SeatRouter::starting_at(seats as u8, shared.options.first_epoch),
+        pads,
         viewers: HashMap::new(),
-        status: None,
-        rumble: Rumble::default(),
-        rumble_sent: (None, Rumble::default(), Instant::now()),
+        status: vec![None; seats],
+        rumble: vec![
+            SeatRumble {
+                now: Rumble::default(),
+                sent: (None, Rumble::default(), start),
+            };
+            seats
+        ],
+        focus: shared.options.source.is_window().then(|| FocusReport {
+            now: false,
+            reported: None,
+            // The first report may go at once.
+            at: start.checked_sub(FOCUS_COALESCE).unwrap_or(start),
+        }),
         shared,
     };
-    st.status = st.router.seat(SEAT).map(|s| s.2);
+    for seat in st.seats() {
+        st.status[usize::from(seat.0)] = st.router.seat(seat).map(|s| s.2);
+    }
     let mut tick = tokio::time::interval(INPUT_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut done = None;
@@ -1424,18 +1519,21 @@ async fn input_loop(
                     let at = st.shared.now();
                     st.shared.event(HostEvent::ViewerGone { member, at });
                 }
-                Some(InputCmd::Grant { member, permissions }) => {
+                Some(InputCmd::Grant { seat, member, permissions }) => {
                     if st.shared.grants_paused.load(Ordering::SeqCst) {
                         tracing::info!(member = ?member, "panic key: a grant on its way was refused");
                     } else {
-                        let effects = st.router.grant(SEAT, member, permissions, Instant::now());
+                        let effects = st.router.grant(seat, member, permissions, Instant::now());
+                        if effects.is_empty() {
+                            tracing::warn!(?seat, "the seat router refused a grant");
+                        }
                         st.deliver(effects);
                     }
                 }
-                Some(InputCmd::Revoke(holder)) => {
-                    let current = st.router.seat(SEAT).and_then(|s| s.1);
+                Some(InputCmd::Revoke { seat, holder }) => {
+                    let current = st.router.seat(seat).and_then(|s| s.1);
                     if holder.is_none_or(|h| current == Some(h)) {
-                        let effects = st.router.revoke(SEAT);
+                        let effects = st.router.revoke(seat);
                         st.deliver(effects);
                     }
                 }
@@ -1466,7 +1564,7 @@ async fn input_loop(
         }
     }
 
-    // However the loop ended: release everything, then unplug the pad.
+    // However the loop ended: release everything, then unplug the pads.
     let effects = st.router.revoke_all();
     st.deliver(effects);
     for (_, (task, _)) in st.viewers.drain() {

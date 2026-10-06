@@ -135,6 +135,10 @@ impl Backend for WindowsBackend {
         Box::new(SendInputInjector::new())
     }
 
+    fn controllers(&self) -> usize {
+        couch_platform_win::controllers::count()
+    }
+
     fn focus(&self, window: NativeId) -> Focus {
         let window = WindowId(window);
         Focus {

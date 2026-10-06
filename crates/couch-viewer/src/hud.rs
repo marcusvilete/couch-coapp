@@ -17,7 +17,10 @@ use std::{
 };
 
 use couch_input::shortcuts::{self, Shortcut};
-use couch_proto::ipc::{HudRole, HudState, UserAction};
+use couch_proto::{
+    ipc::{HudRole, HudSeat, HudState, UserAction},
+    session::seat_phrase,
+};
 use egui::{Align2, Color32, Pos2, Rect, RichText};
 
 /// How long the bar stays after a change, and a note with it.
@@ -98,8 +101,13 @@ impl Hud {
             self.note = Some((state.note.clone(), now + SHOW_AFTER_CHANGE));
         }
         let changed = old.is_none_or(|o| {
-            (o.role, &o.controller, o.control_paused)
-                != (state.role, &state.controller, state.control_paused)
+            (o.role, &o.seats, o.control_paused, o.game_in_front)
+                != (
+                    state.role,
+                    &state.seats,
+                    state.control_paused,
+                    state.game_in_front,
+                )
         });
         if changed {
             self.changed_at = Some(now);
@@ -183,8 +191,15 @@ impl Hud {
             return false;
         };
         let recent = |at: Option<Instant>, within| at.is_some_and(|t| now - t < within);
+        // Up while asking (unless playing meanwhile, asking to move: the bar
+        // would cover the game), and while playing with the game out of
+        // front on the host: the player must know why input does nothing.
+        let playing = session.seats.iter().any(|seat| seat.mine);
+        let asking = session.role == HudRole::Asking && !playing;
+        let away = playing && !session.game_in_front;
         self.visible
-            && (session.role == HudRole::Asking
+            && (asking
+                || away
                 || recent(self.changed_at, SHOW_AFTER_CHANGE)
                 || recent(self.pointer_at, SHOW_AFTER_POINTER)
                 || self.note.as_ref().is_some_and(|(_, until)| now < *until)
@@ -367,49 +382,77 @@ fn session_bar(
                 ui.label(RichText::new(&s.title).strong().size(16.0));
                 ui.label(format!("· {}", s.host));
             });
-            let player = s.controller.as_deref().unwrap_or(&s.host);
             let watching = match s.viewers {
                 1 => "1 watching".to_string(),
                 n => format!("{n} watching"),
             };
-            ui.label(format!("{player} is playing · {watching}"));
+            ui.label(format!("{} · {watching}", who_plays(s)));
 
-            let (state, colour) = match s.role {
-                HudRole::Controlling if s.keyboard_mouse => (
-                    "You're playing, with your gamepad, keyboard and mouse".to_string(),
-                    Color32::LIGHT_GREEN,
-                ),
-                HudRole::Controlling => (
-                    "You're playing, with your gamepad".to_string(),
-                    Color32::LIGHT_GREEN,
-                ),
-                HudRole::Asking => (
+            let mine = s.seats.iter().find(|seat| seat.mine);
+            let asked = s.seats.iter().find(|seat| seat.asked);
+            let (state, colour) = match (s.role, mine) {
+                // Playing, and maybe asking to move meanwhile.
+                (_, Some(seat)) => {
+                    let mut state = playing_with(s, seat);
+                    if let Some(asked) = asked {
+                        state.push_str(&format!(" · asked for {}", seat_phrase(&asked.label)));
+                    }
+                    (state, Color32::LIGHT_GREEN)
+                }
+                (HudRole::Asking, None) => (
                     format!("Waiting for {} to answer…", s.host),
                     Color32::LIGHT_BLUE,
                 ),
-                HudRole::Watching if s.control_paused => {
+                _ if s.control_paused => {
                     (format!("{} paused control for now", s.host), Color32::GRAY)
                 }
-                HudRole::Watching => ("You're watching".to_string(), Color32::GRAY),
+                _ => ("You're watching".to_string(), Color32::GRAY),
             };
             ui.label(RichText::new(state).color(colour));
+            if !s.game_in_front {
+                ui.label(
+                    RichText::new(format!(
+                        "The game isn't in front on {}'s PC: input may not reach it",
+                        s.host
+                    ))
+                    .color(NOTE_YELLOW),
+                );
+            }
             if let Some(note) = note {
                 ui.label(RichText::new(note).color(NOTE_YELLOW));
             }
 
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let control = match s.role {
-                    HudRole::Watching => ("Ask for the controller", UserAction::RequestControl),
-                    HudRole::Asking => ("Withdraw the request", UserAction::CancelControl),
-                    HudRole::Controlling => ("Give it back", UserAction::CancelControl),
+            ui.horizontal_wrapped(|ui| {
+                // Ask for any seat but our own: a free one, someone else's
+                // (the host decides), or another than ours (a move).
+                for (i, seat) in s.seats.iter().enumerate() {
+                    if seat.mine {
+                        continue;
+                    }
+                    let text = if seat.asked {
+                        format!("Asked for {}", seat_phrase(&seat.label))
+                    } else {
+                        format!("Ask for {}", seat_phrase(&seat.label))
+                    };
+                    let enabled = !seat.asked && !s.control_paused;
+                    if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
+                        clicks.push(BarClick::Action(HudAction::Session(
+                            UserAction::RequestControl(i as u8),
+                        )));
+                    }
+                }
+                let cancel = match s.role {
+                    HudRole::Asking => Some("Withdraw the request"),
+                    HudRole::Controlling => Some("Give it back"),
+                    HudRole::Watching => None,
                 };
-                let enabled = !(s.role == HudRole::Watching && s.control_paused);
-                if ui
-                    .add_enabled(enabled, egui::Button::new(control.0))
-                    .clicked()
+                if let Some(cancel) = cancel
+                    && ui.button(cancel).clicked()
                 {
-                    clicks.push(BarClick::Action(HudAction::Session(control.1)));
+                    clicks.push(BarClick::Action(HudAction::Session(
+                        UserAction::CancelControl,
+                    )));
                 }
                 let screen = if fullscreen { "Window" } else { "Full screen" };
                 if ui.button(screen).clicked() {
@@ -433,4 +476,50 @@ fn session_bar(
                 .color(Color32::GRAY),
             );
         });
+}
+
+/// "Bia is playing" (the host, while nobody holds the one seat), or with
+/// several seats "Controller 1: Bia · Controller 2: free · Ana: own
+/// controller": the host plays on their own devices beside the seats.
+fn who_plays(s: &HudState) -> String {
+    match s.seats.as_slice() {
+        [seat] => format!("{} is playing", seat.holder.as_deref().unwrap_or(&s.host)),
+        seats => seats
+            .iter()
+            .map(|seat| {
+                format!(
+                    "{}: {}",
+                    seat.label,
+                    seat.holder.as_deref().unwrap_or("free")
+                )
+            })
+            .chain(std::iter::once(format!("{}: own controller", s.host)))
+            .collect::<Vec<_>>()
+            .join(" · "),
+    }
+}
+
+/// What this viewer plays with, on `seat`.
+fn playing_with(s: &HudState, seat: &HudSeat) -> String {
+    let with = match (seat.pad, seat.keyboard_mouse) {
+        (true, true) => "your gamepad, keyboard and mouse",
+        (false, true) => "your keyboard and mouse",
+        _ => "your gamepad",
+    };
+    if s.seats.len() > 1 {
+        format!("You're playing as {}, with {with}", seat.label)
+    } else {
+        format!("You're playing, with {with}")
+    }
+}
+
+/// The seat Ctrl+Alt+Shift+C asks for: the first nobody holds, the
+/// controllers coming first; with none free, the first that isn't ours.
+pub fn seat_to_ask(s: &HudState) -> Option<u8> {
+    let free = s
+        .seats
+        .iter()
+        .position(|seat| seat.holder.is_none() && !seat.mine);
+    let other = s.seats.iter().position(|seat| !seat.mine);
+    free.or(other).map(|i| i as u8)
 }

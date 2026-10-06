@@ -126,6 +126,10 @@ enum Cmd {
         /// is remote control of this PC while the captured window is in front.
         #[arg(long)]
         allow_kbm: bool,
+        /// Virtual pads, one per seat: each viewer gets the first free seat
+        /// as it connects (only the first may have keyboard and mouse).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
+        pads: u8,
         /// Give the virtual pad a real Xbox 360 controller's USB ids. Without
         /// it the pad uses development ids, which a viewer on this machine
         /// skips; some games only accept the real ones.
@@ -224,6 +228,9 @@ enum Cmd {
         /// Use a real Xbox 360 controller's USB ids.
         #[arg(long)]
         real_pad_ids: bool,
+        /// How many pads to plug in.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
+        count: u8,
     },
     /// Inject a scripted keyboard and mouse run into a test window and check
     /// it arrived intact.
@@ -302,6 +309,7 @@ async fn main() -> ExitCode {
             max_viewers,
             rc_trace,
             allow_kbm,
+            pads,
             real_pad_ids,
             audio,
             net,
@@ -332,6 +340,7 @@ async fn main() -> ExitCode {
                 } else {
                     couch_input::Permissions::GUEST_DEFAULT
                 },
+                pads,
                 real_pad_ids,
                 audio: match audio {
                     AudioArg::Auto => AudioChoice::Auto,
@@ -411,9 +420,11 @@ async fn main() -> ExitCode {
             })
             .await
         }
-        Cmd::PadTest { secs, real_pad_ids } => {
-            tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids))
-        }
+        Cmd::PadTest {
+            secs,
+            real_pad_ids,
+            count,
+        } => tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids, count)),
         Cmd::InputSink => tokio::task::block_in_place(input_sink::run),
         Cmd::ReleaseCheck => tokio::task::block_in_place(release_check::run),
         Cmd::FakeGame {

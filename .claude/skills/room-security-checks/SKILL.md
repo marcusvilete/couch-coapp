@@ -41,7 +41,8 @@ cargo test -p couch-engine --test sessions              # sessions over the same
 | One engine per identity | `lock_profile` (`engine.lock`), lowercased profile names, the single-instance plugin | `one_engine_per_profile`, `names_ignore_case` |
 | Only the owner changes the password | `Actor::change_password` (`owned`) | engine `the_owner_changes_the_password` |
 | A session message counts only from its own host (or, to a host, about its live session), on the current connection, from a roster member; never relayed | `rooms::sessions::session_received` | read the diff; the session scenarios exercise the honest paths |
-| Only viewers play; nothing is granted while paused or after the end; the seat router alone decides | `couch_room::session::HostSession` | its unit tests and `only_viewers_ever_play` (property test) |
+| Only viewers play, one seat each; nothing is granted while paused or after the end; the seat router alone decides | `couch_room::session::HostSession` | its unit tests and `only_viewers_ever_play_and_one_seat_each` (property test) |
+| A peer's seat data is checked: requests for a seat that doesn't exist are ignored; a status whose holders don't match the announced seats, name a non-viewer or one viewer twice is dropped; announced seats stay within `valid_seats` | `HostSession::request`, `SessionStatus::is_valid`, `session_received` | couch-proto `announcements_and_statuses_are_checked`, `seats_are_checked` |
 | A ban, a departure or a lost connection ends watching and releases the viewer's input | `session_closed`, `end_room_sessions` | engine `a_ban_while_watching_ends_it`, `a_host_leaving_the_room_ends_its_stream` |
 | Window titles stay out of logs | `Debug` of `GoLive` and `Sources` | `window_titles_stay_out_of_debug` |
 

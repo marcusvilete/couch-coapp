@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use couch_codec_ffmpeg::FfmpegDecoder;
 use couch_input::shortcuts::Shortcut;
 use couch_media::{DecodedFrame, Micros, Nv12Frame, VideoDecoder, barcode, mailbox::Mailbox};
-use couch_proto::ipc::{FrameTiming, HudRole, HudState, LocalInput, NetStats, UserAction};
+use couch_proto::ipc::{FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, UserAction};
 use sdl3::{
     event::{Event, WindowEvent},
     video::Window,
@@ -360,26 +360,47 @@ pub fn run(options: WindowOptions) -> Result<()> {
     Ok(())
 }
 
-/// A made-up session for `--hud-preview`.
+/// A made-up multiplayer session for `--hud-preview`: two controllers and a
+/// keyboard seat. Playing, the game is out of front on the host.
 fn preview_session(role: HudRole) -> HudState {
+    let seat = |label: &str, pad, holder: Option<&str>, mine, asked| HudSeat {
+        label: label.into(),
+        pad,
+        keyboard_mouse: !pad,
+        holder: holder.map(Into::into),
+        mine,
+        asked,
+    };
+    let playing = role == HudRole::Controlling;
     HudState {
-        title: "Celeste".into(),
+        title: "Fling to the Finish".into(),
         host: "Alice".into(),
         role,
-        controller: (role == HudRole::Controlling).then(|| "Bob".into()),
+        seats: vec![
+            seat("Controller 1", true, Some("Carol"), false, false),
+            seat(
+                "Controller 2",
+                true,
+                playing.then_some("Bob"),
+                playing,
+                role == HudRole::Asking,
+            ),
+            seat("Keyboard and mouse", false, None, false, false),
+        ],
         viewers: 2,
-        keyboard_mouse: false,
         control_paused: false,
+        game_in_front: !playing,
         note: match role {
             HudRole::Watching => String::new(),
-            HudRole::Asking => "Asked the host for the controller".into(),
-            HudRole::Controlling => "You have the controller".into(),
+            HudRole::Asking => "Asked the host for Controller 2".into(),
+            HudRole::Controlling => "You have Controller 2".into(),
         },
     }
 }
 
-/// Ctrl+Alt+Shift+C: ask for the controller, withdraw the request, or give
-/// it back, depending on where this viewer stands. Nothing without a session.
+/// Ctrl+Alt+Shift+C: ask for a seat (the first free one), withdraw the
+/// request, or give the seat back, depending on where this viewer stands.
+/// Nothing without a session.
 fn toggle_control(hud: &mut Hud, out: &mpsc::Sender<Outgoing>) {
     let Some(session) = hud.session() else {
         return;
@@ -390,7 +411,10 @@ fn toggle_control(hud: &mut Hud, out: &mpsc::Sender<Outgoing>) {
             hud.note(note);
             return;
         }
-        HudRole::Watching => UserAction::RequestControl,
+        HudRole::Watching => match crate::hud::seat_to_ask(session) {
+            Some(seat) => UserAction::RequestControl(seat),
+            None => return,
+        },
         HudRole::Asking | HudRole::Controlling => UserAction::CancelControl,
     };
     let _ = out.send(Outgoing::Action(action));

@@ -11,6 +11,8 @@
 //!   combinations count the modifiers injected for every seat: two holders
 //!   could otherwise build Alt+Tab between them.
 //!
+//! Only one holder at a time has keyboard or mouse ([`SeatRouter::grant`]).
+//!
 //! The caller refreshes the foreground and pointer state right before every
 //! `handle`, so a window that just took the foreground never gets input.
 //!
@@ -239,6 +241,10 @@ impl SeatRouter {
     }
 
     /// Hands `seat` to `member`, ending any current hold first.
+    ///
+    /// Refused (no effects) while another seat's holder has keyboard or mouse
+    /// and this grant would give them too: Windows has one keyboard and one
+    /// pointer, so two holders would type into each other.
     pub fn grant(
         &mut self,
         seat: SeatId,
@@ -247,6 +253,16 @@ impl SeatRouter {
         now: Instant,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let kbm = Permissions::KEYBOARD | Permissions::MOUSE;
+        let taken = self.seats.iter().enumerate().any(|(i, s)| {
+            i != usize::from(seat.0)
+                && s.holder
+                    .as_ref()
+                    .is_some_and(|h| h.permissions.intersects(kbm))
+        });
+        if taken && permissions.intersects(kbm) {
+            return effects;
+        }
         let Some(s) = self.seats.get_mut(usize::from(seat.0)) else {
             return effects;
         };
@@ -458,11 +474,12 @@ fn end_hold(seat: SeatId, s: &mut Seat, effects: &mut Vec<Effect>) {
 
 /// Carries out the injection effects; seat notices are the caller's. Keeps
 /// going after a failure, so one failed key-up can't leave the rest held, and
-/// returns the first error. Pad effects for seats without a pad are dropped.
+/// returns the first error. `pads` is by seat; pad effects for seats without
+/// a pad (a keyboard seat, a pad that failed to plug in) are dropped.
 pub fn apply(
     effects: &[Effect],
     kbm: &mut dyn KbmInjector,
-    pads: &mut [Box<dyn VirtualPad>],
+    pads: &mut [Option<Box<dyn VirtualPad>>],
 ) -> Result<(), InputError> {
     let mut first_error = None;
     for effect in effects {
@@ -472,8 +489,8 @@ pub fn apply(
             Effect::Wheel(dx, dy) => kbm.wheel(dx, dy),
             Effect::MouseButton(button, down) => kbm.mouse_button(button, down),
             Effect::Pad(seat, state) => match pads.get_mut(usize::from(seat.0)) {
-                Some(pad) => pad.submit(&state),
-                None => Ok(()),
+                Some(Some(pad)) => pad.submit(&state),
+                _ => Ok(()),
             },
             Effect::Granted { .. } | Effect::Revoked { .. } => Ok(()),
         };
@@ -680,6 +697,29 @@ mod tests {
             vec![Effect::Key(LEFT_ALT, true)]
         );
         assert_eq!(router.handle(OTHER, key(SeatId(1), TAB.0), t0), vec![]);
+    }
+
+    #[test]
+    fn only_one_holder_at_a_time_has_keyboard_or_mouse() {
+        let t0 = Instant::now();
+        let mut router = SeatRouter::new(3);
+        router.grant(SEAT, GUEST, Permissions::KEYBOARD | Permissions::MOUSE, t0);
+        // A second keyboard holder is refused; a pad-only seat isn't.
+        assert_eq!(
+            router.grant(SeatId(1), OTHER, Permissions::MOUSE, t0),
+            vec![]
+        );
+        assert_eq!(router.seat(SeatId(1)).unwrap().2, SeatStatus::Host);
+        assert!(
+            !router
+                .grant(SeatId(2), OTHER, Permissions::GAMEPAD, t0)
+                .is_empty()
+        );
+        // The same seat can change hands, keyboard and all.
+        assert!(!router.grant(SEAT, OTHER, ALL, t0).is_empty());
+        // Once it's free, another seat may have them.
+        router.revoke(SEAT);
+        assert!(!router.grant(SeatId(1), GUEST, ALL, t0).is_empty());
     }
 
     #[test]

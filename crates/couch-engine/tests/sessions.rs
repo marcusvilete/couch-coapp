@@ -14,8 +14,8 @@ use std::{
 };
 
 use couch_engine::{
-    Command, Engine, EngineError, EngineOptions, Event, MemberLink, Profile, Response, RoomView,
-    SessionEnd, SessionRole, SessionView, SourceChoice, WatchEnd,
+    Command, Engine, EngineError, EngineOptions, Event, InputSetup, MemberLink, Profile, Response,
+    RoomView, SeatChoice, SessionEnd, SessionRole, SessionView, SourceChoice, WatchEnd,
     pipeline::{
         AudioKind, Backend, Focus, GameProcess, NativeId, Source, Sources, ViewerOptions,
         ViewerProcess, WindowSource, ipc,
@@ -32,6 +32,7 @@ use couch_net::endpoint::RelayChoice;
 use couch_proto::{
     input::PadSnapshot,
     ipc::{HudState, LocalInput, SeatState, UserAction, VideoFrameHeader},
+    session::SeatKind,
 };
 use couch_room::{limits::LimitConfig, room::Timings};
 use couch_testkit::{FakeCapturer, FakeEncoder, RecordingInjector, RecordingPadFactory};
@@ -57,6 +58,8 @@ struct Fake {
     clock: Arc<ProcessClock>,
     /// The panic key's handler while the engine has it hooked.
     panic_key: PanicHook,
+    /// The game window isn't in front (another window took the focus).
+    away: AtomicBool,
 }
 
 /// The streamed game's process.
@@ -126,6 +129,16 @@ impl Fake {
         plugged.last()?.states().last().copied()
     }
 
+    /// The latest state of the `n`th pad plugged in (seat order).
+    fn pad_at(&self, n: usize) -> Option<PadState> {
+        let plugged = self.pads.plugged.lock().unwrap();
+        plugged.get(n)?.states().last().copied()
+    }
+
+    fn pads_plugged(&self) -> usize {
+        self.pads.plugged.lock().unwrap().len()
+    }
+
     fn viewer(&self) -> Option<FakeViewer> {
         self.viewers.lock().unwrap().last().cloned()
     }
@@ -186,9 +199,10 @@ impl Backend for Fake {
     }
 
     fn focus(&self, _window: NativeId) -> Focus {
+        let foreground = !self.away.load(Ordering::SeqCst);
         Focus {
-            foreground: true,
-            pointer_inside: true,
+            foreground,
+            pointer_inside: foreground,
         }
     }
 
@@ -335,6 +349,14 @@ impl FakeViewer {
         self.say(
             couch_proto::ipc::kinds::INPUT,
             couch_proto::ipc::to_payload(&pad),
+        );
+    }
+
+    /// A key on the local keyboard (a HID usage).
+    fn key(&self, usage: u16, down: bool) {
+        self.say(
+            couch_proto::ipc::kinds::INPUT,
+            couch_proto::ipc::to_payload(&LocalInput::Key { usage, down }),
         );
     }
 
@@ -526,7 +548,33 @@ fn go_live(room: &str, max_viewers: u8) -> Command {
         max_mbps: 20,
         upload_mbps: None,
         max_viewers,
-        keyboard_mouse: false,
+        input: InputSetup::default(),
+    }
+}
+
+/// Going live with these seats.
+fn go_live_with(room: &str, max_viewers: u8, input: InputSetup) -> Command {
+    match go_live(room, max_viewers) {
+        Command::GoLive {
+            room,
+            source,
+            title,
+            fps,
+            max_mbps,
+            upload_mbps,
+            max_viewers,
+            ..
+        } => Command::GoLive {
+            room,
+            source,
+            title,
+            fps,
+            max_mbps,
+            upload_mbps,
+            max_viewers,
+            input,
+        },
+        _ => unreachable!(),
     }
 }
 
@@ -601,9 +649,14 @@ async fn wait(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// B asks, A accepts: B plays.
+/// B asks for seat 0, A accepts: B plays.
 async fn give_control(room: &str, a: &mut Member, b: &Member, window: &FakeViewer) {
-    b.ok(Command::RequestControl).await;
+    give_seat(room, a, b, window, 0).await;
+}
+
+/// B asks for `seat`, A accepts: B plays on it.
+async fn give_seat(room: &str, a: &mut Member, b: &Member, window: &FakeViewer, seat: u8) {
+    b.ok(Command::RequestControl { seat }).await;
     let asker = a
         .event("a request", |e| match e {
             Event::ControlRequested { member, .. } => Some(member.clone()),
@@ -617,10 +670,15 @@ async fn give_control(room: &str, a: &mut Member, b: &Member, window: &FakeViewe
     })
     .await;
     wait("the seat", || window.holding()).await;
-    a.wait_session(room, a, "B as the controller", |s| {
-        s.is_some_and(|s| s.controller.as_deref() == Some(&b.id()))
+    a.wait_session(room, a, "B on the seat", |s| {
+        s.is_some_and(|s| holder(s, seat) == Some(b.id()))
     })
     .await;
+}
+
+/// Who holds `seat`, as `s` shows it.
+fn holder(s: &SessionView, seat: u8) -> Option<String> {
+    s.seats.get(usize::from(seat))?.holder.clone()
 }
 
 fn pressed(buttons: PadButtons) -> PadState {
@@ -719,7 +777,9 @@ async fn a_full_session_turns_one_away_and_one_stream_at_a_time() {
         max_mbps: 20,
         upload_mbps: None,
         max_viewers: 1,
-        keyboard_mouse: true,
+        input: InputSetup::Single {
+            seat: SeatChoice::Both,
+        },
     };
     assert!(refused_because(
         &c.handle(screen_with_kbm).await,
@@ -747,7 +807,11 @@ async fn control_is_asked_for_given_passed_and_given_back() {
     assert_eq!(a.fake.pad(), Some(pressed(PadButtons::A)));
 
     // A passes control to C: B's hold ends, released first.
-    a.ok(Command::PassControl { member: c.id() }).await;
+    a.ok(Command::PassControl {
+        member: c.id(),
+        seat: 0,
+    })
+    .await;
     wait("C's seat", || c_window.holding()).await;
     wait("B's seat gone", || !b_window.holding()).await;
     wait("C's button", || {
@@ -780,14 +844,18 @@ async fn control_is_asked_for_given_passed_and_given_back() {
     })
     .await;
     a.wait_session(&room, &a, "the host playing", |s| {
-        s.is_some_and(|s| s.controller.is_none())
+        s.is_some_and(|s| holder(s, 0).is_none())
     })
     .await;
 
     // A takes it back from someone it passed it to.
-    a.ok(Command::PassControl { member: b.id() }).await;
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 0,
+    })
+    .await;
     wait("B's seat again", || b_window.holding()).await;
-    a.ok(Command::TakeBackControl).await;
+    a.ok(Command::TakeBackControl { seat: None }).await;
     wait("B's seat gone again", || !b_window.holding()).await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
@@ -797,7 +865,7 @@ async fn a_declined_viewer_cannot_ask_again_at_once() {
     let (mut a, mut b, mut c, room) = three().await;
     a.go_live(&room, 4).await;
     let b_window = watching(&room, &a, &b).await;
-    b_window.action(UserAction::RequestControl);
+    b_window.action(UserAction::RequestControl(0));
     a.event("a request", |e| {
         matches!(e, Event::ControlRequested { .. }).then_some(())
     })
@@ -822,7 +890,7 @@ async fn a_declined_viewer_cannot_ask_again_at_once() {
     .await;
 
     // Straight away: declined again, and A never hears of it.
-    b.ok(Command::RequestControl).await;
+    b.ok(Command::RequestControl { seat: 0 }).await;
     b.wait_session(&room, &a, "the second request declined", |s| {
         s.is_some_and(|s| s.role == SessionRole::Watching)
     })
@@ -857,7 +925,7 @@ async fn the_panic_key_takes_control_back_until_allowed() {
     .await;
     wait("B's seat gone", || !b_window.holding()).await;
     a.wait_session(&room, &a, "control paused", |s| {
-        s.is_some_and(|s| s.control_paused && s.controller.is_none())
+        s.is_some_and(|s| s.control_paused && holder(s, 0).is_none())
     })
     .await;
     b.wait_session(&room, &a, "B hears control is paused", |s| {
@@ -866,14 +934,18 @@ async fn the_panic_key_takes_control_back_until_allowed() {
     .await;
     // B's held button stays released, and asking is declined.
     b_window.pad(PadButtons::A | PadButtons::B);
-    b.ok(Command::RequestControl).await;
+    b.ok(Command::RequestControl { seat: 0 }).await;
     b.wait_session(&room, &a, "B's request declined", |s| {
         s.is_some_and(|s| s.role == SessionRole::Watching)
     })
     .await;
     assert_eq!(a.fake.pad(), Some(PadState::NEUTRAL));
     assert!(matches!(
-        a.handle(Command::PassControl { member: b.id() }).await,
+        a.handle(Command::PassControl {
+            member: b.id(),
+            seat: 0
+        })
+        .await,
         Err(EngineError::Session(_))
     ));
 
@@ -906,7 +978,7 @@ async fn a_viewer_closing_its_window_while_playing_is_released_at_once() {
     .await;
     let released = closed.elapsed();
     a.wait_session(&room, &a, "B gone from the viewers", |s| {
-        s.is_some_and(|s| s.viewers.is_empty() && s.controller.is_none())
+        s.is_some_and(|s| s.viewers.is_empty() && holder(s, 0).is_none())
     })
     .await;
     b.wait_session(&room, &a, "B not watching", |s| {
@@ -1175,7 +1247,7 @@ async fn shutting_down_while_a_guest_plays_releases_first() {
 #[tokio::test(flavor = "multi_thread")]
 async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
     use couch_engine::pipeline::host::{HostEvent, HostOptions, HostStream, Rates};
-    use couch_input::{MemberId, Permissions, SeatEpoch};
+    use couch_input::{MemberId, Permissions, SeatEpoch, SeatId};
 
     let fake = Arc::new(Fake::default());
     let (stream, mut events) = HostStream::start(
@@ -1186,6 +1258,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             rates: Rates::default(),
             upload_bps: None,
             audio: couch_engine::pipeline::AudioChoice::Off,
+            seats: vec![SeatKind::Controller],
             real_pad_ids: false,
             session: 1,
             first_epoch: SeatEpoch(0),
@@ -1202,12 +1275,12 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
     };
 
     stream.panic_handle().panic();
-    stream.grant(guest, Permissions::GAMEPAD);
+    stream.grant(SeatId(0), guest, Permissions::GAMEPAD);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!granted(&mut events), "refused while paused");
 
     stream.allow_grants();
-    stream.grant(guest, Permissions::GAMEPAD);
+    stream.grant(SeatId(0), guest, Permissions::GAMEPAD);
     let deadline = Instant::now() + WAIT;
     while !granted(&mut events) {
         assert!(Instant::now() < deadline, "granted once allowed");
@@ -1260,7 +1333,7 @@ async fn a_crashed_stream_window_is_started_again_once() {
         .await;
     assert_eq!(ended, WatchEnd::ViewerFailed);
     a.wait_session(&room, &a, "nobody playing", |s| {
-        s.is_some_and(|s| s.controller.is_none() && s.viewers.is_empty())
+        s.is_some_and(|s| holder(s, 0).is_none() && s.viewers.is_empty())
     })
     .await;
     assert_eq!(b.fake.viewers.lock().unwrap().len(), 2, "no third window");
@@ -1277,7 +1350,7 @@ async fn watching_resumes_when_the_connection_to_the_host_comes_back() {
     b.engine().drop_connection(&room, &a.id()).await;
     // The host lets go of the seat with the old connection.
     a.wait_session(&room, &a, "the seat back with the host", |s| {
-        s.is_some_and(|s| s.controller.is_none())
+        s.is_some_and(|s| holder(s, 0).is_none())
     })
     .await;
     wait("the window told it lost the seat", || !window.holding()).await;
@@ -1366,4 +1439,257 @@ async fn watching_during_the_grace_waits_for_the_window() {
     wait("frames from the new window", || window.frames() >= 5).await;
     assert!(a.session(&room, &a).await.is_some(), "still live");
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+// ---- Seats and input modes ----
+
+const TWO_PADS: InputSetup = InputSetup::Multi {
+    controllers: 2,
+    keyboard_mouse: false,
+};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_guests_play_two_pads_at_once() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a.handle(go_live_with(&room, 4, TWO_PADS)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert_eq!(a.fake.pads_plugged(), 2, "one pad per seat");
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    // Everyone sees the seats by name.
+    c.wait_session(&room, &a, "two seats", |s| {
+        s.is_some_and(|s| {
+            s.seats.iter().map(|s| s.label.as_str()).collect::<Vec<_>>()
+                == ["Controller 1", "Controller 2"]
+        })
+    })
+    .await;
+
+    give_seat(&room, &mut a, &b, &b_window, 0).await;
+    give_seat(&room, &mut a, &c, &c_window, 1).await;
+    b_window.pad(PadButtons::A);
+    c_window.pad(PadButtons::B);
+    wait("each guest on its own pad", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::A))
+            && a.fake.pad_at(1) == Some(pressed(PadButtons::B))
+    })
+    .await;
+    // B's next press reaches only B's pad.
+    b_window.pad(PadButtons::X);
+    wait("B's X", || a.fake.pad_at(0) == Some(pressed(PadButtons::X))).await;
+    assert_eq!(a.fake.pad_at(1), Some(pressed(PadButtons::B)));
+    // Both see who holds what.
+    b.wait_session(&room, &a, "both holders", |s| {
+        s.is_some_and(|s| holder(s, 0) == Some(b.id()) && holder(s, 1) == Some(c.id()))
+    })
+    .await;
+
+    // Taking one seat back leaves the other playing.
+    a.ok(Command::TakeBackControl { seat: Some(0) }).await;
+    wait("B's seat gone", || !b_window.holding()).await;
+    wait("B's pad neutral", || {
+        a.fake.pad_at(0) == Some(PadState::NEUTRAL)
+    })
+    .await;
+    assert!(c_window.holding());
+    // The panic key takes every seat back.
+    assert!(a.fake.press_panic_key());
+    wait("C's seat gone", || !c_window.holding()).await;
+    wait("C's pad neutral", || {
+        a.fake.pad_at(1) == Some(PadState::NEUTRAL)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_to_another_seat_lets_go_of_the_old_one_first() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a.handle(go_live_with(&room, 4, TWO_PADS)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    let b_window = watching(&room, &a, &b).await;
+    give_seat(&room, &mut a, &b, &b_window, 0).await;
+    b_window.pad(PadButtons::A);
+    wait("A on pad 1", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::A))
+    })
+    .await;
+
+    // B asks for the other seat and withdraws: B keeps the first.
+    b.ok(Command::RequestControl { seat: 1 }).await;
+    a.wait_session(&room, &a, "B's first request", |s| {
+        s.is_some_and(|s| !s.requests.is_empty())
+    })
+    .await;
+    b.ok(Command::CancelControl).await;
+    a.wait_session(&room, &a, "the request withdrawn, the seat kept", |s| {
+        s.is_some_and(|s| s.requests.is_empty() && holder(s, 0) == Some(b.id()))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(b_window.holding(), "a withdraw never gives the seat back");
+
+    // B asks for the other seat while holding the first, and gets it.
+    b.ok(Command::RequestControl { seat: 1 }).await;
+    a.wait_session(&room, &a, "B's request for Controller 2", |s| {
+        s.is_some_and(|s| s.requests.iter().any(|r| r.member == b.id() && r.seat == 1))
+    })
+    .await;
+    b.wait_session(&room, &a, "B asking, still holding", |s| {
+        s.is_some_and(|s| s.asked_seat == Some(1) && holder(s, 0) == Some(b.id()))
+    })
+    .await;
+    a.ok(Command::AnswerControl {
+        member: b.id(),
+        accept: true,
+    })
+    .await;
+    a.wait_session(&room, &a, "B on the second seat only", |s| {
+        s.is_some_and(|s| holder(s, 0).is_none() && holder(s, 1) == Some(b.id()))
+    })
+    .await;
+    wait("pad 1 let go", || {
+        a.fake.pad_at(0) == Some(PadState::NEUTRAL)
+    })
+    .await;
+    b_window.pad(PadButtons::Y);
+    wait("B on pad 2", || {
+        a.fake.pad_at(1) == Some(pressed(PadButtons::Y))
+    })
+    .await;
+    assert_eq!(a.fake.pad_at(0), Some(PadState::NEUTRAL));
+    assert!(b_window.holding());
+
+    // The host moves B back without asking.
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 0,
+    })
+    .await;
+    a.wait_session(&room, &a, "B back on the first seat", |s| {
+        s.is_some_and(|s| holder(s, 0) == Some(b.id()) && holder(s, 1).is_none())
+    })
+    .await;
+    wait("pad 2 let go", || {
+        a.fake.pad_at(1) == Some(PadState::NEUTRAL)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keyboard_seat_types_and_never_drives_a_pad() {
+    use couch_input::HidUsage;
+    use couch_testkit::KbmCall;
+
+    let (mut a, mut b, mut c, room) = three().await;
+    let setup = InputSetup::Multi {
+        controllers: 1,
+        keyboard_mouse: true,
+    };
+    let reply = a.handle(go_live_with(&room, 4, setup)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert_eq!(a.fake.pads_plugged(), 1, "no pad for the keyboard seat");
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    a.wait_session(&room, &a, "the seats' kinds", |s| {
+        s.is_some_and(|s| {
+            s.seats.len() == 2
+                && s.seats[0].pad
+                && !s.seats[0].keyboard_mouse
+                && s.seats[1].keyboard_mouse
+                && !s.seats[1].pad
+                && s.seats[1].label == "Keyboard and mouse"
+        })
+    })
+    .await;
+    give_seat(&room, &mut a, &b, &b_window, 1).await;
+    give_seat(&room, &mut a, &c, &c_window, 0).await;
+    let typed = |key: u16, down: bool| {
+        a.fake
+            .kbm
+            .calls()
+            .contains(&KbmCall::Key(HidUsage(key), down))
+    };
+
+    // B's keys reach the game; B's pad goes nowhere.
+    b_window.key(0x1A, true);
+    b_window.pad(PadButtons::A);
+    wait("B's W", || typed(0x1A, true)).await;
+    // C's pad works; C's keys go nowhere.
+    c_window.pad(PadButtons::B);
+    c_window.key(0x04, true);
+    wait("C's B", || a.fake.pad_at(0) == Some(pressed(PadButtons::B))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        a.fake.pad_at(0),
+        Some(pressed(PadButtons::B)),
+        "B's A never landed"
+    );
+    assert!(!typed(0x04, true), "C has no keyboard");
+    // B's seat goes back: its key is let go.
+    a.ok(Command::TakeBackControl { seat: Some(1) }).await;
+    wait("B's W released", || typed(0x1A, false)).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn viewers_hear_when_the_game_leaves_the_front() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let in_front = |w: &FakeViewer| w.hud.lock().unwrap().as_ref().map(|h| h.game_in_front);
+    wait("a HUD", || in_front(&b_window).is_some()).await;
+    assert_eq!(in_front(&b_window), Some(true));
+
+    a.fake.away.store(true, Ordering::SeqCst);
+    wait("the game out of front", || {
+        in_front(&b_window) == Some(false)
+    })
+    .await;
+    // Someone who starts watching now hears it too.
+    let c_window = watching(&room, &a, &c).await;
+    wait("C hears it", || in_front(&c_window) == Some(false)).await;
+
+    a.fake.away.store(false, Ordering::SeqCst);
+    wait("the game back in front", || {
+        in_front(&b_window) == Some(true) && in_front(&c_window) == Some(true)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_input_setup_is_remembered_for_the_program() {
+    let (mut a, mut b, mut c, room) = three().await;
+    // A setup that can't be: refused.
+    let five = InputSetup::Multi {
+        controllers: 5,
+        keyboard_mouse: false,
+    };
+    assert!(matches!(
+        a.handle(go_live_with(&room, 4, five)).await,
+        Err(EngineError::Session(_))
+    ));
+    assert_eq!(sources(&a).await.windows[0].input_setup, None);
+
+    let setup = InputSetup::Multi {
+        controllers: 2,
+        keyboard_mouse: true,
+    };
+    let reply = a.handle(go_live_with(&room, 4, setup)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    let deadline = Instant::now() + WAIT;
+    while sources(&a).await.windows[0].input_setup != Some(setup) {
+        assert!(Instant::now() < deadline, "the setup remembered");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+async fn sources(m: &Member) -> couch_engine::SourceList {
+    match m.handle(Command::ListSources).await.unwrap() {
+        Response::Sources(s) => s,
+        other => panic!("sources: {other:?}"),
+    }
 }

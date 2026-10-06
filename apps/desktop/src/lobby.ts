@@ -10,6 +10,7 @@ import type { RoomView } from "./bindings/RoomView";
 import type { SessionEnd } from "./bindings/SessionEnd";
 import type { WatchEnd } from "./bindings/WatchEnd";
 import { errorText, onEngineEvent, request } from "./engine";
+import { seatPhrase } from "./sessions";
 
 export type Notice = { id: number; text: string; tone: "info" | "warn" };
 
@@ -194,7 +195,7 @@ export function useLobby(): Lobby {
         case "controlRequested": {
           const room = roomsRef.current[event.room];
           const name = room?.members.find((m) => m.id === event.member)?.name ?? "Someone";
-          notify(`${name} asks for the controller. Answer in “${room?.name ?? "the room"}”.`);
+          notify(`${name} asks for ${seatPhrase(event.seat || "Controller")}. Answer in “${room?.name ?? "the room"}”.`);
           flashTaskbar();
           break;
         }

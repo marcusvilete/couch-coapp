@@ -87,6 +87,14 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **A program run as administrator** is marked "admin" in Go live, with a warning when picked. Keyboard and mouse can't reach it, and the panic key doesn't work while it is in front (measured in M6); Take back does.
 - On one PC, the network can't be dropped for one pair; two PCs (turn off the guest's network for about 10 s) or the `sessions` scenarios cover it.
 
+## Seats (P1): what to expect
+
+- **Go live's Input section.** Single player (a controller, keyboard and mouse, or both) or Multiplayer (1 to 4 controllers, plus optionally a keyboard-and-mouse seat). Keyboard choices are disabled for a screen. Picking a window brings back the setup last used with that program (`input-setups.json` in the profile folder).
+- **A controller plugged into the host** shows a warning in Multiplayer: it may take a player's place.
+- **On this PC with profiles:** alice goes live in Multiplayer with 2 controllers; bob and carol each ask for one. `xinput-watch.ps1` should show two virtual pads (after any physical ones), each moving only with its own guest. Steam announces each pad.
+- **Moving.** A guest holding Controller 1 who asks for Controller 2 keeps the first until the host accepts; then the first goes neutral and the second follows them. Host log: `seat` lines for both.
+- **The "game not in front" line.** With alice live and the game window behind another window, the guests' stream windows say "The game isn't in front on Ana's PC"; for a player the bar stays up until it comes back. On one PC the stream window itself takes the front, so expect the line while clicking in it: that is right.
+
 ## A full run to ask for
 
 1. Watch, then stop watching.
@@ -138,6 +146,10 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
 | Host killed | end the host app in Task Manager | the guest is told the stream ended within about 5 s |
 | Stream window crash | on the guest, Task Manager's **Details** tab, End task on `couch-viewer.exe`; again within a minute | it comes back by itself, still holding the controller; the second time, watching ends |
 | Administrator window | run Notepad as administrator, go live with it | Go live marks it "admin" with a warning; keyboard and mouse can't reach it; the panic key doesn't work while it is in front (Take back does) |
+| Single-player seat kinds | go live with a controller seat, then the same game with a keyboard-and-mouse seat | the guest drives the game with exactly that, nothing else |
+| Multiplayer | a co-op game (Fling to the Finish) with 2 controllers, no controller on the host; the guest asks for Controller 2 | the guest plays player 2; asking for and moving between seats works |
+| Host's controller in co-op (the P1 investigation) | the same with the host's controller plugged in, `xinput-watch.ps1` running on the host | note each slot (host's pad, the virtual ones) and whether the game ignores the guest's pad; the answer decides whether hiding the host's controllers (HidHide) comes next |
+| Game not in front | with keyboard and mouse on, the host switches to another window | the guest's stream window says the game isn't in front; the line goes when the game is back |
 
 ### Reading the results
 
@@ -149,6 +161,6 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
   - Task Manager's **Processes** tab End task asks the window to close: that is leaving, so watching just stops. Only the Details tab kills.
   - An administrator window: Windows keeps a normal program's input and hooks from it. Expected; the warning says so.
   - Alt+F4 while only watching closes the guest's own window.
-  - A host controller taking player 1 in co-op: the seats and input modes work will handle it.
+  - A host controller taking player 1 in co-op: Go live warns (P1); whether to hide it waits on the P1 investigation.
   - A full-screen game ignoring the guest once (M5b): an observation, not a known bug; note whether it happens again.
 - **Record** each run in the milestone's results file ("Your run" row), and new observations the user wants kept in the polish backlog memory.

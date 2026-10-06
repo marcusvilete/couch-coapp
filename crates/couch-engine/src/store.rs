@@ -1,11 +1,13 @@
 //! Files in a profile's data folder:
 //! - `identity.key`: the endpoint's secret key, sealed.
 //! - `settings.json`: the display name. Nothing secret.
+//! - `input-setups.json`: the input setup last used with each program.
 //! - `rooms/<room id>.room`: one remembered room each, sealed: its saved
 //!   state and, for rooms we own, the invites and the password key (never
 //!   the password).
 
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,10 +18,11 @@ use couch_proto::ids::RoomId;
 use couch_room::room::SavedRoom;
 use serde::{Deserialize, Serialize};
 
-use crate::secrets::SecretStore;
+use crate::{InputSetup, secrets::SecretStore};
 
 const IDENTITY_FILE: &str = "identity.key";
 const SETTINGS_FILE: &str = "settings.json";
+const INPUT_SETUPS_FILE: &str = "input-setups.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread.
@@ -181,6 +184,28 @@ impl Store {
     }
 }
 
+/// The input setup last used with each program, by its lowercased file name
+/// (`input-setups.json`). Only the engine writes it, never the room actor,
+/// so it has a file of its own.
+pub(crate) fn input_setups(dir: &Path) -> BTreeMap<String, InputSetup> {
+    let path = dir.join(INPUT_SETUPS_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            BTreeMap::new()
+        }),
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+/// Remembers `setup` for `app` (a program's file name).
+pub(crate) fn save_input_setup(dir: &Path, app: &str, setup: InputSetup) -> Result<(), StoreError> {
+    let mut setups = input_setups(dir);
+    setups.insert(app.to_lowercase(), setup);
+    let bytes = serde_json::to_vec_pretty(&setups).expect("setups serialize");
+    write_atomic(&dir.join(INPUT_SETUPS_FILE), &bytes)
+}
+
 /// Writes a sibling temporary file and renames it over `path`, so a crash
 /// leaves the old file or the new one, never half of one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
@@ -278,5 +303,23 @@ mod tests {
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.settings(), settings);
+    }
+
+    #[test]
+    fn input_setups_are_remembered_per_program() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(input_setups(dir.path()).is_empty());
+        let multi = InputSetup::Multi {
+            controllers: 2,
+            keyboard_mouse: true,
+        };
+        save_input_setup(dir.path(), "Fling.exe", multi).unwrap();
+        save_input_setup(dir.path(), "celeste.exe", InputSetup::default()).unwrap();
+        let setups = input_setups(dir.path());
+        assert_eq!(setups.get("fling.exe"), Some(&multi), "names ignore case");
+        assert_eq!(setups.len(), 2);
+        // A damaged file is ignored, not an error.
+        fs::write(dir.path().join(INPUT_SETUPS_FILE), b"{").unwrap();
+        assert!(input_setups(dir.path()).is_empty());
     }
 }

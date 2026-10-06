@@ -172,6 +172,13 @@ pub trait Backend: Send + Sync + 'static {
 
     fn kbm(&self) -> Box<dyn KbmInjector>;
 
+    /// Game controllers plugged into this PC, our own virtual pads included
+    /// if any are plugged in. Go live warns about them in multiplayer: a
+    /// host's controller can take a player's place in the game.
+    fn controllers(&self) -> usize {
+        0
+    }
+
     fn focus(&self, window: NativeId) -> Focus;
 
     fn window_exists(&self, window: NativeId) -> bool;

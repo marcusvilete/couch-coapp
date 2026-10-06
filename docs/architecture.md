@@ -18,9 +18,12 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M4b | Lobby UI: rooms, invites and deep links, members with their links, profiles side by side | done ([results](m4b-results.md)) |
 | M5 | Sessions and control: M5a in the engine, M5b on screen | Done ([M5a](m5a-results.md), [M5b](m5b-results.md)) |
 | M6 | Lifecycle and safety: liveness, the game's window and exit, watching that survives drops and crashes, keys released after a host crash, Alt+F4 blocked, the elevated-game warning | done ([results](m6-results.md)) |
-| M7 | Own relay, real-network tests | |
+| P1 | Seats and input modes: single player or multiplayer per game, a pad per controller seat, a keyboard seat, requests that name a seat; the "game not in front" notice | done ([results](p1-results.md)) |
+| P2 | The host on a seat: the host's controller drives a seat's virtual pad, and HidHide hides the physical one, so any seat can be handed over | next |
+| Polish | The rest of the polish backlog: the shortcut editor, choosing the relay, hiding the host's controllers if needed | |
 | M8 | Host overlay window | |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | |
+| M7 | Own relay, the https invite page, the production relay setup | moved to just before M10: until then, iroh's public relays serve development and real-network tests |
 | M10 | Packaging | |
 
 ## Processes
@@ -142,10 +145,16 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
 ([protocol.md](protocol.md#sessions))
 
 - **Where they live.** A session rides on its room's connections: the roster already decides who may watch. The host is the only writer of its session's facts and sends them straight to each member.
-- **Ownership.** The host owns the session's state: viewers, requests, the control pause (`couch_room::session`). Who holds the seat is decided by the seat router alone (`couch_input::router`); the session mirrors it. Single-player mode has one seat; co-op later adds seats.
-- **"The host has control."** The host's own devices drive the game directly.
-- **Handoff.** Passing control changes the seat's holder and increments its epoch, releasing first. The virtual pad stays plugged in for the whole session, so the game never sees a controller disconnect.
-- **Requests.** Viewers ask; the host accepts or declines, passes control without a request, or takes it back. The panic key takes everything back and pauses control.
+- **Ownership.** The host owns the session's state: viewers, requests, who holds each seat, the control pause (`couch_room::session`). Who holds a seat is decided by the seat router alone (`couch_input::router`); the session mirrors it.
+- **Seats and input modes** (P1). The host's input setup for the game (`InputSetup`, remembered per program in `input-setups.json`) gives the seats:
+  - single player: one seat, a controller, keyboard and mouse, or both;
+  - multiplayer: 1 to 4 controller seats, each its own virtual pad, plus optionally one keyboard-and-mouse seat.
+
+  The seat's kind sets its holder's permissions. One seat per viewer: a grant revokes that viewer's other seat first. Only one holder at a time has keyboard and mouse (the router refuses a second).
+- **"The host has control."** The host's own devices drive the game directly: in single player while nobody holds the seat, in multiplayer beside the seats. Hiding the host's own controllers from the game (HidHide) waits on P1's co-op investigation.
+- **Handoff.** Passing a seat changes its holder and increments its epoch, releasing first. The virtual pads stay plugged in for the whole session, so the game never sees a controller disconnect.
+- **Requests.** Viewers ask for a seat; the host accepts or declines, passes a seat without a request, or takes one or all back. The panic key takes everything back and pauses control.
+- **The game's focus.** The host's input task notices the streamed window leaving the front and tells the viewers (`GameFocus`), whose stream window says why input may not work.
 - **Disconnects.** If a viewer leaves, closes its window, loses its connection or is banned, everything it held is released at once.
 - **In the engine.** The room actor runs the session protocol (`rooms::sessions`). The media and input run in `couch_engine::pipeline`: `HostStream` (one capture, an encoder per viewer, one sound capture, one input task) and `Watch` (the viewer process). **Input never goes through the actor**: it flows from the connection to the input task's seat router to the injectors.
 - **On screen.** The app's stage shows a card per live session (Watch, ask, stop watching) and, for the host, a panel with the viewers, the requests and the pause; the taskbar flashes on a request. The viewer's HUD shows the session and takes clicks on its bar only while the mouse is free. While a host streams, the panic-key hook (`couch_platform_win::panic_key`, through `pipeline::Backend`) watches the physical keyboard. All shortcuts live in `couch_input::shortcuts`.

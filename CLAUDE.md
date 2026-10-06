@@ -41,7 +41,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | Task | Command |
 |---|---|
 | Rooms end to end: engines over loopback (join through the owner, wrong passwords and rate limits, ban, owner offline, catching up, simultaneous restart, leave and close, including with the others offline, invite expiry) | `cargo test -p couch-engine --test rooms` (~20 s) |
-| Sessions end to end: three engines with a fake backend (fake capture, encoder, pad and viewer window): going live, two viewers, a full session, asking, declining, passing and giving back control, the panic key, a viewer closing its window, a ban, the host leaving, the window closing, stopping, shutting down mid-game; the game swapping its window or exiting, a crashed stream window started again, watching resuming after a dropped connection (`Engine::drop_connection`) | `cargo test -p couch-engine --test sessions` (~4 s) |
+| Sessions end to end: three engines with a fake backend (fake capture, encoder, pad and viewer window): going live, two viewers, a full session, asking, declining, passing and giving back control, the panic key, a viewer closing its window, a ban, the host leaving, the window closing, stopping, shutting down mid-game; the game swapping its window or exiting, a crashed stream window started again, watching resuming after a dropped connection (`Engine::drop_connection`); seats: two guests on two pads, moving seats, a keyboard seat, the game leaving the front, the setup remembered per program | `cargo test -p couch-engine --test sessions` (~4 s) |
 | Join through iroh's public relay (needs internet) | `cargo test -p couch-engine --test rooms -- --ignored` |
 | The room state machine, including the simulated network and its property test | `cargo test -p couch-room` |
 
@@ -57,8 +57,8 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | The app for a second PC (release build, stream window and DLLs zipped into `target\guest`) | `.\scripts\pack-guest.ps1`, then `npx --yes http-server target\guest -p 8000` |
 | What an XInput game sees on the host (each slot's buttons and sticks, live): tells a stream problem from a game choosing another controller | `.\scripts\xinput-watch.ps1` |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
-| Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine |
-| Virtual pad (needs ViGEmBus) | `couch-cli pad-test`, then watch it in `joy.cpl`. Without `--real-pad-ids` it uses made-up ids (1209:0001), and games and Steam treat it as a generic joystick (only the D-pad works); the app always uses the real Xbox 360 ids. While a host on this PC has a pad plugged in, viewers here skip every Xbox 360 pad (`couch_platform_win::virtual_pads`) |
+| Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine. `host --pads N` (up to 4) plugs a pad per seat and gives each viewer the next free seat as it connects (only the first gets kbm) |
+| Virtual pad (needs ViGEmBus) | `couch-cli pad-test` (`--count N` for several: pad N presses its buttons N steps ahead, and it prints how many game controllers Windows lists), then watch it in `joy.cpl`. Without `--real-pad-ids` it uses made-up ids (1209:0001), and games and Steam treat it as a generic joystick (only the D-pad works); the app always uses the real Xbox 360 ids. While a host on this PC has a pad plugged in, viewers here skip every Xbox 360 pad (`couch_platform_win::virtual_pads`) |
 | Keyboard and mouse injection through the seat router, checked on one machine (blocked combinations included) | `couch-cli input-sink` |
 | Input released when a session ends badly (killed, frozen, closed, host stopped) | `couch-cli release-check` (about 1 minute). The `input-safety-checks` skill says when to run it and what to ask the user to try |
 | A game swapping its window, exiting or closing it; the stream window killed; a host killed, and killed holding a key | `couch-cli lifecycle-check` (about 1 minute; `--only kill-host,...` for some). `couch-cli fake-game` is the stand-in game it uses (`swap`, `close`, `exit` on stdin) |
@@ -108,7 +108,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 
 **Safety invariants.** Remote input is remote control of someone's PC. Never weaken these:
 - Guests default to gamepad only (`Permissions::GUEST_DEFAULT`).
-- Keyboard and mouse are injected only while the game window is in the foreground.
+- Keyboard and mouse are injected only while the game window is in the foreground, and only one seat's holder at a time has them (a seat's kind sets its permissions; `SeatRouter::grant` refuses a second).
 - The Windows key and its combinations, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4 and the gamepad Guide button are never forwarded.
 - Every handoff, disconnect and teardown releases held keys and sends `PadState::NEUTRAL`.
 - Input with a stale `SeatEpoch` is dropped.
@@ -126,7 +126,8 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 
 **Sessions** (`docs/protocol.md` Sessions)
 - **The host is the only writer** of its session's facts, sent straight to each member, never relayed. A member acts on a session message only from that session's host, on the current connection, while the host is on the roster. Never let one member speak for another's session.
-- **The seat router alone decides who plays.** `couch_room::session` asks it and mirrors its `Granted`/`Revoked`; never inject or track a holder elsewhere.
+- **The seat router alone decides who plays.** `couch_room::session` asks it and mirrors its `Granted`/`Revoked` per seat; never inject or track a holder elsewhere.
+- **One seat per viewer.** A grant is always preceded by revoking that viewer from every other seat, on the same ordered channel to the router (`HostSession::grant`); keep that order.
 - **Ending releases first:** input, then `SessionEnded` and `SESSION_END`, then encoders and capture, then the pad. A viewer that goes (leaves, closes its window, loses the connection, is banned) is released at once through `SeatRouter::disconnected`.
 - **A seat never survives a connection.** A viewer that reconnects joins again as a new viewer and must be given control again; nothing restores a seat without the host.
 - **Every key or button `SendInputInjector` presses is recorded** (`couch_platform_win::held_input`) so a crash can't leave it held. Inject keyboard and mouse only through it, and keep `release_left_input` at the start of anything that hosts.

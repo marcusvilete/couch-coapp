@@ -6,7 +6,7 @@ import type { MemberLink } from "./bindings/MemberLink";
 import type { MemberView } from "./bindings/MemberView";
 import type { ProfileView } from "./bindings/ProfileView";
 import type { RoomView } from "./bindings/RoomView";
-import { playerOf } from "./sessions";
+import { playersOf } from "./sessions";
 import { Avatar, PlusIcon, duration } from "./ui";
 
 /** Rooms as round icons, in the order the user dragged them into (Alt+Up
@@ -225,7 +225,7 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
         {room.members.map((m) => {
           const link = LINKS[m.link];
           const live = room.sessions.some((s) => s.host === m.id);
-          const plays = room.sessions.some((s) => playerOf(s) === m.id);
+          const plays = room.sessions.some((s) => playersOf(s).includes(m.id));
           return (
             <li key={m.id} className={`member link-${m.link}`}>
               <span className="presence" title={link.title}>

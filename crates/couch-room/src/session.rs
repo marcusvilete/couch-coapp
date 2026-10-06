@@ -1,20 +1,22 @@
-//! A session as its host runs it: who watches, who asked to play, who
-//! plays, and its end (docs/protocol.md, Sessions).
+//! A session as its host runs it: who watches, who asked to play which
+//! seat, who plays, and its end (docs/protocol.md, Sessions).
 //!
 //! Sans-IO, like [`crate::room`]: the engine reports what happened and
 //! carries out the returned [`Effect`]s.
 //!
 //! **The seat router decides who plays.** `couch_input::router::SeatRouter`
-//! enforces every input rule and is the only judge of who holds the seat.
-//! This machine asks it to hand over or take back the seat
-//! ([`Effect::Grant`], [`Effect::Revoke`], [`Effect::RevokeAll`]) and only
-//! mirrors the outcome: the engine reports each of the router's grants and
-//! revocations to [`HostSession::seat_changed`], including those the router
-//! makes alone (a holder who went quiet too long).
+//! enforces every input rule and is the only judge of who holds each seat.
+//! This machine asks it to hand over or take back seats ([`Effect::Grant`],
+//! [`Effect::Revoke`], [`Effect::RevokeAll`]) and only mirrors the outcome:
+//! the engine reports each of the router's grants and revocations to
+//! [`HostSession::seat_changed`], including those the router makes alone (a
+//! holder who went quiet too long).
 //!
-//! **Only viewers play.** Requests come from viewers only. A grant goes only
-//! to a viewer, never while control is paused (the panic key) or after the
-//! end. A viewer who leaves loses its request and the seat at once.
+//! **Only viewers play, one seat each.** Requests come from viewers only. A
+//! grant goes only to a viewer, never while control is paused (the panic key)
+//! or after the end, and it is always preceded by revoking that viewer from
+//! every other seat, on the same ordered channel, so nobody ever holds two.
+//! A viewer who leaves loses its request and its seat at once.
 
 use std::{
     collections::BTreeMap,
@@ -23,11 +25,11 @@ use std::{
 
 use couch_proto::{
     control::ControlMessage,
-    ids::{MemberId, Permissions, SessionId},
+    ids::{MemberId, Permissions, SeatId, SessionId},
     room::valid_name,
     session::{
-        ControlDeclined, EndReason, JoinResult, SessionAnnounce, SessionEnded, SessionJoinReply,
-        SessionMode, SessionStatus,
+        ControlDeclined, EndReason, JoinResult, SeatKind, SessionAnnounce, SessionEnded,
+        SessionJoinReply, SessionStatus, valid_seats,
     },
 };
 
@@ -43,9 +45,8 @@ pub const DECLINE_COOLDOWN: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
     pub title: String,
-    pub mode: SessionMode,
-    /// Whoever plays may use keyboard and mouse, not just a gamepad.
-    pub keyboard_mouse: bool,
+    /// The seats players can hold, by [`SeatId`]; one is single player.
+    pub seats: Vec<SeatKind>,
     pub max_viewers: u8,
 }
 
@@ -55,6 +56,10 @@ pub enum SessionError {
     InvalidTitle,
     #[error("a session takes 1 to {MAX_VIEWERS} viewers")]
     InvalidMaxViewers,
+    #[error("a session has 1 to 4 controllers and at most one keyboard-and-mouse seat")]
+    InvalidSeats,
+    #[error("there is no such seat")]
+    NoSuchSeat,
     #[error("that member isn't watching")]
     NotViewer,
     #[error("that member hasn't asked for control")]
@@ -79,19 +84,23 @@ pub enum Effect {
     StartViewer(MemberId),
     /// Stop streaming to this viewer, releasing what it held first.
     StopViewer(MemberId),
-    /// Ask the seat router to hand the seat to `member`.
+    /// Ask the seat router to hand `seat` to `member`.
     Grant {
+        seat: SeatId,
         member: MemberId,
         permissions: Permissions,
     },
-    /// Ask the seat router to give the seat back to the host: only if
-    /// `holder` still holds it, or from whoever does with `None`. A request
-    /// aimed at one viewer must never end another's hold.
-    Revoke { holder: Option<MemberId> },
+    /// Ask the seat router to give `seat` back to the host: only if `holder`
+    /// still holds it, or from whoever does with `None`. A request aimed at
+    /// one viewer must never end another's hold.
+    Revoke {
+        seat: SeatId,
+        holder: Option<MemberId>,
+    },
     /// Ask the seat router to give every seat back to the host at once.
     RevokeAll,
-    /// A viewer asked for control: the host should notice.
-    Requested(MemberId),
+    /// A viewer asked for a seat: the host should notice.
+    Requested(MemberId, SeatId),
     /// Something the host's UI shows changed.
     Changed,
 }
@@ -102,12 +111,12 @@ pub struct HostSession {
     config: SessionConfig,
     /// In the order they joined.
     viewers: Vec<MemberId>,
-    /// Oldest first; one per viewer.
-    requests: Vec<MemberId>,
+    /// Oldest first; one per viewer, naming the seat it wants.
+    requests: Vec<(MemberId, SeatId)>,
     /// Declined viewers and when they may ask again.
     cooldowns: BTreeMap<MemberId, Instant>,
-    /// Who holds the seat, as the router last reported it.
-    controller: Option<MemberId>,
+    /// Who holds each seat, as the router last reported it.
+    holders: Vec<Option<MemberId>>,
     paused: bool,
     ended: bool,
 }
@@ -120,13 +129,16 @@ impl HostSession {
         if !(1..=MAX_VIEWERS).contains(&config.max_viewers) {
             return Err(SessionError::InvalidMaxViewers);
         }
+        if !valid_seats(&config.seats) {
+            return Err(SessionError::InvalidSeats);
+        }
         Ok(Self {
             id,
+            holders: vec![None; config.seats.len()],
             config,
             viewers: Vec::new(),
             requests: Vec::new(),
             cooldowns: BTreeMap::new(),
-            controller: None,
             paused: false,
             ended: false,
         })
@@ -150,14 +162,22 @@ impl HostSession {
         self.viewers.contains(&member)
     }
 
-    /// Viewers waiting for an answer, oldest first.
-    pub fn requests(&self) -> &[MemberId] {
+    /// Viewers waiting for an answer and the seat each wants, oldest first.
+    pub fn requests(&self) -> &[(MemberId, SeatId)] {
         &self.requests
     }
 
-    /// The viewer holding the seat; `None` while the host plays.
-    pub fn controller(&self) -> Option<MemberId> {
-        self.controller
+    /// Each seat's holder, by seat; `None` while the host has it.
+    pub fn holders(&self) -> &[Option<MemberId>] {
+        &self.holders
+    }
+
+    /// The seat `member` holds, if any.
+    pub fn seat_of(&self, member: MemberId) -> Option<SeatId> {
+        self.holders
+            .iter()
+            .position(|h| *h == Some(member))
+            .map(|i| SeatId(i as u8))
     }
 
     pub fn control_paused(&self) -> bool {
@@ -168,21 +188,23 @@ impl HostSession {
         self.ended
     }
 
-    /// What a viewer holding the seat may send.
-    pub fn permissions(&self) -> Permissions {
-        if self.config.keyboard_mouse {
-            Permissions::GAMEPAD | Permissions::KEYBOARD | Permissions::MOUSE
-        } else {
-            Permissions::GUEST_DEFAULT
-        }
+    /// What a viewer holding `seat` may send.
+    pub fn permissions(&self, seat: SeatId) -> Permissions {
+        self.config
+            .seats
+            .get(usize::from(seat.0))
+            .map_or(Permissions::empty(), |kind| kind.permissions())
+    }
+
+    fn has_seat(&self, seat: SeatId) -> bool {
+        usize::from(seat.0) < self.config.seats.len()
     }
 
     pub fn announce(&self) -> ControlMessage {
         ControlMessage::SessionAnnounce(SessionAnnounce {
             session: self.id,
             title: self.config.title.clone(),
-            mode: self.config.mode,
-            keyboard_mouse: self.config.keyboard_mouse,
+            seats: self.config.seats.clone(),
             max_viewers: self.config.max_viewers,
         })
     }
@@ -191,7 +213,7 @@ impl HostSession {
         ControlMessage::SessionStatus(SessionStatus {
             session: self.id,
             viewers: self.viewers.clone(),
-            controller: self.controller,
+            holders: self.holders.clone(),
             control_paused: self.paused,
         })
     }
@@ -270,11 +292,13 @@ impl HostSession {
 
     fn drop_viewer(&mut self, member: MemberId) -> Vec<Effect> {
         self.viewers.retain(|v| *v != member);
-        self.requests.retain(|r| *r != member);
-        if self.controller == Some(member) {
-            // Stopping the viewer releases what it held; the router's own
-            // report of that follows.
-            self.controller = None;
+        self.requests.retain(|(r, _)| *r != member);
+        // Stopping the viewer releases what it held; the router's own report
+        // of that follows.
+        for holder in &mut self.holders {
+            if *holder == Some(member) {
+                *holder = None;
+            }
         }
         let mut fx = vec![Effect::StopViewer(member)];
         if !self.ended {
@@ -284,12 +308,14 @@ impl HostSession {
         fx
     }
 
-    /// A viewer asks for control.
-    pub fn request(&mut self, member: MemberId, now: Instant) -> Vec<Effect> {
+    /// A viewer asks for `seat`, free or held by another viewer. Asking for
+    /// another seat replaces its pending request.
+    pub fn request(&mut self, member: MemberId, seat: SeatId, now: Instant) -> Vec<Effect> {
         if self.ended
             || !self.is_viewer(member)
-            || self.controller == Some(member)
-            || self.requests.contains(&member)
+            || !self.has_seat(seat)
+            || self.seat_of(member) == Some(seat)
+            || self.requests.contains(&(member, seat))
         {
             return Vec::new();
         }
@@ -297,51 +323,81 @@ impl HostSession {
             .cooldowns
             .get(&member)
             .is_some_and(|until| now < *until);
+        // Neither leaves a request pending: the panic key declined them all,
+        // and a decline is what started the cooldown.
         if self.paused || cooling {
             return vec![self.declined(member)];
         }
         self.cooldowns.remove(&member);
-        self.requests.push(member);
-        vec![Effect::Requested(member), Effect::Changed]
+        self.requests.retain(|(r, _)| *r != member);
+        self.requests.push((member, seat));
+        vec![Effect::Requested(member, seat), Effect::Changed]
     }
 
-    /// A viewer withdraws its request, or gives control back.
-    pub fn cancel(&mut self, member: MemberId) -> Vec<Effect> {
-        if self.requests.contains(&member) {
-            self.requests.retain(|r| *r != member);
-            return vec![Effect::Changed];
+    /// A viewer withdraws its request; the seat it holds, if any, stays.
+    pub fn withdraw(&mut self, member: MemberId) -> Vec<Effect> {
+        if !self.requests.iter().any(|(r, _)| *r == member) {
+            return Vec::new();
         }
-        if self.controller == Some(member) && !self.ended {
-            return vec![Effect::Revoke {
+        self.requests.retain(|(r, _)| *r != member);
+        vec![Effect::Changed]
+    }
+
+    /// A viewer gives its seat back. A pending request stays: only a
+    /// withdraw ends that.
+    pub fn give_back(&mut self, member: MemberId) -> Vec<Effect> {
+        match self.seat_of(member) {
+            Some(seat) if !self.ended => vec![Effect::Revoke {
+                seat,
                 holder: Some(member),
-            }];
+            }],
+            _ => Vec::new(),
         }
-        Vec::new()
     }
 
-    /// The seat router handed the seat to `holder`, or back to the host.
-    pub fn seat_changed(&mut self, holder: Option<MemberId>) -> Vec<Effect> {
+    /// The seat router handed `seat` to `holder`, or back to the host.
+    pub fn seat_changed(&mut self, seat: SeatId, holder: Option<MemberId>) -> Vec<Effect> {
+        if !self.has_seat(seat) {
+            return Vec::new();
+        }
         match holder {
             // A grant that crossed a departure, the panic key or the end:
             // the seat goes straight back.
             Some(member) if self.ended || self.paused || !self.is_viewer(member) => {
                 vec![Effect::Revoke {
+                    seat,
                     holder: Some(member),
                 }]
             }
             Some(member) => {
-                self.requests.retain(|r| *r != member);
-                self.mirror(Some(member))
+                // A request for this seat is answered; one for another seat
+                // stays, as a move, and the viewer keeps asking too.
+                self.requests.retain(|r| *r != (member, seat));
+                // Never two seats: grants revoke the others first, so this
+                // only guards against a report out of order.
+                let mut fx: Vec<Effect> = self
+                    .holders
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, h)| *i != usize::from(seat.0) && **h == Some(member))
+                    .map(|(i, _)| Effect::Revoke {
+                        seat: SeatId(i as u8),
+                        holder: Some(member),
+                    })
+                    .collect();
+                fx.extend(self.mirror(seat, Some(member)));
+                fx
             }
-            None => self.mirror(None),
+            None => self.mirror(seat, None),
         }
     }
 
-    fn mirror(&mut self, controller: Option<MemberId>) -> Vec<Effect> {
-        if self.controller == controller {
+    fn mirror(&mut self, seat: SeatId, holder: Option<MemberId>) -> Vec<Effect> {
+        let slot = &mut self.holders[usize::from(seat.0)];
+        if *slot == holder {
             return Vec::new();
         }
-        self.controller = controller;
+        *slot = holder;
         let mut fx = Vec::new();
         if !self.ended {
             fx.push(Effect::Broadcast(self.status()));
@@ -362,24 +418,31 @@ impl HostSession {
         if self.ended {
             return Err(SessionError::Ended);
         }
-        if !self.requests.contains(&member) {
+        let Some(&(_, seat)) = self.requests.iter().find(|(r, _)| *r == member) else {
             return Err(SessionError::NoRequest);
-        }
+        };
         if accept && self.paused {
             return Err(SessionError::ControlPaused);
         }
-        self.requests.retain(|r| *r != member);
+        self.requests.retain(|(r, _)| *r != member);
         if accept {
-            return Ok(vec![self.grant(member), Effect::Changed]);
+            let mut fx = self.grant(member, seat);
+            fx.push(Effect::Changed);
+            return Ok(fx);
         }
         self.cooldowns.insert(member, now + DECLINE_COOLDOWN);
         Ok(vec![self.declined(member), Effect::Changed])
     }
 
-    /// Hands control to a viewer who didn't ask.
-    pub fn pass(&mut self, member: MemberId) -> Result<Vec<Effect>, SessionError> {
+    /// Hands `seat` to a viewer who didn't ask for it. A request of theirs
+    /// for this seat is answered; one for another seat stays (the viewer
+    /// still shows it as pending), as when the router reports the grant.
+    pub fn pass(&mut self, member: MemberId, seat: SeatId) -> Result<Vec<Effect>, SessionError> {
         if self.ended {
             return Err(SessionError::Ended);
+        }
+        if !self.has_seat(seat) {
+            return Err(SessionError::NoSuchSeat);
         }
         if !self.is_viewer(member) {
             return Err(SessionError::NotViewer);
@@ -387,20 +450,33 @@ impl HostSession {
         if self.paused {
             return Err(SessionError::ControlPaused);
         }
-        if self.controller == Some(member) {
+        if self.holders[usize::from(seat.0)] == Some(member) {
             return Ok(Vec::new());
         }
-        self.requests.retain(|r| *r != member);
-        Ok(vec![self.grant(member), Effect::Changed])
+        self.requests.retain(|r| *r != (member, seat));
+        let mut fx = self.grant(member, seat);
+        fx.push(Effect::Changed);
+        Ok(fx)
     }
 
-    /// The host plays again. Sent to the router even if no viewer seems to
-    /// hold the seat: a grant may still be on its way.
-    pub fn take_back(&mut self) -> Vec<Effect> {
+    /// The host takes `seat` back, or every seat with `None`. Sent to the
+    /// router even if no viewer seems to hold it: a grant may still be on
+    /// its way.
+    pub fn take_back(&mut self, seat: Option<SeatId>) -> Vec<Effect> {
         if self.ended {
             return Vec::new();
         }
-        vec![Effect::Revoke { holder: None }]
+        let seats = match seat {
+            Some(seat) if self.has_seat(seat) => vec![seat],
+            Some(_) => Vec::new(),
+            None => (0..self.config.seats.len())
+                .map(|i| SeatId(i as u8))
+                .collect(),
+        };
+        seats
+            .into_iter()
+            .map(|seat| Effect::Revoke { seat, holder: None })
+            .collect()
     }
 
     /// The panic key: every seat back to the host, every request declined,
@@ -412,7 +488,7 @@ impl HostSession {
             return fx;
         }
         let waiting = std::mem::take(&mut self.requests);
-        fx.extend(waiting.into_iter().map(|member| self.declined(member)));
+        fx.extend(waiting.into_iter().map(|(member, _)| self.declined(member)));
         if !self.paused {
             self.paused = true;
             fx.push(Effect::Broadcast(self.status()));
@@ -446,11 +522,24 @@ impl HostSession {
         ]
     }
 
-    fn grant(&self, member: MemberId) -> Effect {
-        Effect::Grant {
+    /// Revokes `member` from every other seat, then grants `seat`: the
+    /// router takes them in order, so nobody ever holds two seats, even with
+    /// a grant still on its way.
+    fn grant(&self, member: MemberId, seat: SeatId) -> Vec<Effect> {
+        let mut fx: Vec<Effect> = (0..self.config.seats.len())
+            .map(|i| SeatId(i as u8))
+            .filter(|s| *s != seat)
+            .map(|s| Effect::Revoke {
+                seat: s,
+                holder: Some(member),
+            })
+            .collect();
+        fx.push(Effect::Grant {
+            seat,
             member,
-            permissions: self.permissions(),
-        }
+            permissions: self.permissions(seat),
+        });
+        fx
     }
 
     fn declined(&self, member: MemberId) -> Effect {
