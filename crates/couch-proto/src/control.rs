@@ -12,6 +12,10 @@ use crate::{
     envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND},
     ids::{Permissions, SeatEpoch, SeatId},
     room::{Goodbye, MemberRecord, Presence, RoomPolicy, RoomSnapshot, Signed},
+    session::{
+        ControlCancel, ControlDeclined, ControlRequest, SessionAnnounce, SessionEnded, SessionJoin,
+        SessionJoinReply, SessionLeave, SessionStatus,
+    },
 };
 
 /// Type ids for control messages.
@@ -23,6 +27,9 @@ pub mod type_ids {
     pub const KEYFRAME_REQUEST: u16 = MUST_UNDERSTAND | 0x0101;
     pub const SEAT_ASSIGNED: u16 = MUST_UNDERSTAND | 0x0201;
     pub const SEAT_RELEASED: u16 = MUST_UNDERSTAND | 0x0202;
+    pub const CONTROL_REQUEST: u16 = MUST_UNDERSTAND | 0x0203;
+    pub const CONTROL_CANCEL: u16 = MUST_UNDERSTAND | 0x0204;
+    pub const CONTROL_DECLINED: u16 = MUST_UNDERSTAND | 0x0205;
     pub const JOIN_START: u16 = MUST_UNDERSTAND | 0x0401;
     pub const MEMBER_HELLO: u16 = MUST_UNDERSTAND | 0x0402;
     pub const ADMIT_REPLY: u16 = MUST_UNDERSTAND | 0x0403;
@@ -32,6 +39,14 @@ pub mod type_ids {
     pub const POLICY_UPDATE: u16 = MUST_UNDERSTAND | 0x0503;
     /// Optional: a peer that ignores presence still works, just repairs slower.
     pub const PRESENCE: u16 = 0x0504;
+    /// The session directory is optional: a peer that doesn't know sessions
+    /// just doesn't show them. The rest only follow an announcement.
+    pub const SESSION_ANNOUNCE: u16 = 0x0601;
+    pub const SESSION_STATUS: u16 = 0x0602;
+    pub const SESSION_ENDED: u16 = 0x0603;
+    pub const SESSION_JOIN: u16 = MUST_UNDERSTAND | 0x0604;
+    pub const SESSION_JOIN_REPLY: u16 = MUST_UNDERSTAND | 0x0605;
+    pub const SESSION_LEAVE: u16 = MUST_UNDERSTAND | 0x0606;
 }
 
 /// QUIC application close codes for connections between members.
@@ -113,6 +128,37 @@ pub enum ControlMessage {
     MemberUpdate(Box<Signed<MemberRecord>>),
     PolicyUpdate(Box<Signed<RoomPolicy>>),
     Presence(Presence),
+    SessionAnnounce(SessionAnnounce),
+    SessionStatus(SessionStatus),
+    SessionEnded(SessionEnded),
+    SessionJoin(SessionJoin),
+    SessionJoinReply(SessionJoinReply),
+    SessionLeave(SessionLeave),
+    ControlRequest(ControlRequest),
+    ControlCancel(ControlCancel),
+    ControlDeclined(ControlDeclined),
+}
+
+impl ControlMessage {
+    /// Whether this is about a session (its directory, joining, control),
+    /// which the session's host and its viewers handle, rather than the room.
+    pub fn is_session(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionAnnounce(_)
+                | Self::SessionStatus(_)
+                | Self::SessionEnded(_)
+                | Self::SessionJoin(_)
+                | Self::SessionJoinReply(_)
+                | Self::SessionLeave(_)
+                | Self::ControlRequest(_)
+                | Self::ControlCancel(_)
+                | Self::ControlDeclined(_)
+                | Self::SeatAssigned(_)
+                | Self::SeatReleased(_)
+                | Self::KeyframeRequest(_)
+        )
+    }
 }
 
 /// The result of reading one control frame.
@@ -155,6 +201,15 @@ impl ControlMessage {
             Self::MemberUpdate(_) => type_ids::MEMBER_UPDATE,
             Self::PolicyUpdate(_) => type_ids::POLICY_UPDATE,
             Self::Presence(_) => type_ids::PRESENCE,
+            Self::SessionAnnounce(_) => type_ids::SESSION_ANNOUNCE,
+            Self::SessionStatus(_) => type_ids::SESSION_STATUS,
+            Self::SessionEnded(_) => type_ids::SESSION_ENDED,
+            Self::SessionJoin(_) => type_ids::SESSION_JOIN,
+            Self::SessionJoinReply(_) => type_ids::SESSION_JOIN_REPLY,
+            Self::SessionLeave(_) => type_ids::SESSION_LEAVE,
+            Self::ControlRequest(_) => type_ids::CONTROL_REQUEST,
+            Self::ControlCancel(_) => type_ids::CONTROL_CANCEL,
+            Self::ControlDeclined(_) => type_ids::CONTROL_DECLINED,
         }
     }
 
@@ -174,6 +229,15 @@ impl ControlMessage {
             Self::MemberUpdate(m) => postcard::to_stdvec(m)?,
             Self::PolicyUpdate(m) => postcard::to_stdvec(m)?,
             Self::Presence(m) => postcard::to_stdvec(m)?,
+            Self::SessionAnnounce(m) => postcard::to_stdvec(m)?,
+            Self::SessionStatus(m) => postcard::to_stdvec(m)?,
+            Self::SessionEnded(m) => postcard::to_stdvec(m)?,
+            Self::SessionJoin(m) => postcard::to_stdvec(m)?,
+            Self::SessionJoinReply(m) => postcard::to_stdvec(m)?,
+            Self::SessionLeave(m) => postcard::to_stdvec(m)?,
+            Self::ControlRequest(m) => postcard::to_stdvec(m)?,
+            Self::ControlCancel(m) => postcard::to_stdvec(m)?,
+            Self::ControlDeclined(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -195,6 +259,15 @@ impl ControlMessage {
             type_ids::MEMBER_UPDATE => Self::MemberUpdate(payload(frame)?),
             type_ids::POLICY_UPDATE => Self::PolicyUpdate(payload(frame)?),
             type_ids::PRESENCE => Self::Presence(payload(frame)?),
+            type_ids::SESSION_ANNOUNCE => Self::SessionAnnounce(payload(frame)?),
+            type_ids::SESSION_STATUS => Self::SessionStatus(payload(frame)?),
+            type_ids::SESSION_ENDED => Self::SessionEnded(payload(frame)?),
+            type_ids::SESSION_JOIN => Self::SessionJoin(payload(frame)?),
+            type_ids::SESSION_JOIN_REPLY => Self::SessionJoinReply(payload(frame)?),
+            type_ids::SESSION_LEAVE => Self::SessionLeave(payload(frame)?),
+            type_ids::CONTROL_REQUEST => Self::ControlRequest(payload(frame)?),
+            type_ids::CONTROL_CANCEL => Self::ControlCancel(payload(frame)?),
+            type_ids::CONTROL_DECLINED => Self::ControlDeclined(payload(frame)?),
             other if frame.must_understand() => return Err(DecodeError::UnknownRequired(other)),
             other => return Ok(Decoded::SkippedOptional(other)),
         };
@@ -338,6 +411,69 @@ mod tests {
             }),
         ] {
             roundtrip(message);
+        }
+    }
+
+    #[test]
+    fn session_messages_roundtrip() {
+        use crate::{
+            ids::{MemberId, SessionId},
+            session::{EndReason, JoinResult, SessionMode},
+        };
+        let session = SessionId(0x0123_4567_89ab_cdef);
+        for message in [
+            ControlMessage::SessionAnnounce(SessionAnnounce {
+                session,
+                title: "Celeste".into(),
+                mode: SessionMode::SinglePlayer,
+                keyboard_mouse: true,
+                max_viewers: 7,
+            }),
+            ControlMessage::SessionStatus(SessionStatus {
+                session,
+                viewers: vec![MemberId([1; 32]), MemberId([2; 32])],
+                controller: Some(MemberId([2; 32])),
+                control_paused: true,
+            }),
+            ControlMessage::SessionEnded(SessionEnded {
+                session,
+                reason: EndReason::SourceLost,
+            }),
+            ControlMessage::SessionJoin(SessionJoin { session }),
+            ControlMessage::SessionJoinReply(SessionJoinReply {
+                session,
+                result: JoinResult::Full,
+            }),
+            ControlMessage::SessionLeave(SessionLeave { session }),
+            ControlMessage::ControlRequest(ControlRequest { session }),
+            ControlMessage::ControlCancel(ControlCancel { session }),
+            ControlMessage::ControlDeclined(ControlDeclined { session }),
+        ] {
+            assert!(message.is_session());
+            roundtrip(message);
+        }
+    }
+
+    /// The directory is optional, so a peer that doesn't know sessions only
+    /// misses them; what follows an announcement must be understood.
+    #[test]
+    fn only_the_session_directory_is_optional() {
+        for id in [
+            type_ids::SESSION_ANNOUNCE,
+            type_ids::SESSION_STATUS,
+            type_ids::SESSION_ENDED,
+        ] {
+            assert_eq!(id & MUST_UNDERSTAND, 0, "{id:#06x}");
+        }
+        for id in [
+            type_ids::SESSION_JOIN,
+            type_ids::SESSION_JOIN_REPLY,
+            type_ids::SESSION_LEAVE,
+            type_ids::CONTROL_REQUEST,
+            type_ids::CONTROL_CANCEL,
+            type_ids::CONTROL_DECLINED,
+        ] {
+            assert_ne!(id & MUST_UNDERSTAND, 0, "{id:#06x}");
         }
     }
 

@@ -4,6 +4,7 @@
 //! - [`control`]: typed control messages, their type ids, close codes.
 //! - [`admission`]: the password check's messages.
 //! - [`room`]: member records, the owner's policy, snapshots, presence.
+//! - [`session`]: sessions (a member streaming to others) and control requests.
 //! - [`invite`]: invite links.
 //! - [`ipc`]: framing for the pipe between the main process and `couch-viewer`.
 //! - [`ids`]: identifiers and permission flags that appear on the wire.
@@ -22,6 +23,7 @@ pub mod invite;
 pub mod ipc;
 pub mod media;
 pub mod room;
+pub mod session;
 
 /// ALPN protocol id for connections between room members.
 ///

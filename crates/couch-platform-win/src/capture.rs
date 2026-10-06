@@ -4,10 +4,14 @@
 //! Frames are copied to CPU memory here. The zero-copy path that hands the
 //! D3D11 texture straight to the encoder is M9.
 
-use std::{sync::Arc, time::Duration};
+use std::{ffi::c_void, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use couch_media::{BgraFrame, CaptureEvent, Capturer, MediaError, mailbox::Mailbox};
+use windows::Win32::{
+    Foundation::HWND,
+    Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
+};
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
@@ -22,11 +26,19 @@ use windows_capture::{
 
 use crate::{clock, foreground::WindowId};
 
+/// A monitor, by its handle value, as [`list_monitors`] found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MonitorId(pub isize);
+
 /// What to capture.
 #[derive(Debug, Clone)]
 pub enum CaptureSource {
     /// The first visible window whose title contains this text.
     WindowTitle(String),
+    /// One window, as [`list_windows`] found it.
+    Window(WindowId),
+    /// One monitor, as [`list_monitors`] found it.
+    Monitor(MonitorId),
     PrimaryMonitor,
 }
 
@@ -41,24 +53,86 @@ pub struct CaptureOptions {
 /// A visible top-level window that can be captured.
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
+    pub window: WindowId,
     pub title: String,
     pub process: String,
     pub process_id: u32,
 }
 
-/// Lists capturable windows (visible, titled).
+/// Lists capturable windows: visible, titled, not cloaked (a suspended
+/// Store app's window is "visible" but shows nothing), and not ours (this
+/// process and its children, such as a viewer).
 pub fn list_windows() -> Result<Vec<WindowInfo>, MediaError> {
+    let me = std::process::id();
+    let mut ours = vec![me];
+    ours.extend(crate::process::child_processes(me).unwrap_or_default());
     let windows = Window::enumerate().map_err(backend)?;
     Ok(windows
         .into_iter()
         .filter(|w| w.is_valid())
         .filter_map(|w| {
+            let window = WindowId(w.as_raw_hwnd() as isize);
+            let process_id = w.process_id().unwrap_or_default();
+            if ours.contains(&process_id) || is_cloaked(window) {
+                return None;
+            }
             let title = w.title().ok()?;
             (!title.trim().is_empty()).then(|| WindowInfo {
+                window,
                 title,
                 process: w.process_name().unwrap_or_default(),
-                process_id: w.process_id().unwrap_or_default(),
+                process_id,
             })
+        })
+        .collect())
+}
+
+fn is_cloaked(window: WindowId) -> bool {
+    let mut cloaked = 0u32;
+    // SAFETY: the out-parameter is a live local of the size passed.
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            HWND(window.0 as *mut c_void),
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    result.is_ok() && cloaked != 0
+}
+
+/// A monitor that can be captured.
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub monitor: MonitorId,
+    /// The monitor's own name ("DELL U2720Q"), or "Screen N".
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+pub fn list_monitors() -> Result<Vec<MonitorInfo>, MediaError> {
+    let primary = Monitor::primary()
+        .ok()
+        .map(|m| m.as_raw_hmonitor() as isize);
+    let monitors = Monitor::enumerate().map_err(backend)?;
+    Ok(monitors
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let id = m.as_raw_hmonitor() as isize;
+            MonitorInfo {
+                monitor: MonitorId(id),
+                name: m
+                    .name()
+                    .ok()
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| format!("Screen {}", i + 1)),
+                width: m.width().unwrap_or(0),
+                height: m.height().unwrap_or(0),
+                primary: primary == Some(id),
+            }
         })
         .collect())
 }
@@ -134,6 +208,20 @@ impl WgcCapturer {
                     .map_err(|e| MediaError::Backend(format!("no window titled {title:?}: {e}")))?;
                 captured = Some(WindowId(window.as_raw_hwnd() as isize));
                 Handler::start_free_threaded(settings(window, cursor, interval, shared.clone()))
+            }
+            CaptureSource::Window(id) => {
+                let window = Window::from_raw_hwnd(id.0 as *mut c_void);
+                if !window.is_valid() {
+                    return Err(MediaError::Backend(
+                        "the window is gone, or can't be captured".into(),
+                    ));
+                }
+                captured = Some(*id);
+                Handler::start_free_threaded(settings(window, cursor, interval, shared.clone()))
+            }
+            CaptureSource::Monitor(id) => {
+                let monitor = Monitor::from_raw_hmonitor(id.0 as *mut c_void);
+                Handler::start_free_threaded(settings(monitor, cursor, interval, shared.clone()))
             }
             CaptureSource::PrimaryMonitor => {
                 let monitor = Monitor::primary().map_err(backend)?;

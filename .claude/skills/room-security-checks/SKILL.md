@@ -15,6 +15,7 @@ description: Check that Couch Co-App's rooms still keep strangers out after a ch
 . .\scripts\dev.ps1
 cargo test -p couch-proto -p couch-room -p couch-net   # types, simulator, property test, admission over loopback
 cargo test -p couch-engine --test rooms                 # three engines, ~20 s
+cargo test -p couch-engine --test sessions              # sessions over the same rooms, ~2 s
 ```
 
 - Run the engine scenarios **three times** after touching the actor, timings or dialing. They use real iroh on loopback, and a flaky pass hides races.
@@ -39,6 +40,10 @@ cargo test -p couch-engine --test rooms                 # three engines, ~20 s
 | An opened link never joins by itself, nor replaces an invite a password was typed for | `Engine::open_link` keeps it for the UI; `App.tsx` queues it; `JoinRoomDialog` takes it only while idle and clears the password when the invite changes | engine `an_opened_invite_is_previewed_before_joining`; read the UI diff |
 | One engine per identity | `lock_profile` (`engine.lock`), lowercased profile names, the single-instance plugin | `one_engine_per_profile`, `names_ignore_case` |
 | Only the owner changes the password | `Actor::change_password` (`owned`) | engine `the_owner_changes_the_password` |
+| A session message counts only from its own host (or, to a host, about its live session), on the current connection, from a roster member; never relayed | `rooms::sessions::session_received` | read the diff; the session scenarios exercise the honest paths |
+| Only viewers play; nothing is granted while paused or after the end; the seat router alone decides | `couch_room::session::HostSession` | its unit tests and `only_viewers_ever_play` (property test) |
+| A ban, a departure or a lost connection ends watching and releases the viewer's input | `session_closed`, `end_room_sessions` | engine `a_ban_while_watching_ends_it`, `a_host_leaving_the_room_ends_its_stream` |
+| Window titles stay out of logs | `Debug` of `GoLive` and `Sources` | `window_titles_stay_out_of_debug` |
 
 ## Review the diff for
 
@@ -47,6 +52,7 @@ cargo test -p couch-engine --test rooms                 # three engines, ~20 s
 - **Verification order**: cheap checks first (room, stay, version), then the signature. Never act before the signature.
 - **Anything sent to a dialer that isn't yet accepted**: only the proof for a former member, and nothing for a stranger.
 - **A new way for outside input to start a join or reach the network**: a link, a command-line argument, a drop. It must stop at the join screen.
+- **A session message acted on from the wrong peer**: one member's word about another's session, a message on a duplicate connection, or a host field taken from the payload instead of the connection.
 - **A new effect order in `apply`**: Save before any Send; Removed and Departed only after the last word is queued.
 - **A new field or type in a signed body**: it changes the signed bytes, so it needs the `protocol-change` skill. A change to `SavedRoom` needs a new `ROOM_MAGIC` in `store.rs`.
 - **Anything in `couch_net::admission`**: labels, inputs and order change what is proven. Update `docs/protocol.md` and ADR 0006 together, and keep the outside-review follow-up.

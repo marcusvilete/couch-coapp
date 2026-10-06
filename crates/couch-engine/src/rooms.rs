@@ -10,6 +10,11 @@
 //!
 //! Only a room's owner admits newcomers (with an invite and the password);
 //! members accept each other by the owner's signed roster.
+//!
+//! Sessions ride on the same connections ([`sessions`]): the one we stream,
+//! the one we watch, and the others' we hear of.
+
+mod sessions;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -21,12 +26,14 @@ use couch_net::{
     Connection, Endpoint, Incoming, NetError, WeakConnectionHandle, addr,
     admission::{self, AcceptTerms, AdmissionError, JoinTerms, PasswordKey, Request},
     control::{self, ControlReceiver, ControlSender},
+    datagrams::Datagrams,
     endpoint::{self, EndpointOptions, Gate, RelayChoice},
+    streams::Streams,
 };
 use couch_proto::{
     admission::{JoinStart, MemberHello},
     control::{ControlMessage, close_code},
-    ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce},
+    ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce, SessionId},
     invite::Invite,
     room::{PeerAddr, RoomPolicy, RoomSnapshot, Signed, valid_name},
 };
@@ -48,6 +55,11 @@ use tokio::{
 use crate::{
     Command, EngineError, EngineOptions, Event, InvitePreview, InviteStatus, MemberLink,
     MemberView, Profile, ProfileView, Response, RoomGone, RoomView,
+    pipeline::{
+        Backend,
+        host::{HostEvent, HostStream, PanicHandle},
+        watch::WatchEvent,
+    },
     store::{RememberedRoom, Settings, Store, StoreError},
 };
 
@@ -116,6 +128,21 @@ pub(crate) enum Input {
     Closed {
         conn: ConnId,
     },
+    /// Our stream has started (or failed to: see [`sessions`]).
+    LiveReady {
+        session: SessionId,
+        stream: Box<HostStream>,
+        events: mpsc::UnboundedReceiver<HostEvent>,
+        reply: Reply,
+    },
+    /// Something our stream reports.
+    Host(SessionId, HostEvent),
+    /// Something the session we watch reports.
+    Watch(SessionId, WatchEvent),
+    /// The host we asked to watch hasn't answered in time.
+    JoinTimeout(SessionId),
+    /// The host's panic key.
+    Panic,
 }
 
 pub(crate) enum JoinAnswer {
@@ -161,10 +188,15 @@ struct Entry {
 
 struct Conn {
     room: RoomId,
+    peer: MemberId,
     conn: Connection,
     out: mpsc::Sender<Outgoing>,
     writer: JoinHandle<()>,
     relayed: Option<bool>,
+    /// The connection's one datagram reader and stream acceptor, for the
+    /// sessions on it.
+    datagrams: Datagrams,
+    streams: Streams,
 }
 
 pub(crate) struct Started {
@@ -193,6 +225,13 @@ struct Actor {
     invite_valid_for: Duration,
     next_addr_check: Instant,
     next_path_check: Instant,
+    backend: Arc<dyn Backend>,
+    join_wait: Duration,
+    /// Where the viewer window logs.
+    viewer_log: std::path::PathBuf,
+    /// Shared with the engine, for the panic key.
+    panic: Arc<Mutex<Option<PanicHandle>>>,
+    sessions: sessions::Sessions,
 }
 
 fn lock(limits: &Mutex<AdmissionLimits>) -> MutexGuard<'_, AdmissionLimits> {
@@ -226,6 +265,7 @@ pub(crate) async fn start(
     profile: &Profile,
     options: EngineOptions,
     events: broadcast::Sender<Event>,
+    panic: Arc<Mutex<Option<PanicHandle>>>,
 ) -> Result<Started, EngineError> {
     let store = Store::new(profile.data_dir(), options.secret_store.clone());
     let secret_key = store.identity()?;
@@ -274,6 +314,11 @@ pub(crate) async fn start(
         invite_valid_for: options.invite_valid_for,
         next_addr_check: now + ADDR_CHECK_EVERY,
         next_path_check: now + PATH_CHECK_EVERY,
+        backend: options.backend,
+        join_wait: options.join_wait,
+        viewer_log: profile.data_dir().join("viewer.log"),
+        panic,
+        sessions: sessions::Sessions::default(),
     };
     actor.restore_rooms(now);
     tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
@@ -435,6 +480,10 @@ impl Actor {
                 let Some(room) = self.conns.get(&conn).map(|c| c.room) else {
                     return;
                 };
+                if message.is_session() {
+                    self.session_received(room, conn, message, now);
+                    return;
+                }
                 if let Some(entry) = self.rooms.get_mut(&room) {
                     let fx = entry.room.received(conn, message, now);
                     self.apply(room, fx, now);
@@ -449,7 +498,18 @@ impl Actor {
                     let fx = entry.room.disconnected(conn, now);
                     self.apply(closed.room, fx, now);
                 }
+                self.session_closed(closed.room, conn, closed.peer, now);
             }
+            Input::LiveReady {
+                session,
+                stream,
+                events,
+                reply,
+            } => self.live_ready(session, *stream, events, reply, now),
+            Input::Host(session, event) => self.host_event(session, event, now),
+            Input::Watch(session, event) => self.watch_event(session, event, now),
+            Input::JoinTimeout(session) => self.join_timeout(session, now),
+            Input::Panic => self.panic_key(now),
         }
     }
 
@@ -489,6 +549,47 @@ impl Actor {
             Command::RevokeInvites { room } => self.revoke_invites(&room, now),
             Command::LeaveRoom { room } => self.leave(&room, now),
             Command::BanMember { room, member } => self.ban(&room, &member, now),
+            // Answered by the engine itself.
+            Command::ListSources => Err(EngineError::Stopped),
+            Command::GoLive {
+                room,
+                source,
+                title,
+                fps,
+                max_mbps,
+                upload_mbps,
+                max_viewers,
+                keyboard_mouse,
+            } => {
+                let go = sessions::GoLive {
+                    room,
+                    source,
+                    title,
+                    fps,
+                    max_mbps,
+                    upload_mbps,
+                    max_viewers,
+                    keyboard_mouse,
+                };
+                // Answers later, once the stream has started.
+                if let Err(e) = self.go_live(go, reply, now) {
+                    tracing::info!("not going live: {e}");
+                }
+                return;
+            }
+            Command::StopLive => self.stop_live(now),
+            Command::Watch { room, host } => {
+                // Answers later, once the host has.
+                self.watch(&room, &host, reply, now);
+                return;
+            }
+            Command::StopWatching => self.stop_watching(now),
+            Command::RequestControl => self.request_control(now),
+            Command::CancelControl => self.cancel_control(now),
+            Command::AnswerControl { member, accept } => self.answer_control(&member, accept, now),
+            Command::PassControl { member } => self.pass_control(&member, now),
+            Command::TakeBackControl => self.take_back_control(now),
+            Command::AllowControl => self.allow_control(now),
         };
         let _ = reply.send(result);
     }
@@ -789,6 +890,9 @@ impl Actor {
     /// (one member for a member leaving, everyone for the owner closing the
     /// room), it stays behind, hidden, and keeps trying to reach them.
     fn leave(&mut self, room: &str, now: Instant) -> Result<Response, EngineError> {
+        let (id, _) = self.entry_mut(room)?;
+        // Sessions end first, so their last words go out before the goodbyes.
+        self.end_room_sessions(id, now);
         let (id, entry) = self.entry_mut(room)?;
         let fx = entry.room.leave(now)?;
         tracing::info!(room = ?id, "left a room");
@@ -919,6 +1023,9 @@ impl Actor {
             id,
             Conn {
                 room,
+                peer,
+                datagrams: Datagrams::start(conn.clone()),
+                streams: Streams::start(conn.clone()),
                 conn,
                 out,
                 writer,
@@ -937,6 +1044,8 @@ impl Actor {
             ));
         }
         self.apply(room, fx, now);
+        // After the room's snapshot, on the same writer.
+        self.session_connected(room, peer, id, now);
     }
 
     /// Carries out a room's effects.
@@ -982,8 +1091,14 @@ impl Actor {
                 tracing::info!(room = ?room, "the others know we left; forgetting the room");
                 self.forget(room, None);
             }
-            None if changed => self.announce(room, now),
-            None => {}
+            None => {
+                // Someone the room no longer counts (banned, gone) loses
+                // its part in sessions now, not when its connection closes.
+                self.prune_sessions(room, now);
+                if changed {
+                    self.announce(room, now);
+                }
+            }
         }
     }
 
@@ -1071,6 +1186,7 @@ impl Actor {
 
     /// Drops the room for good; tells the UI why, unless it already knows.
     fn forget(&mut self, room: RoomId, reason: Option<RoomGone>) {
+        self.end_room_sessions(room, Instant::now());
         self.rooms.remove(&room);
         if let Err(e) = self.store.forget_room(room) {
             tracing::error!("could not forget room {room:?}: {e}");
@@ -1136,6 +1252,7 @@ impl Actor {
             is_owner: entry.room.is_owner(),
             members,
             joins_paused_for_secs: paused,
+            sessions: self.session_views(room),
         })
     }
 
@@ -1172,6 +1289,9 @@ impl Actor {
     /// the endpoint.
     async fn shutdown(&mut self) {
         let now = Instant::now();
+        // Our stream first: everything a guest holds is released before the
+        // connections go.
+        self.end_sessions_for_shutdown(now).await;
         let ids: Vec<RoomId> = self.rooms.keys().copied().collect();
         for id in ids {
             let fx = self.rooms[&id].room.shutdown();

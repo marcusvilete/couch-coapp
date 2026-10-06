@@ -1,6 +1,6 @@
 ---
 name: audio-checks
-description: Verify Couch Co-App's game audio after a change, with `couch-cli latency-probe --audio` (gate A1, click to playback, loss) and the audio unit tests, and know what to ask the user to listen for. Use after changing couch_media::audio (framer, jitter buffer, click track), couch-codec-opus, couch_platform_win::audio (WASAPI loopback), couch_net::audio, couch-cli's host_audio/host/view audio paths, couch-viewer's audio.rs, pipe.rs or clock.rs, the audio datagram or IPC payloads, or QUIC/datagram settings; and before reporting or committing such a change.
+description: Verify Couch Co-App's game audio after a change, with `couch-cli latency-probe --audio` (gate A1, click to playback, loss) and the audio unit tests, and know what to ask the user to listen for. Use after changing couch_media::audio (framer, jitter buffer, click track), couch-codec-opus, couch_platform_win::audio (WASAPI loopback), couch_net::audio, the sound in couch_engine::pipeline (host, watch), couch-viewer's audio.rs, pipe.rs or clock.rs, the audio datagram or IPC payloads, or QUIC/datagram settings; and before reporting or committing such a change.
 ---
 
 # Audio checks

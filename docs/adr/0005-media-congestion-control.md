@@ -36,6 +36,7 @@ noq's controllers stay selectable (`--congestion bbr3|cubic|newreno`) for compar
 
 The rate controller changed alongside this:
 - The delay signal is the minimum one-way delay over 400 ms. A retransmission delays only the frames stuck behind it on the epoch stream, while a queue delays every frame.
+- The delay counts from when the host handed the frame to the network, not from its capture (M5a). The host takes its own part (waiting for and inside the encoder) off each reported delay. Otherwise a host slowed by load, such as several viewers' encoders on one GPU, reads as congestion, and every viewer's bitrate falls to the minimum without making encoding any faster.
 - Backlog is measured beyond the expected pipeline (a round trip plus the report's age).
 - A catch-up aims at 0.85 × the measured delivery rate, between a quarter and half of the old rate. It no longer just halves.
 - A catch-up cuts the bitrate only when the path shows congestion (round-trip inflation, loss above 2%, or delay growth). Otherwise it drops the stale video and keeps the bitrate, since the queue is ours.

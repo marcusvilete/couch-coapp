@@ -1041,6 +1041,7 @@ dependencies = [
  "clap",
  "couch-codec-ffmpeg",
  "couch-codec-opus",
+ "couch-engine",
  "couch-input",
  "couch-media",
  "couch-net",
@@ -1093,10 +1094,16 @@ dependencies = [
 name = "couch-engine"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "couch-codec-ffmpeg",
+ "couch-codec-opus",
+ "couch-input",
+ "couch-media",
  "couch-net",
  "couch-platform-win",
  "couch-proto",
  "couch-room",
+ "couch-testkit",
  "dirs 6.0.0",
  "getrandom 0.4.3",
  "postcard",
@@ -1197,6 +1204,7 @@ dependencies = [
 name = "couch-testkit"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "couch-input",
  "couch-media",
  "couch-proto",

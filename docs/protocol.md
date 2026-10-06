@@ -7,6 +7,7 @@ The wire protocol between room members, and the pipe between the main process an
 - M2 added input: the input stream, the gamepad, mouse and rumble datagrams, and the seat messages.
 - M3 added audio: the audio datagram, and the audio packet and stats on the viewer IPC.
 - M4a added rooms: admission, signed member records, the owner's policy, presence, invites and close codes.
+- M5a added sessions: the session directory, watching, control requests, the per-connection stream acceptor, the control stream's priority, the upload share, and viewer IPC v3.
 - The rest is a draft for later milestones.
 
 ## Versioning
@@ -40,14 +41,21 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x8502` | `MemberUpdate { record }` | One signed member record |
 | `0x8503` | `PolicyUpdate { policy }` | The owner's signed policy; also the proof shown when refusing someone it no longer lists |
 | `0x0504` | `Presence { connected: [member id] }` | Optional: who the sender is connected to |
+| `0x8203` | `ControlRequest { session u64 }` | Viewer to host: may I play? ([Sessions](#sessions)) |
+| `0x8204` | `ControlCancel { session }` | Viewer to host: withdraws my request, or gives control back |
+| `0x8205` | `ControlDeclined { session }` | Host to viewer: no (or not now: the panic key) |
+| `0x0601` | `SessionAnnounce { session, title, mode, keyboard_mouse, max_viewers u8 }` | Optional. Host to each connected member: a session is live |
+| `0x0602` | `SessionStatus { session, viewers [member id], controller?, control_paused }` | Optional. Host to each connected member: who watches and who plays |
+| `0x0603` | `SessionEnded { session, reason }` | Optional. Host to each connected member |
+| `0x8604` | `SessionJoin { session }` | Member to host: let me watch |
+| `0x8605` | `SessionJoinReply { session, result: Joined \| Full \| Ended \| Unavailable }` | Host to member |
+| `0x8606` | `SessionLeave { session }` | Viewer to host: I stopped watching |
 
 Message families still to come, all on this stream:
-- **Session directory and participation:** `SessionAnnounce`, `SessionUpdate`, `SessionEnded{reason}`, `SessionJoin`, `SessionWelcome`, `SessionLeave`.
-- **Control:** `ControlRequest`, `ControlCancel`, `ControlDecision`, `ControlRevoked`.
 - **Media control:** `VideoConfig`, `BitrateHint`.
 - **Liveness:** `Ping`/`Pong` every second.
 
-Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms.
+Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions.
 
 ## Channels
 
@@ -55,13 +63,13 @@ Each pair of room members shares one iroh connection.
 
 | Channel | QUIC primitive | Direction | Content |
 |---|---|---|---|
-| Control | Bidirectional stream, opened first by the dialer | both | Envelope messages above |
+| Control | Bidirectional stream, opened first by the dialer | both | Envelope messages above; priority 50, above video, below input |
 | Video | One unidirectional stream per epoch | host to viewer | Preamble `{kind 0x01, version u8, session u64, epoch u32, codec u8 (1 = H.264), width u16, height u16, fps u16}`, then frames `{seq u32, flags u8 (bit 0 = keyframe), capture_us u64, encode_us u32, len u32 (at most 8 MiB), Annex-B access unit}` |
 | Input | One unidirectional stream, priority 100 (video streams have 0) | viewer to host | Kind byte `0x02`, then messages framed like the control stream (see [Input](#input)) |
 | `0x01` Audio | Datagram | host to viewer | `{seq u32, capture_us u64, packet}`: one Opus packet of 10 ms (see [Audio](#audio)) |
 | `0x02` Gamepad | Datagram | viewer to host | `{seat u8, seat_epoch u32, seq u32, pad}`, on change and every 100 ms while holding a seat. `pad` is `{buttons u16 (XInput bits), left_trigger u8, right_trigger u8, left_x, left_y, right_x, right_y i16 (up positive)}` |
 | `0x03` Mouse motion | Datagram | viewer to host | `{seat, seat_epoch, totals}`, on change and every 100 ms. `totals` is `{version u32, x, y, wheel_x, wheel_y i32}` |
-| `0x04` Receiver report | Datagram | viewer to host | Every 50 ms, postcard: `{epoch, epoch_bytes_received, total_bytes_received, frames_received, delays: up to 32 × (seq, arrival − capture µs), decode_errors}`. Audio has no fields here: the host doesn't adapt it |
+| `0x04` Receiver report | Datagram | viewer to host | Every 50 ms, postcard: `{epoch, epoch_bytes_received, total_bytes_received, frames_received, delays: up to 32 × (seq, arrival − capture µs), all from frames of `epoch`, decode_errors}`. Audio has no fields here: the host doesn't adapt it |
 | `0x05` Rumble | Datagram | host to viewer | `{seat u8, low u8, high u8}`, on change |
 
 - **Epochs.** An epoch is one keyframe plus the frames that depend on it. With an infinite GOP, every frame depends on the one before, so frames must be decoded in order anyway. Resetting a whole epoch is the only useful discard. See [ADR 0003](adr/0003-epoch-streams-for-video.md).
@@ -69,7 +77,7 @@ Each pair of room members shares one iroh connection.
 
 ## Audio
 
-Code: `couch_platform_win::audio` and `couch-cli`'s `host_audio` on the host, `couch_net::audio` between, `couch-viewer`'s `audio` module with `couch_media::audio::JitterBuffer` on the viewer.
+Code: `couch_platform_win::audio` and `couch_engine::pipeline::host` (one capture and encoder for every viewer) on the host, `couch_net::audio` between, `couch-viewer`'s `audio` module with `couch_media::audio::JitterBuffer` on the viewer.
 
 **Format.** Opus (RFC 6716), 48 kHz stereo, one 10 ms frame per packet, 96 kbit/s constant bitrate, low-delay (CELT-only) mode: 120-byte packets, 2.5 ms of algorithmic delay. Fixed by the protocol version; a different format would get a new datagram tag.
 
@@ -138,7 +146,8 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
 - From receiver reports:
   - **Delivery rate:** growth of `total_bytes_received` over the last 300 ms.
   - **Outstanding bytes:** sent in the current epoch minus that epoch's `epoch_bytes_received`.
-  - **One-way delay trend:** the smallest arrival-minus-capture delay of the last 400 ms, minus the smallest of the last 10 s. The clock offset cancels out. Taking the minimum ignores frames held up behind a retransmission, since those delay only some frames while a queue delays all of them.
+  - **One-way delay trend:** the smallest network delay of the last 400 ms, minus the smallest of the last 10 s. The clock offset cancels out. Taking the minimum ignores frames held up behind a retransmission, since those delay only some frames while a queue delays all of them.
+  - **Network delay** is what the viewer reports (arrival minus capture) minus the frame's time on the host, from capture until it was handed to the network, which the host records per frame (`SendDelays`). A host slowed by load (an encoder shared by several viewers, a busy GPU) would otherwise read as a filling queue, and cutting the bitrate can't speed an encoder up: before this, seven viewers on one PC all fell to the minimum bitrate.
   - **Report age.**
 - From the host itself: the **send rate**, video handed to the transport over the last 300 ms. It falls below the bitrate when the encoder has little to send, as in a static scene.
 - From iroh's selected path:
@@ -161,7 +170,7 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
    - if the path delivers less than 90% of the send rate, target = 0.85 × min(delivery rate, target);
    - otherwise target = 0.85 × target. A path that keeps up says nothing about its capacity; the sender may just have little to send.
 4. **Otherwise** grow 8% per second, unless holding or loss is above 2%.
-5. **Clamp** between the minimum (1.5 Mbit/s) and the cap. The cap is the user maximum (20 Mbit/s), or the relay maximum (2 Mbit/s) on a relayed path. This viewer's share of an upload cap comes in M5.
+5. **Clamp** between the minimum (1.5 Mbit/s) and the cap. The cap is the user maximum (20 Mbit/s), or the relay maximum (2 Mbit/s) on a relayed path. With an upload cap, the cap is also this viewer's share of it ([Sessions](#sessions)).
 6. **Apply.**
    - Decreases apply at once.
    - Increases of more than 3% apply too, except where every bitrate change costs a keyframe (FFmpeg's NVENC, below). There, increases go in steps of at least 15%, at most once a second.
@@ -288,6 +297,41 @@ Each exchange must finish within 10 s. At most 32 incoming connections are being
 - **Opening a link only fills in the join screen.** Any web page can open a `couchco://` link, so the app previews the invite (the room's name, which only the invite claims, and whether it expired) and sends nothing until the user types the password and clicks Join. Links open in the default profile, since Windows runs one command per link scheme.
 - **Changing the password** (the owner) replaces the owner's password key. Members stay; invites already sent keep working with the new password.
 
+## Sessions
+
+A session is a member streaming a game to others in the same room, over the room's own connections. Code: `couch_room::session` (the host's state machine), `couch-engine`'s `rooms::sessions` (runs it), `couch_engine::pipeline` (video, sound and input).
+
+**The host is the only writer.** It sends its session's facts straight to each member it is connected to; nobody relays them, so they carry no signature and never name the host.
+- A member acts on a session message only from the session's own host: the connection's authenticated peer, on the current connection with it, while it is on the roster.
+- To a host, `SessionJoin`, `SessionLeave`, `ControlRequest` and `ControlCancel` count only for its live session and from a member on the current connection. A join for a session that isn't (or is no longer) live is answered `Ended`.
+
+**The directory** (optional messages: a peer that doesn't know sessions only misses them).
+- Going live, the host sends `SessionAnnounce` and `SessionStatus` to every member it is connected to, and again to every member whose connection to it becomes current. Titles follow the name rules.
+- `SessionStatus` follows every change of viewers, controller or the control pause. It may list as many viewers as the room has members; the host's own limit is its business.
+- `SessionEnded` ends it, with the reason: the host stopped, the game exited, the window or screen went, the host left the room or shut down, an error.
+- A member forgets a session when its connection to the host goes; the next connection brings the announcement again.
+
+**Watching.**
+- A profile hosts at most one session and watches at most one, never both. A host takes 1 to 7 viewers (its choice when going live; 4 by default).
+- The viewer subscribes to the connection's video epochs, sound and rumble *before* sending `SessionJoin`, so no epoch arrives unclaimed. Epochs naming another session are refused (`SESSION_END`).
+- The host answers `SessionJoinReply`: `Joined` (video follows, starting with a keyframe), `Full`, `Ended`, or `Unavailable` (no encoder could be opened). `Unavailable` can also come later, dropping a viewer whose stream failed.
+- `SessionLeave`, the viewer's connection closing, a ban, or the viewer leaving the room ends watching. A ban or a departure counts the moment the room applies it, not when the connection finally closes. The host's seat router releases what that viewer held at once (`SeatRouter::disconnected`), without waiting for the dead-man timer.
+
+**Control** (single player: seat 0).
+- A viewer asks with `ControlRequest`. The host accepts (a `SeatAssigned` follows) or declines (`ControlDeclined`); a declined viewer's next request within 5 s is declined at once. Each viewer has one request pending at most.
+- The host can also hand the seat to a viewer who didn't ask, and take it back. A viewer gives it back with `ControlCancel`, which also withdraws a pending request.
+- Every change goes through the host's seat router ([Input](#input)), the only judge of who holds the seat. Seat epochs start at a random value per session, so input from an earlier session on the same connection can't carry a current one.
+- Keyboard and mouse are a session-wide choice when going live, for a window source only; otherwise the holder gets the gamepad only.
+- **The panic key** (the host's own keyboard) releases every seat at once, declines pending requests and pauses control (`control_paused` in the status) until the host allows it again. A grant already on its way to the seat router when the key is pressed is refused too. The stream goes on.
+
+**Ending.** When the host ends a session it releases all input first, then sends `SessionEnded` and resets the epoch streams with `SESSION_END`, then stops encoding, capture and sound, and unplugs the virtual pad last.
+
+**The host's streams.** One capture feeds a latest-frame mailbox per viewer; each viewer has its own encoder, rate controller and epoch streams, so a slow viewer never holds up another (gate G7). One sound capture and Opus encoder serve every viewer. Capture and sound run only while someone watches.
+
+**Upload share.** With an upload cap, once a second each viewer's ceiling is recomputed (`couch_media::ratecontrol::UploadShare`): a viewer held back by its own network (aiming below an equal share) gets its target plus 25% to grow into; the others split what is left equally. Shares move in 0.5 Mbit/s steps, rise at once, but come down only when the cut exceeds 10% (or keeping them would overrun the cap by more than 10%), since every bitrate change costs an NVENC keyframe.
+
+**One stream acceptor per connection.** QUIC has one accept queue for unidirectional streams, so each room connection has one acceptor (`couch_net::streams`) that reads a stream's kind byte and hands it to whoever subscribed to that kind, as `couch_net::datagrams` does for datagram tags. Video and input can then flow both ways on one connection.
+
 ## Close and reset codes
 
 **Connection close** (`couch_proto::control::close_code`):
@@ -307,7 +351,10 @@ Each exchange must finish within 10 s. At most 32 incoming connections are being
 | 10 | `protocol` | A malformed or unexpected message |
 | 11 | `not_member` | Not on the owner's member list (any more) |
 
-**Stream reset:** `SKIP_AHEAD` (1) now; `SESSION_END` and `VIEWER_REMOVED` in M5.
+**Stream reset** (an epoch stream, by the host; or stopped by the viewer):
+- `SKIP_AHEAD` (1): a newer epoch replaces this one.
+- `SESSION_END` (2): the session is over; also a viewer's answer to an epoch that names another session.
+- `VIEWER_REMOVED` (3): this viewer left or was dropped.
 
 ## Viewer IPC
 
@@ -318,18 +365,18 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x01` | main to viewer | Hello: IPC version and session parameters |
 | `0x02` | main to viewer | Video frame |
 | `0x03` | main to viewer | Audio packet (postcard): `{seq, capture_us, arrived_us, packet}`, the datagram plus its arrival time on this machine |
-| `0x04` | main to viewer | HUD state |
+| `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, controller?, viewers u8, keyboard_mouse, control_paused, note}`, on every change. `host` and `controller` are display names |
 | `0x05` | main to viewer | Shutdown |
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
 | `0x07` | main to viewer | Seat state (postcard): `{holding, permissions}`. The viewer captures the mouse only while holding with mouse permission |
 | `0x08` | main to viewer | Rumble (postcard): `{low u8, high u8}` |
 | `0x81` | viewer to main | Local input (postcard `LocalInput`): `Key{usage, down}`, `MouseButton{button, down}`, `MouseMotion{dx, dy}`, `Wheel{dx, dy}`, `Pad(snapshot)` or `Alive` (every 100 ms). Deltas; the main process keeps the running totals |
 | `0x82` | viewer to main | Frame timing: `{epoch, seq, capture_us, arrived_us, decoded_us, presented_us, barcode_us}` |
-| `0x83` | viewer to main | User action (request control, leave) |
+| `0x83` | viewer to main | User action (postcard): `RequestControl`, `CancelControl` (withdraw or give back), `Leave` |
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 | `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
 
-`IPC_VERSION` (now 2) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 3) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Viewer hotkeys.** Keys pressed with Ctrl+Alt+Shift held stay in the viewer:
 - H shows or hides the HUD; F3 does too, unless the keyboard is being forwarded.

@@ -16,6 +16,7 @@ tracing.workspace = true
 [target.'cfg(windows)'.dependencies]
 vigem-rust.workspace = true
 windows = { workspace = true, features = [
+    "Win32_Graphics_Dwm",
     "Win32_Media",
     "Win32_Media_Audio",
     "Win32_Security",

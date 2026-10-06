@@ -1,11 +1,11 @@
 ---
 name: rate-control-gates
-description: Run and judge Couch Co-App's streaming gates (G1 latency, G3 loss, G4 blackout, G5 throttle) with `couch-cli gates`, and debug a failure from the rate-control and frame traces. Use after changing couch_media::ratecontrol, couch_net::congestion, couch_net::video, QUIC transport settings, encoder bitrate or keyframe handling, or the viewer's decode loop; when asked to measure streaming latency or check for a regression; and before reporting or committing such a change.
+description: Run and judge Couch Co-App's streaming gates (G1 latency, G3 loss, G4 blackout, G5 throttle, G7 one viewer's bad path not touching another's) with `couch-cli gates`, and debug a failure from the rate-control and frame traces. Use after changing couch_media::ratecontrol, couch_net::congestion, couch_net::video, QUIC transport settings, encoder bitrate or keyframe handling, the upload share, the host pipeline (`couch_engine::pipeline::host`), or the viewer's decode loop; when asked to measure streaming latency or check for a regression; and before reporting or committing such a change.
 ---
 
 # Rate-control gates
 
-`couch-cli gates` runs four `latency-probe` scenarios on this machine and judges each from its traces. The scenarios use the netem test transport, so no admin rights, second machine or internet are needed.
+`couch-cli gates` runs five `latency-probe` scenarios (G7 is two runs) on this machine and judges each from its traces. The scenarios use the netem test transport, so no admin rights, second machine or internet are needed.
 
 | Gate | Scenario | Pass |
 |---|---|---|
@@ -13,6 +13,7 @@ description: Run and judge Couch Co-App's streaming gates (G1 latency, G3 loss, 
 | G3 | 1% loss, 20 ms each way; 10 min (2 with `--quick`) | p95 ≤ G1 p95 + 2 × RTT + 20 ms; last minute's p95 within 10 ms of the best minute's; mean bitrate > 15 Mbit/s |
 | G4 | 2 s blackout at 10 s | latency back to baseline ≤ 1 s after the outage; exactly 1 recovery keyframe |
 | G5 | link throttled 25 → 5 Mbit/s at 10 s | bitrate within 2.5–6 Mbit/s for good ≤ 2 s after; latency back ≤ 2 s |
+| G7 | two viewers, 30 s, run twice: unimpaired, then only the host's traffic to the first viewer throttled to 5 Mbit/s (netem `to=<port>`) | the second viewer's p95 within 5 ms of its unimpaired run, and its median received bitrate ≥ 90% of it |
 
 How the timing checks work:
 - **Event times are exact.** G4 and G5 time from the netem schedule, which the host's trace records.
@@ -28,7 +29,7 @@ Every gate also needs a full run with 0 decode errors. Two checks are regression
 . .\scripts\dev.ps1
 Get-Process couch-* -ErrorAction SilentlyContinue | Stop-Process -Force
 cargo build --release -p couch-cli -p couch-viewer
-.\target\release\couch-cli.exe gates --quick      # about 4 min; without --quick about 12
+.\target\release\couch-cli.exe gates --quick      # about 6 min; without --quick about 14
 ```
 
 - **Stop leftover processes first.** A running `couch-cli.exe` makes the release link fail with "Access is denied". A leftover latency-clock window can be captured instead of the new one.
@@ -54,6 +55,14 @@ A pass that is clearly worse than the reference is still a regression to explain
 | G5 | catch-up 0.3–0.4 s after the throttle, to about 4 Mbit/s; settled at 0.3–0.4 s; latency back after 0.7–0.9 s; worst frame 100–420 ms; p95 42–45 ms |
 
 G5's worst frame varies most between runs. Repeat a borderline gate with `--only` before calling it a regression.
+
+## Many viewers on one PC
+
+The gates use one or two viewers. After changing the host pipeline, encoding or rate control (and in M9's zero-copy work), also run `.\scripts\viewers.ps1` (4 viewers) and `.\scripts\viewers.ps1 -Viewers 7`. Reference from M5a (`docs/m5a-results.md`):
+- **4 viewers:** 60 fps each, capture to present p50 about 22 ms and p95 about 30 ms, 20 Mbit/s each, slowest encode 11 to 12 ms.
+- **7 viewers:** the PC is the limit, at about 36 fps each and p50 about 61 ms, but every rate controller should stay at its 20 Mbit/s target.
+
+A controller falling to the 1.5 Mbit/s floor with many viewers means host load is being read as congestion again (`SendDelays`).
 
 ## When a check fails
 

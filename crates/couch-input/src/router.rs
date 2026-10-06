@@ -208,6 +208,17 @@ impl SeatRouter {
         }
     }
 
+    /// Like [`Self::new`], with each seat's epochs counting on from `epoch`.
+    /// A session starts at a random one, so input left over from an earlier
+    /// session on the same connection can't carry a current epoch.
+    pub fn starting_at(seats: u8, epoch: SeatEpoch) -> Self {
+        let mut router = Self::new(seats);
+        for seat in &mut router.seats {
+            seat.epoch = epoch;
+        }
+        router
+    }
+
     /// Whether the pointer is over the game window. Mouse button presses go
     /// in only then; motion and releases always do (while in front), so the
     /// pointer can come back.
@@ -604,6 +615,29 @@ mod tests {
             down: true,
         });
         assert_eq!(f.send(elsewhere, 30), vec![]);
+    }
+
+    #[test]
+    fn a_session_counts_epochs_on_from_its_own_start() {
+        let now = Instant::now();
+        let mut router = SeatRouter::starting_at(1, SeatEpoch(41));
+        router.set_foreground(true);
+        let effects = router.grant(SEAT, GUEST, ALL, now);
+        assert!(effects.contains(&Effect::Granted {
+            seat: SEAT,
+            epoch: SeatEpoch(42),
+            member: GUEST,
+            permissions: ALL,
+        }));
+        // Input tagged with a fresh router's first epoch, as an earlier
+        // session would have used, is dropped.
+        let earlier = Input::Key(KeyEvent {
+            seat: SEAT,
+            seat_epoch: SeatEpoch(1),
+            usage: W,
+            down: true,
+        });
+        assert_eq!(router.handle(GUEST, earlier, now), vec![]);
     }
 
     #[test]

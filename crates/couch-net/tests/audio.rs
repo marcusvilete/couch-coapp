@@ -11,6 +11,7 @@ use couch_net::{
     audio::{receive_audio, send_audio},
     datagrams::Datagrams,
     endpoint::{EndpointOptions, RelayChoice},
+    streams::Streams,
     video::{HostVideo, ViewerVideo},
 };
 use couch_proto::media::AudioDatagram;
@@ -32,10 +33,17 @@ async fn audio_datagrams_reach_the_viewer() {
     // Receiver reports flow viewer to host meanwhile; neither side may steal
     // the other's datagrams.
     let host_datagrams = Datagrams::start(host_conn.clone());
-    let _video = HostVideo::start(host_conn.clone(), 1, &host_datagrams);
+    let _video = HostVideo::start(
+        host_conn.clone(),
+        1,
+        &host_datagrams,
+        std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
+    );
     let viewer_datagrams = Datagrams::start(viewer_conn.clone());
     let _viewer_video = ViewerVideo::start(
         viewer_conn.clone(),
+        &Streams::start(viewer_conn.clone()),
+        None,
         std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
     );
     let mut audio = receive_audio(&viewer_datagrams);

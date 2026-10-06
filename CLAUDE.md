@@ -40,6 +40,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | Task | Command |
 |---|---|
 | Rooms end to end: engines over loopback (join through the owner, wrong passwords and rate limits, ban, owner offline, catching up, simultaneous restart, leave and close, including with the others offline, invite expiry) | `cargo test -p couch-engine --test rooms` (~20 s) |
+| Sessions end to end: three engines with a fake backend (fake capture, encoder, pad and viewer window): going live, two viewers, a full session, asking, declining, passing and giving back control, the panic key, a viewer closing its window, a ban, the host leaving, the window closing, stopping, shutting down mid-game | `cargo test -p couch-engine --test sessions` (~2 s) |
 | Join through iroh's public relay (needs internet) | `cargo test -p couch-engine --test rooms -- --ignored` |
 | The room state machine, including the simulated network and its property test | `cargo test -p couch-room` |
 
@@ -47,10 +48,11 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 
 | Task | Command |
 |---|---|
-| Stream a window to a viewer | `couch-cli host --source window --title "<substring>"` prints `TICKET ...`; then `couch-cli view <ticket>` |
+| Stream a window to viewers | `couch-cli host --source window --title "<substring>"` prints `TICKET ...`; then `couch-cli view <ticket>`, up to `--max-viewers` (4) at once, each with its own encoder. The first viewer gets the seat. `--upload-mbps` caps the total |
 | Stream the test pattern | `couch-cli host --source testpattern --pattern-size 1280 720 --fps 30` |
 | End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
-| Rate-control gates G1 and G3–G5, run and judged | `couch-cli gates --quick` (4 min) or `couch-cli gates` (12 min). The `rate-control-gates` skill covers traces and reading a failure. |
+| Rate-control gates G1, G3–G5 and G7 (one viewer's bad path leaves another's stream alone), run and judged | `couch-cli gates --quick` (6 min) or `couch-cli gates` (14 min). `latency-probe --viewers 2 --impair-first "rate=5mbit"` runs G7's setup by hand. The `rate-control-gates` skill covers traces and reading a failure. |
+| Many viewers of one host on this PC (fps, latency, bitrate and encode time per viewer) | `.\scripts\viewers.ps1` (4) or `.\scripts\viewers.ps1 -Viewers 7`, after the release build |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
 | Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine |
 | Virtual pad (needs ViGEmBus) | `couch-cli pad-test`, then watch it in `joy.cpl`. `--real-pad-ids` on `pad-test` or `host` gives it a real Xbox 360 controller's ids, which a viewer on this machine would capture and send back |
@@ -67,7 +69,8 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 **Main process.** The Tauri app. Its Rust side links `couch-engine`, which owns:
 - the iroh endpoint;
 - room and session state;
-- on a host: capture, a per-viewer encoder and transport, and input injection.
+- room sessions (`rooms::sessions`): the one we stream, the one we watch;
+- the streaming pipelines, `couch_engine::pipeline` (shared with `couch-cli`): on a host, one capture, an encoder and transport per viewer, one sound capture, and the input task with the seat router and the injectors; on a viewer, `couch-viewer` fed over its pipe. What they need from the machine comes through `pipeline::Backend`, faked in tests.
 
 **Viewer.** `couch-viewer` is a separate child process: SDL3 window, decode, render, audio, input capture, HUD.
 - It does no networking. The main process feeds it encoded frames over stdin and reads input and timing from its stdout (`couch_proto::ipc`).
@@ -88,7 +91,8 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - `couch-codec-ffmpeg`: the only crate that links FFmpeg (video).
 - `couch-codec-opus`: the only crate that links libopus. FFmpeg's libopus wrapper can't do loss concealment, so audio doesn't go through FFmpeg.
 - `couch-platform-win`: the only crate that calls Windows APIs. It compiles to nothing elsewhere (`#![cfg(windows)]`). Before writing unsafe Windows, COM or SDL code, read the `windows-ffi-pitfalls` skill.
-- `couch-engine`: knows nothing about Tauri. `apps/desktop/src-tauri` stays a thin adapter. Its room actor (`rooms.rs`) is the only owner of room state; other tasks report to it over a channel.
+- `couch-engine`: knows nothing about Tauri. `apps/desktop/src-tauri` stays a thin adapter. Its room actor (`rooms.rs`) is the only owner of room state; other tasks report to it over a channel. **Input never goes through the actor**: it runs from the connection through the pipeline's input task to the injectors.
+- `couch-net`: each connection has one datagram reader (`datagrams`) and one unidirectional-stream acceptor (`streams`). Subscribe to them by tag or kind; never call `accept_uni` or `read_datagram` yourself, or two readers steal each other's traffic.
 - `couch-testkit`: fakes; dev-dependency only.
 
 ## Rules that aren't obvious from the code
@@ -115,6 +119,12 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **An opened link never joins by itself.** Any web page can open a `couchco://` link. It only fills in the join screen (through `Engine::open_link`); joining still needs the password and a click.
 - **Secrets never reach logs.** `InviteToken`, `PasswordKey`, the passwords and invites in `Command`, and the links in `Response` print as `..`; keep it so for anything new. Only the owner stores the password key, never the password.
 - After touching rooms, admission, the engine's room actor or `couch_net::control`, follow the `room-security-checks` skill.
+
+**Sessions** (`docs/protocol.md` Sessions)
+- **The host is the only writer** of its session's facts, sent straight to each member, never relayed. A member acts on a session message only from that session's host, on the current connection, while the host is on the roster. Never let one member speak for another's session.
+- **The seat router alone decides who plays.** `couch_room::session` asks it and mirrors its `Granted`/`Revoked`; never inject or track a holder elsewhere.
+- **Ending releases first:** input, then `SessionEnded` and `SESSION_END`, then encoders and capture, then the pad. A viewer that goes (leaves, closes its window, loses the connection, is banned) is released at once through `SeatRouter::disconnected`.
+- After touching sessions or the pipelines, follow both the `room-security-checks` and the `input-safety-checks` skills; after touching the host pipeline's video path, the `rate-control-gates` skill too.
 
 **Licensing.** The app's license is undecided.
 - Only permissive crates are allowed (`deny.toml`).

@@ -12,6 +12,7 @@ use couch_net::{
     SecretKey,
     datagrams::Datagrams,
     endpoint::{EndpointOptions, RelayChoice},
+    streams::Streams,
     video::{HostVideo, ViewerVideo},
 };
 
@@ -46,8 +47,19 @@ async fn frames_arrive_in_order_and_reports_clear_the_backlog() {
     let (host_conn, viewer_conn) = connect(&host, &viewer, host.addr()).await;
 
     let datagrams = Datagrams::start(host_conn.clone());
-    let mut video = HostVideo::start(host_conn, 7, &datagrams);
-    let mut received = ViewerVideo::start(viewer_conn, Arc::new(ProcessClock::new()));
+    let mut video = HostVideo::start(
+        host_conn,
+        7,
+        &datagrams,
+        std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
+    );
+    let streams = Streams::start(viewer_conn.clone());
+    let mut received = ViewerVideo::start(
+        viewer_conn,
+        &streams,
+        Some(7),
+        Arc::new(ProcessClock::new()),
+    );
 
     video.start_epoch(&PARAMS).unwrap();
     for i in 0..20 {

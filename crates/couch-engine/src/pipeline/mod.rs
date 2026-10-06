@@ -1,0 +1,244 @@
+//! The streaming pipelines, shared by the desktop app and `couch-cli`:
+//! - [`host`] streams one session to its viewers;
+//! - [`watch`] shows a session in `couch-viewer`.
+//!
+//! Both run over one iroh connection per pair, sharing that connection's
+//! datagram reader and stream acceptor (`couch_net::datagrams`,
+//! `couch_net::streams`) with whatever else uses it.
+//!
+//! What they need from the machine (capture, encoders, sound, injection, the
+//! viewer process) comes through [`Backend`], so tests run them with fakes
+//! and without a GPU.
+//!
+//! **Input never waits on anything else.** The host's input runs in a task
+//! of its own, from the connection through the seat router to the
+//! injectors. The room actor only sends it grants and revocations.
+
+pub mod host;
+pub mod ipc;
+#[cfg(windows)]
+pub mod platform;
+pub mod watch;
+
+use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
+
+use couch_input::{InputError, KbmInjector, VirtualPad};
+use couch_media::{AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, clock::Clock};
+use tokio::io::{AsyncRead, AsyncWrite};
+
+/// A native window or screen handle (an `HWND` or `HMONITOR` on Windows).
+pub type NativeId = isize;
+
+/// What a host streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// A window, by its native handle, as [`Backend::sources`] listed it.
+    Window(NativeId),
+    /// A screen, by its native handle, as [`Backend::sources`] listed it.
+    Screen(NativeId),
+    /// The first window whose title contains this text (`couch-cli host`).
+    WindowTitle(String),
+    /// The primary screen (`couch-cli host --source monitor`).
+    PrimaryScreen,
+    /// Generated frames, for tests and measurements.
+    TestPattern { width: u32, height: u32 },
+}
+
+impl Source {
+    /// Keyboard and mouse can only be aimed at a window: they go in only
+    /// while it is in front.
+    pub fn is_window(&self) -> bool {
+        matches!(self, Self::Window(_) | Self::WindowTitle(_))
+    }
+}
+
+/// What a host could stream right now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sources {
+    pub windows: Vec<WindowSource>,
+    pub screens: Vec<ScreenSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowSource {
+    pub id: NativeId,
+    pub title: String,
+    /// The program's file name, such as `Celeste.exe`; may be empty.
+    pub app: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenSource {
+    pub id: NativeId,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// Which sound a host streams (`couch-cli host --audio`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AudioChoice {
+    /// The game for a window, everything but us for a screen, test clicks
+    /// for the test pattern.
+    #[default]
+    Auto,
+    /// The captured window's process and its children.
+    Game,
+    /// Everything this PC plays, except this app and its viewers.
+    System,
+    /// The click track.
+    Tone,
+    Off,
+}
+
+/// A sound source, once the choice is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioKind {
+    /// The process behind this window, and its children.
+    Game(NativeId),
+    System,
+    Tone,
+}
+
+/// Where keyboard and mouse would land, checked right before every input.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Focus {
+    /// The game window is in front.
+    pub foreground: bool,
+    /// The pointer is over it.
+    pub pointer_inside: bool,
+}
+
+/// How to show the viewer window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ViewerOptions {
+    pub position: Option<(i32, i32)>,
+    pub size: Option<(u32, u32)>,
+    /// Start with the HUD hidden (it would cover a latency barcode).
+    pub hide_hud: bool,
+    /// Write the viewer's log here, without a console window. `None` lets it
+    /// log to ours (the CLI).
+    pub log: Option<PathBuf>,
+}
+
+/// A running viewer: its stdin and stdout carry `couch_proto::ipc`.
+pub struct ViewerProcess {
+    pub stdin: Pin<Box<dyn AsyncWrite + Send>>,
+    pub stdout: Pin<Box<dyn AsyncRead + Send>>,
+    /// Keeps the process alive; dropping it ends a real viewer.
+    pub guard: Box<dyn Any + Send>,
+}
+
+/// What the pipelines need from the machine.
+pub trait Backend: Send + Sync + 'static {
+    /// The clock frames and packets are stamped with (QPC on Windows), which
+    /// the viewer process shares.
+    fn clock(&self) -> Arc<dyn Clock>;
+
+    /// What could be streamed right now.
+    fn sources(&self) -> Result<Sources, MediaError>;
+
+    /// Starts capturing at up to `fps`. Also returns the captured window,
+    /// if the source is one.
+    fn capture(
+        &self,
+        source: &Source,
+        fps: u32,
+    ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError>;
+
+    fn encoder(&self, config: EncoderConfig) -> Result<Box<dyn VideoEncoder>, MediaError>;
+
+    fn audio(&self, kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError>;
+
+    /// Plugs in a virtual pad. Blocks: that can take seconds. `real_ids`
+    /// gives it a real Xbox 360 controller's ids instead of the development
+    /// ids a viewer on this machine skips.
+    fn plug_pad(&self, real_ids: bool) -> Result<Box<dyn VirtualPad>, InputError>;
+
+    fn kbm(&self) -> Box<dyn KbmInjector>;
+
+    fn focus(&self, window: NativeId) -> Focus;
+
+    fn window_exists(&self, window: NativeId) -> bool;
+
+    fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError>;
+}
+
+/// This machine's backend: Windows' own, or one that refuses everything
+/// where none exists yet.
+pub fn platform_backend() -> Arc<dyn Backend> {
+    #[cfg(windows)]
+    {
+        Arc::new(platform::WindowsBackend)
+    }
+    #[cfg(not(windows))]
+    {
+        Arc::new(Unsupported)
+    }
+}
+
+#[cfg(not(windows))]
+struct Unsupported;
+
+#[cfg(not(windows))]
+impl Backend for Unsupported {
+    fn clock(&self) -> Arc<dyn Clock> {
+        Arc::new(couch_media::clock::ProcessClock::new())
+    }
+    fn sources(&self) -> Result<Sources, MediaError> {
+        Ok(Sources::default())
+    }
+    fn capture(
+        &self,
+        _: &Source,
+        _: u32,
+    ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError> {
+        Err(unsupported())
+    }
+    fn encoder(&self, _: EncoderConfig) -> Result<Box<dyn VideoEncoder>, MediaError> {
+        Err(unsupported())
+    }
+    fn audio(&self, _: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
+        Err(unsupported())
+    }
+    fn plug_pad(&self, _: bool) -> Result<Box<dyn VirtualPad>, InputError> {
+        Err(InputError::DriverUnavailable("not on this platform".into()))
+    }
+    fn kbm(&self) -> Box<dyn KbmInjector> {
+        Box::new(NoKbm)
+    }
+    fn focus(&self, _: NativeId) -> Focus {
+        Focus::default()
+    }
+    fn window_exists(&self, _: NativeId) -> bool {
+        false
+    }
+    fn launch_viewer(&self, _: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
+        Err(unsupported())
+    }
+}
+
+#[cfg(not(windows))]
+fn unsupported() -> MediaError {
+    MediaError::Unsupported("streaming on this platform".into())
+}
+
+#[cfg(not(windows))]
+struct NoKbm;
+
+#[cfg(not(windows))]
+impl KbmInjector for NoKbm {
+    fn key(&mut self, _: couch_input::HidUsage, _: bool) -> Result<(), InputError> {
+        Ok(())
+    }
+    fn mouse_move(&mut self, _: i32, _: i32) -> Result<(), InputError> {
+        Ok(())
+    }
+    fn mouse_button(&mut self, _: couch_input::MouseButton, _: bool) -> Result<(), InputError> {
+        Ok(())
+    }
+    fn wheel(&mut self, _: i32, _: i32) -> Result<(), InputError> {
+        Ok(())
+    }
+}

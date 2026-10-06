@@ -1,51 +1,25 @@
 //! `couch-cli host`: stream a window, the monitor or the test pattern, with
-//! its audio, to one viewer at a time, with rate control.
+//! its audio, to up to `--max-viewers` viewers at once, each with an encoder
+//! and rate control of its own (`couch_engine::pipeline::host`, the app's
+//! own pipeline). The first viewer to connect gets the seat while nobody
+//! holds it; the app instead hands the seat out on request.
 
-use std::{
-    fs::File,
-    io::{LineWriter, Write},
-    path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
-use couch_codec_ffmpeg::FfmpegEncoder;
-use couch_input::Permissions;
-use couch_media::{
-    CaptureEvent, Capturer, Codec, EncoderConfig, EncoderInput, VideoEncoder, VideoParams,
-    VideoSender,
-    clock::LATENCY_CLOCK_TITLE,
-    ratecontrol::{RateAction, RateConfig, RateController},
-    testpattern::TestPattern,
+use couch_engine::pipeline::{
+    AudioChoice, Source,
+    host::{HostEvent, HostOptions, HostStream, NetemElapsed, Rates, ViewerStats},
+    platform_backend,
 };
-use couch_net::{
-    Connection, control, datagrams::Datagrams, endpoint, netem::NetemTransport, video::HostVideo,
-};
-use couch_platform_win::foreground::WindowId;
-use couch_platform_win::{
-    capture::{CaptureOptions, CaptureSource, WgcCapturer},
-    clock::QpcClock,
-};
-use couch_proto::control::ControlMessage;
+use couch_input::{MemberId, Permissions, SeatEpoch, router::SeatStatus};
+use couch_media::clock::LATENCY_CLOCK_TITLE;
+use couch_net::{Connection, control, datagrams::Datagrams, endpoint, streams::Streams};
+use couch_proto::control::{ControlMessage, SeatAssigned, SeatReleased};
 use iroh_tickets::endpoint::EndpointTicket;
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::sync::mpsc;
 
-use crate::{
-    host_audio::{self, AudioChoice},
-    host_input,
-    net_args::{NetArgs, dial_addr},
-};
-
-#[derive(Debug, Clone)]
-pub enum Source {
-    Window(String),
-    Monitor,
-    TestPattern { width: u32, height: u32 },
-}
+use crate::net_args::{NetArgs, dial_addr};
 
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -55,13 +29,34 @@ pub struct Args {
     pub min_mbps: f64,
     pub max_mbps: f64,
     pub relay_max_mbps: f64,
-    /// Write every rate-controller tick (feedback and action) to this CSV file.
+    /// The host's upload cap, split between viewers.
+    pub upload_mbps: Option<f64>,
+    pub max_viewers: usize,
+    /// Write every rate-controller tick to CSV files, one per viewer.
     pub rc_trace: Option<PathBuf>,
-    /// What the viewer may send: the gamepad by default.
+    /// What the viewer holding the seat may send: the gamepad by default.
     pub permissions: Permissions,
     pub real_pad_ids: bool,
     pub audio: AudioChoice,
     pub net: NetArgs,
+}
+
+/// What happens on a viewer's connection, as the main loop hears it.
+enum FromViewer {
+    Joined {
+        member: MemberId,
+        conn: Connection,
+        control: mpsc::UnboundedSender<ControlMessage>,
+    },
+    Keyframe(MemberId),
+    Left(MemberId),
+}
+
+struct Viewer {
+    conn: Connection,
+    control: mpsc::UnboundedSender<ControlMessage>,
+    /// Kept for the connection's lifetime.
+    _channels: (Datagrams, Streams),
 }
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
@@ -75,48 +70,270 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let endpoint = endpoint::bind(options).await?;
     let addr = dial_addr(&endpoint, netem.as_deref(), args.net.uses_relays()).await?;
     println!("TICKET {}", EndpointTicket::new(addr));
-    println!("waiting for a viewer (Ctrl+C to stop)");
+    println!("waiting for viewers (Ctrl+C to stop)");
 
-    // Stopping must release whatever a viewer holds: Windows keeps injected
-    // keys down after the process that pressed them exits.
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let inputs: Mutex<Vec<JoinHandle<()>>> = Mutex::default();
-    let serving = async {
-        while let Some(incoming) = endpoint.accept().await {
-            let conn = match incoming.accept().context("accepting")?.await {
-                Ok(conn) => conn,
+    let mbps = |v: f64| (v * 1e6) as u32;
+    let netem_elapsed = netem.map(|link| Arc::new(move || link.elapsed()) as NetemElapsed);
+    let (stream, mut events) = HostStream::start(
+        platform_backend(),
+        HostOptions {
+            source: args.source.clone(),
+            fps: args.fps,
+            rates: Rates {
+                min_bps: mbps(args.min_mbps),
+                start_bps: mbps(args.start_mbps),
+                max_bps: mbps(args.max_mbps),
+                relay_max_bps: mbps(args.relay_max_mbps),
+            },
+            upload_bps: args.upload_mbps.map(mbps),
+            audio: args.audio,
+            real_pad_ids: args.real_pad_ids,
+            session: 1,
+            first_epoch: SeatEpoch(0),
+            rc_trace: args.rc_trace.clone(),
+            netem_elapsed,
+        },
+    )
+    .await;
+    if args
+        .permissions
+        .intersects(Permissions::KEYBOARD | Permissions::MOUSE)
+        && !args.source.is_window()
+    {
+        println!("keyboard and mouse stay off: they need --source window");
+    }
+
+    let (from_viewers, mut heard) = mpsc::unbounded_channel();
+    tokio::spawn(accept_viewers(endpoint.clone(), from_viewers));
+
+    let mut viewers: HashMap<MemberId, Viewer> = HashMap::new();
+    let mut holder: Option<MemberId> = None;
+    let started = std::time::Instant::now();
+    let since = || started.elapsed().as_secs_f64();
+    let stop = stop_requested();
+    tokio::pin!(stop);
+
+    let ended = loop {
+        tokio::select! {
+            Some(message) = heard.recv() => match message {
+                FromViewer::Joined { member, conn, control } => {
+                    if viewers.len() >= args.max_viewers {
+                        println!("viewer {} turned away: {} watching already", short(member), viewers.len());
+                        conn.close(0u32.into(), b"full");
+                        continue;
+                    }
+                    println!("viewer {} connected", short(member));
+                    let channels = (Datagrams::start(conn.clone()), Streams::start(conn.clone()));
+                    stream.add_viewer(member, conn.clone(), &channels.0, &channels.1);
+                    if holder.is_none() {
+                        holder = Some(member);
+                        stream.grant(member, args.permissions);
+                    }
+                    viewers.insert(member, Viewer { conn, control, _channels: channels });
+                }
+                FromViewer::Keyframe(member) => stream.keyframe(member),
+                FromViewer::Left(member) => {
+                    if viewers.remove(&member).is_some() {
+                        println!("viewer {} disconnected", short(member));
+                        stream.remove_viewer(member);
+                    }
+                    if holder == Some(member) {
+                        holder = None;
+                    }
+                }
+            },
+            Some(event) = events.recv() => {
+                if let Some(ended) = on_event(event, &viewers, since()) {
+                    break ended;
+                }
+            }
+            () = &mut stop => {
+                println!("stopping");
+                break Ok(());
+            }
+        }
+    };
+
+    // Releases everything first; the events that says so are printed below.
+    stream.stop().await;
+    while let Ok(event) = events.try_recv() {
+        on_event(event, &viewers, since());
+    }
+    for viewer in viewers.values() {
+        viewer.conn.close(0u32.into(), b"bye");
+    }
+    endpoint.close().await;
+    ended
+}
+
+/// Prints an event; `Some` when the stream must end.
+fn on_event(
+    event: HostEvent,
+    viewers: &HashMap<MemberId, Viewer>,
+    secs: f64,
+) -> Option<anyhow::Result<()>> {
+    match event {
+        HostEvent::Granted {
+            member,
+            seat,
+            epoch,
+            permissions,
+        } => {
+            if let Some(v) = viewers.get(&member) {
+                let _ = v.control.send(ControlMessage::SeatAssigned(SeatAssigned {
+                    seat,
+                    seat_epoch: epoch,
+                    permissions,
+                }));
+            }
+        }
+        HostEvent::Revoked {
+            member,
+            seat,
+            epoch,
+        } => {
+            if let Some(v) = viewers.get(&member) {
+                let _ = v.control.send(ControlMessage::SeatReleased(SeatReleased {
+                    seat,
+                    seat_epoch: epoch,
+                }));
+            }
+        }
+        HostEvent::Seat { status, at } => {
+            let (what, event) = match status {
+                SeatStatus::Active => ("active", "active"),
+                SeatStatus::Suspended => ("suspended, everything released", "suspended"),
+                SeatStatus::Host => ("back with the host", "revoked"),
+                SeatStatus::Granted => ("waiting", "waiting"),
+            };
+            println!("{secs:8.3}s  seat 0 {what}");
+            event_line(event, at.0);
+        }
+        HostEvent::ViewerGone { at, .. } => {
+            println!("{secs:8.3}s  viewer gone: input released");
+            event_line("gone", at.0);
+        }
+        HostEvent::Released { at } => {
+            println!("{secs:8.3}s  host stopping: input released");
+            event_line("stopped", at.0);
+        }
+        HostEvent::ViewerFailed { member, error } => {
+            println!("viewer {}: {error}", short(member));
+            if let Some(v) = viewers.get(&member) {
+                v.conn.close(0u32.into(), b"failed");
+            }
+        }
+        HostEvent::Stats(stats) => println!("{}", stats_line(&stats, viewers.len() > 1)),
+        HostEvent::Rumble(r) => println!(
+            "{secs:8.3}s  rumble from the game: low {} high {}",
+            r.low_frequency, r.high_frequency
+        ),
+        HostEvent::SourceClosed => {
+            println!("the captured source closed");
+            return Some(Ok(()));
+        }
+        HostEvent::CaptureFailed(e) => return Some(Err(anyhow::anyhow!("capture failed: {e}"))),
+        HostEvent::Note(text) => println!("{text}"),
+    }
+    None
+}
+
+fn stats_line(s: &ViewerStats, name_it: bool) -> String {
+    let fb = s.feedback;
+    let who = if name_it {
+        format!("{}  ", short(s.member))
+    } else {
+        String::new()
+    };
+    format!(
+        "{who}{:5.1} fps  {:5.1} Mbit/s (target {:5.1})  rtt {:5.1} ms  delay+ {:5.1} ms  backlog {:6} B  \
+         loss {}  key {}  catch-up {}  pause {}  encode max {:.1} ms  {}  audio {}",
+        s.fps,
+        s.bps / 1e6,
+        f64::from(s.applied_bps) / 1e6,
+        f64::from(fb.rtt_us) / 1000.0,
+        f64::from(fb.delay_trend_us) / 1000.0,
+        fb.outstanding_bytes,
+        fb.lost_packets,
+        s.keyframes,
+        s.catch_ups,
+        s.pauses,
+        f64::from(s.encode_us_max) / 1000.0,
+        if fb.relayed { "RELAY" } else { "direct" },
+        s.audio_packets,
+    )
+}
+
+fn short(member: MemberId) -> String {
+    member.to_hex()[..10].to_string()
+}
+
+/// `EVENT <what> <QPC µs>`, for `release-check`, which times releases on the
+/// same clock. What: `active`, `suspended`, `revoked`, `waiting`, and when a
+/// viewer's input ends, `gone` (it disconnected) or `stopped` (the host).
+fn event_line(what: &str, qpc_us: u64) {
+    println!("EVENT {what} {qpc_us}");
+}
+
+/// Accepts viewers, runs each one's control stream, and reports to the main
+/// loop.
+async fn accept_viewers(endpoint: couch_net::Endpoint, to_main: mpsc::UnboundedSender<FromViewer>) {
+    while let Some(incoming) = endpoint.accept().await {
+        let to_main = to_main.clone();
+        tokio::spawn(async move {
+            let conn = match incoming.accept().context("accepting") {
+                Ok(connecting) => match connecting.await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        println!("connection failed: {e}");
+                        return;
+                    }
+                },
                 Err(e) => {
-                    println!("connection failed: {e}");
-                    continue;
+                    println!("connection failed: {e:#}");
+                    return;
                 }
             };
-            println!("viewer {} connected", conn.remote_id().fmt_short());
-            if let Err(e) = serve(
-                conn.clone(),
-                &args,
-                netem.clone(),
-                shutdown_rx.clone(),
-                &inputs,
-            )
-            .await
+            let member = MemberId(*conn.remote_id().as_bytes());
+            let (mut tx, mut rx, hello) = match control::accept(&conn).await {
+                Ok(control) => control,
+                Err(e) => {
+                    println!("no control stream: {e}");
+                    return;
+                }
+            };
+            println!("viewer app {}", hello.app_version);
+            let (control, mut outgoing) = mpsc::unbounded_channel::<ControlMessage>();
+            tokio::spawn(async move {
+                while let Some(message) = outgoing.recv().await {
+                    if let Err(e) = tx.send(&message).await {
+                        tracing::debug!("seat notice not sent: {e}");
+                        return;
+                    }
+                }
+            });
+            if to_main
+                .send(FromViewer::Joined {
+                    member,
+                    conn: conn.clone(),
+                    control,
+                })
+                .is_err()
             {
-                println!("session ended: {e:#}");
+                return;
             }
-            conn.close(0u32.into(), b"bye");
-        }
-        Ok(())
-    };
-    tokio::select! {
-        result = serving => result,
-        () = stop_requested() => {
-            println!("stopping");
-            shutdown_tx.send_replace(true);
-            let handles = std::mem::take(&mut *inputs.lock().unwrap());
-            for handle in handles {
-                let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+            loop {
+                match rx.recv().await {
+                    Ok(Some(ControlMessage::KeyframeRequest(request))) => {
+                        tracing::debug!(?request, "keyframe requested");
+                        let _ = to_main.send(FromViewer::Keyframe(member));
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break,
+                }
             }
-            Ok(())
-        }
+            let _ = to_main.send(FromViewer::Left(member));
+        });
     }
 }
 
@@ -134,361 +351,6 @@ async fn stop_requested() {
         _ => {
             let _ = tokio::signal::ctrl_c().await;
         }
-    }
-}
-
-async fn serve(
-    conn: Connection,
-    args: &Args,
-    netem: Option<Arc<NetemTransport>>,
-    shutdown: watch::Receiver<bool>,
-    inputs: &Mutex<Vec<JoinHandle<()>>>,
-) -> anyhow::Result<()> {
-    let (control_tx, mut control_rx, hello) = control::accept(&conn).await?;
-    println!("viewer app {}", hello.app_version);
-    let datagrams = Datagrams::start(conn.clone());
-    // Set by the capture thread once it has the window.
-    let game_window = Arc::new(AtomicIsize::new(0));
-    let handle = host_input::spawn(
-        conn.clone(),
-        &datagrams,
-        control_tx,
-        host_input::Options {
-            permissions: args.permissions,
-            real_pad_ids: args.real_pad_ids,
-            game_window: game_window.clone(),
-            window_source: matches!(args.source, Source::Window(_)),
-        },
-        shutdown,
-    );
-    inputs.lock().unwrap().push(handle);
-
-    let keyframe = Arc::new(AtomicBool::new(true));
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let keyframe = keyframe.clone();
-        tokio::spawn(async move {
-            while let Ok(Some(message)) = control_rx.recv().await {
-                if let ControlMessage::KeyframeRequest(request) = message {
-                    tracing::debug!(?request, "keyframe requested");
-                    keyframe.store(true, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
-    let audio_sent = Arc::new(AtomicU64::new(0));
-    let audio = host_audio::spawn(
-        conn.clone(),
-        host_audio::Options {
-            choice: args.audio,
-            video: args.source.clone(),
-            game_window: game_window.clone(),
-        },
-        stop.clone(),
-        audio_sent.clone(),
-    );
-
-    let video = HostVideo::start(conn.clone(), 1, &datagrams);
-    let media = {
-        let (args, keyframe, stop) = (args.clone(), keyframe.clone(), stop.clone());
-        tokio::task::spawn_blocking(move || {
-            media_loop(
-                &args,
-                video,
-                &keyframe,
-                &stop,
-                netem.as_deref(),
-                &game_window,
-                &audio_sent,
-            )
-        })
-    };
-    let result = tokio::select! {
-        result = media => result.context("media thread").and_then(|r| r),
-        error = conn.closed() => {
-            println!("viewer disconnected: {error}");
-            Ok(())
-        }
-    };
-    stop.store(true, Ordering::SeqCst);
-    if let Some(audio) = audio {
-        let _ = tokio::task::spawn_blocking(move || audio.join()).await;
-    }
-    result
-}
-
-/// The capturer, and the captured window if the source is one.
-fn open_capturer(args: &Args) -> anyhow::Result<(Box<dyn Capturer>, Option<WindowId>)> {
-    let options = CaptureOptions {
-        min_interval: Duration::from_secs(1) / args.fps,
-        cursor: true,
-    };
-    Ok(match &args.source {
-        Source::Window(title) => {
-            let capturer = WgcCapturer::start(&CaptureSource::WindowTitle(title.clone()), options)?;
-            let window = capturer.window();
-            (Box::new(capturer), window)
-        }
-        Source::Monitor => (
-            Box::new(WgcCapturer::start(&CaptureSource::PrimaryMonitor, options)?),
-            None,
-        ),
-        &Source::TestPattern { width, height } => (
-            Box::new(TestPattern::new(
-                width,
-                height,
-                args.fps,
-                Arc::new(QpcClock),
-            )),
-            None,
-        ),
-    })
-}
-
-fn media_loop(
-    args: &Args,
-    mut video: HostVideo,
-    keyframe: &AtomicBool,
-    stop: &AtomicBool,
-    netem: Option<&NetemTransport>,
-    game_window: &AtomicIsize,
-    audio_sent: &AtomicU64,
-) -> anyhow::Result<()> {
-    let (mut capturer, window) = open_capturer(args)?;
-    if let Some(window) = window {
-        game_window.store(window.0, Ordering::Release);
-    }
-    let mbps = |v: f64| (v * 1e6) as u32;
-    let mut encoder: Option<FfmpegEncoder> = None;
-    let mut controller: Option<RateController> = None;
-    let mut params: Option<VideoParams> = None;
-    let mut force_keyframe = true;
-    let mut last_tick = Instant::now();
-    let mut stats = PeriodStats::new();
-    let mut trace = args.rc_trace.as_deref().map(RcTrace::create).transpose()?;
-
-    while !stop.load(Ordering::SeqCst) {
-        if let (Some(c), Some(enc), Some(p)) = (controller.as_mut(), encoder.as_mut(), params)
-            && last_tick.elapsed() >= Duration::from_millis(50)
-        {
-            last_tick = Instant::now();
-            let fb = video.feedback();
-            let action = c.tick(last_tick, &fb);
-            if let Some(trace) = trace.as_mut() {
-                trace.write(&fb, c, action, netem.and_then(NetemTransport::elapsed))?;
-            }
-            match action {
-                RateAction::Keep => {}
-                RateAction::SetBitrate(bps) => enc.set_bitrate(bps)?,
-                RateAction::CatchUp { bitrate } => {
-                    enc.set_bitrate(bitrate)?;
-                    video.start_epoch(&p)?;
-                    force_keyframe = true;
-                    stats.catch_ups += 1;
-                }
-                RateAction::Pause => {
-                    // Drop what is queued; nothing more until reports return.
-                    video.start_epoch(&p)?;
-                    stats.pauses += 1;
-                    println!("viewer silent: paused");
-                }
-                RateAction::Resume { bitrate } => {
-                    enc.set_bitrate(bitrate)?;
-                    force_keyframe = true;
-                    println!(
-                        "viewer back: resuming at {:.1} Mbit/s",
-                        f64::from(bitrate) / 1e6
-                    );
-                }
-            }
-            stats.last_feedback = Some(fb);
-        }
-
-        let frame = match capturer.next_event(Duration::from_millis(10))? {
-            Some(CaptureEvent::Frame(frame)) => frame.cropped_to_even(),
-            Some(CaptureEvent::SourceClosed) => {
-                println!("the captured source closed");
-                return Ok(());
-            }
-            None => continue,
-        };
-
-        // Nothing goes out while the viewer is silent, not even a new size:
-        // the first frame after resuming reopens the encoder if it changed.
-        if controller.as_ref().is_some_and(RateController::is_paused) {
-            continue;
-        }
-
-        let size_changed =
-            params.is_none_or(|p| (p.width, p.height) != (frame.width, frame.height));
-        if size_changed {
-            let mut rate = RateConfig {
-                min_bps: mbps(args.min_mbps),
-                max_bps: mbps(args.max_mbps),
-                relay_max_bps: mbps(args.relay_max_mbps),
-                start_bps: controller
-                    .as_ref()
-                    .map_or(mbps(args.start_mbps), |c| c.applied_bps()),
-                keyframe_costly: false,
-            };
-            // The encoder must start where the controller does.
-            let start = rate.clamped_start();
-            let enc = FfmpegEncoder::open_best(EncoderConfig {
-                codec: Codec::H264,
-                width: frame.width,
-                height: frame.height,
-                fps: args.fps,
-                bitrate_bps: start,
-            })?;
-            println!(
-                "encoding {}x{} with {} at {:.1} Mbit/s",
-                frame.width,
-                frame.height,
-                enc.caps().name,
-                f64::from(start) / 1e6
-            );
-            rate.keyframe_costly = enc.caps().bitrate_change_costs_keyframe;
-            controller = Some(RateController::new(rate));
-            let p = VideoParams {
-                codec: Codec::H264,
-                width: frame.width,
-                height: frame.height,
-                fps: args.fps,
-            };
-            video.start_epoch(&p)?;
-            params = Some(p);
-            encoder = Some(enc);
-            force_keyframe = true;
-        }
-
-        let enc = encoder.as_mut().expect("opened above");
-        let key = std::mem::take(&mut force_keyframe) | keyframe.swap(false, Ordering::SeqCst);
-        for unit in enc.encode(EncoderInput::Cpu(&frame), key)? {
-            stats.bytes += unit.data.len() as u64;
-            stats.keyframes += u32::from(unit.keyframe);
-            stats.encode_us_max = stats.encode_us_max.max(unit.encode_time_us);
-            video.send_frame(&unit)?;
-        }
-        stats.frames += 1;
-
-        if stats.started.elapsed() >= Duration::from_secs(1) {
-            let applied = controller.as_ref().map_or(0, |c| c.applied_bps());
-            println!(
-                "{}  audio {}",
-                stats.line(applied),
-                audio_sent.swap(0, Ordering::Relaxed)
-            );
-            stats = PeriodStats::new();
-        }
-    }
-    Ok(())
-}
-
-struct PeriodStats {
-    started: Instant,
-    frames: u32,
-    bytes: u64,
-    keyframes: u32,
-    catch_ups: u32,
-    pauses: u32,
-    encode_us_max: u32,
-    last_feedback: Option<couch_media::FeedbackSnapshot>,
-}
-
-impl PeriodStats {
-    fn new() -> Self {
-        Self {
-            started: Instant::now(),
-            frames: 0,
-            bytes: 0,
-            keyframes: 0,
-            catch_ups: 0,
-            pauses: 0,
-            encode_us_max: 0,
-            last_feedback: None,
-        }
-    }
-
-    fn line(&self, applied_bps: u32) -> String {
-        let secs = self.started.elapsed().as_secs_f64();
-        let fb = self.last_feedback.unwrap_or_default();
-        format!(
-            "{:5.1} fps  {:5.1} Mbit/s (target {:5.1})  rtt {:5.1} ms  delay+ {:5.1} ms  backlog {:6} B  \
-             loss {}  key {}  catch-up {}  pause {}  {}",
-            f64::from(self.frames) / secs,
-            self.bytes as f64 * 8.0 / secs / 1e6,
-            f64::from(applied_bps) / 1e6,
-            f64::from(fb.rtt_us) / 1000.0,
-            f64::from(fb.delay_trend_us) / 1000.0,
-            fb.outstanding_bytes,
-            fb.lost_packets,
-            self.keyframes,
-            self.catch_ups,
-            self.pauses,
-            if fb.relayed { "RELAY" } else { "direct" },
-        )
-    }
-}
-
-/// `--rc-trace`: one CSV row per controller tick. Times are QPC microseconds,
-/// like the viewer's `--timings-csv`, so the two files line up. `netem_us` is
-/// the time since the netem link started (empty without `--netem`), which
-/// places its scheduled changes. Written line by line: `latency-probe` ends
-/// the host by killing it.
-struct RcTrace(LineWriter<File>);
-
-impl RcTrace {
-    fn create(path: &std::path::Path) -> anyhow::Result<Self> {
-        let mut w = LineWriter::new(
-            File::create(path).with_context(|| format!("creating {}", path.display()))?,
-        );
-        writeln!(
-            w,
-            "qpc_us,applied_bps,target_bps,delivery_bps,send_bps,outstanding_bytes,rtt_us,min_rtt_us,delay_trend_us,\
-             sent_packets,lost_packets,congestion_events,cwnd_bytes,report_age_ms,relayed,netem_us,action"
-        )?;
-        Ok(Self(w))
-    }
-
-    fn write(
-        &mut self,
-        fb: &couch_media::FeedbackSnapshot,
-        c: &RateController,
-        action: RateAction,
-        netem: Option<Duration>,
-    ) -> anyhow::Result<()> {
-        use couch_media::clock::Clock;
-        let action = match action {
-            RateAction::Keep => String::new(),
-            RateAction::SetBitrate(bps) => format!("set {bps}"),
-            RateAction::CatchUp { bitrate } => format!("catch-up {bitrate}"),
-            RateAction::Pause => "pause".into(),
-            RateAction::Resume { bitrate } => format!("resume {bitrate}"),
-        };
-        let netem = netem.map_or(String::new(), |d| d.as_micros().to_string());
-        writeln!(
-            self.0,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            QpcClock.now().0,
-            c.applied_bps(),
-            c.target_bps(),
-            fb.delivery_rate_bps,
-            fb.send_rate_bps,
-            fb.outstanding_bytes,
-            fb.rtt_us,
-            fb.min_rtt_us,
-            fb.delay_trend_us,
-            fb.sent_packets,
-            fb.lost_packets,
-            fb.congestion_events,
-            fb.cwnd_bytes,
-            fb.report_age_ms,
-            u8::from(fb.relayed),
-            netem,
-            action
-        )?;
-        Ok(())
     }
 }
 

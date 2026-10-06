@@ -46,12 +46,16 @@ pub struct NetemConfig {
     pub queue: Duration,
     /// Changes at times after the transport starts.
     pub schedule: Vec<(Duration, Change)>,
+    /// Impair only the traffic with the peer on this UDP port (`to=51001`);
+    /// everything else passes untouched. Lets one viewer's path be impaired
+    /// while another's isn't.
+    pub only_to: Option<u16>,
 }
 
 impl FromStr for NetemConfig {
     type Err = String;
 
-    /// `delay=20ms,loss=1%,rate=20mbit,queue=100ms,at10s=blackout:2s,at10s=rate:5mbit`
+    /// `delay=20ms,loss=1%,rate=20mbit,queue=100ms,at10s=blackout:2s,at10s=rate:5mbit,to=51001`
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut config = NetemConfig {
             queue: Duration::from_millis(100),
@@ -66,6 +70,9 @@ impl FromStr for NetemConfig {
                 "loss" => config.loss = percent(value)?,
                 "rate" => config.rate_bps = Some(bitrate(value)?),
                 "queue" => config.queue = duration(value)?,
+                "to" => {
+                    config.only_to = Some(value.parse().map_err(|_| format!("bad port {value}"))?);
+                }
                 at if at.starts_with("at") => {
                     let when = duration(&at[2..])?;
                     let (kind, arg) = value
@@ -216,6 +223,7 @@ impl CustomTransport for NetemTransport {
             addrs: n0_watcher::Watchable::new(vec![custom_addr(local)]),
             tx,
             schedule,
+            only_to: self.config.only_to,
         }))
     }
 }
@@ -228,6 +236,13 @@ struct NetemEndpoint {
     /// Shared with the link task: a blackout cuts receiving as well, so one
     /// side's schedule can black out the whole path.
     schedule: Arc<Mutex<Schedule>>,
+    /// [`NetemConfig::only_to`]: a blackout cuts only that peer.
+    only_to: Option<u16>,
+}
+
+/// Whether traffic with `peer` is impaired under `only_to`.
+fn impaired(only_to: Option<u16>, peer: SocketAddr) -> bool {
+    only_to.is_none_or(|port| peer.port() == port)
 }
 
 impl fmt::Debug for NetemEndpoint {
@@ -265,7 +280,9 @@ impl CustomEndpoint for NetemEndpoint {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(from)) => {
-                    if self.schedule.lock().unwrap().at(Instant::now()).0 {
+                    if impaired(self.only_to, from)
+                        && self.schedule.lock().unwrap().at(Instant::now()).0
+                    {
                         continue; // dropped: the link is blacked out
                     }
                     let len = buf.filled().len();
@@ -367,6 +384,12 @@ async fn run_link(
         tokio::select! {
             packet = rx.recv() => {
                 let Some((dst, data)) = packet else { return };
+                if !impaired(config.only_to, dst) {
+                    if let Err(e) = socket.send_to(&data, dst).await {
+                        tracing::debug!("netem send failed: {e}");
+                    }
+                    continue;
+                }
                 let now = Instant::now();
                 let (blacked_out, rate_bps) = schedule.lock().unwrap().at(now);
                 if blacked_out || rng.next_f64() < config.loss {
@@ -461,6 +484,17 @@ mod tests {
                 (Duration::from_secs(12), Change::Rate(Some(5_000_000))),
             ]
         );
+    }
+
+    #[test]
+    fn to_limits_impairment_to_one_peer() {
+        let c: NetemConfig = "rate=5mbit,to=51001".parse().unwrap();
+        assert_eq!(c.only_to, Some(51001));
+        let peer = |port| SocketAddr::from(([127, 0, 0, 1], port));
+        assert!(impaired(c.only_to, peer(51001)));
+        assert!(!impaired(c.only_to, peer(51002)));
+        assert!(impaired(None, peer(51002)), "without to=, everyone");
+        assert!("to=port".parse::<NetemConfig>().is_err());
     }
 
     #[test]

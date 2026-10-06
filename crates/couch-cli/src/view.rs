@@ -1,30 +1,24 @@
 //! `couch-cli view <ticket>`: connect to a host, show the stream in
-//! `couch-viewer`, and measure latency. With `--measure-secs` it stops after
+//! `couch-viewer` (through `couch_engine::pipeline::watch`, the app's own
+//! viewer side), and measure latency. With `--measure-secs` it stops after
 //! that long and prints a `RESULT {json}` line for `latency-probe`.
 
-use std::{
-    process::Stdio,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::time::Duration;
 
 use anyhow::Context;
-use couch_input::{Permissions, forward::Forwarder};
-use couch_net::{control, datagrams::Datagrams, endpoint, input::InputSender, video::ViewerVideo};
-use couch_platform_win::clock::QpcClock;
+use couch_engine::pipeline::{
+    ViewerOptions, platform_backend,
+    watch::{Watch, WatchEvent, WatchOptions},
+};
+use couch_net::{control, datagrams::Datagrams, endpoint, streams::Streams};
 use couch_proto::{
     control::{ControlMessage, KeyframeReason, KeyframeRequest},
-    input::RumbleDatagram,
-    ipc::{
-        self, AudioPacket, AudioStats, FrameTiming, LocalInput, NetStats, RumbleState, SeatState,
-        VideoFrameHeader,
-    },
-    media::{datagram, decode_payload},
+    ipc::{AudioStats, FrameTiming, NetStats},
 };
 use iroh_tickets::endpoint::EndpointTicket;
-use tokio::{process::Command, sync::mpsc};
+use tokio::sync::mpsc;
 
-use crate::{ipc_async, net_args::NetArgs, stats::Samples};
+use crate::{net_args::NetArgs, stats::Samples};
 
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -137,40 +131,33 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             }
         }
     });
+
+    // Subscribed before asking for the stream.
     let datagrams = Datagrams::start(conn.clone());
-    let mut rumbles = datagrams.subscribe(datagram::RUMBLE);
-    let mut audio = couch_net::audio::receive_audio(&datagrams);
-    let input_out = InputSender::start(conn.clone());
-    let mut forwarder = Forwarder::new();
+    let streams = Streams::start(conn.clone());
+    let backend = platform_backend();
+    let (watch, mut events) = Watch::start(
+        conn.clone(),
+        &datagrams,
+        &streams,
+        backend.as_ref(),
+        WatchOptions {
+            session: None,
+            viewer: ViewerOptions {
+                position: args.viewer_pos,
+                size: args.viewer_size,
+                hide_hud: args.hide_hud,
+                log: None,
+            },
+            measure: true,
+        },
+    )?;
     control_tx
         .send(&ControlMessage::KeyframeRequest(KeyframeRequest {
             epoch: 0,
             reason: KeyframeReason::Start,
         }))
         .await?;
-
-    let mut video = ViewerVideo::start(conn.clone(), Arc::new(QpcClock));
-
-    let viewer_exe = std::env::current_exe()?
-        .with_file_name(format!("couch-viewer{}", std::env::consts::EXE_SUFFIX));
-    let mut command = Command::new(&viewer_exe);
-    if let Some((x, y)) = args.viewer_pos {
-        command.args(["--pos", &x.to_string(), &y.to_string()]);
-    }
-    if let Some((w, h)) = args.viewer_size {
-        command.args(["--size", &w.to_string(), &h.to_string()]);
-    }
-    if args.hide_hud {
-        command.arg("--no-hud");
-    }
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("starting {}", viewer_exe.display()))?;
-    let mut viewer_in = child.stdin.take().expect("piped");
-    let mut viewer_out = child.stdout.take().expect("piped");
 
     let mut latency = Latency::default();
     if let Some(path) = &args.timings_csv {
@@ -184,50 +171,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         )?;
         latency.csv = Some(csv);
     }
-    let latency = Arc::new(Mutex::new(latency));
-    let audio_stats = Arc::new(Mutex::new(AudioStats::default()));
-    let (keyframe_tx, mut keyframe_rx) = mpsc::unbounded_channel();
-    let (local_tx, mut local_rx) = mpsc::unbounded_channel::<LocalInput>();
-    {
-        let latency = latency.clone();
-        let audio_stats = audio_stats.clone();
-        tokio::spawn(async move {
-            while let Ok(Some(frame)) = ipc_async::read_frame(&mut viewer_out).await {
-                match frame.kind {
-                    ipc::kinds::FRAME_TIMING => {
-                        if let Some(t) = FrameTiming::read(&frame.payload) {
-                            latency.lock().unwrap().record(&t);
-                        }
-                    }
-                    ipc::kinds::AUDIO_STATS => {
-                        if let Some(stats) = ipc::from_payload(&frame.payload) {
-                            *audio_stats.lock().unwrap() = stats;
-                        }
-                    }
-                    ipc::kinds::KEYFRAME_REQUEST => {
-                        let _ = keyframe_tx.send(());
-                    }
-                    ipc::kinds::INPUT => {
-                        if let Some(input) = ipc::from_payload(&frame.payload) {
-                            let _ = local_tx.send(input);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        });
-    }
-
-    let mut scratch = Vec::new();
-    let mut payload = Vec::new();
-    let hello_payload = ipc::IPC_VERSION.to_be_bytes();
-    ipc_async::write_frame(
-        &mut viewer_in,
-        ipc::kinds::HELLO,
-        &hello_payload,
-        &mut scratch,
-    )
-    .await?;
+    let mut audio_stats = AudioStats::default();
 
     let deadline = async {
         match args.measure_secs {
@@ -237,12 +181,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     };
     tokio::pin!(deadline);
     let mut report = tokio::time::interval(Duration::from_secs(1));
-    let mut net_tick = tokio::time::interval(Duration::from_millis(250));
-    let mut input_tick = tokio::time::interval(Duration::from_millis(10));
-    input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut net_since = Instant::now();
-    let mut received_bytes = 0u64;
     let mut net: Option<NetStats> = None;
+    // Received video, four samples a second, for G7.
+    let mut receive_mbps = Samples::default();
     // For the soak test (G2): both should stay 0.
     let mut decode_errors = 0u32;
     let mut path_changes = 0u32;
@@ -251,135 +192,54 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     loop {
         tokio::select! {
-            frame = video.frames.recv() => {
-                let Some(frame) = frame else { break };
-                received_bytes += frame.data.len() as u64;
-                if frame.epoch < video.latest_epoch() {
-                    continue;
+            event = events.recv() => match event {
+                Some(WatchEvent::Timing(t)) => latency.record(&t),
+                Some(WatchEvent::AudioStats(stats)) => audio_stats = stats,
+                Some(WatchEvent::KeyframeNeeded { epoch }) => {
+                    decode_errors += 1;
+                    control_tx
+                        .send(&ControlMessage::KeyframeRequest(KeyframeRequest {
+                            epoch,
+                            reason: KeyframeReason::DecoderError,
+                        }))
+                        .await?;
                 }
-                payload.clear();
-                VideoFrameHeader {
-                    epoch: frame.epoch,
-                    seq: frame.header.seq,
-                    keyframe: frame.header.keyframe,
-                    capture_us: frame.header.capture_us,
-                    encode_us: frame.header.encode_us,
-                    arrived_us: frame.arrived.0,
-                }
-                .write(&frame.data, &mut payload);
-                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::VIDEO_FRAME, &payload, &mut scratch)
-                    .await
-                    .is_err()
-                {
-                    println!("the viewer window closed");
-                    break;
-                }
-            }
-            Some(packet) = audio.recv() => {
-                payload = ipc::to_payload(&AudioPacket {
-                    seq: packet.seq,
-                    capture_us: packet.capture_us,
-                    arrived_us: couch_platform_win::clock::now().0,
-                    packet: packet.packet,
-                });
-                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::AUDIO_PACKET, &payload, &mut scratch)
-                    .await
-                    .is_err()
-                {
-                    println!("the viewer window closed");
-                    break;
-                }
-            }
-            Some(local) = local_rx.recv() => {
-                for out in forwarder.local(local, Instant::now()) {
-                    input_out.send(out);
-                }
-            }
-            _ = input_tick.tick() => {
-                for out in forwarder.tick(Instant::now()) {
-                    input_out.send(out);
-                }
-            }
-            Some(message) = seat_rx.recv() => {
-                match message {
-                    ControlMessage::SeatAssigned(s) => {
-                        println!("you control seat {} ({:?})", s.seat.0, s.permissions);
-                        for out in forwarder.seat_assigned(s.seat, s.seat_epoch, s.permissions, Instant::now()) {
-                            input_out.send(out);
-                        }
+                Some(WatchEvent::Net(stats)) => {
+                    receive_mbps.push(f64::from(stats.receive_bps) / 1e6);
+                    if net.is_some_and(|n| n.relayed != stats.relayed) {
+                        path_changes += 1;
+                        println!("path changed: now {}", if stats.relayed { "RELAY" } else { "direct" });
                     }
-                    ControlMessage::SeatReleased(s) => {
-                        println!("seat {} went back to the host", s.seat.0);
-                        forwarder.seat_released(s.seat, s.seat_epoch);
-                    }
-                    _ => continue,
+                    net = Some(stats);
                 }
-                let state = SeatState {
-                    holding: forwarder.holding().is_some(),
-                    permissions: forwarder.holding().map_or(Permissions::empty(), |h| h.1),
-                };
-                payload = ipc::to_payload(&state);
-                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::SEAT, &payload, &mut scratch)
-                    .await
-                    .is_err()
-                {
+                Some(WatchEvent::Rumble(r)) => {
+                    println!("rumble from the host: low {} high {}", r.low, r.high);
+                }
+                Some(WatchEvent::Action(action)) => println!("the viewer asked to {action:?}; no session here"),
+                Some(WatchEvent::ViewerClosed) | None => {
                     println!("the viewer window closed");
                     break;
                 }
-            }
-            Some(rumble) = rumbles.recv() => {
-                let Some(r) = decode_payload::<RumbleDatagram>(&rumble) else {
-                    continue;
-                };
-                println!("rumble from the host: low {} high {}", r.low, r.high);
-                payload = ipc::to_payload(&RumbleState { low: r.low, high: r.high });
-                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::RUMBLE, &payload, &mut scratch)
-                    .await
-                    .is_err()
-                {
-                    println!("the viewer window closed");
+                Some(WatchEvent::ConnectionLost) => {
+                    println!("connection closed");
                     break;
                 }
-            }
-            Some(()) = keyframe_rx.recv() => {
-                decode_errors += 1;
-                video.note_decode_error();
-                control_tx
-                    .send(&ControlMessage::KeyframeRequest(KeyframeRequest {
-                        epoch: video.latest_epoch(),
-                        reason: KeyframeReason::DecoderError,
-                    }))
-                    .await?;
-            }
-            _ = net_tick.tick() => {
-                let path = couch_net::video::selected_path(&conn);
-                let secs = net_since.elapsed().as_secs_f64().max(1e-3);
-                net_since = Instant::now();
-                let stats = NetStats {
-                    rtt_us: path.rtt.as_micros().min(u128::from(u32::MAX)) as u32,
-                    relayed: path.relayed,
-                    receive_bps: (std::mem::take(&mut received_bytes) as f64 * 8.0 / secs) as u32,
-                };
-                if net.is_some_and(|n| n.relayed != stats.relayed) {
-                    path_changes += 1;
-                    println!("path changed: now {}", if stats.relayed { "RELAY" } else { "direct" });
+            },
+            Some(message) = seat_rx.recv() => match message {
+                ControlMessage::SeatAssigned(s) => {
+                    println!("you control seat {} ({:?})", s.seat.0, s.permissions);
+                    watch.seat_assigned(s);
                 }
-                net = Some(stats);
-                payload.clear();
-                stats.write(&mut payload);
-                if ipc_async::write_frame(&mut viewer_in, ipc::kinds::NET_STATS, &payload, &mut scratch)
-                    .await
-                    .is_err()
-                {
-                    println!("the viewer window closed");
-                    break;
+                ControlMessage::SeatReleased(s) => {
+                    println!("seat {} went back to the host", s.seat.0);
+                    watch.seat_released(s);
                 }
-            }
+                _ => {}
+            },
             _ = report.tick() => {
-                let mut l = latency.lock().unwrap();
-                let w = std::mem::take(&mut l.window);
+                let w = std::mem::take(&mut latency.window);
                 let p = |s: &Samples, q| s.percentile(q).map_or("   -".into(), |v| format!("{v:4.1}"));
-                let a = *audio_stats.lock().unwrap();
+                let a = audio_stats;
                 println!(
                     "{:3} fps  clock->present p50 {} p95 {} ms  arrive->present p50 {} ms  {} {:.1} Mbit/s  \
                      audio buffer {:.0}/{:.0} ms  concealed {}  late {}  underruns {}",
@@ -400,66 +260,56 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 ended_early = false;
                 break;
             }
-            status = child.wait() => {
-                println!("the viewer exited: {status:?}");
-                break;
-            }
-            error = conn.closed() => {
-                println!("connection closed: {error}");
-                break;
-            }
         }
     }
 
     let path = couch_net::video::selected_path(&conn);
-    {
-        let mut l = latency.lock().unwrap();
-        if let Some(mut csv) = l.csv.take() {
-            use std::io::Write;
-            csv.flush()?;
-        }
-        println!(
-            "clock -> present     {}",
-            l.all.clock_to_present.summary_ms()
-        );
-        println!(
-            "capture -> present   {}",
-            l.all.capture_to_present.summary_ms()
-        );
-        println!(
-            "arrive -> present    {}",
-            l.all.arrive_to_present.summary_ms()
-        );
-        if args.measure_secs.is_some() {
-            let a = *audio_stats.lock().unwrap();
-            let result = serde_json::json!({
-                "audio": {
-                    "played": a.played,
-                    "concealed": a.concealed,
-                    "late": a.late,
-                    "dropped": a.dropped,
-                    "underruns": a.underruns,
-                    "buffered_ms": f64::from(a.buffered_us) / 1000.0,
-                    "target_ms": f64::from(a.target_us) / 1000.0,
-                    "capture_to_queue_ms": f64::from(a.capture_to_queue_us) / 1000.0,
-                    "capture_to_queue_p95_ms": f64::from(a.capture_to_queue_p95_us) / 1000.0,
-                },
-                "frames": l.all.frames,
-                "fps": l.fps(),
-                "clock_to_present_ms": percentiles(&l.all.clock_to_present),
-                "capture_to_present_ms": percentiles(&l.all.capture_to_present),
-                "arrive_to_present_ms": percentiles(&l.all.arrive_to_present),
-                "rtt_ms": path.rtt.as_secs_f64() * 1000.0,
-                "relayed": path.relayed,
-                "lost_packets": path.lost_packets,
-                "decode_errors": decode_errors,
-                "path_changes": path_changes,
-                "ended_early": ended_early,
-            });
-            println!("RESULT {result}");
-        }
+    if let Some(mut csv) = latency.csv.take() {
+        use std::io::Write;
+        csv.flush()?;
     }
-    let _ = ipc_async::write_frame(&mut viewer_in, ipc::kinds::SHUTDOWN, &[], &mut scratch).await;
+    println!(
+        "clock -> present     {}",
+        latency.all.clock_to_present.summary_ms()
+    );
+    println!(
+        "capture -> present   {}",
+        latency.all.capture_to_present.summary_ms()
+    );
+    println!(
+        "arrive -> present    {}",
+        latency.all.arrive_to_present.summary_ms()
+    );
+    if args.measure_secs.is_some() {
+        let a = audio_stats;
+        let result = serde_json::json!({
+            "audio": {
+                "played": a.played,
+                "concealed": a.concealed,
+                "late": a.late,
+                "dropped": a.dropped,
+                "underruns": a.underruns,
+                "buffered_ms": f64::from(a.buffered_us) / 1000.0,
+                "target_ms": f64::from(a.target_us) / 1000.0,
+                "capture_to_queue_ms": f64::from(a.capture_to_queue_us) / 1000.0,
+                "capture_to_queue_p95_ms": f64::from(a.capture_to_queue_p95_us) / 1000.0,
+            },
+            "frames": latency.all.frames,
+            "fps": latency.fps(),
+            "clock_to_present_ms": percentiles(&latency.all.clock_to_present),
+            "capture_to_present_ms": percentiles(&latency.all.capture_to_present),
+            "arrive_to_present_ms": percentiles(&latency.all.arrive_to_present),
+            "receive_mbps": percentiles(&receive_mbps),
+            "rtt_ms": path.rtt.as_secs_f64() * 1000.0,
+            "relayed": path.relayed,
+            "lost_packets": path.lost_packets,
+            "decode_errors": decode_errors,
+            "path_changes": path_changes,
+            "ended_early": ended_early,
+        });
+        println!("RESULT {result}");
+    }
+    watch.stop().await;
     conn.close(0u32.into(), b"bye");
     endpoint.close().await;
     Ok(())

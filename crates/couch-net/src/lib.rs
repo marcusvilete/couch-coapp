@@ -2,6 +2,10 @@
 //! control stream and the password check that admits a connection into a
 //! room, video over per-epoch QUIC streams with receiver reports, audio, and
 //! input. The room mesh itself is `couch_room::room`, driven by the engine.
+//!
+//! Each connection has one reader for its datagrams ([`datagrams`]) and one
+//! acceptor for its unidirectional streams ([`streams`]); video, audio and
+//! input subscribe to them by tag or kind.
 
 pub mod addr;
 pub mod admission;
@@ -13,6 +17,7 @@ pub mod endpoint;
 pub mod input;
 #[cfg(feature = "netem")]
 pub mod netem;
+pub mod streams;
 pub mod video;
 
 pub use iroh::{

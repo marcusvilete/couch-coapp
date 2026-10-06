@@ -31,7 +31,7 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
 ## Steps
 
 1. **Type id.**
-   - Control families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x04xx` admission, `0x05xx` rooms. Input stream: `0x03xx`.
+   - Control families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats and control requests, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions. Input stream: `0x03xx`.
    - Set `MUST_UNDERSTAND` (`0x8000`) if a peer that doesn't know the message can't work correctly. An unknown must-understand type closes the connection; an unknown optional one is skipped.
    - A message only some peers understand: advertise a feature bit in `Hello.features`, and send the message only to peers that set it.
 2. **Payload struct** with `Serialize`/`Deserialize`.
@@ -41,7 +41,7 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
 3. **Wire it into both directions.**
    - Control and input: the `match` arms in `type_id`, `encode` and `from_frame`.
    - Datagrams: receivers get them only through `couch_net::datagrams::Datagrams::subscribe(tag)`. QUIC has one datagram queue per connection, so never call `read_datagram` directly.
-   - Streams: the acceptor reads the kind byte and stops streams it doesn't know.
+   - Streams: receivers get them only through `couch_net::streams::Streams::subscribe(kind)`, which reads the kind byte and stops streams nobody takes. Never call `accept_uni` directly.
 4. **Tests in `couch-proto`:**
    - a roundtrip through the envelope (or the datagram tag);
    - trailing bytes rejected;

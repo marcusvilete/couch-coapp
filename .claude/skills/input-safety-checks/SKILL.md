@@ -1,6 +1,6 @@
 ---
 name: input-safety-checks
-description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch-cli's host_input/host/view, couch-platform-win's sendinput, keymap, vigem or foreground code, or anything on the viewer/host teardown path; and before reporting or committing such a change.
+description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch_engine::pipeline (host, watch), the engine's rooms::sessions, couch-cli's host/view, couch-platform-win's sendinput, keymap, vigem or foreground code, or anything on the viewer/host teardown path; and before reporting or committing such a change.
 ---
 
 # Input safety checks
@@ -17,6 +17,8 @@ description: Verify that Couch Co-App's remote input stays safe after a change, 
 . .\scripts\dev.ps1
 Get-Process couch-* -ErrorAction SilentlyContinue | Stop-Process -Force
 cargo test -p couch-input -p couch-net        # router, forwarder, filter; input over loopback
+cargo test -p couch-room session              # the host's session machine and its property test
+cargo test -p couch-engine --test sessions    # handoffs, panic key, viewers leaving, all with a recording pad
 cargo build --release -p couch-cli -p couch-viewer
 .\target\release\couch-cli.exe release-check  # about 1 minute
 .\target\release\couch-cli.exe input-sink     # a few seconds
@@ -43,14 +45,14 @@ Ctrl+C and closing the host's console run the same code path as Ctrl+Break. Ctrl
 
 **If a scenario fails**
 - **No release at all:** some path ends without calling the router's release, or without reaching it.
-  - Check `host_input::run`'s exits.
+  - Check the exits of the input task, `input_loop` in `couch_engine::pipeline::host`: it must release on every one, including when the `HostStream` is dropped.
   - Check the viewer's shutdown: it must send `Outgoing::Close`, not wait for its channels to close.
   - Check `Forwarder::tick`'s liveness gate.
 - **Late:** look at the timer constants first:
   - `router::DEAD_MAN`;
   - `forward::{PAD_REFRESH, VIEWER_QUIET}`;
   - the viewer's `ALIVE_EVERY`;
-  - `host_input`'s `TICK`.
+  - `couch_engine::pipeline::host`'s `INPUT_TICK`.
 
   Their sum sets each limit above. Change a limit only with the user's agreement.
 - **Error before acting:** usually leftovers, or the seat never went active (a slow ViGEm plug can take seconds).

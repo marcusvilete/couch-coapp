@@ -16,6 +16,7 @@ use couch_net::{
     datagrams::Datagrams,
     endpoint::{EndpointOptions, RelayChoice},
     input::{InputReceiver, InputSender, send_rumble},
+    streams::Streams,
     video::{HostVideo, ViewerVideo},
 };
 use couch_proto::{
@@ -44,11 +45,18 @@ async fn local_input_reaches_the_router_and_rumble_comes_back() {
 
     // Video runs alongside, as it would, and must not swallow input.
     let host_datagrams = Datagrams::start(host_conn.clone());
-    let _video = HostVideo::start(host_conn.clone(), 1, &host_datagrams);
-    let mut inputs = InputReceiver::start(host_conn.clone(), &host_datagrams);
+    let _video = HostVideo::start(
+        host_conn.clone(),
+        1,
+        &host_datagrams,
+        std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
+    );
+    let mut inputs = InputReceiver::start(&host_datagrams, &Streams::start(host_conn.clone()));
     let viewer_datagrams = Datagrams::start(viewer_conn.clone());
     let _viewer_video = ViewerVideo::start(
         viewer_conn.clone(),
+        &Streams::start(viewer_conn.clone()),
+        None,
         std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
     );
     let mut rumbles = viewer_datagrams.subscribe(datagram::RUMBLE);

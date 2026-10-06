@@ -11,7 +11,7 @@ use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::WindowsAndMessaging::{
         GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
-        WindowFromPoint,
+        IsWindow, WindowFromPoint,
     },
 };
 
@@ -45,6 +45,12 @@ pub fn pointer_over(window: WindowId) -> bool {
     }
     // SAFETY: takes the point by value.
     root(unsafe { WindowFromPoint(point) }) == Some(window)
+}
+
+/// Whether `window` still exists: a closed game's window doesn't.
+pub fn window_exists(window: WindowId) -> bool {
+    // SAFETY: IsWindow accepts any handle value.
+    unsafe { IsWindow(Some(HWND(window.0 as *mut _))) }.as_bool()
 }
 
 /// The process that owns `window`, if it still exists.

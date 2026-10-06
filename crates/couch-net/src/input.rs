@@ -11,7 +11,7 @@ use couch_proto::{
 use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
 use tokio::sync::mpsc;
 
-use crate::datagrams::Datagrams;
+use crate::{datagrams::Datagrams, streams::Streams};
 
 /// The input stream's priority. Video streams have 0, so a key press never
 /// waits behind a keyframe.
@@ -85,15 +85,16 @@ async fn open_stream(conn: &Connection) -> Option<SendStream> {
     Some(s)
 }
 
-/// Host side: everything a viewer sends, merged into one queue.
+/// Host side: everything a viewer sends, merged into one queue. Its tasks
+/// end when it is dropped.
 pub struct InputReceiver {
     pub inputs: mpsc::Receiver<Input>,
 }
 
 impl InputReceiver {
-    /// Starts accepting the viewer's input stream and reading its input
-    /// datagrams. Call inside a tokio runtime.
-    pub fn start(conn: Connection, datagrams: &Datagrams) -> Self {
+    /// Starts taking the viewer's input stream from `streams` and its input
+    /// datagrams from `datagrams`. Call inside a tokio runtime.
+    pub fn start(datagrams: &Datagrams, streams: &Streams) -> Self {
         let (tx, inputs) = mpsc::channel(1024);
         let mut pads = datagrams.subscribe(datagram::GAMEPAD);
         let mut mice = datagrams.subscribe(datagram::MOUSE_MOTION);
@@ -104,6 +105,7 @@ impl InputReceiver {
                     let input = tokio::select! {
                         Some(p) = pads.recv() => decode_payload::<PadDatagram>(&p).map(Input::Pad),
                         Some(m) = mice.recv() => decode_payload::<MouseDatagram>(&m).map(Input::Mouse),
+                        () = tx.closed() => return,
                         else => return,
                     };
                     match input {
@@ -116,8 +118,16 @@ impl InputReceiver {
                 }
             });
         }
+        let mut incoming = streams.subscribe(stream_kind::INPUT);
         tokio::spawn(async move {
-            while let Ok(recv) = conn.accept_uni().await {
+            loop {
+                let recv = tokio::select! {
+                    recv = incoming.recv() => match recv {
+                        Some(recv) => recv,
+                        None => return,
+                    },
+                    () = tx.closed() => return,
+                };
                 tokio::spawn(read_stream(recv, tx.clone()));
             }
         });
@@ -125,16 +135,8 @@ impl InputReceiver {
     }
 }
 
+/// Reads one input stream, whose kind byte `Streams` has read already.
 async fn read_stream(mut recv: RecvStream, tx: mpsc::Sender<Input>) {
-    let mut kind = [0u8; 1];
-    if recv.read_exact(&mut kind).await.is_err() {
-        return;
-    }
-    if kind[0] != stream_kind::INPUT {
-        tracing::debug!("ignoring stream of kind {:#04x}", kind[0]);
-        let _ = recv.stop(VarInt::from_u32(0));
-        return;
-    }
     let mut buf = Vec::new();
     loop {
         match envelope::decode(&buf) {

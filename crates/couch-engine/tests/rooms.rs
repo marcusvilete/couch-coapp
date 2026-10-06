@@ -40,6 +40,7 @@ fn options(port: u16) -> EngineOptions {
         tick: Duration::from_millis(50),
         invite_valid_for: Duration::from_secs(3600),
         profile_wait: Duration::from_secs(2),
+        ..EngineOptions::development()
     }
 }
 

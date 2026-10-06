@@ -1,7 +1,9 @@
-//! `couch-cli gates`: runs M1's rate-control gates (G1, G3, G4, G5) through
-//! `latency-probe` and judges them from its traces. Re-run after changing rate
-//! control, congestion control or the video transport; the reference numbers
-//! are in docs/m1-results.md.
+//! `couch-cli gates`: runs the rate-control gates through `latency-probe` and
+//! judges them from its traces: M1's G1, G3, G4 and G5, and M5's G7 (one
+//! viewer's bad path leaves another's stream alone). Re-run after changing
+//! rate control, congestion control, the video transport or the host's
+//! pipeline; the reference numbers are in docs/m1-results.md and
+//! docs/m5a-results.md.
 
 use std::{
     collections::HashMap,
@@ -26,6 +28,7 @@ pub enum Gate {
     G3,
     G4,
     G5,
+    G7,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +59,7 @@ struct Spec {
     netem_viewer: Option<&'static str>,
 }
 
-fn specs(quick: bool) -> [Spec; 4] {
+fn specs(quick: bool) -> [Spec; 5] {
     [
         Spec {
             gate: Gate::G1,
@@ -86,6 +89,14 @@ fn specs(quick: bool) -> [Spec; 4] {
             netem: Some("rate=25mbit,at10s=rate:5mbit"),
             netem_viewer: Some("delay=0ms"),
         },
+        Spec {
+            gate: Gate::G7,
+            what: "two viewers, the first throttled to 5 Mbit/s",
+            secs: 30,
+            // The host's traffic to the first viewer only.
+            netem: Some("rate=5mbit"),
+            netem_viewer: None,
+        },
     ]
 }
 
@@ -96,6 +107,7 @@ impl Gate {
             Gate::G3 => "G3",
             Gate::G4 => "G4",
             Gate::G5 => "G5",
+            Gate::G7 => "G7",
         }
     }
 }
@@ -158,6 +170,16 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         }
         let gate = spec.gate;
         println!("== {} ({}, {} s)", gate.name(), spec.what, spec.secs);
+        if gate == Gate::G7 {
+            let report = run_g7(&spec, &args).await.unwrap_or_else(|e| {
+                let mut report = Report::default();
+                report.check(gate, "run", format!("{e:#}"), "completes", false);
+                report
+            });
+            print_checks(&report);
+            checks.extend(report.checks);
+            continue;
+        }
         let file = |suffix: &str| {
             args.out
                 .join(format!("{}{suffix}", gate.name().to_ascii_lowercase()))
@@ -172,6 +194,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             timings_csv: Some(view_csv.clone()),
             rc_trace: Some(rc_csv.clone()),
             netem_viewer: spec.netem_viewer.map(Into::into),
+            viewers: 1,
+            impair_first: None,
             log: Some(file(".log")),
             net: NetArgs {
                 relay: "none".into(),
@@ -190,17 +214,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             report.check(gate, "run", format!("{e:#}"), "completes", false);
             report
         });
-        for c in &report.checks {
-            let verdict = match c.pass {
-                Some(true) => "pass",
-                Some(false) => "FAIL",
-                None => "",
-            };
-            println!("   {:<28} {:<36} {verdict}", c.name, c.measured);
-        }
-        if !report.actions.is_empty() {
-            println!("   actions: {}", report.actions);
-        }
+        print_checks(&report);
         if gate == Gate::G1 {
             baseline_p95 = report.p95;
         }
@@ -236,6 +250,114 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         bail!("{failed} check(s) failed");
     }
     Ok(())
+}
+
+fn print_checks(report: &Report) {
+    for c in &report.checks {
+        let verdict = match c.pass {
+            Some(true) => "pass",
+            Some(false) => "FAIL",
+            None => "",
+        };
+        println!("   {:<28} {:<36} {verdict}", c.name, c.measured);
+    }
+    if !report.actions.is_empty() {
+        println!("   actions: {}", report.actions);
+    }
+}
+
+/// G7: two viewers, unimpaired and then with only the first one's path
+/// throttled. The second viewer's stream must not notice: its latency and
+/// bitrate stay where they were. Each viewer has an encoder, a rate
+/// controller and a connection of its own; this checks nothing they share
+/// (the capture, the sound, the input task, the host's uplink) couples them.
+async fn run_g7(spec: &Spec, args: &Args) -> anyhow::Result<Report> {
+    let gate = Gate::G7;
+    let probe = |impair: Option<&str>, tag: &str| {
+        let file = |suffix: &str| args.out.join(format!("g7-{tag}{suffix}"));
+        latency_probe::Args {
+            secs: spec.secs,
+            fps: 60,
+            max_mbps: MAX_MBPS,
+            screen: false,
+            audio: false,
+            timings_csv: Some(file("-view.csv")),
+            rc_trace: Some(file("-rc.csv")),
+            netem_viewer: None,
+            viewers: 2,
+            impair_first: impair.map(Into::into),
+            log: Some(file(".log")),
+            net: NetArgs {
+                relay: "none".into(),
+                relay_only: false,
+                port: None,
+                congestion: args.congestion,
+                netem: None,
+            },
+        }
+    };
+    let clean = latency_probe::run_all(probe(None, "unimpaired")).await?;
+    let hit = latency_probe::run_all(probe(spec.netem, "impaired")).await?;
+    let mut report = Report::default();
+
+    let runs = [("unimpaired", &clean), ("impaired", &hit)];
+    let flawed: Vec<String> = runs
+        .iter()
+        .flat_map(|(name, results)| {
+            results.iter().enumerate().filter_map(move |(i, r)| {
+                let errors = r["decode_errors"].as_u64().unwrap_or(u64::MAX);
+                let early = r["ended_early"].as_bool().unwrap_or(true);
+                (errors != 0 || early).then(|| format!("{name} #{}", i + 1))
+            })
+        })
+        .collect();
+    report.check(
+        gate,
+        "full runs, clean decodes",
+        if flawed.is_empty() {
+            "all 4".into()
+        } else {
+            flawed.join(", ")
+        },
+        "every viewer, both runs",
+        flawed.is_empty(),
+    );
+
+    let p95 = |r: &serde_json::Value| r["clock_to_present_ms"]["p95"].as_f64();
+    let rate = |r: &serde_json::Value| r["receive_mbps"]["p50"].as_f64();
+    let (Some(before), Some(after)) = (p95(&clean[1]), p95(&hit[1])) else {
+        bail!("no latency for the second viewer");
+    };
+    report.check(
+        gate,
+        "second viewer p95",
+        format!("{after:.1} ms (unimpaired {before:.1})"),
+        "<= unimpaired + 5 ms",
+        after <= before + 5.0,
+    );
+    let (Some(before), Some(after)) = (rate(&clean[1]), rate(&hit[1])) else {
+        bail!("no bitrate for the second viewer");
+    };
+    report.check(
+        gate,
+        "second viewer bitrate p50",
+        format!("{after:.1} Mbit/s (unimpaired {before:.1})"),
+        ">= 90% of unimpaired",
+        after >= 0.9 * before,
+    );
+    // Without this, a throttle that never applied would pass unnoticed.
+    let throttled = rate(&hit[0]).unwrap_or(f64::NAN);
+    report.check(
+        gate,
+        "first viewer throttled",
+        format!(
+            "{throttled:.1} Mbit/s, p95 {:.1} ms",
+            p95(&hit[0]).unwrap_or(f64::NAN)
+        ),
+        "<= 6 Mbit/s (the 5 Mbit/s throttle applied)",
+        throttled <= 6.0,
+    );
+    Ok(report)
 }
 
 fn judge(
@@ -416,6 +538,7 @@ fn judge(
             report.info(gate, "clock->present p95", format!("{p95:.1} ms"));
             report.actions = actions(&ticks, at);
         }
+        Gate::G7 => bail!("G7 is judged by run_g7"),
     }
     Ok(report)
 }

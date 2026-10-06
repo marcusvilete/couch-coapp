@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 2;
+pub const IPC_VERSION: u16 = 3;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -28,7 +28,7 @@ pub mod kinds {
     pub const VIDEO_FRAME: u8 = 0x02;
     /// main -> viewer: one Opus packet ([`super::AudioPacket`]).
     pub const AUDIO_PACKET: u8 = 0x03;
-    /// main -> viewer: HUD state (members, who holds control).
+    /// main -> viewer: the session as the HUD shows it ([`super::HudState`]).
     pub const HUD_STATE: u8 = 0x04;
     /// main -> viewer: close the window and exit.
     pub const SHUTDOWN: u8 = 0x05;
@@ -43,7 +43,7 @@ pub mod kinds {
     pub const INPUT: u8 = 0x81;
     /// viewer -> main: decode and present times, for receiver reports.
     pub const FRAME_TIMING: u8 = 0x82;
-    /// viewer -> main: something the user did in the HUD (request control, leave).
+    /// viewer -> main: something the user asked of the session ([`super::UserAction`]).
     pub const USER_ACTION: u8 = 0x83;
     /// viewer -> main: the decoder lost sync and needs a keyframe.
     pub const KEYFRAME_REQUEST: u8 = 0x84;
@@ -203,6 +203,48 @@ pub enum LocalInput {
 pub struct SeatState {
     pub holding: bool,
     pub permissions: Permissions,
+}
+
+/// Payload of [`kinds::HUD_STATE`] (postcard): the session as the viewer's
+/// HUD shows it. Sent on every change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HudState {
+    /// What the host called the session; also the window's title.
+    pub title: String,
+    /// The host's display name.
+    pub host: String,
+    pub role: HudRole,
+    /// The guest who plays, by display name; `None` while the host plays.
+    pub controller: Option<String>,
+    pub viewers: u8,
+    /// Whoever plays may use keyboard and mouse too.
+    pub keyboard_mouse: bool,
+    /// The host took control back with the panic key; asking is pointless
+    /// until the host allows control again.
+    pub control_paused: bool,
+    /// A short line to show for a few seconds, such as "request declined";
+    /// empty for none.
+    pub note: String,
+}
+
+/// Where this viewer stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HudRole {
+    Watching,
+    /// Asked for control; waiting for the host.
+    Asking,
+    Controlling,
+}
+
+/// Payload of [`kinds::USER_ACTION`] (postcard): something the user asked of
+/// the session from the viewer (a hotkey or the HUD's bar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UserAction {
+    RequestControl,
+    /// Withdraw the request, or give control back.
+    CancelControl,
+    /// Stop watching.
+    Leave,
 }
 
 /// Payload of [`kinds::RUMBLE`] (postcard): motor strengths, 0 to 255.
@@ -441,6 +483,28 @@ mod tests {
         let mut extra = to_payload(&RumbleState { low: 1, high: 2 });
         extra.push(0);
         assert_eq!(from_payload::<RumbleState>(&extra), None);
+    }
+
+    #[test]
+    fn session_payloads_roundtrip() {
+        let hud = HudState {
+            title: "Celeste".into(),
+            host: "Ana".into(),
+            role: HudRole::Asking,
+            controller: Some("Bia".into()),
+            viewers: 3,
+            keyboard_mouse: false,
+            control_paused: false,
+            note: "request declined".into(),
+        };
+        assert_eq!(from_payload(&to_payload(&hud)), Some(hud));
+        for action in [
+            UserAction::RequestControl,
+            UserAction::CancelControl,
+            UserAction::Leave,
+        ] {
+            assert_eq!(from_payload(&to_payload(&action)), Some(action));
+        }
     }
 
     #[test]

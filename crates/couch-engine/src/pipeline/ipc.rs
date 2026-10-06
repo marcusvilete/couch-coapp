@@ -1,5 +1,5 @@
-//! Async framing for the viewer pipe (`couch_proto::ipc`), for tokio child
-//! processes.
+//! Async framing for the viewer pipe (`couch_proto::ipc`), for a viewer
+//! started as a tokio child process (or a fake one in tests).
 
 use std::io::{self, ErrorKind};
 
@@ -7,7 +7,7 @@ use couch_proto::ipc::{self, IpcFrame, MAX_FRAME_LEN};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// The next frame; `Ok(None)` when the other side closed the pipe.
-pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<IpcFrame>> {
+pub async fn read_frame<R: AsyncRead + Unpin + ?Sized>(r: &mut R) -> io::Result<Option<IpcFrame>> {
     let mut len = [0u8; 4];
     match r.read_exact(&mut len).await {
         Ok(_) => {}
@@ -31,7 +31,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Option<Ip
     }))
 }
 
-pub async fn write_frame<W: AsyncWrite + Unpin>(
+pub async fn write_frame<W: AsyncWrite + Unpin + ?Sized>(
     w: &mut W,
     kind: u8,
     payload: &[u8],

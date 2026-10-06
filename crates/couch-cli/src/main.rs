@@ -14,10 +14,7 @@ mod audio_probe;
 mod capture_test;
 mod gates;
 mod host;
-mod host_audio;
-mod host_input;
 mod input_sink;
-mod ipc_async;
 mod latency_probe;
 mod net_args;
 mod pad_test;
@@ -89,8 +86,8 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Stream a window, the monitor or the test pattern to a viewer. Prints
-    /// a `TICKET` line to pass to `view`.
+    /// Stream a window, the monitor or the test pattern to viewers, each with
+    /// an encoder of its own. Prints a `TICKET` line to pass to `view`.
     Host {
         #[arg(long, value_enum, default_value = "window")]
         source: SourceArg,
@@ -111,7 +108,14 @@ enum Cmd {
         /// Bitrate ceiling while the path goes through a relay.
         #[arg(long, default_value_t = 2.0)]
         relay_max_mbps: f64,
-        /// Write every rate-controller tick to this CSV file.
+        /// This PC's upload cap, split between the viewers.
+        #[arg(long)]
+        upload_mbps: Option<f64>,
+        /// Viewers at once; more are turned away.
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=7))]
+        max_viewers: u8,
+        /// Write every rate-controller tick to this CSV file; with several
+        /// viewers, the next ones go to numbered files beside it.
         #[arg(long)]
         rc_trace: Option<PathBuf>,
         /// Let the viewer use keyboard and mouse, not just the gamepad. This
@@ -180,6 +184,14 @@ enum Cmd {
         /// host's). A blackout on the host side cuts both directions.
         #[arg(long)]
         netem_viewer: Option<String>,
+        /// Two viewers watch (gate G7). Everything then runs on the netem
+        /// transport.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+        viewers: u8,
+        /// With two viewers: a netem profile for the host's traffic to the
+        /// first viewer only, e.g. `rate=5mbit`.
+        #[arg(long)]
+        impair_first: Option<String>,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -258,20 +270,23 @@ async fn main() -> ExitCode {
             min_mbps,
             max_mbps,
             relay_max_mbps,
+            upload_mbps,
+            max_viewers,
             rc_trace,
             allow_kbm,
             real_pad_ids,
             audio,
             net,
         } => {
+            use couch_engine::pipeline::{AudioChoice, Source};
             host::run(host::Args {
                 source: match source {
                     SourceArg::Window => {
-                        host::Source::Window(title.unwrap_or_else(host::default_window))
+                        Source::WindowTitle(title.unwrap_or_else(host::default_window))
                     }
-                    SourceArg::Monitor => host::Source::Monitor,
+                    SourceArg::Monitor => Source::PrimaryScreen,
                     // clap guarantees exactly two values.
-                    SourceArg::Testpattern => host::Source::TestPattern {
+                    SourceArg::Testpattern => Source::TestPattern {
                         width: pattern_size[0],
                         height: pattern_size[1],
                     },
@@ -281,6 +296,8 @@ async fn main() -> ExitCode {
                 min_mbps,
                 max_mbps,
                 relay_max_mbps,
+                upload_mbps,
+                max_viewers: usize::from(max_viewers),
                 rc_trace,
                 permissions: if allow_kbm {
                     couch_input::Permissions::all()
@@ -289,11 +306,11 @@ async fn main() -> ExitCode {
                 },
                 real_pad_ids,
                 audio: match audio {
-                    AudioArg::Auto => host_audio::AudioChoice::Auto,
-                    AudioArg::Game => host_audio::AudioChoice::Game,
-                    AudioArg::System => host_audio::AudioChoice::System,
-                    AudioArg::Tone => host_audio::AudioChoice::Tone,
-                    AudioArg::Off => host_audio::AudioChoice::Off,
+                    AudioArg::Auto => AudioChoice::Auto,
+                    AudioArg::Game => AudioChoice::Game,
+                    AudioArg::System => AudioChoice::System,
+                    AudioArg::Tone => AudioChoice::Tone,
+                    AudioArg::Off => AudioChoice::Off,
                 },
                 net,
             })
@@ -331,8 +348,10 @@ async fn main() -> ExitCode {
             timings_csv,
             rc_trace,
             netem_viewer,
+            viewers,
+            impair_first,
             net,
-        } => latency_probe::run(latency_probe::Args {
+        } => latency_probe::run_all(latency_probe::Args {
             secs,
             fps,
             max_mbps,
@@ -341,6 +360,8 @@ async fn main() -> ExitCode {
             timings_csv,
             rc_trace,
             netem_viewer,
+            viewers: usize::from(viewers),
+            impair_first,
             log: None,
             net,
         })
@@ -378,6 +399,10 @@ async fn main() -> ExitCode {
 fn list_windows() -> anyhow::Result<()> {
     for w in couch_platform_win::capture::list_windows()? {
         println!("{:>6}  {:<28} {}", w.process_id, w.process, w.title);
+    }
+    for m in couch_platform_win::capture::list_monitors()? {
+        let primary = if m.primary { "  (primary)" } else { "" };
+        println!("screen  {}x{}  {}{primary}", m.width, m.height, m.name);
     }
     Ok(())
 }

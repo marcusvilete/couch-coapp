@@ -1,10 +1,132 @@
 //! Fakes for tests. Only ever a dev-dependency.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
+use bytes::Bytes;
 use couch_input::{
     HidUsage, InputError, KbmInjector, MouseButton, PadState, Rumble, VirtualPad, VirtualPadFactory,
 };
+use couch_media::{
+    BgraFrame, CaptureEvent, Capturer, EncodedFrame, EncoderCaps, EncoderInput, MediaError,
+    VideoEncoder, clock::Clock,
+};
+
+/// Plain gray frames at a steady rate, until told the source closed.
+pub struct FakeCapturer {
+    width: u32,
+    height: u32,
+    interval: Duration,
+    next_due: Instant,
+    clock: Arc<dyn Clock>,
+    closed: Arc<AtomicBool>,
+    reported: bool,
+}
+
+impl FakeCapturer {
+    /// Setting `closed` makes it report [`CaptureEvent::SourceClosed`], as a
+    /// closing window would.
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: u32,
+        clock: Arc<dyn Clock>,
+        closed: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            interval: Duration::from_secs(1) / fps.max(1),
+            next_due: Instant::now(),
+            clock,
+            closed,
+            reported: false,
+        }
+    }
+}
+
+impl Capturer for FakeCapturer {
+    fn next_event(&mut self, timeout: Duration) -> Result<Option<CaptureEvent>, MediaError> {
+        if self.closed.load(Ordering::SeqCst) {
+            if self.reported {
+                return Err(MediaError::Closed);
+            }
+            self.reported = true;
+            return Ok(Some(CaptureEvent::SourceClosed));
+        }
+        let now = Instant::now();
+        if now < self.next_due {
+            let wait = self.next_due - now;
+            if wait > timeout {
+                std::thread::sleep(timeout);
+                return Ok(None);
+            }
+            std::thread::sleep(wait);
+        }
+        self.next_due = Instant::now() + self.interval;
+        let stride = self.width * 4;
+        Ok(Some(CaptureEvent::Frame(BgraFrame {
+            width: self.width,
+            height: self.height,
+            stride,
+            data: Bytes::from(vec![128; (stride * self.height) as usize]),
+            captured_at: self.clock.now(),
+        })))
+    }
+}
+
+/// An encoder that emits a small access unit per frame: a keyframe when
+/// asked for one (or first), filled with 1s; otherwise 0s.
+pub struct FakeEncoder {
+    caps: EncoderCaps,
+    started: bool,
+}
+
+impl Default for FakeEncoder {
+    fn default() -> Self {
+        Self {
+            caps: EncoderCaps {
+                name: "fake".into(),
+                hardware: false,
+                bitrate_change_costs_keyframe: false,
+            },
+            started: false,
+        }
+    }
+}
+
+impl VideoEncoder for FakeEncoder {
+    fn caps(&self) -> &EncoderCaps {
+        &self.caps
+    }
+
+    fn encode(
+        &mut self,
+        input: EncoderInput<'_>,
+        force_keyframe: bool,
+    ) -> Result<Vec<EncodedFrame>, MediaError> {
+        let EncoderInput::Cpu(frame) = input else {
+            return Err(MediaError::Unsupported("only CPU frames".into()));
+        };
+        let keyframe = force_keyframe || !self.started;
+        self.started = true;
+        Ok(vec![EncodedFrame {
+            data: Bytes::from(vec![u8::from(keyframe); 200]),
+            keyframe,
+            captured_at: frame.captured_at,
+            encode_time_us: 100,
+        }])
+    }
+
+    fn set_bitrate(&mut self, _bps: u32) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
 
 /// One call made on a [`RecordingInjector`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

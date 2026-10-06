@@ -16,7 +16,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M3 | Audio: game process loopback, Opus, jitter buffer, SDL3 playback | done ([results](m3-results.md)) |
 | M4a | Rooms in the engine: identity, invites, admission, the mesh | done ([results](m4a-results.md)) |
 | M4b | Lobby UI: rooms, invites and deep links, members with their links, profiles side by side | done ([results](m4b-results.md)) |
-| M5 | Sessions and control | |
+| M5 | Sessions and control: M5a in the engine, M5b on screen | M5a done ([results](m5a-results.md)); M5b next |
 | M6 | Lifecycle and safety | |
 | M7 | Own relay, real-network tests | |
 | M8 | Host overlay window | |
@@ -51,14 +51,14 @@ Host machine                                    Viewer machine
 | `couch-proto` | Wire and IPC types, framing, versioning, ids | nothing internal |
 | `couch-media` | Frame types; capture, codec, transport and audio traits; rate controller; audio framing, jitter buffer and click track; test pattern; timestamp barcode | nothing internal |
 | `couch-input` | Input model (HID usages, pad state), injection traits; the seat router, the viewer-side forwarder and the blocked-key filter, all sans-IO | `couch-proto` |
-| `couch-room` | Room (membership, the owner's policy, the mesh), admission rate limits, session and seat state machines, all sans-IO; Ed25519 signatures on room facts | `couch-proto` |
-| `couch-net` | iroh endpoint, its gate and congestion controller; the password check (SPAKE2); control, video, audio and input channels, datagram routing, netem test transport | `couch-proto`, `couch-media`, `couch-input` |
+| `couch-room` | Room (membership, the owner's policy, the mesh), admission rate limits, and the host's session (viewers, requests, the control pause), all sans-IO; Ed25519 signatures on room facts | `couch-proto` |
+| `couch-net` | iroh endpoint, its gate and congestion controller; the password check (SPAKE2); control, video, audio and input channels, datagram routing and the stream acceptor, netem test transport | `couch-proto`, `couch-media`, `couch-input` |
 | `couch-codec-ffmpeg` | Everything that touches FFmpeg (video) | `couch-media` |
 | `couch-codec-opus` | Opus encode, decode and loss concealment, through libopus built from source (the `opus` crate, needs CMake) | `couch-media`, `couch-proto` |
 | `couch-platform-win` | Everything that calls Windows APIs, including WASAPI loopback capture, `SendInput`, ViGEm pads and DPAPI | `couch-media`, `couch-input` |
-| `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out. Runs the rooms over iroh; keeps the identity and remembered rooms (DPAPI-sealed) in the profile folder; sessions from M5 | everything above |
+| `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out. Runs the rooms and their sessions over iroh; keeps the identity and remembered rooms (DPAPI-sealed) in the profile folder. Its `pipeline` (host and viewer side of a stream, behind a `Backend` trait) is shared with `couch-cli` | everything above |
 | `couch-viewer` | The viewer binary | `couch-proto`, `couch-input`, media and codec crates |
-| `couch-cli` | Developer harness: `probe`, `host`, `view`, `latency-probe`, `gates`, `pad-test`, `input-sink`, `release-check`, `capture-test`, `screen-scan` | anything |
+| `couch-cli` | Developer harness on the engine's pipeline: `probe`, `host`, `view`, `latency-probe`, `gates`, `pad-test`, `input-sink`, `release-check`, `capture-test`, `screen-scan` | anything |
 | `couch-testkit` | Fakes (recording injector and pad, test pattern helpers); dev-dependency only | trait crates |
 | `xtask` | `fetch-deps`, `stage-dlls`, `doctor` | none |
 | `apps/desktop/src-tauri` | Thin Tauri adapter over `couch-engine` | `couch-engine` |
@@ -139,11 +139,15 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
 
 ## Sessions and control
 
-- **Ownership.** The session host owns the session's state: viewers, seats and grants. Single-player mode has one seat; co-op later adds seats.
+([protocol.md](protocol.md#sessions))
+
+- **Where they live.** A session rides on its room's connections: the roster already decides who may watch. The host is the only writer of its session's facts and sends them straight to each member.
+- **Ownership.** The host owns the session's state: viewers, requests, the control pause (`couch_room::session`). Who holds the seat is decided by the seat router alone (`couch_input::router`); the session mirrors it. Single-player mode has one seat; co-op later adds seats.
 - **"The host has control."** The host's own devices drive the game directly.
-- **Handoff.** Passing control changes the seat's holder and increments its epoch. The virtual pad stays plugged in for the whole session, so the game never sees a controller disconnect.
-- **Requests.** Members request control and the host accepts or declines.
-- **Disconnects.** If the controlling member drops, everything they held is released and the seat returns to the host.
+- **Handoff.** Passing control changes the seat's holder and increments its epoch, releasing first. The virtual pad stays plugged in for the whole session, so the game never sees a controller disconnect.
+- **Requests.** Viewers ask; the host accepts or declines, passes control without a request, or takes it back. The panic key takes everything back and pauses control.
+- **Disconnects.** If a viewer leaves, closes its window, loses its connection or is banned, everything it held is released at once.
+- **In the engine.** The room actor runs the session protocol (`rooms::sessions`). The media and input run in `couch_engine::pipeline`: `HostStream` (one capture, an encoder per viewer, one sound capture, one input task) and `Watch` (the viewer process). **Input never goes through the actor**: it flows from the connection to the input task's seat router to the injectors.
 
 ## Safety invariants
 

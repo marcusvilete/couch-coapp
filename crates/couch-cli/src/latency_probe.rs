@@ -2,6 +2,11 @@
 //! latency clock window, a host capturing it, and a viewer showing the stream
 //! next to it; collects the viewer's numbers and checks them against the gates.
 //! With `--audio`, the clock's clicks are timed too (M3, `audio_probe`).
+//!
+//! With `--viewers 2`, a second viewer watches too (gate G7), and
+//! `--impair-first` impairs only the host's traffic to the first one. Every
+//! process then runs on the netem transport, each viewer on a port of its
+//! own, so the host can tell their traffic apart.
 
 use std::{
     fs::File,
@@ -38,15 +43,24 @@ pub struct Args {
     pub rc_trace: Option<PathBuf>,
     /// The viewer's netem profile, when it should differ from the host's.
     pub netem_viewer: Option<String>,
+    /// 1, or 2 for G7.
+    pub viewers: usize,
+    /// With two viewers: a netem profile for the host's traffic to the
+    /// first viewer only.
+    pub impair_first: Option<String>,
     /// Write the host's and viewer's output and the report here instead of
     /// to the console.
     pub log: Option<PathBuf>,
     pub net: NetArgs,
 }
 
-/// Clock window position; the viewer goes right below it at the same size.
+/// Clock window position; the viewers go below it at the same size.
 const CLOCK_POS: (i32, i32) = (40, 40);
-const VIEWER_POS: (i32, i32) = (40, 300);
+const VIEWER_POS: [(i32, i32); 2] = [(40, 300), (40, 520)];
+/// With two viewers, their netem ports, so the host can impair one.
+const VIEWER_PORTS: [u16; 2] = [51101, 51102];
+/// netem without impairment: the transport alone.
+const UNIMPAIRED: &str = "delay=0ms";
 
 /// Where the children's output goes: the console, or a log file.
 #[derive(Clone)]
@@ -66,8 +80,29 @@ impl Echo {
     }
 }
 
-/// Runs the probe and returns the viewer's `RESULT` (see `view`).
+/// Runs the probe and returns the (first) viewer's `RESULT` (see `view`).
 pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
+    Ok(run_all(args).await?.swap_remove(0))
+}
+
+/// Runs the probe and returns every viewer's `RESULT`, in order.
+pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
+    anyhow::ensure!(
+        (1..=2).contains(&args.viewers),
+        "one or two viewers, not {}",
+        args.viewers
+    );
+    let two = args.viewers == 2;
+    if two {
+        anyhow::ensure!(
+            !args.audio && !args.screen,
+            "--audio and --screen measure one viewer"
+        );
+        args.net.netem = Some(match &args.impair_first {
+            Some(profile) => format!("{profile},to={}", VIEWER_PORTS[0]),
+            None => UNIMPAIRED.into(),
+        });
+    }
     let echo = match &args.log {
         None => Echo::Stdout,
         Some(path) => Echo::File(Arc::new(Mutex::new(LineWriter::new(
@@ -109,36 +144,53 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
         .kill_on_drop(true)
         .spawn()
         .context("starting the host")?;
-    let ticket = read_ticket(&mut host, echo.clone()).await?;
+    let (ticket, mut connected) = read_ticket(&mut host, echo.clone()).await?;
 
     // The viewer window shows the clock's stream at its own size, so the copy
     // of the barcode on screen is pixel for pixel like the original.
     let (clock_w, clock_h) = latency_clock_size();
-    let mut view_net = args.net.clone();
-    if let Some(profile) = &args.netem_viewer {
-        view_net.netem = Some(profile.clone());
+    let mut views = Vec::new();
+    for i in 0..args.viewers {
+        let mut view_net = args.net.clone();
+        if let Some(profile) = &args.netem_viewer {
+            view_net.netem = Some(profile.clone());
+        }
+        if two {
+            view_net.netem = Some(UNIMPAIRED.into());
+            view_net.port = Some(VIEWER_PORTS[i]);
+        }
+        let mut view = Command::new(&exe);
+        view.args(["view", &ticket, "--measure-secs", &args.secs.to_string()])
+            .args([
+                "--viewer-pos",
+                &VIEWER_POS[i].0.to_string(),
+                &VIEWER_POS[i].1.to_string(),
+            ])
+            .args(["--viewer-size", &clock_w.to_string(), &clock_h.to_string()])
+            .arg("--no-hud")
+            .args(view_net.to_args());
+        if let Some(port) = view_net.port {
+            view.args(["--port", &port.to_string()]);
+        }
+        if let Some(csv) = &args.timings_csv {
+            view.arg("--timings-csv").arg(numbered(csv, i));
+        }
+        let view = view
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("starting the viewer")?;
+        views.push(view);
+        if two && i == 0 {
+            // The first to connect gets the host's first trace file.
+            tokio::time::timeout(Duration::from_secs(15), connected.recv())
+                .await
+                .context("the first viewer never connected")?;
+        }
     }
-    let mut view = Command::new(&exe);
-    view.args(["view", &ticket, "--measure-secs", &args.secs.to_string()])
-        .args([
-            "--viewer-pos",
-            &VIEWER_POS.0.to_string(),
-            &VIEWER_POS.1.to_string(),
-        ])
-        .args(["--viewer-size", &clock_w.to_string(), &clock_h.to_string()])
-        .arg("--no-hud")
-        .args(view_net.to_args());
-    if let Some(csv) = &args.timings_csv {
-        view.arg("--timings-csv").arg(csv);
-    }
-    let mut view = view
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("starting the viewer")?;
 
     let audio = if args.audio {
-        let (Some(clock_pid), Some(view_pid)) = (clock.id(), view.id()) else {
+        let (Some(clock_pid), Some(view_pid)) = (clock.id(), views[0].id()) else {
             bail!("the clock or the viewer already exited");
         };
         Some(AudioProbe::start(clock_pid, view_pid).context("starting the audio probe")?)
@@ -152,15 +204,36 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
         None
     };
 
-    let mut lines = BufReader::new(view.stdout.take().expect("piped")).lines();
-    let mut result = None;
-    while let Some(line) = lines.next_line().await? {
-        match line.strip_prefix("RESULT ") {
-            Some(json) => result = Some(serde_json::from_str::<serde_json::Value>(json)?),
-            None => echo.line(&format!("[view] {line}")),
-        }
+    let readers: Vec<_> = views
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut view)| {
+            let echo = echo.clone();
+            let prefix = if i == 0 {
+                "[view]".to_string()
+            } else {
+                format!("[view {}]", i + 1)
+            };
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(view.stdout.take().expect("piped")).lines();
+                let mut result = None;
+                while let Some(line) = lines.next_line().await? {
+                    match line.strip_prefix("RESULT ") {
+                        Some(json) => {
+                            result = Some(serde_json::from_str::<serde_json::Value>(json)?);
+                        }
+                        None => echo.line(&format!("{prefix} {line}")),
+                    }
+                }
+                let _ = view.wait().await;
+                Ok::<_, anyhow::Error>(result)
+            })
+        })
+        .collect();
+    let mut results = Vec::new();
+    for reader in readers {
+        results.push(reader.await.context("reading a viewer")??);
     }
-    let _ = view.wait().await;
     let screen = screen.map(ScreenProbe::finish);
     let audio = audio
         .map(|probe| tokio::task::block_in_place(|| probe.finish()))
@@ -169,13 +242,19 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
     // old clock window.
     let _ = host.kill().await;
     let _ = clock.kill().await;
-    let Some(result) = result else {
-        bail!("the viewer exited without a result");
+    let Some(results) = results.into_iter().collect::<Option<Vec<_>>>() else {
+        bail!("a viewer exited without a result");
     };
     let g1 = args.net.netem.is_none() && !args.net.relay_only;
-    for line in report(&result, g1) {
-        echo.line(&line);
+    for (i, result) in results.iter().enumerate() {
+        if two {
+            echo.line(&format!("viewer {}:", i + 1));
+        }
+        for line in report(result, g1) {
+            echo.line(&line);
+        }
     }
+    let result = &results[0];
     if let Some(screen) = screen {
         echo.line(&format!(
             "screen (clock -> viewer on screen)  {}",
@@ -189,11 +268,24 @@ pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
         echo.line(&format!("G1b (screen: median <= 50 ms): {verdict}"));
     }
     if let Some(audio) = audio {
-        for line in audio_report(&audio, &result, g1) {
+        for line in audio_report(&audio, result, g1) {
             echo.line(&line);
         }
     }
-    Ok(result)
+    Ok(results)
+}
+
+/// `path` for the first viewer; `name-2.csv` for the second (as the host
+/// numbers its traces).
+fn numbered(path: &std::path::Path, i: usize) -> PathBuf {
+    if i == 0 {
+        return path.to_path_buf();
+    }
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = path
+        .extension()
+        .map_or(String::new(), |e| format!(".{}", e.to_string_lossy()));
+    path.with_file_name(format!("{stem}-{}{ext}", i + 1))
 }
 
 /// The audio lines: what our pipeline adds (judged as A1 when the run was
@@ -253,7 +345,12 @@ fn audio_report(audio: &AudioResult, result: &serde_json::Value, judge: bool) ->
 }
 
 /// Reads the host's stdout until it prints its ticket, then keeps echoing it.
-async fn read_ticket(host: &mut Child, echo: Echo) -> anyhow::Result<String> {
+/// The receiver hears of each viewer that connects.
+async fn read_ticket(
+    host: &mut Child,
+    echo: Echo,
+) -> anyhow::Result<(String, tokio::sync::mpsc::UnboundedReceiver<()>)> {
+    let (connected_tx, connected) = tokio::sync::mpsc::unbounded_channel();
     let mut lines = BufReader::new(host.stdout.take().expect("piped")).lines();
     let ticket = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(line) = lines.next_line().await? {
@@ -268,10 +365,13 @@ async fn read_ticket(host: &mut Child, echo: Echo) -> anyhow::Result<String> {
     .context("waiting for the host's ticket")??;
     tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
+            if line.starts_with("viewer ") && line.ends_with(" connected") {
+                let _ = connected_tx.send(());
+            }
             echo.line(&format!("[host] {line}"));
         }
     });
-    Ok(ticket)
+    Ok((ticket, connected))
 }
 
 /// The summary lines, with the G1 verdict when the run measured G1 (direct,

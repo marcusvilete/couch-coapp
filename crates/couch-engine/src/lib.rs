@@ -9,6 +9,7 @@
 //! iroh. Identity and remembered rooms live in the profile's folder
 //! ([`store`]), sealed with DPAPI on Windows ([`secrets`]).
 
+pub mod pipeline;
 mod profile;
 mod rooms;
 pub mod secrets;
@@ -25,6 +26,7 @@ use couch_proto::invite::InviteError;
 use couch_room::{
     limits::LimitConfig,
     room::{RoomError, Timings},
+    session::SessionError,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -43,41 +45,217 @@ pub enum Command {
     /// Facts about this install and build.
     GetInfo,
     /// A round trip through the engine; also announced as [`Event::Pong`].
-    Ping { nonce: u32 },
+    Ping {
+        nonce: u32,
+    },
     /// This profile's display name and member id.
     GetProfile,
     /// Shown to the other members of every room.
-    SetDisplayName { name: String },
+    SetDisplayName {
+        name: String,
+    },
     /// Every remembered room.
     ListRooms,
     /// A new room owned by this profile. Only the owner lets people in.
-    CreateRoom { name: String, password: String },
+    CreateRoom {
+        name: String,
+        password: String,
+    },
     /// What an invite (a link or its bare payload) leads to, shown before
     /// asking for the password. Nothing is sent anywhere.
-    PreviewInvite { invite: String },
+    PreviewInvite {
+        invite: String,
+    },
     /// The invite link the app was last opened with, if any. Taken: a
     /// second call answers `None`. Opening a link only fills in the join
     /// screen; joining still needs the password and a click.
     TakeOpenedInvite,
     /// Joins with an invite link (or its bare payload) and the password.
     /// The room's owner must be online.
-    JoinRoom { invite: String, password: String },
+    JoinRoom {
+        invite: String,
+        password: String,
+    },
     /// Owner only: a new invite link, good for a week (or until revoked, or
     /// five wrong passwords). With relays configured it names our relay,
     /// never our IP address, so right after startup it may wait a few
     /// seconds for the relay.
-    GetInvite { room: String },
+    GetInvite {
+        room: String,
+    },
     /// Owner only: newcomers need this password from now on. Members stay,
     /// and invites keep working with the new password.
-    ChangePassword { room: String, password: String },
+    ChangePassword {
+        room: String,
+        password: String,
+    },
     /// Owner only: every invite made so far stops working.
-    RevokeInvites { room: String },
+    RevokeInvites {
+        room: String,
+    },
     /// Leaves for good: the others are told, and the room is forgotten. The
     /// owner leaving closes the room for everyone.
-    LeaveRoom { room: String },
+    LeaveRoom {
+        room: String,
+    },
     /// Owner only: takes a member out of the room for good, and revokes
     /// every invite (the banned member may hold one).
-    BanMember { room: String, member: String },
+    BanMember {
+        room: String,
+        member: String,
+    },
+    /// Windows and screens that could be streamed. Nothing is sent anywhere.
+    ListSources,
+    /// Starts streaming `source` to `room`. One stream at a time, and not
+    /// while watching one.
+    GoLive {
+        room: String,
+        source: SourceChoice,
+        /// What the room sees it called (1 to 96 bytes).
+        title: String,
+        fps: u32,
+        /// The most each viewer's stream may use, Mbit/s.
+        max_mbps: u32,
+        /// This PC's upload cap, split between viewers, Mbit/s.
+        upload_mbps: Option<u32>,
+        /// 1 to 7.
+        max_viewers: u8,
+        /// Whoever plays may use keyboard and mouse too, while the window is
+        /// in front. A window source only.
+        keyboard_mouse: bool,
+    },
+    StopLive,
+    /// Watches `host`'s stream in `room`, in a viewer window. Answers once
+    /// the host has.
+    Watch {
+        room: String,
+        host: String,
+    },
+    StopWatching,
+    /// While watching: asks the host for control.
+    RequestControl,
+    /// While watching: withdraws the request, or gives control back.
+    CancelControl,
+    /// While streaming: accepts or declines a viewer's request.
+    AnswerControl {
+        member: String,
+        accept: bool,
+    },
+    /// While streaming: hands control to a viewer who didn't ask.
+    PassControl {
+        member: String,
+    },
+    /// While streaming: play again.
+    TakeBackControl,
+    /// While streaming: let viewers have control again after the panic key.
+    AllowControl,
+}
+
+/// A window or screen from [`Command::ListSources`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export)]
+pub enum SourceChoice {
+    Window { id: String },
+    Screen { id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SourceList {
+    pub windows: Vec<WindowView>,
+    pub screens: Vec<ScreenView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct WindowView {
+    pub id: String,
+    pub title: String,
+    /// The program's file name; may be empty.
+    pub app: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ScreenView {
+    pub id: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// A live session in a room, as this profile sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SessionView {
+    /// The host's member id.
+    pub host: String,
+    pub title: String,
+    pub keyboard_mouse: bool,
+    pub max_viewers: u8,
+    /// Member ids, in the order they joined.
+    pub viewers: Vec<String>,
+    /// The viewer who plays; `None` while the host does.
+    pub controller: Option<String>,
+    /// The host took control back with the panic key and hasn't allowed it
+    /// again.
+    pub control_paused: bool,
+    pub role: SessionRole,
+    /// For the host: viewers asking for control, oldest first.
+    pub requests: Vec<String>,
+}
+
+/// Where this profile stands in a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum SessionRole {
+    Host,
+    /// Asked to watch; the host hasn't answered yet.
+    Joining,
+    Watching,
+    /// Watching, and asked for control.
+    Asking,
+    Controlling,
+    /// Not watching.
+    None,
+}
+
+/// Why a session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum SessionEnd {
+    HostStopped,
+    GameExited,
+    /// The window or screen being streamed went away.
+    SourceLost,
+    HostLeftRoom,
+    HostShutdown,
+    Error,
+}
+
+/// Why watching ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum WatchEnd {
+    /// The host ended the session.
+    Ended,
+    /// We stopped, or closed the viewer window.
+    Left,
+    /// The connection to the host went.
+    ConnectionLost,
+    /// The host can't stream to us (no encoder free, say).
+    Unavailable,
+    /// The viewer window couldn't start.
+    ViewerFailed,
 }
 
 /// The reply to a [`Command`]. Its `Debug` leaves out invite links.
@@ -93,6 +271,7 @@ pub enum Response {
     Invite { link: String },
     InvitePreview(InvitePreview),
     OpenedInvite { link: Option<String> },
+    Sources(SourceList),
     Done,
 }
 
@@ -129,6 +308,45 @@ impl fmt::Debug for Command {
                 .field("room", room)
                 .field("member", member)
                 .finish(),
+            // Window titles are the user's business; the log needn't see them.
+            Self::ListSources => f.write_str("ListSources"),
+            Self::GoLive {
+                room,
+                fps,
+                max_mbps,
+                upload_mbps,
+                max_viewers,
+                keyboard_mouse,
+                ..
+            } => f
+                .debug_struct("GoLive")
+                .field("room", room)
+                .field("fps", fps)
+                .field("max_mbps", max_mbps)
+                .field("upload_mbps", upload_mbps)
+                .field("max_viewers", max_viewers)
+                .field("keyboard_mouse", keyboard_mouse)
+                .finish_non_exhaustive(),
+            Self::StopLive => f.write_str("StopLive"),
+            Self::Watch { room, host } => f
+                .debug_struct("Watch")
+                .field("room", room)
+                .field("host", host)
+                .finish(),
+            Self::StopWatching => f.write_str("StopWatching"),
+            Self::RequestControl => f.write_str("RequestControl"),
+            Self::CancelControl => f.write_str("CancelControl"),
+            Self::AnswerControl { member, accept } => f
+                .debug_struct("AnswerControl")
+                .field("member", member)
+                .field("accept", accept)
+                .finish(),
+            Self::PassControl { member } => f
+                .debug_struct("PassControl")
+                .field("member", member)
+                .finish(),
+            Self::TakeBackControl => f.write_str("TakeBackControl"),
+            Self::AllowControl => f.write_str("AllowControl"),
         }
     }
 }
@@ -146,6 +364,11 @@ impl fmt::Debug for Response {
             Self::OpenedInvite { link } => f
                 .debug_struct("OpenedInvite")
                 .field("link", &link.as_ref().map(|_| ".."))
+                .finish(),
+            Self::Sources(list) => f
+                .debug_struct("Sources")
+                .field("windows", &list.windows.len())
+                .field("screens", &list.screens.len())
                 .finish(),
             Self::Done => f.write_str("Done"),
         }
@@ -184,6 +407,8 @@ pub struct RoomView {
     /// For the owner: while set, newcomers can't join, after too many wrong
     /// passwords. Seconds left.
     pub joins_paused_for_secs: Option<u32>,
+    /// Live sessions: ours, and those of members connected to us.
+    pub sessions: Vec<SessionView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -273,6 +498,22 @@ pub enum Event {
     /// The app was opened with an invite link: [`Command::TakeOpenedInvite`]
     /// has it.
     InviteOpened,
+    /// A viewer asks for control of our stream.
+    ControlRequested {
+        room: String,
+        member: String,
+    },
+    /// Our stream ended other than by [`Command::StopLive`].
+    SessionEnded {
+        room: String,
+        reason: SessionEnd,
+    },
+    /// Watching ended other than by [`Command::StopWatching`].
+    WatchEnded {
+        room: String,
+        host: String,
+        reason: WatchEnd,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -313,6 +554,15 @@ pub enum EngineError {
     /// Another Couch Co-App is running as this profile (or still closing).
     #[error("profile {0:?} is already running in another Couch Co-App")]
     ProfileInUse(String),
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error("you aren't streaming")]
+    NotLive,
+    #[error("you aren't watching a stream")]
+    NotWatching,
+    /// Capture, encoding or the viewer window failed; the text says how.
+    #[error("{0}")]
+    Media(String),
 }
 
 /// How the engine runs. Tests shorten the timings and turn relays off.
@@ -333,6 +583,11 @@ pub struct EngineOptions {
     /// again after restarts through the relay; without one (a LAN, the
     /// tests) only a fixed port keeps saved addresses valid.
     pub port: Option<u16>,
+    /// Capture, encoders, injection and the viewer window: this machine's,
+    /// or fakes in tests.
+    pub backend: Arc<dyn pipeline::Backend>,
+    /// How long a request to watch waits for the host's answer.
+    pub join_wait: Duration,
 }
 
 impl EngineOptions {
@@ -348,6 +603,8 @@ impl EngineOptions {
             invite_valid_for: Duration::from_secs(7 * 24 * 3600),
             port: None,
             profile_wait: Duration::from_secs(5),
+            backend: pipeline::platform_backend(),
+            join_wait: Duration::from_secs(10),
         }
     }
 }
@@ -392,6 +649,9 @@ pub struct Engine {
     actor: mpsc::Sender<rooms::Input>,
     /// The invite link the app was last opened with, until the UI takes it.
     opened: Mutex<Option<String>>,
+    backend: Arc<dyn pipeline::Backend>,
+    /// While we stream: releases every seat without waiting for the actor.
+    panic: Arc<Mutex<Option<pipeline::host::PanicHandle>>>,
     /// Held while this engine runs; see [`lock_profile`].
     _lock: std::fs::File,
 }
@@ -402,15 +662,30 @@ impl Engine {
     pub async fn start(profile: Profile, options: EngineOptions) -> Result<Self, EngineError> {
         let lock = lock_profile(&profile, options.profile_wait).await?;
         let (events, _) = broadcast::channel(256);
-        let started = rooms::start(&profile, options, events.clone()).await?;
+        let backend = options.backend.clone();
+        let panic = Arc::new(Mutex::new(None));
+        let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
         Ok(Self {
             profile,
             member_id: started.member_id.to_hex(),
             events,
             actor: started.inbox,
             opened: Mutex::new(None),
+            backend,
+            panic,
             _lock: lock,
         })
+    }
+
+    /// The host's panic key: every seat of our stream back to us at once,
+    /// pending requests declined, and control paused until
+    /// [`Command::AllowControl`]. Does nothing while not streaming.
+    pub async fn panic_key(&self) {
+        // Released first, straight through the input task.
+        if let Some(handle) = &*self.panic.lock().unwrap_or_else(PoisonError::into_inner) {
+            handle.panic();
+        }
+        let _ = self.actor.send(rooms::Input::Panic).await;
     }
 
     pub fn profile(&self) -> &Profile {
@@ -464,6 +739,35 @@ impl Engine {
                     .unwrap_or_else(PoisonError::into_inner)
                     .take(),
             }),
+            Command::ListSources => {
+                let backend = self.backend.clone();
+                let sources = tokio::task::spawn_blocking(move || backend.sources())
+                    .await
+                    .map_err(|_| EngineError::Stopped)?
+                    .map_err(|e| EngineError::Media(e.to_string()))?;
+                Ok(Response::Sources(SourceList {
+                    windows: sources
+                        .windows
+                        .into_iter()
+                        .map(|w| WindowView {
+                            id: w.id.to_string(),
+                            title: w.title,
+                            app: w.app,
+                        })
+                        .collect(),
+                    screens: sources
+                        .screens
+                        .into_iter()
+                        .map(|s| ScreenView {
+                            id: s.id.to_string(),
+                            name: s.name,
+                            width: s.width,
+                            height: s.height,
+                            primary: s.primary,
+                        })
+                        .collect(),
+                }))
+            }
             command => {
                 let (reply, response) = oneshot::channel();
                 self.actor
@@ -513,6 +817,36 @@ mod tests {
         Engine::start(Profile::new("test", dir).unwrap(), options)
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn window_titles_stay_out_of_debug() {
+        let shown = format!(
+            "{:?}",
+            Command::GoLive {
+                room: "00".into(),
+                source: SourceChoice::Window { id: "42".into() },
+                title: "Bank of Somewhere - Chrome".into(),
+                fps: 60,
+                max_mbps: 20,
+                upload_mbps: None,
+                max_viewers: 4,
+                keyboard_mouse: false,
+            }
+        );
+        assert!(!shown.contains("Bank"), "{shown}");
+        let list = format!(
+            "{:?}",
+            Response::Sources(SourceList {
+                windows: vec![WindowView {
+                    id: "1".into(),
+                    title: "Bank of Somewhere - Chrome".into(),
+                    app: "chrome.exe".into(),
+                }],
+                screens: Vec::new(),
+            })
+        );
+        assert!(!list.contains("Bank"), "{list}");
     }
 
     #[tokio::test]

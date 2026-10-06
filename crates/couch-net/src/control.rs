@@ -11,6 +11,10 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 
 use crate::NetError;
 
+/// The control stream's priority: above video epochs (0), so a seat change or
+/// a keyframe request never waits behind a keyframe; below input (100).
+const PRIORITY: i32 = 50;
+
 pub struct ControlSender {
     stream: SendStream,
     buf: Vec<u8>,
@@ -100,6 +104,7 @@ pub async fn open(conn: &Connection) -> Result<(ControlSender, ControlReceiver, 
         .open_bi()
         .await
         .map_err(|e| NetError::Connection(e.to_string()))?;
+    let _ = send.set_priority(PRIORITY);
     let mut sender = ControlSender {
         stream: send,
         buf: Vec::new(),
@@ -121,6 +126,7 @@ pub async fn accept(
         .accept_bi()
         .await
         .map_err(|e| NetError::Connection(e.to_string()))?;
+    let _ = send.set_priority(PRIORITY);
     let mut sender = ControlSender {
         stream: send,
         buf: Vec::new(),

@@ -2,7 +2,8 @@
 //!
 //! [`FeedbackTracker`] turns receiver reports and path statistics into a
 //! [`FeedbackSnapshot`]; [`RateController`] turns snapshots into bitrate
-//! changes and catch-up decisions. Both are pure: time is an argument.
+//! changes and catch-up decisions; [`UploadShare`] splits the host's upload
+//! cap between its viewers. All are pure: time is an argument.
 
 use std::{
     collections::VecDeque,
@@ -244,6 +245,8 @@ const COSTLY_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct RateController {
     cfg: RateConfig,
+    /// This viewer's share of the host's upload cap, if there is a cap.
+    share: Option<u32>,
     target: f64,
     applied: u32,
     last_tick: Option<Instant>,
@@ -261,6 +264,7 @@ impl RateController {
         let start = cfg.clamped_start();
         Self {
             cfg,
+            share: None,
             target: f64::from(start),
             applied: start,
             last_tick: None,
@@ -286,6 +290,13 @@ impl RateController {
     /// Where the controller wants to go (may run ahead of `applied_bps`).
     pub fn target_bps(&self) -> u32 {
         self.target as u32
+    }
+
+    /// This viewer's share of the host's upload cap ([`UploadShare`]), or
+    /// `None` without a cap. It lowers the ceiling from the next tick on; a
+    /// bitrate above it comes down at once.
+    pub fn set_share(&mut self, bps: Option<u32>) {
+        self.share = bps;
     }
 
     pub fn tick(&mut self, now: Instant, fb: &FeedbackSnapshot) -> RateAction {
@@ -324,6 +335,7 @@ impl RateController {
         } else {
             self.cfg.max_bps
         }
+        .min(self.share.unwrap_or(u32::MAX))
         .max(self.cfg.min_bps);
 
         // 1. Catch up when video queues up beyond what the path can drain soon.
@@ -446,6 +458,158 @@ impl RateController {
             return 0.0;
         }
         lost1.saturating_sub(lost0) as f64 / sent as f64
+    }
+}
+
+/// Frames whose host delay is remembered: a few seconds' worth, far more
+/// than a report can be behind.
+const SEND_DELAYS_KEPT: usize = 512;
+
+/// How long each recent frame spent on the host before it was handed to the
+/// network: waiting for the encoder and inside it.
+///
+/// Viewers report each frame's arrival minus its capture time. Taking off
+/// the host's part leaves the time on the network, which is what congestion
+/// control must react to. Without it, an encoder slowed by load (several
+/// viewers, a busy GPU) reads as a filling queue, and cutting the bitrate,
+/// which can't speed the encoder up, collapses every viewer to the floor.
+#[derive(Debug, Default)]
+pub struct SendDelays {
+    /// (epoch, seq, microseconds from capture to send), oldest first.
+    frames: VecDeque<(u32, u32, i64)>,
+}
+
+impl SendDelays {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Frame `seq` of `epoch` went out `host_us` after it was captured.
+    pub fn sent(&mut self, epoch: u32, seq: u32, host_us: i64) {
+        if self.frames.len() == SEND_DELAYS_KEPT {
+            self.frames.pop_front();
+        }
+        self.frames.push_back((epoch, seq, host_us.max(0)));
+    }
+
+    /// The network's part of a reported delay. A report's samples all belong
+    /// to its epoch (the viewer drops an abandoned epoch's). An unknown
+    /// frame's delay is left as it is.
+    pub fn network_part(&self, epoch: u32, seq: u32, one_way_us: i64) -> i64 {
+        let host = self
+            .frames
+            .iter()
+            .rev()
+            .find(|&&(e, s, _)| e == epoch && s == seq)
+            .map_or(0, |&(_, _, host)| host);
+        one_way_us.saturating_sub(host)
+    }
+}
+
+/// A viewer held back by its own network keeps this much room above its
+/// target, so it can still grow into it.
+const SHARE_MARGIN: f64 = 1.25;
+/// Shares move in steps of this many bit/s.
+const SHARE_STEP: u32 = 500_000;
+/// A share comes down only when it falls by more than this fraction: every
+/// bitrate change costs an NVENC keyframe, so small swings change nothing...
+const SHARE_HYSTERESIS: f64 = 0.10;
+/// ...unless keeping the old shares would overrun the cap by more than this.
+const SHARE_OVERRUN: f64 = 0.10;
+
+/// Splits the host's upload cap, `total_bps`, between viewers whose
+/// controllers aim at `targets` ([`RateController::target_bps`]). A viewer
+/// held back by its own network (aiming below an equal share) gets its
+/// target plus a margin to grow into; the others split what is left
+/// equally. Shares are rounded down to whole steps, so they never add up to
+/// more than the cap. [`UploadShare`] adds hysteresis.
+pub fn share_upload(total_bps: u32, targets: &[u32]) -> Vec<u32> {
+    let mut order: Vec<usize> = (0..targets.len()).collect();
+    order.sort_by_key(|&i| targets[i]);
+    let mut shares = vec![0; targets.len()];
+    let mut left = f64::from(total_bps);
+    let mut rest = targets.len();
+    for (k, &i) in order.iter().enumerate() {
+        let fair = left / rest as f64;
+        // At least one step above the target, or rounding down could hand a
+        // viewer at the minimum a share equal to it, and it could never grow.
+        let target = f64::from(targets[i]);
+        let wants = (target * SHARE_MARGIN).max(target + f64::from(SHARE_STEP));
+        if wants >= fair {
+            // This one and every larger one can use an equal share.
+            for &j in &order[k..] {
+                shares[j] = step_down(fair);
+            }
+            break;
+        }
+        shares[i] = step_down(wants);
+        left -= f64::from(shares[i]);
+        rest -= 1;
+    }
+    shares
+}
+
+fn step_down(bps: f64) -> u32 {
+    let bps = bps.clamp(0.0, f64::from(u32::MAX)) as u32;
+    bps / SHARE_STEP * SHARE_STEP
+}
+
+/// [`share_upload`] with memory, for the host to call about once a second.
+/// A share rises at once (that costs nothing until the controller grows
+/// into it) but comes down only when the cut is large, or when keeping the
+/// old shares would overrun the cap. Viewers are told apart by `K`, so one
+/// leaving and another joining start afresh.
+#[derive(Debug, Clone)]
+pub struct UploadShare<K> {
+    total_bps: u32,
+    shares: std::collections::BTreeMap<K, u32>,
+}
+
+impl<K: Ord + Copy> UploadShare<K> {
+    pub fn new(total_bps: u32) -> Self {
+        Self {
+            total_bps,
+            shares: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn total_bps(&self) -> u32 {
+        self.total_bps
+    }
+
+    /// The share of each viewer in `targets` (viewer, its controller's
+    /// target), in the same order.
+    pub fn update(&mut self, targets: &[(K, u32)]) -> Vec<(K, u32)> {
+        let wanted: Vec<u32> = targets.iter().map(|&(_, t)| t).collect();
+        let fresh = share_upload(self.total_bps, &wanted);
+        let kept: Vec<u32> = targets
+            .iter()
+            .zip(&fresh)
+            .map(|(&(viewer, _), &new)| match self.shares.get(&viewer) {
+                Some(&old)
+                    if new < old && f64::from(new) >= f64::from(old) * (1.0 - SHARE_HYSTERESIS) =>
+                {
+                    old
+                }
+                _ => new,
+            })
+            .collect();
+        let sum: u64 = kept.iter().map(|&s| u64::from(s)).sum();
+        let chosen = if sum as f64 > f64::from(self.total_bps) * (1.0 + SHARE_OVERRUN) {
+            fresh
+        } else {
+            kept
+        };
+        self.shares = targets
+            .iter()
+            .map(|&(viewer, _)| viewer)
+            .zip(chosen.iter().copied())
+            .collect();
+        targets
+            .iter()
+            .map(|&(viewer, _)| viewer)
+            .zip(chosen)
+            .collect()
     }
 }
 
@@ -839,5 +1003,159 @@ mod tests {
         });
         // The 400 ms window still holds the report from 8 reports back.
         assert_eq!(trend, 25_000);
+    }
+
+    #[test]
+    fn a_lower_share_brings_the_bitrate_down_at_once() {
+        let start = Instant::now();
+        let mut c = RateController::new(config(true));
+        run(&mut c, start, 12.0, |_| clean());
+        assert_eq!(c.applied_bps(), 20 * MBPS);
+        c.set_share(Some(12 * MBPS));
+        let later = start + Duration::from_secs(12);
+        assert_eq!(c.tick(later, &clean()), RateAction::SetBitrate(12 * MBPS));
+        // It stays there on a clean path, and grows again once lifted.
+        run(&mut c, later, 3.0, |_| clean());
+        assert_eq!(c.applied_bps(), 12 * MBPS);
+        c.set_share(None);
+        run(&mut c, later + Duration::from_secs(3), 10.0, |_| clean());
+        assert_eq!(c.applied_bps(), 20 * MBPS);
+    }
+
+    #[test]
+    fn the_hosts_own_delay_is_taken_off() {
+        let mut sent = SendDelays::new();
+        sent.sent(3, 0, 4_000);
+        sent.sent(3, 1, 25_000); // a busy encoder
+        assert_eq!(sent.network_part(3, 0, 24_000), 20_000);
+        assert_eq!(sent.network_part(3, 1, 45_000), 20_000);
+        // A new epoch starts over at seq 0; frames are told apart by epoch.
+        sent.sent(4, 0, 6_000);
+        assert_eq!(sent.network_part(4, 0, 26_000), 20_000);
+        assert_eq!(sent.network_part(3, 0, 24_000), 20_000);
+        assert_eq!(sent.network_part(4, 1, 45_000), 45_000, "not sent yet");
+        // Unknown: left as it is. Hostile values don't overflow.
+        assert_eq!(sent.network_part(9, 77, 30_000), 30_000);
+        assert_eq!(sent.network_part(4, 0, i64::MIN), i64::MIN);
+    }
+
+    #[test]
+    fn a_busy_encoder_is_not_congestion() {
+        // Every other frame waits 30 ms more for the encoder; the network
+        // takes 20 ms throughout.
+        let start = Instant::now();
+        let mut tracker = FeedbackTracker::new(start);
+        let mut sent = SendDelays::new();
+        tracker.on_epoch(1);
+        let mut trend = 0;
+        for report in 0..40u32 {
+            let now = start + Duration::from_millis(50 * u64::from(report));
+            let mut delays = Vec::new();
+            for i in 0..3 {
+                let seq = report * 3 + i;
+                let host = if seq % 2 == 0 { 2_000 } else { 32_000 } + i64::from(report) * 300;
+                sent.sent(1, seq, host);
+                delays.push(sent.network_part(1, seq, host + 20_000));
+            }
+            tracker.on_report(now, 1, 0, 0, &delays);
+            trend = tracker.snapshot(now, PathSample::default()).delay_trend_us;
+        }
+        // Encoding got slower all along (300 µs per report); none of it shows.
+        assert_eq!(trend, 0);
+    }
+
+    #[test]
+    fn viewers_split_the_upload_cap() {
+        // Everyone wants more than an equal share: equal shares.
+        assert_eq!(
+            share_upload(30 * MBPS, &[20 * MBPS, 20 * MBPS, 20 * MBPS]),
+            vec![10 * MBPS; 3]
+        );
+        // One held back at 4 Mbit/s by its network keeps room to grow; the
+        // rest is split between the others.
+        assert_eq!(
+            share_upload(30 * MBPS, &[20 * MBPS, 4 * MBPS, 20 * MBPS]),
+            vec![12_500_000, 5 * MBPS, 12_500_000]
+        );
+        // Nobody needs much: margins only, and what is left goes unused.
+        assert_eq!(
+            share_upload(100 * MBPS, &[2 * MBPS, 3 * MBPS]),
+            vec![2_500_000, 3_500_000]
+        );
+        // A viewer down at the minimum still gets room to grow.
+        assert_eq!(
+            share_upload(30 * MBPS, &[1_500_000, 20 * MBPS]),
+            vec![2 * MBPS, 25 * MBPS]
+        );
+        assert!(share_upload(30 * MBPS, &[]).is_empty());
+    }
+
+    #[test]
+    fn shares_never_add_up_to_more_than_the_cap() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let total = (next() % 100 + 1) as u32 * MBPS;
+            let n = (next() % 7 + 1) as usize;
+            let targets: Vec<u32> = (0..n).map(|_| (next() % 40_000_000) as u32).collect();
+            let shares = share_upload(total, &targets);
+            let sum: u64 = shares.iter().map(|&s| u64::from(s)).sum();
+            assert!(sum <= u64::from(total), "{targets:?} -> {shares:?}");
+        }
+    }
+
+    /// A viewer pushed down to the minimum by a bad patch climbs back once
+    /// its network recovers, with the cap's share recomputed every second.
+    #[test]
+    fn a_viewer_at_the_minimum_climbs_back_under_a_cap() {
+        let start = Instant::now();
+        let cfg = RateConfig {
+            min_bps: 1_500_000,
+            start_bps: 1_500_000,
+            ..config(false)
+        };
+        let mut c = RateController::new(cfg);
+        let mut share = UploadShare::new(30 * MBPS);
+        for second in 0..20u64 {
+            let shares = share.update(&[('b', c.target_bps()), ('c', 20 * MBPS)]);
+            c.set_share(Some(shares[0].1));
+            run(&mut c, start + Duration::from_secs(second), 1.0, |_| {
+                clean()
+            });
+        }
+        assert!(c.applied_bps() >= 5 * MBPS, "{}", c.applied_bps());
+    }
+
+    #[test]
+    fn small_swings_leave_the_shares_alone() {
+        let mut share = UploadShare::new(30 * MBPS);
+        let (bob, carol) = ('b', 'c');
+        let update = |share: &mut UploadShare<char>, bob_target: u32| {
+            share.update(&[(bob, bob_target), (carol, 20 * MBPS)])
+        };
+        assert_eq!(
+            update(&mut share, 4 * MBPS),
+            vec![(bob, 5 * MBPS), (carol, 25 * MBPS)]
+        );
+        // Bob grows a little: his share rises; Carol's cut is small, so she
+        // keeps hers (the cap is overrun by under 10%).
+        assert_eq!(
+            update(&mut share, 4_800_000),
+            vec![(bob, 6 * MBPS), (carol, 25 * MBPS)]
+        );
+        // Bob grows more: now Carol's cut is large enough to take.
+        assert_eq!(
+            update(&mut share, 6_500_000),
+            vec![(bob, 8 * MBPS), (carol, 22 * MBPS)]
+        );
+        // A newcomer starts afresh rather than inheriting Bob's share.
+        let dan = 'd';
+        let shares = share.update(&[(dan, 20 * MBPS), (carol, 20 * MBPS)]);
+        assert_eq!(shares, vec![(dan, 15 * MBPS), (carol, 15 * MBPS)]);
     }
 }
