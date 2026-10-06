@@ -682,3 +682,294 @@ button.big:not(.primary) span {
   justify-content: space-between;
   gap: 10px;
 }
+
+/* Sessions: the stage with live streams. */
+.stage.live {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 16px;
+}
+
+.stage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stage-header h2 {
+  font-size: 1.2rem;
+}
+
+.stage-empty-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.stage-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.stage-card,
+.host-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-quiet);
+  border-radius: var(--radius);
+}
+
+.stage-card.mine,
+.host-panel {
+  border-color: var(--border);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.card-title {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.card-title h3,
+.host-head h3 {
+  font-size: 1.05rem;
+  margin: 0;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-title .hint {
+  flex-basis: 100%;
+}
+
+.card-state {
+  color: var(--accent);
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.live-badge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--danger);
+  color: #000;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.5;
+}
+
+.member .live-badge {
+  margin-left: -4px;
+}
+
+.member:hover .live-badge {
+  display: none;
+}
+
+.host-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.host-head h3 {
+  flex: 1 1 120px;
+}
+
+.host-list h4 {
+  margin: 0 0 6px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+
+.host-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.host-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+}
+
+.host-list li:hover {
+  background: var(--bg-hover);
+}
+
+.host-list li button {
+  padding: 3px 10px;
+  font-size: 0.85rem;
+}
+
+.host-list.requests {
+  padding: 8px;
+  border: 1px solid var(--focus);
+  border-radius: var(--radius);
+}
+
+kbd {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em;
+  padding: 1px 6px;
+  border: 1px solid var(--border-quiet);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+/* Go live. */
+select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  width: 100%;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.form label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font-weight: 400;
+  font-size: 0.95rem;
+}
+
+.form label.check input {
+  width: auto;
+}
+
+.form label.check.disabled {
+  opacity: 0.5;
+}
+
+.sources {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sources legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  margin-bottom: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.source-list {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border-quiet);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+
+.form label.source {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-weight: 400;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.form label.source:hover {
+  background: var(--bg-hover);
+}
+
+.form label.source.picked {
+  border-color: var(--accent);
+}
+
+.source input {
+  width: auto;
+  flex: none;
+}
+
+.source-title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source .hint {
+  flex: none;
+  font-size: 0.8rem;
+}
+
+/* Shortcuts. */
+.shortcuts {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.shortcuts td {
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border-quiet);
+  vertical-align: top;
+}
+
+.shortcuts td:first-child {
+  width: 1%;
+}
+
+.shortcuts .hint {
+  display: block;
+  font-size: 0.8rem;
+}

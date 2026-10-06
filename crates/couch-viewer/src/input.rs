@@ -3,14 +3,16 @@
 //! goes on the wire (`couch_input::forward`); this side only reports what the
 //! user does, and captures the mouse while this member may send it.
 //!
-//! Local hotkeys hold Ctrl+Alt+Shift and are never forwarded:
-//! - H shows or hides the HUD (F3 too, while the keyboard isn't forwarded);
-//! - M frees the mouse, or captures it again.
+//! Local shortcuts (`couch_input::shortcuts`) are never forwarded. Most hold
+//! Ctrl+Alt+Shift; F3 alone shows the HUD while keys aren't being sent.
 
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Result, anyhow};
-use couch_input::{DEV_PAD_IDS, PadButtons};
+use couch_input::{
+    DEV_PAD_IDS, HidUsage, PadButtons, XBOX_360_IDS,
+    shortcuts::{self, Shortcut},
+};
 use couch_proto::{
     ids::Permissions,
     input::{PadSnapshot, mouse_button},
@@ -26,15 +28,6 @@ use sdl3::{
     video::Window,
 };
 
-/// Something the user asked of the viewer itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    ToggleHud,
-}
-
-const KEY_H: u16 = 0x0B;
-const KEY_M: u16 = 0x10;
-const KEY_F3: u16 = 0x3C;
 /// Rumble lasts this long unless renewed. The host repeats a running rumble
 /// every 500 ms, so a lost "stop" ends it within a second.
 const RUMBLE_MS: u32 = 1_000;
@@ -42,6 +35,8 @@ const RUMBLE_MS: u32 = 1_000;
 pub struct InputCapture {
     gamepads: GamepadSubsystem,
     pads: HashMap<JoystickId, Gamepad>,
+    /// Open pads with Xbox 360 ids: dropped if a host here plugs one in.
+    xbox_360: BTreeSet<JoystickId>,
     /// The pad last touched; it drives the seat.
     active: Option<JoystickId>,
     last_pad: PadSnapshot,
@@ -73,6 +68,7 @@ impl InputCapture {
         Ok(Self {
             gamepads,
             pads: HashMap::new(),
+            xbox_360: BTreeSet::new(),
             active: None,
             last_pad: PadSnapshot::default(),
             seat: None,
@@ -131,12 +127,15 @@ impl InputCapture {
                 }
                 let mouse = if self.may(Permissions::MOUSE) {
                     if self.captured {
-                        "  (Ctrl+Alt+Shift+M frees the mouse)"
+                        format!(
+                            "  ({} frees the mouse)",
+                            shortcuts::binding(Shortcut::FreeMouse).keys()
+                        )
                     } else {
-                        "  (click to capture the mouse)"
+                        "  (click to capture the mouse)".to_string()
                     }
                 } else {
-                    ""
+                    String::new()
                 };
                 format!("Controlling: {}  [{pad}]{mouse}", what.join(", "))
             }
@@ -145,7 +144,8 @@ impl InputCapture {
     }
 
     /// Handles one event, appending what to send to `out`.
-    pub fn event(&mut self, event: &Event, out: &mut Vec<LocalInput>) -> Option<Action> {
+    /// Returns a shortcut for the viewer itself, which goes nowhere else.
+    pub fn event(&mut self, event: &Event, out: &mut Vec<LocalInput>) -> Option<Shortcut> {
         match event {
             Event::Window { win_event, .. } => match win_event {
                 WindowEvent::FocusGained => self.focused = true,
@@ -166,22 +166,21 @@ impl InputCapture {
                 let chord = hotkey(*keymod, Mod::LCTRLMOD, Mod::RCTRLMOD)
                     && hotkey(*keymod, Mod::LALTMOD, Mod::RALTMOD)
                     && hotkey(*keymod, Mod::LSHIFTMOD, Mod::RSHIFTMOD);
-                let action = match usage {
-                    KEY_H if chord => Some(Action::ToggleHud),
-                    KEY_F3 if !self.may(Permissions::KEYBOARD) => Some(Action::ToggleHud),
-                    KEY_M if chord => {
-                        self.mouse_freed = !self.mouse_freed;
-                        None
+                // F3 alone is a shortcut only while keys aren't being sent.
+                let shortcut = shortcuts::viewer_shortcut(HidUsage(usage), chord)
+                    .filter(|_| chord || !self.may(Permissions::KEYBOARD));
+                let Some(shortcut) = shortcut else {
+                    if self.focused && self.keys.insert(usage) {
+                        out.push(LocalInput::Key { usage, down: true });
                     }
-                    _ => {
-                        if self.focused && self.keys.insert(usage) {
-                            out.push(LocalInput::Key { usage, down: true });
-                        }
-                        return None;
-                    }
+                    return None;
                 };
                 self.swallowed_keys.insert(usage);
-                return action;
+                if shortcut == Shortcut::FreeMouse {
+                    self.mouse_freed = !self.mouse_freed;
+                    return None;
+                }
+                return Some(shortcut);
             }
             Event::KeyUp {
                 scancode: Some(scancode),
@@ -241,6 +240,7 @@ impl InputCapture {
             Event::GamepadAdded { which, .. } => self.open_pad(*which),
             Event::GamepadRemoved { which, .. } => {
                 self.pads.remove(which);
+                self.xbox_360.remove(which);
                 if self.active == Some(*which) {
                     self.active = None;
                     self.send_pad(PadSnapshot::default(), out);
@@ -258,6 +258,12 @@ impl InputCapture {
             _ => {}
         }
         None
+    }
+
+    /// The mouse is captured for the game: the pointer is hidden and every
+    /// click is the game's.
+    pub fn mouse_captured(&self) -> bool {
+        self.captured
     }
 
     /// Captures or frees the mouse to match the state. Call after events.
@@ -293,12 +299,37 @@ impl InputCapture {
         };
         let ids = (pad.vendor_id().unwrap_or(0), pad.product_id().unwrap_or(0));
         let name = pad.name().unwrap_or_default();
-        if ids == DEV_PAD_IDS {
-            tracing::info!("skipping {name:?}: it is a host's virtual pad on this machine");
+        let xbox_360 = ids == XBOX_360_IDS;
+        if ids == DEV_PAD_IDS || (xbox_360 && host_pads_here()) {
+            tracing::info!(
+                "skipping {name:?}: a host on this PC has a virtual pad plugged in, and it may be this one"
+            );
             return;
         }
         tracing::info!("gamepad {name:?} ({:04x}:{:04x})", ids.0, ids.1);
+        if xbox_360 {
+            self.xbox_360.insert(id);
+        }
         self.pads.insert(id, pad);
+    }
+
+    /// Drops Xbox 360 pads once a host on this PC has a virtual pad plugged
+    /// in (it went live after this window opened): one of them may be the
+    /// host's. Call every second or so.
+    pub fn drop_host_pads(&mut self, out: &mut Vec<LocalInput>) {
+        if self.xbox_360.is_empty() || !host_pads_here() {
+            return;
+        }
+        for id in std::mem::take(&mut self.xbox_360) {
+            tracing::info!(
+                "skipping an Xbox 360 pad: a host on this PC has a virtual pad plugged in"
+            );
+            self.pads.remove(&id);
+            if self.active == Some(id) {
+                self.active = None;
+                self.send_pad(PadSnapshot::default(), out);
+            }
+        }
     }
 
     fn send_pad(&mut self, snapshot: PadSnapshot, out: &mut Vec<LocalInput>) {
@@ -309,7 +340,21 @@ impl InputCapture {
     }
 }
 
-fn button_code(button: MouseButton) -> Option<u8> {
+/// A host on this PC has a virtual pad plugged in. Host pads report a real
+/// Xbox 360 controller's ids (games need them), so while one is plugged in,
+/// every pad with those ids is skipped (`couch_platform_win::virtual_pads`).
+pub fn host_pads_here() -> bool {
+    #[cfg(windows)]
+    {
+        couch_platform_win::virtual_pads::host_pads_here()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+pub fn button_code(button: MouseButton) -> Option<u8> {
     Some(match button {
         MouseButton::Left => mouse_button::LEFT,
         MouseButton::Right => mouse_button::RIGHT,

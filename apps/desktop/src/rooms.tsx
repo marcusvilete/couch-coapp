@@ -1,11 +1,12 @@
 // The lobby's columns: the room rail, the room's column (members and you),
-// and the stage where sessions will show (M5).
+// and the welcome screen. The stage is in sessions.tsx.
 import { useEffect, useRef, useState } from "react";
 import type { EngineInfo } from "./bindings/EngineInfo";
 import type { MemberLink } from "./bindings/MemberLink";
 import type { MemberView } from "./bindings/MemberView";
 import type { ProfileView } from "./bindings/ProfileView";
 import type { RoomView } from "./bindings/RoomView";
+import { playerOf } from "./sessions";
 import { Avatar, PlusIcon, duration } from "./ui";
 
 /** Rooms as round icons, in the order the user dragged them into (Alt+Up
@@ -125,6 +126,7 @@ export function RoomColumn(props: {
   info: EngineInfo | null;
   actions: RoomActions;
   onEditName: () => void;
+  onShortcuts: () => void;
 }) {
   const { room } = props;
   return (
@@ -145,7 +147,7 @@ export function RoomColumn(props: {
         </div>
       )}
       {!room && <div className="column-body" />}
-      <UserPanel profile={props.profile} info={props.info} onEdit={props.onEditName} />
+      <UserPanel profile={props.profile} info={props.info} onEdit={props.onEditName} onShortcuts={props.onShortcuts} />
     </aside>
   );
 }
@@ -222,6 +224,8 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
       <ul>
         {room.members.map((m) => {
           const link = LINKS[m.link];
+          const live = room.sessions.some((s) => s.host === m.id);
+          const plays = room.sessions.some((s) => playerOf(s) === m.id);
           return (
             <li key={m.id} className={`member link-${m.link}`}>
               <span className="presence" title={link.title}>
@@ -236,7 +240,18 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
                     ♛
                   </span>
                 )}
+                {plays && (
+                  <span className="playing" title="Playing" aria-label="playing">
+                    {" "}
+                    🎮
+                  </span>
+                )}
               </span>
+              {live && (
+                <span className="live-badge" title={`${m.name} is streaming`}>
+                  LIVE
+                </span>
+              )}
               <span className="link-label" title={link.title}>
                 {link.label}
               </span>
@@ -258,7 +273,12 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
   );
 }
 
-function UserPanel(props: { profile: ProfileView | null; info: EngineInfo | null; onEdit: () => void }) {
+function UserPanel(props: {
+  profile: ProfileView | null;
+  info: EngineInfo | null;
+  onEdit: () => void;
+  onShortcuts: () => void;
+}) {
   const name = props.profile?.displayName ?? "…";
   const profile = props.info?.profile;
   return (
@@ -270,27 +290,13 @@ function UserPanel(props: { profile: ProfileView | null; info: EngineInfo | null
         </span>
         {profile && profile !== "default" && <span className="user-profile">profile {profile}</span>}
       </div>
+      <button className="icon" title="Keyboard shortcuts" aria-label="Keyboard shortcuts" onClick={props.onShortcuts}>
+        ⌨
+      </button>
       <button className="icon" title="Change your name" aria-label="Change your name" onClick={props.onEdit}>
         ✎
       </button>
     </footer>
-  );
-}
-
-export function Stage(props: { room: RoomView; onInvite: () => void }) {
-  const others = props.room.members.length - 1;
-  return (
-    <main className="stage">
-      <div className="stage-empty">
-        <h2>Nobody is live yet</h2>
-        <p className="hint">Streaming a game to the room arrives with sessions (M5).</p>
-        {props.room.isOwner && others === 0 && (
-          <button className="primary" onClick={props.onInvite}>
-            Invite people
-          </button>
-        )}
-      </div>
-    </main>
   );
 }
 

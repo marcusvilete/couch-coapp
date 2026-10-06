@@ -141,8 +141,9 @@ pub(crate) enum Input {
     Watch(SessionId, WatchEvent),
     /// The host we asked to watch hasn't answered in time.
     JoinTimeout(SessionId),
-    /// The host's panic key.
-    Panic,
+    /// The host's panic key, for the stream it was pressed during; `None`
+    /// means ours, whichever it is (`Engine::panic_key`).
+    Panic(Option<SessionId>),
 }
 
 pub(crate) enum JoinAnswer {
@@ -509,7 +510,7 @@ impl Actor {
             Input::Host(session, event) => self.host_event(session, event, now),
             Input::Watch(session, event) => self.watch_event(session, event, now),
             Input::JoinTimeout(session) => self.join_timeout(session, now),
-            Input::Panic => self.panic_key(now),
+            Input::Panic(session) => self.panic_key(session, now),
         }
     }
 
@@ -550,7 +551,7 @@ impl Actor {
             Command::LeaveRoom { room } => self.leave(&room, now),
             Command::BanMember { room, member } => self.ban(&room, &member, now),
             // Answered by the engine itself.
-            Command::ListSources => Err(EngineError::Stopped),
+            Command::GetShortcuts | Command::ListSources => Err(EngineError::Stopped),
             Command::GoLive {
                 room,
                 source,

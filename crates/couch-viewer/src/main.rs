@@ -5,6 +5,8 @@
 //!
 //! Modes:
 //! - no arguments: show the stream arriving on the IPC pipe until it closes;
+//! - `--hud-preview watching|asking|controlling`: no pipe, a made-up session,
+//!   to check the HUD by eye;
 //! - `--clock [x y] [--clicks]`: the latency clock window (see `clock.rs`);
 //! - `--input-sink FILE`: a window that records the input it receives (see
 //!   `sink.rs`);
@@ -27,6 +29,7 @@ use std::io::Write;
 
 use anyhow::{anyhow, bail};
 use couch_media::Micros;
+use couch_proto::ipc::HudRole;
 
 /// Now, on the clock frames are stamped with (QPC on Windows).
 pub fn now_us() -> Micros {
@@ -48,7 +51,9 @@ fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None | Some("--pos" | "--size" | "--no-hud") => viewer::run(window_options(&args)?),
+        None | Some("--pos" | "--size" | "--no-hud" | "--hide-stats" | "--hud-preview") => {
+            viewer::run(window_options(&args)?)
+        }
         Some("--clock") => {
             let coord =
                 |i: usize, default| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);
@@ -70,7 +75,8 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// `--pos X Y` and `--size W H` for the stream window.
+/// `--pos X Y` and `--size W H` for the stream window, `--no-hud`,
+/// `--hide-stats` and `--hud-preview ROLE`.
 fn window_options(args: &[String]) -> anyhow::Result<viewer::WindowOptions> {
     let mut options = viewer::WindowOptions::default();
     let mut rest = args.iter();
@@ -84,6 +90,15 @@ fn window_options(args: &[String]) -> anyhow::Result<viewer::WindowOptions> {
             "--pos" => options.position = Some((number()? as i32, number()? as i32)),
             "--size" => options.size = (number()? as u32, number()? as u32),
             "--no-hud" => options.hide_hud = true,
+            "--hide-stats" => options.hide_stats = true,
+            "--hud-preview" => {
+                options.preview = Some(match rest.next().map(String::as_str) {
+                    Some("watching") => HudRole::Watching,
+                    Some("asking") => HudRole::Asking,
+                    Some("controlling") => HudRole::Controlling,
+                    _ => bail!("--hud-preview needs watching, asking or controlling"),
+                });
+            }
             other => bail!("unknown argument {other:?}"),
         }
     }
@@ -107,9 +122,11 @@ fn probe() -> anyhow::Result<()> {
                 gamepads.vendor_for_id(id).unwrap_or(0),
                 gamepads.product_for_id(id).unwrap_or(0),
             );
-            if ids == couch_input::DEV_PAD_IDS {
+            let skipped = ids == couch_input::DEV_PAD_IDS
+                || (ids == couch_input::XBOX_360_IDS && input::host_pads_here());
+            if skipped {
                 format!(
-                    "{name} ({:04x}:{:04x}, a host's virtual pad: skipped)",
+                    "{name} ({:04x}:{:04x}, maybe a host's virtual pad: skipped)",
                     ids.0, ids.1
                 )
             } else {

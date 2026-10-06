@@ -4,7 +4,8 @@ import type { RoomView } from "./bindings/RoomView";
 import { ChangePasswordDialog, ConfirmDialog, CreateRoomDialog, InviteDialog, JoinRoomDialog, NameDialog } from "./dialogs";
 import { request } from "./engine";
 import { useLobby } from "./lobby";
-import { RoomColumn, RoomRail, Stage, Welcome, type RoomActions } from "./rooms";
+import { RoomColumn, RoomRail, Welcome, type RoomActions } from "./rooms";
+import { GoLiveDialog, ShortcutsDialog, Stage, busyIn } from "./sessions";
 import { Modal } from "./ui";
 import "./App.css";
 
@@ -14,6 +15,8 @@ type Dialog =
   | { kind: "join"; invite: string }
   | { kind: "invite"; room: RoomView }
   | { kind: "name" }
+  | { kind: "goLive"; room: RoomView }
+  | { kind: "shortcuts" }
   | { kind: "password"; room: RoomView }
   | { kind: "confirm"; title: string; body: string; action: string; danger?: boolean; run: () => Promise<unknown> };
 
@@ -182,9 +185,17 @@ function App() {
         info={lobby.info}
         actions={actions}
         onEditName={() => setDialog({ kind: "name" })}
+        onShortcuts={() => setDialog({ kind: "shortcuts" })}
       />
       {room ? (
-        <Stage room={room} onInvite={actions.invite} />
+        <Stage
+          room={room}
+          busy={busyIn(rooms)}
+          onGoLive={() => setDialog({ kind: "goLive", room })}
+          onInvite={actions.invite}
+          onRoom={lobby.putRoom}
+          notify={lobby.notify}
+        />
       ) : lobby.loaded ? (
         <Welcome onCreate={() => setDialog({ kind: "create" })} onJoin={() => setDialog({ kind: "join", invite: "" })} />
       ) : (
@@ -251,6 +262,17 @@ function App() {
           }}
         />
       )}
+      {dialog?.kind === "goLive" && (
+        <GoLiveDialog
+          room={dialog.room}
+          onClose={close}
+          onLive={(live) => {
+            lobby.putRoom(live);
+            setDialog(null);
+          }}
+        />
+      )}
+      {dialog?.kind === "shortcuts" && <ShortcutsDialog onClose={close} />}
       {dialog?.kind === "confirm" && (
         <ConfirmDialog
           title={dialog.title}

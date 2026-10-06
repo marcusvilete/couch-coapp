@@ -38,6 +38,14 @@ Each item below cost time or nearly caused undefined behaviour in M1–M3. Check
 - **Callbacks arrive on other threads.** Keep their state `Send + Sync` (channels or atomics), and never block them for long.
 - **Event handles** (`CreateEventW`) are closed in `Drop`, including on the error paths partway through setup.
 
+## Low-level hooks
+
+- **Raw keyboard input blinds the process's own hooks.** While a process that registered for raw keyboard input (`RegisterRawInputDevices`, usage page 1, usage 6) is in front, Windows doesn't call that process's own `WH_KEYBOARD_LL` hooks. Measured in M5b: 0 of 2 events with the registration, 2 of 2 without it or after `RIDEV_REMOVE`.
+  - Tauri's tao registers for raw input by default, so the desktop app calls `device_event_filter(DeviceEventFilter::Always)`. Keep it, and never register raw keyboard input in a process that hosts the panic key.
+  - Symptom: the panic key works everywhere except in our own window.
+- **Test the hook with a person.** The panic key ignores injected keys, so a script can't press it. For experiments, a throwaway hook that counts injected keys (a C# `Add-Type` script in the scratchpad works) can show whether the hook is called at all.
+- A low-level hook runs on the thread that installed it, from that thread's message loop. Keep that thread doing nothing else, and return within milliseconds: Windows silently removes a hook that keeps timing out.
+
 ## Callbacks must not panic
 
 - A panic that unwinds out of an `extern "C"` callback (SDL audio, Windows hooks, window procedures) aborts the process. Inside callbacks:

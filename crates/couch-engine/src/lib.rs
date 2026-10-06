@@ -104,6 +104,8 @@ pub enum Command {
         room: String,
         member: String,
     },
+    /// Every keyboard shortcut, for the app to list (read-only for now).
+    GetShortcuts,
     /// Windows and screens that could be streamed. Nothing is sent anywhere.
     ListSources,
     /// Starts streaming `source` to `room`. One stream at a time, and not
@@ -149,6 +151,29 @@ pub enum Command {
     TakeBackControl,
     /// While streaming: let viewers have control again after the panic key.
     AllowControl,
+}
+
+/// One row of [`Command::GetShortcuts`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ShortcutView {
+    /// Such as "Ctrl+Alt+Shift+H".
+    pub keys: String,
+    pub action: String,
+    pub scope: ShortcutScope,
+    /// When it applies, if not always; empty otherwise.
+    pub condition: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum ShortcutScope {
+    /// In the stream window.
+    Viewer,
+    /// Anywhere on this PC while streaming.
+    Host,
 }
 
 /// A window or screen from [`Command::ListSources`].
@@ -209,6 +234,9 @@ pub struct SessionView {
     pub role: SessionRole,
     /// For the host: viewers asking for control, oldest first.
     pub requests: Vec<String>,
+    /// For the host: the panic key's keys, while its hook is in place;
+    /// `None` if it couldn't be installed (the app warns).
+    pub panic_key: Option<String>,
 }
 
 /// Where this profile stands in a session.
@@ -272,6 +300,7 @@ pub enum Response {
     InvitePreview(InvitePreview),
     OpenedInvite { link: Option<String> },
     Sources(SourceList),
+    Shortcuts { shortcuts: Vec<ShortcutView> },
     Done,
 }
 
@@ -309,6 +338,7 @@ impl fmt::Debug for Command {
                 .field("member", member)
                 .finish(),
             // Window titles are the user's business; the log needn't see them.
+            Self::GetShortcuts => f.write_str("GetShortcuts"),
             Self::ListSources => f.write_str("ListSources"),
             Self::GoLive {
                 room,
@@ -369,6 +399,10 @@ impl fmt::Debug for Response {
                 .debug_struct("Sources")
                 .field("windows", &list.windows.len())
                 .field("screens", &list.screens.len())
+                .finish(),
+            Self::Shortcuts { shortcuts } => f
+                .debug_struct("Shortcuts")
+                .field("shortcuts", &shortcuts.len())
                 .finish(),
             Self::Done => f.write_str("Done"),
         }
@@ -685,7 +719,7 @@ impl Engine {
         if let Some(handle) = &*self.panic.lock().unwrap_or_else(PoisonError::into_inner) {
             handle.panic();
         }
-        let _ = self.actor.send(rooms::Input::Panic).await;
+        let _ = self.actor.send(rooms::Input::Panic(None)).await;
     }
 
     pub fn profile(&self) -> &Profile {
@@ -738,6 +772,20 @@ impl Engine {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .take(),
+            }),
+            Command::GetShortcuts => Ok(Response::Shortcuts {
+                shortcuts: couch_input::shortcuts::SHORTCUTS
+                    .iter()
+                    .map(|b| ShortcutView {
+                        keys: b.keys(),
+                        action: b.action.to_string(),
+                        scope: match b.scope {
+                            couch_input::shortcuts::Scope::Viewer => ShortcutScope::Viewer,
+                            couch_input::shortcuts::Scope::Host => ShortcutScope::Host,
+                        },
+                        condition: b.condition.to_string(),
+                    })
+                    .collect(),
             }),
             Command::ListSources => {
                 let backend = self.backend.clone();
@@ -892,6 +940,20 @@ mod tests {
         };
         assert_eq!(info.profile, "test");
         assert_eq!(info.protocol, "couch-coapp/0");
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shortcuts_list_the_panic_key_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path()).await;
+        let Response::Shortcuts { shortcuts } = engine.handle(Command::GetShortcuts).await.unwrap()
+        else {
+            panic!("expected shortcuts");
+        };
+        assert_eq!(shortcuts[0].keys, "Ctrl+Alt+Shift+Backspace");
+        assert_eq!(shortcuts[0].scope, ShortcutScope::Host);
+        assert_eq!(shortcuts.len(), couch_input::shortcuts::SHORTCUTS.len());
         engine.shutdown().await;
     }
 

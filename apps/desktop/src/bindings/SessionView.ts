@@ -25,4 +25,9 @@ controlPaused: boolean, role: SessionRole,
 /**
  * For the host: viewers asking for control, oldest first.
  */
-requests: Array<string>, };
+requests: Array<string>, 
+/**
+ * For the host: the panic key's keys, while its hook is in place;
+ * `None` if it couldn't be installed (the app warns).
+ */
+panicKey: string | null, };

@@ -2,7 +2,8 @@
 //! them:
 //! - [`router`]: on the host, decides which remote input reaches the game;
 //! - [`forward`]: on a viewer, turns local input into what goes on the wire;
-//! - [`filter`]: keys a remote member may never press.
+//! - [`filter`]: keys a remote member may never press;
+//! - [`shortcuts`]: every local shortcut, in one table.
 //!
 //! Keys travel as physical positions (USB HID usages), never as characters, so
 //! the host's keyboard layout decides what a key types and WASD stays WASD on
@@ -11,6 +12,7 @@
 pub mod filter;
 pub mod forward;
 pub mod router;
+pub mod shortcuts;
 
 use bitflags::bitflags;
 use couch_proto::input::{PadSnapshot, mouse_button};
@@ -19,10 +21,17 @@ use thiserror::Error;
 
 pub use couch_proto::ids::{MemberId, Permissions, SeatEpoch, SeatId};
 
-/// USB vendor and product id of the virtual pad in development builds. A
-/// viewer on the same machine skips pads with these ids, so the host's virtual
-/// pad isn't captured and sent back to itself. 0x1209/0x0001 is pid.codes'
-/// test id, reserved for exactly this kind of private use.
+/// USB vendor and product id of a wired Xbox 360 controller, which the host's
+/// virtual pad reports: games and Steam know a controller's layout by its ids,
+/// and with unknown ones only the D-pad works. While a host on the same PC
+/// has a pad plugged in, a viewer skips pads with these ids, so the host's pad
+/// isn't captured and sent back to itself.
+pub const XBOX_360_IDS: (u16, u16) = (0x045E, 0x028E);
+
+/// A made-up vendor and product id for virtual pads that no game should use:
+/// `couch-cli pad-test` and the CLI's host without `--real-pad-ids`. A viewer
+/// always skips pads with these ids. 0x1209/0x0001 is pid.codes' test id,
+/// reserved for exactly this kind of private use.
 pub const DEV_PAD_IDS: (u16, u16) = (0x1209, 0x0001);
 
 /// A keyboard key as a USB HID usage on the Keyboard/Keypad page (0x07).

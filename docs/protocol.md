@@ -8,6 +8,7 @@ The wire protocol between room members, and the pipe between the main process an
 - M3 added audio: the audio datagram, and the audio packet and stats on the viewer IPC.
 - M4a added rooms: admission, signed member records, the owner's policy, presence, invites and close codes.
 - M5a added sessions: the session directory, watching, control requests, the per-connection stream acceptor, the control stream's priority, the upload share, and viewer IPC v3.
+- M5b put sessions on screen without changing the wire: the viewer's HUD bar and shortcuts, the shortcuts table, and the panic-key hook.
 - The rest is a draft for later milestones.
 
 ## Versioning
@@ -322,7 +323,10 @@ A session is a member streaming a game to others in the same room, over the room
 - The host can also hand the seat to a viewer who didn't ask, and take it back. A viewer gives it back with `ControlCancel`, which also withdraws a pending request.
 - Every change goes through the host's seat router ([Input](#input)), the only judge of who holds the seat. Seat epochs start at a random value per session, so input from an earlier session on the same connection can't carry a current one.
 - Keyboard and mouse are a session-wide choice when going live, for a window source only; otherwise the holder gets the gamepad only.
-- **The panic key** (the host's own keyboard) releases every seat at once, declines pending requests and pauses control (`control_paused` in the status) until the host allows it again. A grant already on its way to the seat router when the key is pressed is refused too. The stream goes on.
+- **The panic key** (Ctrl+Alt+Shift+Backspace on the host's own keyboard) releases every seat at once, declines pending requests and pauses control (`control_paused` in the status) until the host allows it again. A grant already on its way to the seat router when the key is pressed is refused too. The stream goes on.
+  - It is a low-level keyboard hook (`couch_platform_win::panic_key`), installed while the host streams. Only physical key events count: injected ones (`LLKHF_INJECTED`, which is what a guest's keys become) are passed on and never change which modifiers it believes are held, so a guest can neither press it nor complete it. A modifier also counts only while Windows still has it down, so a key-up lost to the secure desktop doesn't leave it held; but once a guest's injected event has touched that modifier, only the physical state counts, because Windows' down bit is shared and a guest's key-up would clear it while the host holds the key. A guest can't block the key either.
+  - Auto-repeat is told from a new press by timing (a repeat follows within Windows' longest repeat delay, 1 s). A Backspace already held before the chord is completed stays the game's, repeats and release included, so it never sticks down.
+  - The chord's key-down, repeats and key-up are swallowed; the game never sees them. The hook releases straight through the input task, from its own thread, then tells the room actor.
 
 **Ending.** When the host ends a session it releases all input first, then sends `SessionEnded` and resets the epoch streams with `SESSION_END`, then stops encoding, capture and sound, and unplugs the virtual pad last.
 
@@ -362,7 +366,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 
 | Kind | Direction | Meaning |
 |---|---|---|
-| `0x01` | main to viewer | Hello: IPC version and session parameters |
+| `0x01` | main to viewer | Hello: `IPC_VERSION` as a big-endian `u16`. A viewer that speaks another version stops |
 | `0x02` | main to viewer | Video frame |
 | `0x03` | main to viewer | Audio packet (postcard): `{seq, capture_us, arrived_us, packet}`, the datagram plus its arrival time on this machine |
 | `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, controller?, viewers u8, keyboard_mouse, control_paused, note}`, on every change. `host` and `controller` are display names |
@@ -378,8 +382,12 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 
 `IPC_VERSION` (now 3) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
-**Viewer hotkeys.** Keys pressed with Ctrl+Alt+Shift held stay in the viewer:
-- H shows or hides the HUD; F3 does too, unless the keyboard is being forwarded.
+**Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the panic-key hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. In the viewer, with Ctrl+Alt+Shift held:
+- C asks for the controller, withdraws the request, or gives it back (a `USER_ACTION`);
+- F toggles full screen;
+- H shows or hides the HUD; F3 alone does too, unless the keyboard is being forwarded;
 - M frees the mouse; clicking the window captures it again.
+
+**The HUD's bar.** The session bar (title, host, who plays, this viewer's state, a note, and buttons for the same actions plus Leave) takes clicks only while the mouse is free. A click on it goes to the HUD alone: it is never forwarded and never captures the mouse.
 
 Losing the focus releases every forwarded key and button. Gamepads keep working in the background.

@@ -100,6 +100,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine_command])
+        // No raw keyboard and mouse input for this process. We don't use
+        // device events, and while a process registered for raw keyboard
+        // input is in front, Windows skips its own low-level keyboard hooks:
+        // the panic key would go blind whenever this window has the focus.
+        .device_event_filter(tauri::DeviceEventFilter::Always)
         .build(context)
         .expect("error while building Couch Co-App");
 

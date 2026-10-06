@@ -8,6 +8,8 @@ use vigem_rust::{
     Client, NotificationReceiver, TargetHandle, X360Button, X360Notification, X360Report, Xbox360,
 };
 
+use crate::virtual_pads::{self, PadMarker};
+
 /// Connects to ViGEmBus and disconnects again. `Err` explains what is missing.
 pub fn probe() -> Result<(), String> {
     Client::connect().map(drop).map_err(|e| e.to_string())
@@ -24,8 +26,11 @@ pub struct VigemPadFactory {
 }
 
 impl VigemPadFactory {
-    /// `ids` overrides the USB vendor and product id; development builds use
-    /// [`couch_input::DEV_PAD_IDS`] so a local viewer can skip the pad.
+    /// `ids` overrides the USB vendor and product id. `None` keeps a real
+    /// Xbox 360 controller's, which games and Steam need to recognise it
+    /// (with others only the D-pad works). Only CLI test tools pass
+    /// [`couch_input::DEV_PAD_IDS`]. Either way a stream window on this PC
+    /// skips it while it is plugged in (`virtual_pads`).
     pub fn connect(ids: Option<(u16, u16)>) -> Result<Self, InputError> {
         Ok(Self {
             client: Client::connect().map_err(driver)?,
@@ -40,6 +45,11 @@ impl VirtualPadFactory for VigemPadFactory {
         if let Some((vid, pid)) = self.ids {
             builder = builder.with_vid(vid).with_pid(pid);
         }
+        // Marked before it appears, so a stream window on this PC never
+        // opens it (see `virtual_pads`). A failed plug drops the marker.
+        let marker = virtual_pads::mark()
+            .inspect_err(|e| tracing::warn!("marking the virtual pad: {e}"))
+            .ok();
         let pad = builder
             .plug()
             .map_err(driver)?
@@ -51,6 +61,7 @@ impl VirtualPadFactory for VigemPadFactory {
             pad,
             rumble,
             last_rumble: Rumble::default(),
+            _marker: marker,
         }))
     }
 }
@@ -62,6 +73,8 @@ struct VigemPad {
     pad: TargetHandle<Xbox360>,
     rumble: NotificationReceiver<X360Notification>,
     last_rumble: Rumble,
+    /// Removed after the pad has gone (fields drop in order).
+    _marker: Option<PadMarker>,
 }
 
 impl VirtualPad for VigemPad {

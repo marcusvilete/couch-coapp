@@ -1,6 +1,6 @@
 ---
 name: input-safety-checks
-description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch_engine::pipeline (host, watch), the engine's rooms::sessions, couch-cli's host/view, couch-platform-win's sendinput, keymap, vigem or foreground code, or anything on the viewer/host teardown path; and before reporting or committing such a change.
+description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch_engine::pipeline (host, watch), the engine's rooms::sessions, couch-cli's host/view, couch-platform-win's sendinput, keymap, vigem, foreground or panic_key code, couch_input::shortcuts, or anything on the viewer/host teardown path; and before reporting or committing such a change.
 ---
 
 # Input safety checks
@@ -59,12 +59,18 @@ Ctrl+C and closing the host's console run the same code path as Ctrl+Break. Ctrl
 
 ## What isn't covered automatically; ask the user
 
-- **`pad-test`:** run it and watch `joy.cpl` (Game Controllers → the Xbox 360 controller → Properties). Needs ViGEmBus.
+- **`pad-test`:** run it and watch `joy.cpl` (Game Controllers → the Xbox 360 controller → Properties). Needs ViGEmBus. Each run plugs a pad, and Steam announces it: say so before running it repeatedly.
+- **A guest's pad reaches the host:** with a session live and a guest holding the controller, `.\scripts\xinput-watch.ps1` on the host must show every button and stick under the right name in the virtual pad's slot. That is the check for our side; a game ignoring the pad on one PC is usually the game binding to the guest's physical controller (the `app-manual-run` skill).
 - **A real game:**
   - put it in windowed mode and turn off Steam Input for it;
   - run the host on the game window and the viewer;
-  - with the game focused, the pad should drive it, and rumble lines should appear in both the host and `view` output.
+  - with the game focused, the pad should drive it, and rumble lines should appear in both the host and `view` output;
+  - on one PC the game may pick the physical controller instead; only two PCs settle it.
+- **Pad identity.** The app's virtual pad must report a real Xbox 360 controller's ids (`real_pad_ids: true` in `rooms::sessions`): with made-up ids, games and Steam treat it as a generic joystick and only the D-pad works ("XInput Controller #1" in Steam's notification). A viewer on the same PC skips Xbox 360 pads while a host here has a pad plugged in (`couch_platform_win::virtual_pads` markers). After touching `vigem.rs`, `virtual_pads.rs` or the viewer's `open_pad`, check that `couch-viewer --probe` lists a plugged host pad as skipped and that the marker disappears when it is unplugged.
 - **Keyboard and mouse end to end:** needs a second PC or Windows Sandbox. On one machine the viewer holds the focus, so the router correctly keeps keyboard and mouse away from the game.
+- **The panic key** (Ctrl+Alt+Shift+Backspace) ignores injected keys by design, so only a person can press it. After touching `couch_platform_win::panic_key`, the shortcuts table or the hook's wiring in `rooms::sessions`, ask the user to stream from the app with a guest playing and press it on the physical keyboard, once with the game in front and once with the host's own app window in front. The guest's pad must go neutral at once, the host panel must show "control paused", and the game must not see a Backspace.
+  - The `Chord` unit tests cover the logic, including a guest's injected modifier key-ups (which clear Windows' shared down bit) not blocking it, and a Backspace held before the chord staying the game's. `the_panic_key_takes_control_back_until_allowed` covers the wiring with a fake hook, and every end path checks the hook goes.
+  - Never log or block inside the hook callback: every key on the PC waits for it.
 - **The user's DualSense going silent in `joy.cpl`** while SDL or Steam holds it in enhanced mode is normal.
 
 ## After the checks

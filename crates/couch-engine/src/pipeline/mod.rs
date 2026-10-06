@@ -117,6 +117,8 @@ pub struct ViewerOptions {
     pub size: Option<(u32, u32)>,
     /// Start with the HUD hidden (it would cover a latency barcode).
     pub hide_hud: bool,
+    /// Start with the stats panel closed (the app; the HUD has a button).
+    pub hide_stats: bool,
     /// Write the viewer's log here, without a console window. `None` lets it
     /// log to ours (the CLI).
     pub log: Option<PathBuf>,
@@ -163,6 +165,11 @@ pub trait Backend: Send + Sync + 'static {
     fn window_exists(&self, window: NativeId) -> bool;
 
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError>;
+
+    /// Hooks the host's panic key (`couch_input::shortcuts`) until the
+    /// returned guard drops. Only physical presses count, never injected
+    /// ones. `on_press` runs on the hook's own thread and must return at once.
+    fn panic_key(&self, on_press: Box<dyn Fn() + Send>) -> Result<Box<dyn Any + Send>, MediaError>;
 }
 
 /// This machine's backend: Windows' own, or one that refuses everything
@@ -215,6 +222,9 @@ impl Backend for Unsupported {
         false
     }
     fn launch_viewer(&self, _: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
+        Err(unsupported())
+    }
+    fn panic_key(&self, _: Box<dyn Fn() + Send>) -> Result<Box<dyn Any + Send>, MediaError> {
         Err(unsupported())
     }
 }

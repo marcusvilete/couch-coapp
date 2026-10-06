@@ -3,9 +3,10 @@ import type { EngineInfo } from "./EngineInfo";
 import type { InvitePreview } from "./InvitePreview";
 import type { ProfileView } from "./ProfileView";
 import type { RoomView } from "./RoomView";
+import type { ShortcutView } from "./ShortcutView";
 import type { SourceList } from "./SourceList";
 
 /**
  * The reply to a [`Command`]. Its `Debug` leaves out invite links.
  */
-export type Response = { "type": "info" } & EngineInfo | { "type": "pong", nonce: number, } | { "type": "profile" } & ProfileView | { "type": "rooms", rooms: Array<RoomView>, } | { "type": "room" } & RoomView | { "type": "invite", link: string, } | { "type": "invitePreview" } & InvitePreview | { "type": "openedInvite", link: string | null, } | { "type": "sources" } & SourceList | { "type": "done" };
+export type Response = { "type": "info" } & EngineInfo | { "type": "pong", nonce: number, } | { "type": "profile" } & ProfileView | { "type": "rooms", rooms: Array<RoomView>, } | { "type": "room" } & RoomView | { "type": "invite", link: string, } | { "type": "invitePreview" } & InvitePreview | { "type": "openedInvite", link: string | null, } | { "type": "sources" } & SourceList | { "type": "shortcuts", shortcuts: Array<ShortcutView>, } | { "type": "done" };

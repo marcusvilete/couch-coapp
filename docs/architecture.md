@@ -16,7 +16,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M3 | Audio: game process loopback, Opus, jitter buffer, SDL3 playback | done ([results](m3-results.md)) |
 | M4a | Rooms in the engine: identity, invites, admission, the mesh | done ([results](m4a-results.md)) |
 | M4b | Lobby UI: rooms, invites and deep links, members with their links, profiles side by side | done ([results](m4b-results.md)) |
-| M5 | Sessions and control: M5a in the engine, M5b on screen | M5a done ([results](m5a-results.md)); M5b next |
+| M5 | Sessions and control: M5a in the engine, M5b on screen | Done ([M5a](m5a-results.md), [M5b](m5b-results.md)) |
 | M6 | Lifecycle and safety | |
 | M7 | Own relay, real-network tests | |
 | M8 | Host overlay window | |
@@ -148,6 +148,7 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
 - **Requests.** Viewers ask; the host accepts or declines, passes control without a request, or takes it back. The panic key takes everything back and pauses control.
 - **Disconnects.** If a viewer leaves, closes its window, loses its connection or is banned, everything it held is released at once.
 - **In the engine.** The room actor runs the session protocol (`rooms::sessions`). The media and input run in `couch_engine::pipeline`: `HostStream` (one capture, an encoder per viewer, one sound capture, one input task) and `Watch` (the viewer process). **Input never goes through the actor**: it flows from the connection to the input task's seat router to the injectors.
+- **On screen.** The app's stage shows a card per live session (Watch, ask, stop watching) and, for the host, a panel with the viewers, the requests and the pause; the taskbar flashes on a request. The viewer's HUD shows the session and takes clicks on its bar only while the mouse is free. While a host streams, the panic-key hook (`couch_platform_win::panic_key`, through `pipeline::Backend`) watches the physical keyboard. All shortcuts live in `couch_input::shortcuts`.
 
 ## Safety invariants
 
@@ -164,7 +165,7 @@ These hold in every milestone. Tests guard them from M2 on.
 ## Platform limits
 
 - Virtual gamepads on Windows need the ViGEmBus 1.22.0 driver, which is archived but still the only redistributable option. It sits behind the `VirtualPad` trait so a user-mode driver can replace it.
-- **Injection limits.** Elevated game windows, UAC prompts, the lock screen and anti-cheat titles reject injected input.
+- **Injection limits.** Elevated game windows, UAC prompts, the lock screen and anti-cheat titles reject injected input. A virtual gamepad still reaches an elevated game, but the panic key's hook probably doesn't see keys aimed at it (not yet measured; see m5b-results.md).
 - **Exclusive fullscreen.** True exclusive-fullscreen games may not capture through Windows.Graphics.Capture; the Desktop Duplication fallback lands in M9.
 - **macOS.** Planned as a viewer and keyboard/mouse host only. System-wide virtual gamepads need an Apple-restricted entitlement.
 

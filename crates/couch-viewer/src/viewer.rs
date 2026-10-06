@@ -10,15 +10,19 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use couch_codec_ffmpeg::FfmpegDecoder;
+use couch_input::shortcuts::Shortcut;
 use couch_media::{DecodedFrame, Micros, Nv12Frame, VideoDecoder, barcode, mailbox::Mailbox};
-use couch_proto::ipc::{FrameTiming, LocalInput, NetStats};
-use sdl3::event::{Event, WindowEvent};
+use couch_proto::ipc::{FrameTiming, HudRole, HudState, LocalInput, NetStats, UserAction};
+use sdl3::{
+    event::{Event, WindowEvent},
+    video::Window,
+};
 
 use crate::{
     audio::AudioOut,
     clock, gpu,
-    hud::Hud,
-    input::{Action, InputCapture},
+    hud::{Hud, HudAction},
+    input::{InputCapture, button_code},
     now_us,
     pipe::{self, ForWindow, Incoming, Outgoing},
 };
@@ -37,6 +41,11 @@ pub struct WindowOptions {
     pub size: (u32, u32),
     /// Start with the HUD hidden (it would cover the latency barcode on screen).
     pub hide_hud: bool,
+    /// Start with the stats panel closed (the app's viewers).
+    pub hide_stats: bool,
+    /// Show a made-up session in this role, without the pipe, to check the
+    /// HUD by eye (`--hud-preview`).
+    pub preview: Option<HudRole>,
 }
 
 impl Default for WindowOptions {
@@ -45,8 +54,24 @@ impl Default for WindowOptions {
             position: None,
             size: (1280, 720),
             hide_hud: false,
+            hide_stats: false,
+            preview: None,
         }
     }
+}
+
+/// An SDL window position (window coordinates) in the HUD's points.
+fn hud_point(window: &Window, x: f32, y: f32) -> egui::Pos2 {
+    let (w, _) = window.size();
+    let (pw, _) = window.size_in_pixels();
+    let per_coord = if w == 0 { 1.0 } else { pw as f32 / w as f32 };
+    let scale = hud_scale(window);
+    egui::pos2(x * per_coord / scale, y * per_coord / scale)
+}
+
+/// The HUD's pixels per point: the display's scale.
+fn hud_scale(window: &Window) -> f32 {
+    window.display_scale().clamp(0.5, 4.0)
 }
 
 pub fn run(options: WindowOptions) -> Result<()> {
@@ -65,8 +90,18 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let (window_tx, window_rx) = mpsc::channel();
     let (out_tx, out_rx) = mpsc::channel();
     let net = Arc::new(std::sync::Mutex::new(None));
-    pipe::spawn_reader(in_tx, window_tx, net.clone(), audio_feed);
-    let writer = pipe::spawn_writer(out_rx);
+    // A preview has no main process: nothing is sent, and the decoder
+    // waits for good instead of stopping when the pipe closes.
+    let _keep_open = options.preview.map(|_| in_tx.clone());
+    pipe::spawn_reader(in_tx, window_tx.clone(), net.clone(), audio_feed);
+    let writer = match options.preview {
+        None => Some(pipe::spawn_writer(out_rx)),
+        Some(role) => {
+            drop(out_rx);
+            let _ = window_tx.send(ForWindow::Hud(preview_session(role)));
+            None
+        }
+    };
 
     let decoded = Arc::new(Mailbox::new());
     let decoder_name = Arc::new(std::sync::Mutex::new(String::from("starting")));
@@ -87,18 +122,21 @@ pub fn run(options: WindowOptions) -> Result<()> {
     const ALIVE_EVERY: Duration = Duration::from_millis(100);
     let mut last_alive = Instant::now() - ALIVE_EVERY;
     let mut last_audio_stats = Instant::now();
+    let mut last_pad_check = Instant::now();
     let mut builder = video.window("Couch Co-App", options.size.0, options.size.1);
     match options.position {
         Some((x, y)) => builder.position(x, y),
         None => builder.position_centered(),
     };
-    let window = builder.resizable().high_pixel_density().build()?;
+    let mut window = builder.resizable().high_pixel_density().build()?;
     // SAFETY: `gpu` is dropped at the end of this function, before `window`
     // (locals drop in reverse declaration order).
     let mut gpu = unsafe { gpu::Gpu::new(&window)? };
     let mut video_pass = gpu::VideoPass::new(&gpu.device, gpu.config.format);
     let mut hud = Hud::new(&gpu.device, gpu.config.format);
     hud.visible = !options.hide_hud;
+    hud.show_stats = !options.hide_stats;
+    let mut title = String::new();
     let mut events = sdl.event_pump().map_err(|e| anyhow!("SDL events: {e}"))?;
     let mut stats = Stats::default();
     // The size of the frame in the video textures, once there is one. It can
@@ -119,14 +157,52 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     WindowEvent::Exposed | WindowEvent::Restored | WindowEvent::Shown => {
                         redraw = true;
                     }
+                    WindowEvent::MouseLeave => hud.pointer_gone(),
+                    WindowEvent::FocusLost => hud.focus_lost(),
                     _ => {}
                 },
+                // A free pointer also drives the HUD; a click on its bar goes
+                // nowhere else, so it is never forwarded and never captures
+                // the mouse.
+                Event::MouseMotion { x, y, .. } if !input.mouse_captured() => {
+                    hud.pointer_moved(hud_point(&window, x, y));
+                }
+                Event::MouseButtonDown {
+                    mouse_btn, x, y, ..
+                } if !input.mouse_captured() => {
+                    if let Some(button) = button_code(mouse_btn)
+                        && hud.pointer_button(hud_point(&window, x, y), button, true)
+                    {
+                        continue;
+                    }
+                }
+                Event::MouseButtonUp {
+                    mouse_btn, x, y, ..
+                } => {
+                    if let Some(button) = button_code(mouse_btn)
+                        && hud.pointer_button(hud_point(&window, x, y), button, false)
+                    {
+                        continue;
+                    }
+                }
                 _ => {}
             }
-            if input.event(&event, &mut local) == Some(Action::ToggleHud) {
-                hud.visible = !hud.visible;
-                redraw = true;
+            match input.event(&event, &mut local) {
+                Some(Shortcut::ToggleHud) => hud.visible = !hud.visible,
+                Some(Shortcut::ToggleControl) => toggle_control(&mut hud, &out_tx),
+                Some(Shortcut::Fullscreen) => toggle_fullscreen(&mut window, &mut hud),
+                Some(Shortcut::FreeMouse | Shortcut::Panic) | None => continue,
             }
+            redraw = true;
+        }
+        for action in hud.take_actions() {
+            match action {
+                HudAction::Session(action) => {
+                    let _ = out_tx.send(Outgoing::Action(action));
+                }
+                HudAction::Fullscreen => toggle_fullscreen(&mut window, &mut hud),
+            }
+            redraw = true;
         }
         while let Ok(message) = window_rx.try_recv() {
             match message {
@@ -135,8 +211,20 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     redraw = true;
                 }
                 ForWindow::Rumble(rumble) => input.rumble(rumble),
+                ForWindow::Hud(state) => {
+                    let wanted = format!("{} · {} · Couch Co-App", state.title, state.host);
+                    if wanted != title {
+                        if let Err(e) = window.set_title(&wanted) {
+                            tracing::debug!("window title: {e}");
+                        }
+                        title = wanted;
+                    }
+                    hud.set_session(state);
+                    redraw = true;
+                }
             }
         }
+        redraw |= hud.needs_paint();
         input.sync_capture(&mouse, &window);
         if last_alive.elapsed() >= ALIVE_EVERY {
             last_alive = Instant::now();
@@ -144,6 +232,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
         }
         for event in local.drain(..) {
             let _ = out_tx.send(Outgoing::Input(event));
+        }
+        if last_pad_check.elapsed() >= Duration::from_secs(1) {
+            last_pad_check = Instant::now();
+            input.drop_host_pads(&mut local);
         }
         if let Some(audio) = &audio
             && last_audio_stats.elapsed() >= Duration::from_secs(1)
@@ -161,9 +253,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
             Ok(None) => None,
             Err(_closed) => break,
         };
-        let Some(frame_size) = shown else {
+        // Before the first frame, a session's viewer still shows its HUD
+        // over black; `couch-cli view` waits for the stream.
+        if shown.is_none() && hud.session().is_none() {
             continue;
-        };
+        }
         if timing.is_none() && !redraw {
             continue;
         }
@@ -197,10 +291,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 })],
                 ..Default::default()
             });
-            video_pass.draw(&mut pass, gpu::letterbox(frame_size, size));
+            if let Some(frame_size) = shown {
+                video_pass.draw(&mut pass, gpu::letterbox(frame_size, size));
+            }
         }
         let mut lines = stats.lines(
-            frame_size,
+            shown.unwrap_or((0, 0)),
             &decoder_name.lock().unwrap(),
             &gpu.adapter_name,
             gpu.present_mode(),
@@ -214,7 +310,18 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 .as_ref()
                 .map_or_else(|| "audio: no device".to_string(), AudioOut::hud_line),
         );
-        let mut buffers = hud.paint(&gpu.device, &gpu.queue, &mut encoder, &view, size, &lines);
+        hud.waiting = shown.is_none();
+        let mut buffers = hud.paint(
+            &gpu.device,
+            &gpu.queue,
+            &mut encoder,
+            &view,
+            &egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [size.0, size.1],
+                pixels_per_point: hud_scale(&window),
+            },
+            &lines,
+        );
         buffers.push(encoder.finish());
         gpu.queue.submit(buffers);
         gpu.queue.present(surface_texture);
@@ -241,8 +348,53 @@ pub fn run(options: WindowOptions) -> Result<()> {
     drop(out_tx);
     drop(audio);
     drop(gpu);
-    let _ = writer.join();
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
     Ok(())
+}
+
+/// A made-up session for `--hud-preview`.
+fn preview_session(role: HudRole) -> HudState {
+    HudState {
+        title: "Celeste".into(),
+        host: "Alice".into(),
+        role,
+        controller: (role == HudRole::Controlling).then(|| "Bob".into()),
+        viewers: 2,
+        keyboard_mouse: false,
+        control_paused: false,
+        note: match role {
+            HudRole::Watching => String::new(),
+            HudRole::Asking => "Asked the host for the controller".into(),
+            HudRole::Controlling => "You have the controller".into(),
+        },
+    }
+}
+
+/// Ctrl+Alt+Shift+C: ask for the controller, withdraw the request, or give
+/// it back, depending on where this viewer stands. Nothing without a session.
+fn toggle_control(hud: &mut Hud, out: &mpsc::Sender<Outgoing>) {
+    let Some(session) = hud.session() else {
+        return;
+    };
+    let action = match session.role {
+        HudRole::Watching if session.control_paused => {
+            let note = format!("{} paused control for now", session.host);
+            hud.note(note);
+            return;
+        }
+        HudRole::Watching => UserAction::RequestControl,
+        HudRole::Asking | HudRole::Controlling => UserAction::CancelControl,
+    };
+    let _ = out.send(Outgoing::Action(action));
+}
+
+fn toggle_fullscreen(window: &mut Window, hud: &mut Hud) {
+    match window.set_fullscreen(!hud.fullscreen) {
+        Ok(()) => hud.fullscreen = !hud.fullscreen,
+        Err(e) => tracing::warn!("full screen: {e}"),
+    }
 }
 
 /// A frame that waited this long for the decoder means decoding can't keep

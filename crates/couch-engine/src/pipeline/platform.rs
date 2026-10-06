@@ -1,10 +1,14 @@
 //! The Windows backend: Windows.Graphics.Capture, FFmpeg's encoders, WASAPI
-//! loopback, `SendInput`, ViGEm pads, and `couch-viewer` as a child process.
+//! loopback, `SendInput`, ViGEm pads, the panic-key hook, and `couch-viewer` as a
+//! child process.
 
-use std::{process::Stdio, sync::Arc, time::Duration};
+use std::{any::Any, process::Stdio, sync::Arc, time::Duration};
 
 use couch_codec_ffmpeg::FfmpegEncoder;
-use couch_input::{DEV_PAD_IDS, InputError, KbmInjector, VirtualPad, VirtualPadFactory};
+use couch_input::{
+    DEV_PAD_IDS, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
+    shortcuts::{self, Shortcut},
+};
 use couch_media::{
     AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, audio::ToneSource,
     clock::Clock, testpattern::TestPattern,
@@ -14,6 +18,7 @@ use couch_platform_win::{
     capture::{self, CaptureOptions, CaptureSource, MonitorId, WgcCapturer},
     clock::QpcClock,
     foreground::{self, WindowId},
+    panic_key::PanicKey,
     sendinput::SendInputInjector,
     vigem::VigemPadFactory,
 };
@@ -146,12 +151,19 @@ impl Backend for WindowsBackend {
         if options.hide_hud {
             command.arg("--no-hud");
         }
+        if options.hide_stats {
+            command.arg("--hide-stats");
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
         if let Some(log) = &options.log {
-            let file = std::fs::File::create(log)
+            // Appended, so an earlier window's log survives the next one.
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
                 .map_err(|e| MediaError::Backend(format!("{}: {e}", log.display())))?;
             command.stderr(Stdio::from(file));
             command.creation_flags(CREATE_NO_WINDOW);
@@ -166,5 +178,12 @@ impl Backend for WindowsBackend {
             stdout: Box::pin(stdout),
             guard: Box::new(child),
         })
+    }
+
+    fn panic_key(&self, on_press: Box<dyn Fn() + Send>) -> Result<Box<dyn Any + Send>, MediaError> {
+        let key = shortcuts::binding(Shortcut::Panic).key.0;
+        let hook = PanicKey::install(key, on_press)
+            .map_err(|e| MediaError::Backend(format!("the panic-key hook: {e}")))?;
+        Ok(Box::new(hook))
     }
 }

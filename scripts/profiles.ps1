@@ -20,6 +20,11 @@ $exe = Join-Path $repo 'target\debug\couch-desktop.exe'
 if (-not (Test-Path $exe)) {
     throw "No debug build yet. Run 'npm run tauri dev' in apps\desktop first."
 }
+# Watching a stream opens this window, from next to the app's exe.
+$viewer = Join-Path $repo 'target\debug\couch-viewer.exe'
+if (-not (Test-Path $viewer)) {
+    throw "No stream window build: run 'cargo build -p couch-viewer' (npm run tauri dev builds it too)."
+}
 try {
     Invoke-WebRequest 'http://localhost:1420' -UseBasicParsing -TimeoutSec 3 | Out-Null
 } catch {
@@ -45,6 +50,8 @@ foreach ($name in $Names) {
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.EnvironmentVariables['COUCH_PROFILE'] = $name
+    # The same default as dev.ps1; without it only errors are logged.
+    if (-not $env:RUST_LOG) { $start.EnvironmentVariables['RUST_LOG'] = 'couch=debug,iroh=info' }
     [System.Diagnostics.Process]::Start($start) | Out-Null
     Write-Host "Started $name; log: $log"
 }

@@ -7,8 +7,8 @@ use std::{
 };
 
 use couch_proto::ipc::{
-    self, AudioPacket, AudioStats, FrameTiming, LocalInput, NetStats, RumbleState, SeatState,
-    VideoFrameHeader,
+    self, AudioPacket, AudioStats, FrameTiming, HudState, LocalInput, NetStats, RumbleState,
+    SeatState, UserAction, VideoFrameHeader,
 };
 
 use crate::audio::AudioFeed;
@@ -23,6 +23,7 @@ pub enum Incoming {
 pub enum ForWindow {
     Seat(SeatState),
     Rumble(RumbleState),
+    Hud(HudState),
 }
 
 /// What the viewer sends back.
@@ -31,6 +32,7 @@ pub enum Outgoing {
     KeyframeRequest,
     Input(LocalInput),
     AudioStats(AudioStats),
+    Action(UserAction),
     /// Write what is queued before this, then stop. Other threads (the
     /// decoder) still hold senders, so the channel alone never closes.
     Close,
@@ -82,11 +84,15 @@ pub fn spawn_reader(
                         *net.lock().unwrap() = NetStats::read(&frame.payload);
                         continue;
                     }
-                    ipc::kinds::SEAT | ipc::kinds::RUMBLE => {
-                        let message = if frame.kind == ipc::kinds::SEAT {
-                            ipc::from_payload(&frame.payload).map(ForWindow::Seat)
-                        } else {
-                            ipc::from_payload(&frame.payload).map(ForWindow::Rumble)
+                    ipc::kinds::SEAT | ipc::kinds::RUMBLE | ipc::kinds::HUD_STATE => {
+                        let message = match frame.kind {
+                            ipc::kinds::SEAT => {
+                                ipc::from_payload(&frame.payload).map(ForWindow::Seat)
+                            }
+                            ipc::kinds::RUMBLE => {
+                                ipc::from_payload(&frame.payload).map(ForWindow::Rumble)
+                            }
+                            _ => ipc::from_payload(&frame.payload).map(ForWindow::Hud),
                         };
                         match message {
                             Some(m) => {
@@ -96,7 +102,23 @@ pub fn spawn_reader(
                         }
                         continue;
                     }
-                    ipc::kinds::HELLO => continue,
+                    ipc::kinds::HELLO => {
+                        // The viewer ships with the app, so a mismatch is a
+                        // broken install: stop rather than misread frames.
+                        let version = frame
+                            .payload
+                            .get(..2)
+                            .map(|v| u16::from_be_bytes([v[0], v[1]]));
+                        if version != Some(ipc::IPC_VERSION) {
+                            tracing::error!(
+                                ?version,
+                                ours = ipc::IPC_VERSION,
+                                "the main process speaks another IPC version"
+                            );
+                            break;
+                        }
+                        continue;
+                    }
                     other => {
                         tracing::debug!("ignoring IPC kind {other:#04x}");
                         continue;
@@ -135,6 +157,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>) -> JoinHandle<()> {
                     Outgoing::AudioStats(stats) => {
                         payload = ipc::to_payload(&stats);
                         ipc::kinds::AUDIO_STATS
+                    }
+                    Outgoing::Action(action) => {
+                        payload = ipc::to_payload(&action);
+                        ipc::kinds::USER_ACTION
                     }
                     Outgoing::Close => break,
                 };

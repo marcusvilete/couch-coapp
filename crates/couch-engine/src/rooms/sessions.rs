@@ -10,8 +10,9 @@
 //! module decides who gets them. Who holds the seat is the seat router's
 //! call; `couch_room::session` mirrors it.
 
-use std::collections::BTreeMap;
+use std::{any::Any, collections::BTreeMap};
 
+use couch_input::shortcuts::{self, Shortcut};
 use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
@@ -50,6 +51,9 @@ struct Hosting {
     /// The connection each viewer joined on. When it closes, the viewer
     /// has gone: its stream and input were bound to it.
     viewer_conns: BTreeMap<MemberId, ConnId>,
+    /// The panic key's hook, in place while the stream runs; `None` if it
+    /// couldn't be installed.
+    panic_key: Option<Box<dyn Any + Send>>,
 }
 
 struct Watching {
@@ -569,7 +573,9 @@ impl Actor {
             },
             upload_bps: go.upload_mbps.map(mbps),
             audio: AudioChoice::Auto,
-            real_pad_ids: false,
+            // Games and Steam know a controller by its ids; a made-up pair
+            // leaves only the D-pad working.
+            real_pad_ids: true,
             session: session.0,
             first_epoch: SeatEpoch(u32::from_le_bytes(random()?)),
             rc_trace: None,
@@ -580,6 +586,7 @@ impl Actor {
             session: host_session,
             stream: None,
             viewer_conns: BTreeMap::new(),
+            panic_key: None,
         });
         Ok((session, options))
     }
@@ -605,6 +612,27 @@ impl Actor {
         };
         let room = h.room;
         *self.panic.lock().unwrap_or_else(PoisonError::into_inner) = Some(stream.panic_handle());
+        // The hook releases straight through the input task, from its own
+        // thread, before the actor hears of it.
+        let on_press = {
+            let handle = stream.panic_handle();
+            let inbox = self.inbox.clone();
+            let runtime = tokio::runtime::Handle::current();
+            move || {
+                handle.panic();
+                let inbox = inbox.clone();
+                runtime.spawn(async move {
+                    let _ = inbox.send(Input::Panic(Some(session))).await;
+                });
+            }
+        };
+        h.panic_key = match self.backend.panic_key(Box::new(on_press)) {
+            Ok(hook) => Some(hook),
+            Err(e) => {
+                tracing::error!("no panic key while streaming: {e}");
+                None
+            }
+        };
         h.stream = Some(stream);
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
@@ -801,8 +829,15 @@ impl Actor {
 
     /// The panic key. The engine has already released through the stream's
     /// panic handle; this declines the requests and pauses control.
-    pub(super) fn panic_key(&mut self, now: Instant) {
-        let Some(h) = self.sessions.hosting.as_mut() else {
+    pub(super) fn panic_key(&mut self, session: Option<SessionId>, now: Instant) {
+        // A press during a stream that has since ended (stopped and gone
+        // live again meanwhile) isn't about this one.
+        let Some(h) = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| session.is_none_or(|s| h.session.id() == s))
+        else {
             return;
         };
         let room = h.room;
@@ -871,6 +906,7 @@ impl Actor {
             session: Some(session.0),
             viewer: ViewerOptions {
                 log: Some(self.viewer_log.clone()),
+                hide_stats: true,
                 ..ViewerOptions::default()
             },
             measure: false,
@@ -1210,6 +1246,10 @@ impl Actor {
                 control_paused: s.control_paused(),
                 role: SessionRole::Host,
                 requests: s.requests().iter().map(MemberId::to_hex).collect(),
+                panic_key: h
+                    .panic_key
+                    .is_some()
+                    .then(|| shortcuts::binding(Shortcut::Panic).keys()),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -1235,6 +1275,7 @@ impl Actor {
                 control_paused: status.is_some_and(|s| s.control_paused),
                 role,
                 requests: Vec::new(),
+                panic_key: None,
             });
         }
         views

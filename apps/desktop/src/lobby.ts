@@ -1,11 +1,14 @@
 // Lobby state: this profile, its rooms, notices, and invite links the app
 // was opened with. Kept current by engine events.
+import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EngineInfo } from "./bindings/EngineInfo";
 import type { Event as EngineEvent } from "./bindings/Event";
 import type { ProfileView } from "./bindings/ProfileView";
 import type { RoomGone } from "./bindings/RoomGone";
 import type { RoomView } from "./bindings/RoomView";
+import type { SessionEnd } from "./bindings/SessionEnd";
+import type { WatchEnd } from "./bindings/WatchEnd";
 import { errorText, onEngineEvent, request } from "./engine";
 
 export type Notice = { id: number; text: string; tone: "info" | "warn" };
@@ -50,6 +53,45 @@ function goneText(room: RoomView, reason: RoomGone): Notice {
         tone: "warn",
       };
   }
+}
+
+/** Why our stream ended, unless we ended it ourselves. */
+function sessionEndText(reason: SessionEnd): string | null {
+  switch (reason) {
+    case "gameExited":
+      return "The game closed, so your stream ended.";
+    case "sourceLost":
+      return "The window or screen you were streaming went away, so your stream ended.";
+    case "error":
+      return "Your stream stopped after an error.";
+    case "hostStopped":
+    case "hostLeftRoom":
+    case "hostShutdown":
+      return null;
+  }
+}
+
+/** Why watching ended, unless we stopped it ourselves. */
+function watchEndText(host: string, reason: WatchEnd): string | null {
+  switch (reason) {
+    case "ended":
+      return `${host}'s stream ended.`;
+    case "connectionLost":
+      return `Lost the connection to ${host}'s stream.`;
+    case "unavailable":
+      return `${host} can't stream to you right now.`;
+    case "viewerFailed":
+      return "The stream window couldn't open.";
+    case "left":
+      return null;
+  }
+}
+
+/** Flashes the taskbar button until the window is focused. */
+function flashTaskbar() {
+  getCurrentWindow()
+    .requestUserAttention(UserAttentionType.Critical)
+    .catch(() => {});
 }
 
 export function useLobby(): Lobby {
@@ -147,6 +189,24 @@ export function useLobby(): Lobby {
             "warn",
           );
           refreshRooms().catch(() => {});
+          break;
+        }
+        case "controlRequested": {
+          const room = roomsRef.current[event.room];
+          const name = room?.members.find((m) => m.id === event.member)?.name ?? "Someone";
+          notify(`${name} asks for the controller. Answer in “${room?.name ?? "the room"}”.`);
+          flashTaskbar();
+          break;
+        }
+        case "sessionEnded": {
+          const text = sessionEndText(event.reason);
+          if (text) notify(text, "warn");
+          break;
+        }
+        case "watchEnded": {
+          const host = roomsRef.current[event.room]?.members.find((m) => m.id === event.host)?.name ?? "The host";
+          const text = watchEndText(host, event.reason);
+          if (text) notify(text, event.reason === "ended" ? "info" : "warn");
           break;
         }
         case "inviteOpened":

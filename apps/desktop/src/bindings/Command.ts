@@ -5,7 +5,7 @@ import type { SourceChoice } from "./SourceChoice";
  * Everything the UI can ask of the engine. Its `Debug` leaves out passwords
  * and invites.
  */
-export type Command = { "type": "getInfo" } | { "type": "ping", nonce: number, } | { "type": "getProfile" } | { "type": "setDisplayName", name: string, } | { "type": "listRooms" } | { "type": "createRoom", name: string, password: string, } | { "type": "previewInvite", invite: string, } | { "type": "takeOpenedInvite" } | { "type": "joinRoom", invite: string, password: string, } | { "type": "getInvite", room: string, } | { "type": "changePassword", room: string, password: string, } | { "type": "revokeInvites", room: string, } | { "type": "leaveRoom", room: string, } | { "type": "banMember", room: string, member: string, } | { "type": "listSources" } | { "type": "goLive", room: string, source: SourceChoice, 
+export type Command = { "type": "getInfo" } | { "type": "ping", nonce: number, } | { "type": "getProfile" } | { "type": "setDisplayName", name: string, } | { "type": "listRooms" } | { "type": "createRoom", name: string, password: string, } | { "type": "previewInvite", invite: string, } | { "type": "takeOpenedInvite" } | { "type": "joinRoom", invite: string, password: string, } | { "type": "getInvite", room: string, } | { "type": "changePassword", room: string, password: string, } | { "type": "revokeInvites", room: string, } | { "type": "leaveRoom", room: string, } | { "type": "banMember", room: string, member: string, } | { "type": "getShortcuts" } | { "type": "listSources" } | { "type": "goLive", room: string, source: SourceChoice, 
 /**
  * What the room sees it called (1 to 96 bytes).
  */

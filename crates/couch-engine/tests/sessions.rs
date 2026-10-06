@@ -53,6 +53,8 @@ struct Fake {
     /// The window closed: capture says so, and it no longer exists.
     closed: Arc<AtomicBool>,
     clock: Arc<ProcessClock>,
+    /// The panic key's handler while the engine has it hooked.
+    panic_key: PanicHook,
 }
 
 impl Fake {
@@ -124,6 +126,43 @@ impl Backend for Fake {
         let (viewer, process) = FakeViewer::launch();
         self.viewers.lock().unwrap().push(viewer);
         Ok(process)
+    }
+
+    fn panic_key(
+        &self,
+        on_press: Box<dyn Fn() + Send>,
+    ) -> Result<Box<dyn std::any::Any + Send>, MediaError> {
+        *self.panic_key.lock().unwrap() = Some(on_press);
+        Ok(Box::new(Unhook(self.panic_key.clone())))
+    }
+}
+
+type PanicHook = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+
+/// Removes the fake panic-key hook when the engine drops it.
+struct Unhook(PanicHook);
+
+impl Drop for Unhook {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
+impl Fake {
+    /// The host presses the panic key on its keyboard; `false` if no hook
+    /// was in place to see it.
+    fn press_panic_key(&self) -> bool {
+        match &*self.panic_key.lock().unwrap() {
+            Some(on_press) => {
+                on_press();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn panic_key_hooked(&self) -> bool {
+        self.panic_key.lock().unwrap().is_some()
     }
 }
 
@@ -720,7 +759,12 @@ async fn the_panic_key_takes_control_back_until_allowed() {
     })
     .await;
 
-    a.engine().panic_key().await;
+    assert_eq!(
+        a.session(&room, &a).await.unwrap().panic_key.as_deref(),
+        Some("Ctrl+Alt+Shift+Backspace")
+    );
+    // Pressed on the keyboard: the hook, not the app.
+    assert!(a.fake.press_panic_key(), "the hook is in place while live");
     wait("the pad neutral", || {
         a.fake.pad() == Some(PadState::NEUTRAL)
     })
@@ -839,6 +883,7 @@ async fn a_host_leaving_the_room_ends_its_stream() {
     c.go_live(&room, 4).await;
     let b_window = watching(&room, &c, &b).await;
     c.ok(Command::LeaveRoom { room: room.clone() }).await;
+    assert!(!c.fake.panic_key_hooked(), "the hook goes with the stream");
     let reason = b
         .event("the end of watching", |e| match e {
             Event::WatchEnded { reason, .. } => Some(*reason),
@@ -871,6 +916,7 @@ async fn the_window_closing_ends_the_session() {
         })
         .await;
     assert_eq!(reason, SessionEnd::SourceLost);
+    assert!(!a.fake.panic_key_hooked(), "the hook goes with the stream");
     let ended = b
         .event("the end of watching", |e| match e {
             Event::WatchEnded { reason, .. } => Some(*reason),
@@ -889,6 +935,7 @@ async fn stopping_and_going_live_again() {
     a.go_live(&room, 4).await;
     let first = watching(&room, &a, &b).await;
     a.ok(Command::StopLive).await;
+    assert!(!a.fake.panic_key_hooked(), "the hook goes with the stream");
     let ended = b
         .event("the end of watching", |e| match e {
             Event::WatchEnded { reason, .. } => Some(*reason),
@@ -937,6 +984,7 @@ async fn shutting_down_while_a_guest_plays_releases_first() {
         Some(PadState::NEUTRAL),
         "released before the end"
     );
+    assert!(!fake.panic_key_hooked(), "the hook goes with the stream");
     let ended = b
         .event("the end of watching", |e| match e {
             Event::WatchEnded { reason, .. } => Some(*reason),

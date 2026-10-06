@@ -147,6 +147,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 position: args.viewer_pos,
                 size: args.viewer_size,
                 hide_hud: args.hide_hud,
+                hide_stats: false,
                 log: None,
             },
             measure: true,

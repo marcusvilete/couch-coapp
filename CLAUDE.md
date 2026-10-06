@@ -26,14 +26,15 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 | Format | `cargo fmt --all` |
 | Dependency licenses and advisories | `cargo deny check` |
 | Capability probe (codecs, iroh, SDL3, ViGEm) | `cargo build -p couch-viewer`, then `cargo run -p couch-cli -- probe` |
-| Desktop app | `cd apps/desktop`, then `npm run tauri dev` |
+| Desktop app | `cd apps/desktop`, then `npm run tauri dev` (builds `couch-viewer` first, which watching needs) |
+| The viewer's HUD by eye, without a session | `cargo run -p couch-viewer -- --hud-preview watching` (or `asking`, `controlling`) |
 | Front-end type check | `cd apps/desktop`, then `npx tsc --noEmit` |
 | Regenerate TypeScript bindings | `cargo test -p couch-engine` (writes `apps/desktop/src/bindings/`) |
 | Regenerate FFmpeg FFI bindings (after an FFmpeg bump; needs LLVM) | `cargo xtask gen-ffmpeg-bindings` |
 
 To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`; lowercased, as Windows folder names ignore case). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`: `identity.key` and `rooms\*.room` (sealed with DPAPI), `settings.json`, and `webview\` (the UI's own storage, such as the room order).
 
-The desktop app with several profiles: start `npm run tauri dev` (the default profile), then `.\scripts\profiles.ps1` starts alice, bob and carol from the same debug build, logging to `desktop.log` in their profile folders. Each profile runs once: a second launch hands its arguments to the running one and exits before going online, and `Engine::start` also holds `engine.lock` in the profile folder (never run two engines on one identity). `couchco://` invite links open in the default profile. Debug builds register the scheme for the current Windows user, pointing at the debug exe; the installer will do it in M10.
+The desktop app with several profiles: start `npm run tauri dev` (the default profile), then `.\scripts\profiles.ps1` starts alice, bob and carol from the same debug build, logging to `desktop.log` in their profile folders. Each profile runs once: a second launch hands its arguments to the running one and exits before going online, and `Engine::start` also holds `engine.lock` in the profile folder (never run two engines on one identity). `couchco://` invite links open in the default profile. Debug builds register the scheme for the current Windows user, pointing at the debug exe; the installer will do it in M10. The `app-manual-run` skill covers a manual run: where each profile's logs are, what one PC can't show (games and keyboard and mouse), and what to ask the user to try.
 
 **Rooms.**
 
@@ -53,9 +54,10 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
 | Rate-control gates G1, G3–G5 and G7 (one viewer's bad path leaves another's stream alone), run and judged | `couch-cli gates --quick` (6 min) or `couch-cli gates` (14 min). `latency-probe --viewers 2 --impair-first "rate=5mbit"` runs G7's setup by hand. The `rate-control-gates` skill covers traces and reading a failure. |
 | Many viewers of one host on this PC (fps, latency, bitrate and encode time per viewer) | `.\scripts\viewers.ps1` (4) or `.\scripts\viewers.ps1 -Viewers 7`, after the release build |
+| What an XInput game sees on the host (each slot's buttons and sticks, live): tells a stream problem from a game choosing another controller | `.\scripts\xinput-watch.ps1` |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
 | Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine |
-| Virtual pad (needs ViGEmBus) | `couch-cli pad-test`, then watch it in `joy.cpl`. `--real-pad-ids` on `pad-test` or `host` gives it a real Xbox 360 controller's ids, which a viewer on this machine would capture and send back |
+| Virtual pad (needs ViGEmBus) | `couch-cli pad-test`, then watch it in `joy.cpl`. Without `--real-pad-ids` it uses made-up ids (1209:0001), and games and Steam treat it as a generic joystick (only the D-pad works); the app always uses the real Xbox 360 ids. While a host on this PC has a pad plugged in, viewers here skip every Xbox 360 pad (`couch_platform_win::virtual_pads`) |
 | Keyboard and mouse injection, checked on one machine | `couch-cli input-sink` |
 | Input released when a session ends badly (killed, frozen, closed, host stopped) | `couch-cli release-check` (about 1 minute). The `input-safety-checks` skill says when to run it and what to ask the user to try |
 | Audio datagrams behind a keyframe (timing test) | `cargo test --release -p couch-net --features netem --test datagrams -- --ignored --nocapture` |
@@ -124,6 +126,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **The host is the only writer** of its session's facts, sent straight to each member, never relayed. A member acts on a session message only from that session's host, on the current connection, while the host is on the roster. Never let one member speak for another's session.
 - **The seat router alone decides who plays.** `couch_room::session` asks it and mirrors its `Granted`/`Revoked`; never inject or track a holder elsewhere.
 - **Ending releases first:** input, then `SessionEnded` and `SESSION_END`, then encoders and capture, then the pad. A viewer that goes (leaves, closes its window, loses the connection, is banned) is released at once through `SeatRouter::disconnected`.
+- **Shortcuts live in one table**, `couch_input::shortcuts`: the viewer, the panic-key hook and the app's list all read it. Add or change a shortcut there, never as a key constant elsewhere (the user wants them editable later). The panic-key hook must keep ignoring injected keys.
 - After touching sessions or the pipelines, follow both the `room-security-checks` and the `input-safety-checks` skills; after touching the host pipeline's video path, the `rate-control-gates` skill too.
 
 **Licensing.** The app's license is undecided.
