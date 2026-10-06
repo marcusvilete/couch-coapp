@@ -90,7 +90,12 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 
 ## Two PCs
 
-The host PC needs ViGEmBus and the app; the guest PC needs the app (built or installed). Two PCs test what one can't:
+The host PC needs ViGEmBus and the app; the guest PC needs the app (built or installed).
+- **Getting the app there:** `.\scripts\pack-guest.ps1` builds the release app and zips it with the stream window and the DLLs into `target\guest\couch-coapp.zip`; `npx --yes http-server target\guest -p 8000` serves it. The guest starts it with `run.cmd`, which logs to `desktop.log` beside it. Its header lists what the guest PC will ask (unblocking the zip, the firewall, pasting invites).
+- **Both sides from the same commit:** `BUILD.txt` in the zip says which.
+- **The guest's controller goes on the guest PC;** with none on the host, games see only the virtual pad.
+
+Two PCs test what one can't:
 - games reading the guest's pad;
 - keyboard and mouse;
 - real networks and relays;

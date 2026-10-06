@@ -64,6 +64,14 @@ From the code review (a subagent read the whole change; each finding was checked
 - **A guest's hold was suspended twice for under 100 ms** during your run (the host's 300 ms dead-man timer). Likely the debug stream window stalling, or a window being moved, which pauses its loop; the hold came back by itself. Worth watching in M6's heartbeat work.
 - **The default profile logs only to the `npm run tauri dev` terminal**; profiles started by `profiles.ps1` log to `desktop.log`.
 
+## Two PCs (after the commit)
+
+The first test across two PCs on a home network, the guest running the release build from `scripts\pack-guest.ps1`; the host streamed a window every time.
+- **The connection was direct**, and the stream and the guest's gamepad worked.
+- **Single-player games took the guest's pad** whether or not the host's DualSense was connected, so the "host's controller takes player 1" limit above didn't show in these games.
+- **Fling to the Finish (co-op)** spawned two players, but the guest's pad worked only with no controller on the host. With one there, the guest could play only on keyboard and mouse, which wasn't pleasant. This belongs to the seats and input modes follow-up (hiding the host's own controllers).
+- **A game running full screen on the host got no input from the guest**, neither gamepad nor keyboard and mouse, though the stream worked. Deferred to the polishing stage. The gamepad path doesn't depend on focus, so the likely causes are the game ignoring input while it thinks it's in the background, or the game drawing to another window than the one captured. To start: which game it was and whether it worked windowed; `xinput-watch.ps1` on the host with the game full screen (inputs in the virtual pad's slot mean the game ignores them); the host's log; borderless full screen.
+
 ## Follow-ups
 
 - **Seats and input modes (your requirement; very important).** Passing and sharing controllers must feel seamless.
