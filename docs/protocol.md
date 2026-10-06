@@ -9,6 +9,7 @@ The wire protocol between room members, and the pipe between the main process an
 - M4a added rooms: admission, signed member records, the owner's policy, presence, invites and close codes.
 - M5a added sessions: the session directory, watching, control requests, the per-connection stream acceptor, the control stream's priority, the upload share, and viewer IPC v3.
 - M5b put sessions on screen without changing the wire: the viewer's HUD bar and shortcuts, the shortcuts table, and the panic-key hook.
+- M6 added liveness (`Alive`, the `timed_out` close code), Alt+F4 to the blocked keys, following a game to a new window and telling that it exited, and watching that survives a dropped connection or a crashed viewer window.
 - The rest is a draft for later milestones.
 
 ## Versioning
@@ -31,6 +32,7 @@ u32 len (big-endian) | u16 type | payload (postcard)
 |---|---|---|
 | `0x8001` | `Hello` | First message in both directions |
 | `0x8002` | `Goodbye { reason: LeftRoom \| Shutdown }` | Before closing a connection on purpose |
+| `0x0003` | `Alive {}` | Optional. Both ways, every second ([Liveness](#liveness)) |
 | `0x8101` | `KeyframeRequest { epoch, reason: Start \| DecoderError }` | Viewer to host: decoding can't go on without a keyframe |
 | `0x8201` | `SeatAssigned { seat u8, seat_epoch u32, permissions u8 }` | Host to member: you hold this seat; tag input with this epoch. Permissions: bit 0 gamepad, 1 keyboard, 2 mouse |
 | `0x8202` | `SeatReleased { seat u8, seat_epoch u32 }` | Host to member: your hold on the seat (with that epoch) ended |
@@ -52,11 +54,16 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x8605` | `SessionJoinReply { session, result: Joined \| Full \| Ended \| Unavailable }` | Host to member |
 | `0x8606` | `SessionLeave { session }` | Viewer to host: I stopped watching |
 
-Message families still to come, all on this stream:
-- **Media control:** `VideoConfig`, `BitrateHint`.
-- **Liveness:** `Ping`/`Pong` every second.
+Message families still to come, all on this stream: **media control** (`VideoConfig`, `BitrateHint`).
 
 Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions.
+
+### Liveness
+
+- **Each side sends `Alive` every second** on the control stream (`couch_proto::control::ALIVE_EVERY`), whatever else it sends.
+- **A peer that has sent `Alive` and then says nothing for 5 s** (`SILENT_LIMIT`) is taken for gone: its connection is closed with `timed_out` (12). Its sessions end as for any closed connection, and the room redials.
+- **A peer that never sent `Alive`** (a build from before M6) is never timed out this way; QUIC's 15 s idle timeout still applies.
+- **Why it exists.** A killed or hung host app, or a dead path, otherwise shows only after QUIC's idle timeout (15 s), while the viewer stares at a frozen picture. `Alive` comes from each connection's writer task: it stops when the peer's process or its async runtime hangs, but not when only its room actor does.
 
 ## Channels
 
@@ -125,7 +132,7 @@ Code: `couch_input::forward` on the viewer's side, `couch_input::router` on the 
 - the holder has the permission for that kind of input;
 - for keyboard and mouse, the captured game window (not just its process) is in the foreground. The host checks right before each input, not only on its 10 ms tick;
 - for a mouse button press, the pointer is over the game window too. Otherwise a click could reach the taskbar or another app. Motion and releases still go through;
-- it isn't blocked: the Windows keys always; Tab while Alt is held; Esc while Alt or Ctrl is held. Held modifiers count across every seat, so two holders can't combine into Alt+Tab. The pad's Guide bit is cleared.
+- it isn't blocked: the Windows keys always; Tab while Alt is held; Esc while Alt or Ctrl is held; F4 while Alt is held (M6). Held modifiers count across every seat, so two holders can't combine into Alt+Tab. The pad's Guide bit is cleared.
 
 **What the host releases**
 - Releases (key up, button up) only ever let go of something the router pressed, so keys held when a seat is granted stay ignored until released.
@@ -177,7 +184,7 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
    - Increases of more than 3% apply too, except where every bitrate change costs a keyframe (FFmpeg's NVENC, below). There, increases go in steps of at least 15%, at most once a second.
 
 **QUIC settings**
-- Timeouts: idle timeout 15 s, keep-alive 2 s.
+- Timeouts: idle timeout 15 s, keep-alive 2 s. A silent peer is noticed sooner, after 5 s, by the missing `Alive` ([Liveness](#liveness)).
 - Streams and windows: 64 concurrent unidirectional streams; stream window 8 MB, connection window 16 MB, send window 16 MB.
 - Datagrams: 64 KB send buffer, so stale audio and input drop rather than queue. noq puts datagrams in each packet ahead of stream data. In M1's test, audio-sized datagrams gained under 1 ms while a 1 MB keyframe was in flight on loopback. A slow link's queue still delays them behind video (about 100 ms behind a 1 MB keyframe at 25 Mbit/s).
 - Congestion control: `MediaCongestion` ([ADR 0005](adr/0005-media-congestion-control.md)). noq's BBR v3, Cubic and NewReno stay available for comparison.
@@ -317,6 +324,9 @@ A session is a member streaming a game to others in the same room, over the room
 - The viewer subscribes to the connection's video epochs, sound and rumble *before* sending `SessionJoin`, so no epoch arrives unclaimed. Epochs naming another session are refused (`SESSION_END`).
 - The host answers `SessionJoinReply`: `Joined` (video follows, starting with a keyframe), `Full`, `Ended`, or `Unavailable` (no encoder could be opened). `Unavailable` can also come later, dropping a viewer whose stream failed.
 - `SessionLeave`, the viewer's connection closing, a ban, or the viewer leaving the room ends watching. A ban or a departure counts the moment the room applies it, not when the connection finally closes. The host's seat router releases what that viewer held at once (`SeatRouter::disconnected`), without waiting for the dead-man timer.
+- **A dropped connection, on the viewer's side** (M6). The viewer keeps its window open ("Reconnecting to …") while the room redials. When the host's new connection announces the same session, the viewer subscribes on it and sends `SessionJoin` again; to the host it is a new viewer, and the seat it held went with the old connection. Watching ends if the session ended or changed meanwhile, the host left the roster, the join is refused, or 30 s pass.
+- **A join on a new connection, on the host's side.** If a viewer joins again on a connection other than the one it watched on (it reconnected before the host saw the old one close), the host drops the old viewer first, releasing what it held, then takes the join.
+- **The viewer window** is the viewer's own business: if it exits without the user leaving (a crash), it is started again, at most once a minute, and the viewer asks for a keyframe. Nothing about it goes on the wire.
 
 **Control** (single player: seat 0).
 - A viewer asks with `ControlRequest`. The host accepts (a `SeatAssigned` follows) or declines (`ControlDeclined`); a declined viewer's next request within 5 s is declined at once. Each viewer has one request pending at most.
@@ -329,6 +339,15 @@ A session is a member streaming a game to others in the same room, over the room
   - The chord's key-down, repeats and key-up are swallowed; the game never sees them. The hook releases straight through the input task, from its own thread, then tells the room actor.
 
 **Ending.** When the host ends a session it releases all input first, then sends `SessionEnded` and resets the epoch streams with `SESSION_END`, then stops encoding, capture and sound, and unplugs the virtual pad last.
+
+**The game's window** (M6, `couch_engine::pipeline::source`). The host watches the process behind the streamed window. When the window goes:
+- the process has exited: the session ends with `GameExited`, at once;
+- otherwise, for 5 s (`REPLACE_GRACE`), the host looks every 250 ms for a *new* window of that process or its descendants (visible, titled, not minimized, at least 200 pixels each way, largest first) and, if one shows, captures it instead, and watches its process from then on. Viewers see a short freeze and then a keyframe; nothing goes on the wire.
+  - **Only a new window is followed.** The game's other windows (another browser window, Explorer's desktop) are never streamed in its place: the host notes the process tree's windows once a second while the captured one is there, and a window seen on two looks in a row is never followed. One that appeared within about a second of the old one closing is.
+  - A process that exited still counts while one of its children shows a new window (a launcher handing over to the game).
+- if none shows within the grace, the session ends with `SourceLost`, as before M6.
+
+While nobody watches (no capture runs), the host checks once a second.
 
 **The host's streams.** One capture feeds a latest-frame mailbox per viewer; each viewer has its own encoder, rate controller and epoch streams, so a slow viewer never holds up another (gate G7). One sound capture and Opus encoder serve every viewer. Capture and sound run only while someone watches.
 
@@ -354,6 +373,7 @@ A session is a member streaming a game to others in the same room, over the room
 | 9 | `unknown_room` | The acceptor isn't in that room (any more) |
 | 10 | `protocol` | A malformed or unexpected message |
 | 11 | `not_member` | Not on the owner's member list (any more) |
+| 12 | `timed_out` | Nothing heard for 5 s from a peer that sends `Alive` |
 
 **Stream reset** (an epoch stream, by the host; or stopped by the viewer):
 - `SKIP_AHEAD` (1): a newer epoch replaces this one.
@@ -376,7 +396,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x08` | main to viewer | Rumble (postcard): `{low u8, high u8}` |
 | `0x81` | viewer to main | Local input (postcard `LocalInput`): `Key{usage, down}`, `MouseButton{button, down}`, `MouseMotion{dx, dy}`, `Wheel{dx, dy}`, `Pad(snapshot)` or `Alive` (every 100 ms). Deltas; the main process keeps the running totals |
 | `0x82` | viewer to main | Frame timing: `{epoch, seq, capture_us, arrived_us, decoded_us, presented_us, barcode_us}` |
-| `0x83` | viewer to main | User action (postcard): `RequestControl`, `CancelControl` (withdraw or give back), `Leave` |
+| `0x83` | viewer to main | User action (postcard): `RequestControl`, `CancelControl` (withdraw or give back), `Leave`. The viewer also sends `Leave` when its window is closed (M6): a viewer that exits without it crashed, and the app starts it again, at most once a minute |
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 | `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
 

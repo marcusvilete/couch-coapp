@@ -1,6 +1,6 @@
 ---
 name: input-safety-checks
-description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch_engine::pipeline (host, watch), the engine's rooms::sessions, couch-cli's host/view, couch-platform-win's sendinput, keymap, vigem, foreground or panic_key code, couch_input::shortcuts, or anything on the viewer/host teardown path; and before reporting or committing such a change.
+description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink`, `lifecycle-check` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch_engine::pipeline (host, watch), the engine's rooms::sessions, couch-cli's host/view, couch-platform-win's sendinput, held_input, markers, keymap, vigem, foreground, game or panic_key code, couch_engine::pipeline::source, couch_input::shortcuts, or anything on the viewer/host teardown path; and before reporting or committing such a change.
 ---
 
 # Input safety checks
@@ -22,7 +22,10 @@ cargo test -p couch-engine --test sessions    # handoffs, panic key, viewers lea
 cargo build --release -p couch-cli -p couch-viewer
 .\target\release\couch-cli.exe release-check  # about 1 minute
 .\target\release\couch-cli.exe input-sink     # a few seconds
+.\target\release\couch-cli.exe lifecycle-check  # about 1 minute
 ```
+
+- **Tell the user first.** `release-check` and `lifecycle-check` start several hosts, each plugging a virtual pad (a Steam notification each), and open windows that take the focus.
 
 - **Close leftovers first.** A running `couch-cli.exe` blocks the release build ("Access is denied"), and a stray viewer confuses the checks.
 - **Leave the machine alone while they run.** Both commands open windows. `input-sink` types into its own window, and stops if that window loses the foreground. `release-check` starts and ends viewer windows. Don't click around.
@@ -56,6 +59,23 @@ Ctrl+C and closing the host's console run the same code path as Ctrl+Break. Ctrl
 
   Their sum sets each limit above. Change a limit only with the user's agreement.
 - **Error before acting:** usually leftovers, or the seat never went active (a slow ViGEm plug can take seconds).
+
+## What `input-sink` and `lifecycle-check` do
+
+- **`input-sink`** plays a guest holding the seat: every key, button, move and wheel turn goes through a `SeatRouter` into the `SendInput` injector, into `couch-viewer --input-sink` as the game, and must arrive in order. Then the blocked combinations (Windows, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4) must not, beyond their modifiers. A Windows key that got through would open Start and take the focus, which stops the run.
+- **`lifecycle-check`**, times on QPC:
+
+| Scenario | Expected | Limit |
+|---|---|---|
+| `fake-game` swaps its window | host `followed` | 1 s |
+| `fake-game` exits | host `game-exited` | 3 s |
+| Its window closes, the process runs on | host `source-lost`, after the grace | 5 to 6 s |
+| The stream window (`view --restart-viewer`) killed | `view` `viewer-restarted`; the seat active again if it was suspended | 2 s |
+| Host killed | `view` reports `connection-lost` (no `Alive` for 5 s) | 5.5 s |
+| A helper holding F24 through `SendInputInjector` is killed | F24 stays down; the next `host` start releases it | 1 s after start |
+
+  - The last one checks that F24 really was left down first ("nothing to show" otherwise), and lets go of F24 whatever happens.
+  - A stale-key failure means the held-input marker (`couch_platform_win::held_input`) wasn't written, read or acted on: check `%LOCALAPPDATA%\CouchCoApp\held-input\`.
 
 ## What isn't covered automatically; ask the user
 

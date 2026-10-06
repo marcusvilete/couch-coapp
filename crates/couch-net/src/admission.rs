@@ -111,6 +111,7 @@ pub fn close_name(code: u32) -> &'static str {
         close_code::UNKNOWN_ROOM => "unknown room",
         close_code::PROTOCOL => "protocol error",
         close_code::NOT_MEMBER => "not a member",
+        close_code::TIMED_OUT => "timed out",
         _ => "unknown",
     }
 }

@@ -1,7 +1,9 @@
 //! What a remote member may never press, whatever their permissions
 //! (docs/architecture.md, "Safety invariants"): the Windows keys, and the
-//! combinations that leave the game: Alt+Tab, Alt+Esc, Ctrl+Esc and
-//! Ctrl+Shift+Esc. The gamepad's Guide button is cleared in the router.
+//! combinations that leave the game or close it: Alt+Tab, Alt+Esc, Ctrl+Esc,
+//! Ctrl+Shift+Esc and Alt+F4. A guest quits through the game's own menu; an
+//! accidental Alt+F4 would end everyone's session. The gamepad's Guide
+//! button is cleared in the router.
 
 use std::collections::BTreeSet;
 
@@ -9,6 +11,7 @@ use crate::HidUsage;
 
 pub const ESCAPE: HidUsage = HidUsage(0x29);
 pub const TAB: HidUsage = HidUsage(0x2B);
+pub const F4: HidUsage = HidUsage(0x3D);
 pub const LEFT_CTRL: HidUsage = HidUsage(0xE0);
 pub const LEFT_SHIFT: HidUsage = HidUsage(0xE1);
 pub const LEFT_ALT: HidUsage = HidUsage(0xE2);
@@ -28,6 +31,7 @@ pub fn key_allowed(key: HidUsage, held: &BTreeSet<HidUsage>) -> bool {
         LEFT_GUI | RIGHT_GUI => false,
         TAB => !alt,
         ESCAPE => !alt && !ctrl,
+        F4 => !alt,
         _ => true,
     }
 }
@@ -53,6 +57,14 @@ mod tests {
         assert!(!key_allowed(ESCAPE, &held(&[LEFT_ALT])));
         assert!(!key_allowed(ESCAPE, &held(&[RIGHT_CTRL])));
         assert!(!key_allowed(ESCAPE, &held(&[LEFT_CTRL, LEFT_SHIFT])));
+    }
+
+    #[test]
+    fn alt_f4_is_blocked() {
+        assert!(!key_allowed(F4, &held(&[LEFT_ALT])));
+        assert!(!key_allowed(F4, &held(&[RIGHT_ALT, LEFT_SHIFT])));
+        assert!(key_allowed(F4, &held(&[])));
+        assert!(key_allowed(F4, &held(&[LEFT_CTRL])));
     }
 
     #[test]

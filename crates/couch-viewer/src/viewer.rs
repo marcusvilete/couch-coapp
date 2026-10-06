@@ -148,7 +148,13 @@ pub fn run(options: WindowOptions) -> Result<()> {
     'running: loop {
         for event in events.poll_iter() {
             match event {
-                Event::Quit { .. } => break 'running,
+                Event::Quit { .. } => {
+                    // The user closed the window: say so, so the main
+                    // process doesn't take the exit for a crash and start
+                    // the window again.
+                    let _ = out_tx.send(Outgoing::Action(UserAction::Leave));
+                    break 'running;
+                }
                 Event::Window { win_event, .. } => match win_event {
                     WindowEvent::PixelSizeChanged(w, h) => {
                         gpu.resize(w as u32, h as u32);

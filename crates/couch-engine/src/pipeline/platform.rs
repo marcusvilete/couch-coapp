@@ -18,13 +18,14 @@ use couch_platform_win::{
     capture::{self, CaptureOptions, CaptureSource, MonitorId, WgcCapturer},
     clock::QpcClock,
     foreground::{self, WindowId},
+    game, held_input,
     panic_key::PanicKey,
     sendinput::SendInputInjector,
     vigem::VigemPadFactory,
 };
 
 use super::{
-    AudioKind, Backend, Focus, NativeId, ScreenSource, Source, Sources, ViewerOptions,
+    AudioKind, Backend, Focus, GameProcess, NativeId, ScreenSource, Source, Sources, ViewerOptions,
     ViewerProcess, WindowSource,
 };
 
@@ -35,6 +36,18 @@ const VIEWER_EXE: &str = "couch-viewer.exe";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct WindowsBackend;
+
+struct WatchedGame(game::GameProcess);
+
+impl GameProcess for WatchedGame {
+    fn running(&self) -> bool {
+        self.0.running()
+    }
+
+    fn windows(&self) -> Vec<NativeId> {
+        self.0.windows().into_iter().map(|w| w.0).collect()
+    }
+}
 
 type Capture = (Box<dyn Capturer>, Option<NativeId>);
 
@@ -50,12 +63,16 @@ impl Backend for WindowsBackend {
     }
 
     fn sources(&self) -> Result<Sources, MediaError> {
+        let mut elevated = std::collections::HashMap::new();
         let windows = capture::list_windows()?
             .into_iter()
             .map(|w| WindowSource {
                 id: w.window.0,
                 title: w.title,
                 app: w.process,
+                elevated: *elevated
+                    .entry(w.process_id)
+                    .or_insert_with(|| game::runs_elevated(w.process_id)),
             })
             .collect();
         let screens = capture::list_monitors()?
@@ -128,6 +145,17 @@ impl Backend for WindowsBackend {
 
     fn window_exists(&self, window: NativeId) -> bool {
         foreground::window_exists(WindowId(window))
+    }
+
+    fn release_left_input(&self) -> usize {
+        held_input::release_on_panic();
+        held_input::release_stale()
+    }
+
+    fn game_process(&self, window: NativeId) -> Option<Box<dyn GameProcess>> {
+        let game = game::GameProcess::of_window(WindowId(window))?;
+        tracing::info!("watching the game's process {}", game.pid());
+        Some(Box::new(WatchedGame(game)))
     }
 
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {

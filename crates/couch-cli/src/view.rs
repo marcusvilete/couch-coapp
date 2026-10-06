@@ -10,9 +10,9 @@ use couch_engine::pipeline::{
     ViewerOptions, platform_backend,
     watch::{Watch, WatchEvent, WatchOptions},
 };
-use couch_net::{control, datagrams::Datagrams, endpoint, streams::Streams};
+use couch_net::{NetError, admission, control, datagrams::Datagrams, endpoint, streams::Streams};
 use couch_proto::{
-    control::{ControlMessage, KeyframeReason, KeyframeRequest},
+    control::{ALIVE_EVERY, Alive, ControlMessage, KeyframeReason, KeyframeRequest, close_code},
     ipc::{AudioStats, FrameTiming, NetStats},
 };
 use iroh_tickets::endpoint::EndpointTicket;
@@ -29,6 +29,8 @@ pub struct Args {
     pub hide_hud: bool,
     /// Write every presented frame's timings here.
     pub timings_csv: Option<std::path::PathBuf>,
+    /// Start the viewer window again if it crashes (`lifecycle-check`).
+    pub restart_viewer: bool,
     pub net: NetArgs,
 }
 
@@ -119,15 +121,28 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         conn.remote_id().fmt_short(),
         hello.app_version
     );
+    let backend = platform_backend();
+    let clock = backend.clock();
     let (seat_tx, mut seat_rx) = mpsc::unbounded_channel();
+    let control_conn = conn.clone();
     tokio::spawn(async move {
-        while let Ok(Some(message)) = control_rx.recv().await {
-            if matches!(
-                message,
-                ControlMessage::SeatAssigned(_) | ControlMessage::SeatReleased(_)
-            ) && seat_tx.send(message).is_err()
-            {
-                return;
+        loop {
+            match control_rx.recv().await {
+                Ok(Some(message)) => {
+                    if matches!(
+                        message,
+                        ControlMessage::SeatAssigned(_) | ControlMessage::SeatReleased(_)
+                    ) && seat_tx.send(message).is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(NetError::TimedOut) => {
+                    println!("the host went silent");
+                    admission::close(&control_conn, close_code::TIMED_OUT);
+                    return;
+                }
+                Ok(None) | Err(_) => return,
             }
         }
     });
@@ -135,12 +150,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // Subscribed before asking for the stream.
     let datagrams = Datagrams::start(conn.clone());
     let streams = Streams::start(conn.clone());
-    let backend = platform_backend();
     let (watch, mut events) = Watch::start(
         conn.clone(),
         &datagrams,
         &streams,
-        backend.as_ref(),
+        backend.clone(),
         WatchOptions {
             session: None,
             viewer: ViewerOptions {
@@ -151,6 +165,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 log: None,
             },
             measure: true,
+            // Off by default: `release-check` kills the window on purpose and
+            // expects the connection to close.
+            restart_viewer: args.restart_viewer,
         },
     )?;
     control_tx
@@ -182,6 +199,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     };
     tokio::pin!(deadline);
     let mut report = tokio::time::interval(Duration::from_secs(1));
+    let mut alive = tokio::time::interval(ALIVE_EVERY);
     let mut net: Option<NetStats> = None;
     // Received video, four samples a second, for G7.
     let mut receive_mbps = Samples::default();
@@ -217,11 +235,23 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     println!("rumble from the host: low {} high {}", r.low, r.high);
                 }
                 Some(WatchEvent::Action(action)) => println!("the viewer asked to {action:?}; no session here"),
+                Some(WatchEvent::ViewerRestarted) => {
+                    println!("EVENT viewer-restarted {}", clock.now().0);
+                    println!("the viewer window was started again");
+                }
+                Some(WatchEvent::ViewerCrashed) => {
+                    println!("EVENT viewer-crashed {}", clock.now().0);
+                    println!("the viewer window crashed");
+                    break;
+                }
                 Some(WatchEvent::ViewerClosed) | None => {
+                    println!("EVENT viewer-closed {}", clock.now().0);
                     println!("the viewer window closed");
                     break;
                 }
-                Some(WatchEvent::ConnectionLost) => {
+                Some(WatchEvent::ConnectionLost { .. }) => {
+                    // For `lifecycle-check`, on the host's clock (QPC).
+                    println!("EVENT connection-lost {}", clock.now().0);
                     println!("connection closed");
                     break;
                 }
@@ -237,6 +267,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 }
                 _ => {}
             },
+            _ = alive.tick() => {
+                // A closed connection is reported by the watch, below; an
+                // error here must not end the run first.
+                let _ = control_tx.send(&ControlMessage::Alive(Alive {})).await;
+            }
             _ = report.tick() => {
                 let w = std::mem::take(&mut latency.window);
                 let p = |s: &Samples, q| s.percentile(q).map_or("   -".into(), |v| format!("{v:4.1}"));

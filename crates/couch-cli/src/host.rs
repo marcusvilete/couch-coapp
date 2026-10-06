@@ -11,11 +11,16 @@ use couch_engine::pipeline::{
     AudioChoice, Source,
     host::{HostEvent, HostOptions, HostStream, NetemElapsed, Rates, ViewerStats},
     platform_backend,
+    source::REPLACE_GRACE,
 };
 use couch_input::{MemberId, Permissions, SeatEpoch, router::SeatStatus};
 use couch_media::clock::LATENCY_CLOCK_TITLE;
-use couch_net::{Connection, control, datagrams::Datagrams, endpoint, streams::Streams};
-use couch_proto::control::{ControlMessage, SeatAssigned, SeatReleased};
+use couch_net::{
+    Connection, NetError, admission, control, datagrams::Datagrams, endpoint, streams::Streams,
+};
+use couch_proto::control::{
+    ALIVE_EVERY, Alive, ControlMessage, SeatAssigned, SeatReleased, close_code,
+};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::sync::mpsc;
 
@@ -74,8 +79,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     let mbps = |v: f64| (v * 1e6) as u32;
     let netem_elapsed = netem.map(|link| Arc::new(move || link.elapsed()) as NetemElapsed);
+    let backend = platform_backend();
+    // A host here that was killed may have left a guest's keys held.
+    let left = backend.release_left_input();
+    if left > 0 {
+        println!("released {left} keys or buttons a crashed host left held");
+    }
+    event_line("started", qpc_now());
     let (stream, mut events) = HostStream::start(
-        platform_backend(),
+        backend,
         HostOptions {
             source: args.source.clone(),
             fps: args.fps,
@@ -92,6 +104,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             first_epoch: SeatEpoch(0),
             rc_trace: args.rc_trace.clone(),
             netem_elapsed,
+            replace_grace: REPLACE_GRACE,
         },
     )
     .await;
@@ -229,8 +242,18 @@ fn on_event(
             r.low_frequency, r.high_frequency
         ),
         HostEvent::SourceClosed => {
-            println!("the captured source closed");
+            println!("{secs:8.3}s  the captured source closed");
+            event_line("source-lost", qpc_now());
             return Some(Ok(()));
+        }
+        HostEvent::GameExited => {
+            println!("{secs:8.3}s  the game exited");
+            event_line("game-exited", qpc_now());
+            return Some(Ok(()));
+        }
+        HostEvent::SourceFollowed { at, .. } => {
+            println!("{secs:8.3}s  the game opened a new window; capturing that one");
+            event_line("followed", at.0);
         }
         HostEvent::CaptureFailed(e) => return Some(Err(anyhow::anyhow!("capture failed: {e}"))),
         HostEvent::Note(text) => println!("{text}"),
@@ -268,11 +291,18 @@ fn short(member: MemberId) -> String {
     member.to_hex()[..10].to_string()
 }
 
-/// `EVENT <what> <QPC µs>`, for `release-check`, which times releases on the
-/// same clock. What: `active`, `suspended`, `revoked`, `waiting`, and when a
-/// viewer's input ends, `gone` (it disconnected) or `stopped` (the host).
+/// `EVENT <what> <QPC µs>`, for `release-check` and `lifecycle-check`,
+/// which time them on the same clock. What: `active`, `suspended`,
+/// `revoked`, `waiting`, and when a viewer's input ends, `gone` (it
+/// disconnected) or `stopped` (the host); for the source, `followed` (a new
+/// window of the game), `game-exited` and `source-lost`.
 fn event_line(what: &str, qpc_us: u64) {
     println!("EVENT {what} {qpc_us}");
+}
+
+fn qpc_now() -> u64 {
+    use couch_media::clock::Clock;
+    couch_platform_win::clock::QpcClock.now().0
 }
 
 /// Accepts viewers, runs each one's control stream, and reports to the main
@@ -305,7 +335,15 @@ async fn accept_viewers(endpoint: couch_net::Endpoint, to_main: mpsc::UnboundedS
             println!("viewer app {}", hello.app_version);
             let (control, mut outgoing) = mpsc::unbounded_channel::<ControlMessage>();
             tokio::spawn(async move {
-                while let Some(message) = outgoing.recv().await {
+                let mut alive = tokio::time::interval(ALIVE_EVERY);
+                loop {
+                    let message = tokio::select! {
+                        message = outgoing.recv() => match message {
+                            Some(message) => message,
+                            None => return,
+                        },
+                        _ = alive.tick() => ControlMessage::Alive(Alive {}),
+                    };
                     if let Err(e) = tx.send(&message).await {
                         tracing::debug!("seat notice not sent: {e}");
                         return;
@@ -329,6 +367,11 @@ async fn accept_viewers(endpoint: couch_net::Endpoint, to_main: mpsc::UnboundedS
                         let _ = to_main.send(FromViewer::Keyframe(member));
                     }
                     Ok(Some(_)) => {}
+                    Err(NetError::TimedOut) => {
+                        println!("viewer went silent");
+                        admission::close(&conn, close_code::TIMED_OUT);
+                        break;
+                    }
                     Ok(None) | Err(_) => break,
                 }
             }

@@ -41,7 +41,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | Task | Command |
 |---|---|
 | Rooms end to end: engines over loopback (join through the owner, wrong passwords and rate limits, ban, owner offline, catching up, simultaneous restart, leave and close, including with the others offline, invite expiry) | `cargo test -p couch-engine --test rooms` (~20 s) |
-| Sessions end to end: three engines with a fake backend (fake capture, encoder, pad and viewer window): going live, two viewers, a full session, asking, declining, passing and giving back control, the panic key, a viewer closing its window, a ban, the host leaving, the window closing, stopping, shutting down mid-game | `cargo test -p couch-engine --test sessions` (~2 s) |
+| Sessions end to end: three engines with a fake backend (fake capture, encoder, pad and viewer window): going live, two viewers, a full session, asking, declining, passing and giving back control, the panic key, a viewer closing its window, a ban, the host leaving, the window closing, stopping, shutting down mid-game; the game swapping its window or exiting, a crashed stream window started again, watching resuming after a dropped connection (`Engine::drop_connection`) | `cargo test -p couch-engine --test sessions` (~4 s) |
 | Join through iroh's public relay (needs internet) | `cargo test -p couch-engine --test rooms -- --ignored` |
 | The room state machine, including the simulated network and its property test | `cargo test -p couch-room` |
 
@@ -59,8 +59,9 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
 | Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine |
 | Virtual pad (needs ViGEmBus) | `couch-cli pad-test`, then watch it in `joy.cpl`. Without `--real-pad-ids` it uses made-up ids (1209:0001), and games and Steam treat it as a generic joystick (only the D-pad works); the app always uses the real Xbox 360 ids. While a host on this PC has a pad plugged in, viewers here skip every Xbox 360 pad (`couch_platform_win::virtual_pads`) |
-| Keyboard and mouse injection, checked on one machine | `couch-cli input-sink` |
+| Keyboard and mouse injection through the seat router, checked on one machine (blocked combinations included) | `couch-cli input-sink` |
 | Input released when a session ends badly (killed, frozen, closed, host stopped) | `couch-cli release-check` (about 1 minute). The `input-safety-checks` skill says when to run it and what to ask the user to try |
+| A game swapping its window, exiting or closing it; the stream window killed; a host killed, and killed holding a key | `couch-cli lifecycle-check` (about 1 minute; `--only kill-host,...` for some). `couch-cli fake-game` is the stand-in game it uses (`swap`, `close`, `exit` on stdin) |
 | Audio datagrams behind a keyframe (timing test) | `cargo test --release -p couch-net --features netem --test datagrams -- --ignored --nocapture` |
 | Audio latency (gate A1) and click to playback | `couch-cli latency-probe --secs 30 --relay none --audio` (it clicks through the speakers). Add `--netem "delay=10ms,loss=1%"` for the loss check. The `audio-checks` skill covers reading the results and what to ask the user to listen for |
 | Which sound `host` streams | `--audio auto` (default: the game's process tree for a window, everything but us for the monitor, clicks for the test pattern), or `game`, `system`, `tone`, `off` |
@@ -108,7 +109,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 **Safety invariants.** Remote input is remote control of someone's PC. Never weaken these:
 - Guests default to gamepad only (`Permissions::GUEST_DEFAULT`).
 - Keyboard and mouse are injected only while the game window is in the foreground.
-- The Windows key and its combinations, Alt+Tab, Ctrl+Esc, Ctrl+Shift+Esc and the gamepad Guide button are never forwarded.
+- The Windows key and its combinations, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4 and the gamepad Guide button are never forwarded.
 - Every handoff, disconnect and teardown releases held keys and sends `PadState::NEUTRAL`.
 - Input with a stale `SeatEpoch` is dropped.
 - Remote input reaches `KbmInjector` and `VirtualPad` only through `couch_input::router::SeatRouter`, which enforces all of the above. Its tests are the guard; don't weaken them. After touching input or teardown code, follow the `input-safety-checks` skill.
@@ -127,6 +128,8 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **The host is the only writer** of its session's facts, sent straight to each member, never relayed. A member acts on a session message only from that session's host, on the current connection, while the host is on the roster. Never let one member speak for another's session.
 - **The seat router alone decides who plays.** `couch_room::session` asks it and mirrors its `Granted`/`Revoked`; never inject or track a holder elsewhere.
 - **Ending releases first:** input, then `SessionEnded` and `SESSION_END`, then encoders and capture, then the pad. A viewer that goes (leaves, closes its window, loses the connection, is banned) is released at once through `SeatRouter::disconnected`.
+- **A seat never survives a connection.** A viewer that reconnects joins again as a new viewer and must be given control again; nothing restores a seat without the host.
+- **Every key or button `SendInputInjector` presses is recorded** (`couch_platform_win::held_input`) so a crash can't leave it held. Inject keyboard and mouse only through it, and keep `release_left_input` at the start of anything that hosts.
 - **Shortcuts live in one table**, `couch_input::shortcuts`: the viewer, the panic-key hook and the app's list all read it. Add or change a shortcut there, never as a key constant elsewhere (the user wants them editable later). The panic-key hook must keep ignoring injected keys.
 - After touching sessions or the pipelines, follow both the `room-security-checks` and the `input-safety-checks` skills; after touching the host pipeline's video path, the `rate-control-gates` skill too.
 

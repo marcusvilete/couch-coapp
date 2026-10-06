@@ -1,5 +1,6 @@
-//! Doing things to other processes, for test tools: find a process's
-//! children, freeze it, close its windows, send it Ctrl+Break.
+//! Doing things to other processes: find a process's children and
+//! descendants (the game's process tree), and, for test tools, freeze it,
+//! close its windows, send it Ctrl+Break.
 //! `couch-cli release-check` uses these to stage a viewer that dies, hangs
 //! or is closed, and a host that is stopped.
 
@@ -62,6 +63,36 @@ pub fn child_processes(pid: u32) -> io::Result<Vec<u32>> {
         more = unsafe { Process32NextW(snapshot.0, &mut entry) }.is_ok();
     }
     Ok(children)
+}
+
+/// `pid`'s children, their children, and so on, from one snapshot.
+pub fn descendants(pid: u32) -> io::Result<Vec<u32>> {
+    // SAFETY: a snapshot of all processes; the handle is closed by `Handle`.
+    let snapshot = Handle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.map_err(os)?);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut parents = Vec::new();
+    // SAFETY: `entry` is a live, correctly sized out-parameter.
+    let mut more = unsafe { Process32FirstW(snapshot.0, &mut entry) }.is_ok();
+    while more {
+        parents.push((entry.th32ProcessID, entry.th32ParentProcessID));
+        // SAFETY: as above.
+        more = unsafe { Process32NextW(snapshot.0, &mut entry) }.is_ok();
+    }
+    let mut found = Vec::new();
+    let mut queue = vec![pid];
+    while let Some(parent) = queue.pop() {
+        for &(child, of) in &parents {
+            // A reused id can make a process its own ancestor; never loop.
+            if of == parent && child != pid && !found.contains(&child) {
+                found.push(child);
+                queue.push(child);
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Ends `pid` at once, as a crash would.

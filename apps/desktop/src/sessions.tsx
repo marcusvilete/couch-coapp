@@ -14,7 +14,7 @@ import { Avatar, MAX_NAME_BYTES, Modal, truncateBytes } from "./ui";
  * while watching one. */
 export type Busy = { hosting: boolean; watching: boolean };
 
-const WATCHING_ROLES: SessionView["role"][] = ["joining", "watching", "asking", "controlling"];
+const WATCHING_ROLES: SessionView["role"][] = ["joining", "watching", "asking", "controlling", "reconnecting"];
 
 export function busyIn(rooms: RoomView[]): Busy {
   const all = rooms.flatMap((r) => r.sessions);
@@ -141,6 +141,10 @@ function StageCard(props: {
       break;
     case "joining":
       state = `Waiting for ${host}…`;
+      actions = <StopWatching run={run} busy={busy} />;
+      break;
+    case "reconnecting":
+      state = `Lost the connection to ${host}. Reconnecting…`;
       actions = <StopWatching run={run} busy={busy} />;
       break;
     default: {
@@ -390,6 +394,7 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
   }
 
   const isPicked = (kind: Picked["kind"], id: string) => picked?.kind === kind && picked.id === id;
+  const pickedElevated = sources?.windows.some((w) => w.elevated && isPicked("window", w.id)) ?? false;
 
   return (
     <Modal
@@ -426,6 +431,11 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
                     {w.title}
                   </span>
                   {w.app && <span className="hint">{w.app}</span>}
+                  {w.elevated && (
+                    <span className="hint warn-text" title="Runs as administrator">
+                      admin
+                    </span>
+                  )}
                 </label>
               ))}
               {sources.screens.map((s, i) => (
@@ -449,6 +459,12 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
             </div>
           )}
           <p className="hint">A window is best: only the game is shown, and only its sound is sent.</p>
+          {pickedElevated && (
+            <p className="banner warn" role="status">
+              This program runs as administrator. Guests' keyboard and mouse can't reach it, and the panic key doesn't
+              work while it is in front: switch to Couch Co-App and use Take back instead. Their gamepad still works.
+            </p>
+          )}
         </fieldset>
 
         <label>
@@ -518,7 +534,8 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
         {kbm ? (
           <p className="banner warn">
             That is control of your PC. Their keys and clicks reach only the game, and only while its window is in front;
-            the Windows key, Alt+Tab, Ctrl+Esc and Ctrl+Shift+Esc never go through. Allow it only for people you trust.
+            the Windows key, Alt+Tab, Alt+F4, Ctrl+Esc and Ctrl+Shift+Esc never go through. Allow it only for people you
+            trust.
           </p>
         ) : (
           <p className="hint">

@@ -13,9 +13,9 @@
 //! slot 0 in the process that plugged it and slot 1 in others (measured in
 //! M5b, with Steam running).
 //!
-//! The host leaves a marker file per pad. A marker names the host process
-//! and its start time, so one left behind by a crash is recognised as stale
-//! even if the process id is reused.
+//! The host leaves a marker file per pad ([`crate::markers`]). A marker
+//! names the host process and its start time, so one left behind by a crash
+//! is recognised as stale even if the process id is reused.
 
 use std::{
     fs, io,
@@ -23,13 +23,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use windows::Win32::{
-    Foundation::{CloseHandle, E_INVALIDARG, FILETIME, HANDLE, STILL_ACTIVE},
-    System::Threading::{
-        GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    },
-};
+use crate::markers::{self, Process, own_start_time, process_state};
 
 /// Tells apart the markers of several pads in one process.
 static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -59,8 +53,7 @@ pub fn host_pads_here() -> bool {
 }
 
 fn markers_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(Path::new(&base).join("CouchCoApp").join("virtual-pads"))
+    markers::dir("virtual-pads")
 }
 
 fn marker_name(pid: u32, n: u32) -> String {
@@ -79,17 +72,6 @@ fn mark_in(dir: &Path, pid: u32, n: u32, started: Option<u64>) -> io::Result<Pad
     Ok(PadMarker { path })
 }
 
-/// A marker's process, as far as can be told.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Process {
-    /// Running, with its start time if it could be read.
-    Running(Option<u64>),
-    /// Exited, or no such process.
-    Gone,
-    /// Couldn't be asked (access denied, say): assume it runs.
-    Unknown,
-}
-
 /// How many markers belong to running hosts. A marker is removed only when
 /// its process is known to be gone or the id now names another process; any
 /// doubt keeps it, since a lost marker would let a viewer here read the
@@ -106,13 +88,7 @@ fn live_markers_in(dir: &Path, process: impl Fn(u32) -> Process) -> usize {
         let recorded = fs::read_to_string(entry.path())
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
-        let stale = match (process(pid), recorded) {
-            (Process::Gone, _) => true,
-            // The id was reused by a process that started at another time.
-            (Process::Running(Some(now)), Some(then)) => then != 0 && now != then,
-            _ => false,
-        };
-        if stale {
+        if markers::stale(process(pid), recorded) {
             let _ = fs::remove_file(entry.path());
         } else {
             live += 1;
@@ -126,48 +102,6 @@ fn parse_pid(name: &str) -> Option<u32> {
     let (pid, n) = rest.split_once("-pad-")?;
     n.parse::<u32>().ok()?;
     pid.parse().ok()
-}
-
-fn own_start_time() -> Option<u64> {
-    // SAFETY: the pseudo-handle for this process needs no closing.
-    process_start(unsafe { GetCurrentProcess() })
-}
-
-/// Whether `pid` runs, and since when.
-fn process_state(pid: u32) -> Process {
-    // SAFETY: opening a process by id for a query; closed below.
-    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-        Ok(process) => process,
-        // No process has that id.
-        Err(e) if e.code() == E_INVALIDARG => return Process::Gone,
-        Err(_) => return Process::Unknown,
-    };
-    let mut code = 0;
-    // SAFETY: a process handle with query rights and a valid out-parameter.
-    // An exited process still answers until its last handle closes, so
-    // only STILL_ACTIVE means it runs.
-    let state = if unsafe { GetExitCodeProcess(process, &mut code) }.is_err() {
-        Process::Unknown
-    } else if code == STILL_ACTIVE.0 as u32 {
-        Process::Running(process_start(process))
-    } else {
-        Process::Gone
-    };
-    // SAFETY: we opened it above and close it once.
-    let _ = unsafe { CloseHandle(process) };
-    state
-}
-
-fn process_start(process: HANDLE) -> Option<u64> {
-    let (mut created, mut exited, mut kernel, mut user) = Default::default();
-    // SAFETY: a process handle with query rights and four valid
-    // out-parameters.
-    unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
-    let FILETIME {
-        dwLowDateTime: low,
-        dwHighDateTime: high,
-    } = created;
-    Some(u64::from(high) << 32 | u64::from(low))
 }
 
 #[cfg(test)]
@@ -227,14 +161,12 @@ mod tests {
     }
 
     #[test]
-    fn our_own_markers_count_and_a_missing_process_is_gone() {
+    fn our_own_markers_count() {
         let dir = scratch("own");
         let pid = std::process::id();
         let _first = mark_in(&dir, pid, 0, own_start_time()).unwrap();
         let _second = mark_in(&dir, pid, 1, own_start_time()).unwrap();
         assert_eq!(live_markers_in(&dir, process_state), 2);
-        // Process ids are multiples of 4; no process has this one.
-        assert_eq!(process_state(u32::MAX - 2), Process::Gone);
         let _ = fs::remove_dir_all(&dir);
     }
 

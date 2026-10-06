@@ -36,4 +36,7 @@ pub enum NetError {
     /// A message type we must understand and don't: the peer is newer.
     #[error("unknown message type {0:#06x} that must be understood")]
     Version(u16),
+    /// A peer that sends `Alive` went silent for the silent limit.
+    #[error("the peer went silent")]
+    TimedOut,
 }

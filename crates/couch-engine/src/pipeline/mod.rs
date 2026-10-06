@@ -18,6 +18,7 @@ pub mod host;
 pub mod ipc;
 #[cfg(windows)]
 pub mod platform;
+pub mod source;
 pub mod watch;
 
 use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
@@ -65,6 +66,8 @@ pub struct WindowSource {
     pub title: String,
     /// The program's file name, such as `Celeste.exe`; may be empty.
     pub app: String,
+    /// It runs with more rights than we do (as administrator).
+    pub elevated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +135,15 @@ pub struct ViewerProcess {
     pub guard: Box<dyn Any + Send>,
 }
 
+/// The game behind a streamed window ([`Backend::game_process`]), watched so
+/// the host can follow it to a new window or tell that it exited
+/// ([`source`]).
+pub trait GameProcess: Send + Sync {
+    fn running(&self) -> bool;
+    /// Its windows that could replace the captured one, best first.
+    fn windows(&self) -> Vec<NativeId>;
+}
+
 /// What the pipelines need from the machine.
 pub trait Backend: Send + Sync + 'static {
     /// The clock frames and packets are stamped with (QPC on Windows), which
@@ -164,7 +176,22 @@ pub trait Backend: Send + Sync + 'static {
 
     fn window_exists(&self, window: NativeId) -> bool;
 
+    /// The process behind `window`, to watch while it is streamed. `None`
+    /// when there is nothing to watch: a lost window then ends the stream at
+    /// once.
+    fn game_process(&self, _window: NativeId) -> Option<Box<dyn GameProcess>> {
+        None
+    }
+
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError>;
+
+    /// At start, before any input: lets go of keys and buttons a host on
+    /// this machine left held when it crashed or was killed, and makes a
+    /// panic in this process let go of what it holds. Returns how many were
+    /// left held.
+    fn release_left_input(&self) -> usize {
+        0
+    }
 
     /// Hooks the host's panic key (`couch_input::shortcuts`) until the
     /// returned guard drops. Only physical presses count, never injected

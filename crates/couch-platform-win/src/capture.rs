@@ -87,7 +87,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, MediaError> {
         .collect())
 }
 
-fn is_cloaked(window: WindowId) -> bool {
+pub(crate) fn is_cloaked(window: WindowId) -> bool {
     let mut cloaked = 0u32;
     // SAFETY: the out-parameter is a live local of the size passed.
     let result = unsafe {

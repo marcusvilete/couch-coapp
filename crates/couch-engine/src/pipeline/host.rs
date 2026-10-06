@@ -14,6 +14,11 @@
 //!   However it stops, it releases everything first.
 //! - **housekeeping**, a task: once a second, each viewer's share of the
 //!   upload cap, and whether a window nobody watches still exists.
+//!
+//! When the captured window goes, the capture (or housekeeping, while
+//! nobody watches) looks for the game's next window for a grace period
+//! ([`super::source`]): it follows a new one, ends with `GameExited` when the
+//! process is gone, or with `SourceClosed` when the grace runs out.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -59,7 +64,10 @@ use tokio::{
     time::MissedTickBehavior,
 };
 
-use super::{AudioChoice, AudioKind, Backend, Focus, NativeId, Source};
+use super::{
+    AudioChoice, AudioKind, Backend, Focus, GameProcess, NativeId, Source,
+    source::{self, Game, SourceWatch, Verdict},
+};
 
 /// Single player: one seat.
 const SEAT: SeatId = SeatId(0);
@@ -119,6 +127,9 @@ pub struct HostOptions {
     pub rc_trace: Option<PathBuf>,
     /// The netem link's age, for the trace's `netem_us` column.
     pub netem_elapsed: Option<NetemElapsed>,
+    /// How long a game may take to show a new window before the stream ends
+    /// ([`source::REPLACE_GRACE`]; shorter in tests).
+    pub replace_grace: Duration,
 }
 
 /// What a host stream reports.
@@ -150,8 +161,13 @@ pub enum HostEvent {
     Stats(ViewerStats),
     /// The game set its rumble (`couch-cli host` prints it).
     Rumble(Rumble),
-    /// The captured window or screen went away.
+    /// The captured window or screen went away, and no new window of the
+    /// game took its place within the grace.
     SourceClosed,
+    /// The game's process exited.
+    GameExited,
+    /// The game replaced its window, and the capture follows the new one.
+    SourceFollowed { window: NativeId, at: Micros },
     /// The capture failed: the stream can't go on.
     CaptureFailed(String),
     /// Something worth a line in a log.
@@ -191,8 +207,13 @@ struct Shared {
     clock: Arc<dyn Clock>,
     options: HostOptions,
     events: mpsc::UnboundedSender<HostEvent>,
-    /// The captured window: from the source, or once the capture finds it.
+    /// The captured window: from the source, or once the capture finds it,
+    /// and the game's next window when it replaces it.
     window: AtomicIsize,
+    /// The process behind the window, once known. Locked before `known`.
+    game: Mutex<Option<Box<dyn GameProcess>>>,
+    /// The game's other windows, which are never taken for its new one.
+    known: Mutex<Known>,
     state: Mutex<State>,
     /// Every viewer's mailbox and flags, for the capture thread.
     feeds: Mutex<Vec<Arc<Feed>>>,
@@ -204,7 +225,16 @@ struct Shared {
     grants_paused: Arc<AtomicBool>,
 }
 
+/// The game's windows other than its new one ([`Shared::remember_windows`]).
 #[derive(Default)]
+struct Known {
+    /// Never followed: there when streaming started, or seen on two looks
+    /// in a row while the captured window was there.
+    known: Vec<NativeId>,
+    /// The last look.
+    last_seen: Vec<NativeId>,
+}
+
 struct State {
     viewers: BTreeMap<MemberId, Viewer>,
     /// The capture and sound threads, while anyone watches.
@@ -215,8 +245,8 @@ struct State {
     /// Threads told to stop that may still be finishing: removed viewers'
     /// encoders, a capture nobody watches any more.
     retired: Vec<JoinHandle<()>>,
-    /// The window was found gone while nobody watched.
-    source_gone: bool,
+    /// Whether the window went, and what came of it.
+    source: SourceWatch,
     stopped: bool,
 }
 
@@ -288,6 +318,112 @@ impl Shared {
         tracing::debug!("{text}");
         self.event(HostEvent::Note(text));
     }
+
+    /// Starts watching the process behind `window`, if not yet.
+    fn watch_game(&self, window: NativeId) {
+        let mut game = lock(&self.game);
+        if game.is_none() {
+            *game = self.backend.game_process(window);
+            let windows = game.as_ref().map(|g| g.windows()).unwrap_or_default();
+            *lock(&self.known) = Known {
+                known: windows.clone(),
+                last_seen: windows,
+            };
+        }
+    }
+
+    /// While the captured window is there: remembers the game's other
+    /// windows, which are never followed (another browser window, the
+    /// desktop of Explorer). A window counts only once seen on two looks in
+    /// a row: a game's new window, opened a moment before it closes the old
+    /// one, must stay followable. Lists windows: call without holding
+    /// `state`, and off the async workers.
+    fn remember_windows(&self) {
+        let game = lock(&self.game);
+        let Some(g) = game.as_ref() else {
+            return;
+        };
+        let windows = g.windows();
+        // The captured window went meanwhile: what was listed may include
+        // its replacement.
+        let captured = self.window.load(Ordering::Acquire);
+        if captured == 0 || !self.backend.window_exists(captured) {
+            return;
+        }
+        let mut k = lock(&self.known);
+        let known: Vec<NativeId> = windows
+            .iter()
+            .copied()
+            .filter(|w| k.known.contains(w) || k.last_seen.contains(w))
+            .collect();
+        *k = Known {
+            known,
+            last_seen: windows,
+        };
+    }
+
+    /// The game as it is now: only windows that weren't there while the
+    /// captured one was count as its new window. The process that exited may
+    /// have left a child showing one (a launcher). Lists windows: call
+    /// without holding `state`, and off the async workers.
+    fn game_now(&self) -> Game {
+        let game = lock(&self.game);
+        let Some(g) = game.as_ref() else {
+            return Game::Unknown;
+        };
+        let known = lock(&self.known);
+        let fresh: Vec<NativeId> = g
+            .windows()
+            .into_iter()
+            .filter(|w| !known.known.contains(w))
+            .collect();
+        if fresh.is_empty() && !g.running() {
+            Game::Exited
+        } else {
+            Game::Running(fresh)
+        }
+    }
+
+    /// The capture follows `window`: from now on its process is the game.
+    fn follow(&self, window: NativeId) {
+        self.window.store(window, Ordering::Release);
+        let mut game = lock(&self.game);
+        if let Some(next) = self.backend.game_process(window) {
+            *game = Some(next);
+        }
+        let windows = game.as_ref().map(|g| g.windows()).unwrap_or_default();
+        *lock(&self.known) = Known {
+            known: windows.clone(),
+            last_seen: windows,
+        };
+    }
+
+    /// One look while the window is gone: what the source watch says, done.
+    /// Returns the window to capture from now on, if the game showed one.
+    fn look_for_window(&self) -> (Verdict, Option<NativeId>) {
+        let game = self.game_now();
+        let verdict = lock(&self.state).source.check(&game, Instant::now());
+        let follow = match verdict {
+            Verdict::Wait => None,
+            Verdict::Follow(window) => {
+                self.follow(window);
+                self.event(HostEvent::SourceFollowed {
+                    window,
+                    at: self.now(),
+                });
+                Some(window)
+            }
+            Verdict::GameExited => {
+                self.event(HostEvent::GameExited);
+                None
+            }
+            Verdict::SourceLost => {
+                self.event(HostEvent::SourceClosed);
+                None
+            }
+        };
+        (verdict, follow)
+    }
 }
 
 impl HostStream {
@@ -308,15 +444,23 @@ impl HostStream {
             _ => 0,
         };
         let share = options.upload_bps.map(UploadShare::new);
+        let source = SourceWatch::new(options.replace_grace);
         let shared = Arc::new(Shared {
             clock: backend.clock(),
             backend,
             options,
             events,
             window: AtomicIsize::new(window),
+            game: Mutex::new(None),
+            known: Mutex::new(Known::default()),
             state: Mutex::new(State {
+                viewers: BTreeMap::new(),
+                running: None,
                 share,
-                ..State::default()
+                traces: 0,
+                retired: Vec::new(),
+                source,
+                stopped: false,
             }),
             feeds: Mutex::default(),
             audio_to: Mutex::default(),
@@ -339,6 +483,10 @@ impl HostStream {
                 None
             }
         };
+        if window != 0 {
+            let sh = shared.clone();
+            let _ = tokio::task::spawn_blocking(move || sh.watch_game(window)).await;
+        }
         let (input, cmds) = mpsc::unbounded_channel();
         let input_task = tokio::spawn(input_loop(shared.clone(), pad, cmds));
         let housekeeping = tokio::spawn(housekeeping(Arc::downgrade(&shared))).abort_handle();
@@ -607,18 +755,39 @@ async fn housekeeping(shared: Weak<Shared>) {
         let Some(sh) = shared.upgrade() else {
             return;
         };
-        let mut state = lock(&sh.state);
-        reshare(&mut state);
-        state.retired.retain(|t| !t.is_finished());
-        // While capturing, the capture notices a closed window itself.
-        if let Source::Window(window) = sh.options.source
-            && state.running.is_none()
-            && !state.source_gone
-            && !sh.backend.window_exists(window)
-        {
-            state.source_gone = true;
-            sh.event(HostEvent::SourceClosed);
-        }
+        let (looking, watching_game) = {
+            let mut state = lock(&sh.state);
+            reshare(&mut state);
+            state.retired.retain(|t| !t.is_finished());
+            // While capturing, the capture watches the window itself.
+            let window = sh.window.load(Ordering::Acquire);
+            if state.running.is_none()
+                && !state.source.ended()
+                && sh.options.source.is_window()
+                && window != 0
+                && !state.source.looking()
+                && !sh.backend.window_exists(window)
+            {
+                state.source.lost(Instant::now());
+            }
+            (
+                state.running.is_none() && state.source.looking(),
+                !state.source.looking() && !state.source.ended(),
+            )
+        };
+        // Listing windows blocks for a moment: not on an async worker.
+        let sh2 = sh.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if looking {
+                // Nobody watches: once a second is soon enough. The
+                // capture, when someone comes, starts on whatever window
+                // this found.
+                sh2.look_for_window();
+            } else if watching_game {
+                sh2.remember_windows();
+            }
+        })
+        .await;
     }
 }
 
@@ -650,16 +819,60 @@ fn start_capture(shared: &Arc<Shared>) -> Running {
 
 fn capture_loop(shared: &Shared, stop: &AtomicBool) {
     let options = &shared.options;
-    let (mut capturer, window) = match shared.backend.capture(&options.source, options.fps) {
-        Ok(capture) => capture,
-        Err(e) => {
-            shared.event(HostEvent::CaptureFailed(e.to_string()));
+    // A window found earlier (or followed while nobody watched) wins over
+    // the source as first given.
+    let mut source = match shared.window.load(Ordering::Acquire) {
+        0 => options.source.clone(),
+        window if options.source.is_window() => Source::Window(window),
+        _ => options.source.clone(),
+    };
+    loop {
+        if stop.load(Ordering::SeqCst) || lock(&shared.state).source.ended() {
             return;
         }
-    };
-    if let Some(window) = window {
-        shared.window.store(window, Ordering::Release);
+        // The window may be gone already (someone came to watch during the
+        // grace, or it closed while nobody watched): look for the next one
+        // rather than fail to capture it.
+        let gone = match source {
+            Source::Window(window) => {
+                lock(&shared.state).source.looking() || !shared.backend.window_exists(window)
+            }
+            _ => false,
+        };
+        if gone {
+            match follow_game(shared, stop) {
+                Some(window) => {
+                    source = Source::Window(window);
+                    continue;
+                }
+                None => return,
+            }
+        }
+        let (capturer, window) = match shared.backend.capture(&source, options.fps) {
+            Ok(capture) => capture,
+            Err(e) => {
+                shared.event(HostEvent::CaptureFailed(e.to_string()));
+                return;
+            }
+        };
+        if let Some(window) = window {
+            shared.window.store(window, Ordering::Release);
+            shared.watch_game(window);
+        }
+        match capture_frames(shared, capturer, stop) {
+            Some(window) => source = Source::Window(window),
+            None => return,
+        }
     }
+}
+
+/// Hands every frame to every viewer until stopped or the window goes;
+/// returns the game's new window, if it showed one.
+fn capture_frames(
+    shared: &Shared,
+    mut capturer: Box<dyn couch_media::Capturer>,
+    stop: &AtomicBool,
+) -> Option<NativeId> {
     while !stop.load(Ordering::SeqCst) {
         match capturer.next_event(Duration::from_millis(10)) {
             Ok(Some(CaptureEvent::Frame(frame))) => {
@@ -669,16 +882,31 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
                 }
             }
             Ok(Some(CaptureEvent::SourceClosed)) => {
-                shared.event(HostEvent::SourceClosed);
-                return;
+                drop(capturer);
+                return follow_game(shared, stop);
             }
             Ok(None) => {}
             Err(e) => {
                 shared.event(HostEvent::CaptureFailed(e.to_string()));
-                return;
+                return None;
             }
         }
     }
+    None
+}
+
+/// The captured window went. Looks for the game's next window until the
+/// source watch decides, or the capture is stopped (housekeeping then goes on
+/// looking, if the window is still being looked for).
+fn follow_game(shared: &Shared, stop: &AtomicBool) -> Option<NativeId> {
+    lock(&shared.state).source.lost(Instant::now());
+    while !stop.load(Ordering::SeqCst) {
+        match shared.look_for_window() {
+            (Verdict::Wait, _) => std::thread::sleep(source::REPLACE_POLL),
+            (_, follow) => return follow,
+        }
+    }
+    None
 }
 
 fn audio_loop(shared: &Shared, stop: &AtomicBool) {

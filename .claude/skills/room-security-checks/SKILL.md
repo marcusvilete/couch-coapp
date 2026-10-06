@@ -58,6 +58,7 @@ cargo test -p couch-engine --test sessions              # sessions over the same
 - **Anything in `couch_net::admission`**: labels, inputs and order change what is proven. Update `docs/protocol.md` and ADR 0006 together, and keep the outside-review follow-up.
 - **New `Debug`, `tracing` or error text** near passwords, password keys, invite tokens or links.
 - **Waits and timeouts in the accept path**: a timeout must never drop an answer the actor already acted on.
+- **Liveness** (`Alive`, `couch_net::control`): a peer is timed out only after it has sent `Alive` once, so older builds keep working; `TimedOut` closes with `timed_out`, never with a code that blames the peer. A reconnecting viewer resumes only on the same session id from the same host, on its current connection, and never gets its seat back.
 
 ## What isn't covered automatically
 

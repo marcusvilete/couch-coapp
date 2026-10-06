@@ -13,7 +13,9 @@ pub async fn bind(options: EndpointOptions) -> Endpoint {
 }
 
 /// Connects `viewer` to `host` at `addr` and runs the control handshake.
-/// Returns (host side, viewer side).
+/// Returns (host side, viewer side). (`liveness` keeps the control streams,
+/// so it connects by itself.)
+#[allow(dead_code)]
 pub async fn connect(
     host: &Endpoint,
     viewer: &Endpoint,

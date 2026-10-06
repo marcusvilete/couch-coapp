@@ -77,11 +77,11 @@ function watchEndText(host: string, reason: WatchEnd): string | null {
     case "ended":
       return `${host}'s stream ended.`;
     case "connectionLost":
-      return `Lost the connection to ${host}'s stream.`;
+      return `Lost the connection to ${host}'s stream, and it didn't come back.`;
     case "unavailable":
       return `${host} can't stream to you right now.`;
     case "viewerFailed":
-      return "The stream window couldn't open.";
+      return "The stream window couldn't open, or it crashed twice. Try Watch again.";
     case "left":
       return null;
   }

@@ -32,7 +32,7 @@ use couch_net::{
 };
 use couch_proto::{
     admission::{JoinStart, MemberHello},
-    control::{ControlMessage, close_code},
+    control::{ALIVE_EVERY, Alive, ControlMessage, close_code},
     ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce, SessionId},
     invite::Invite,
     room::{PeerAddr, RoomPolicy, RoomSnapshot, Signed, valid_name},
@@ -84,6 +84,8 @@ type Reply = oneshot::Sender<Result<Response, EngineError>>;
 pub(crate) enum Input {
     Command(Command, Reply),
     Connections(String, oneshot::Sender<Vec<(String, bool)>>),
+    /// For tests: drop the connection with a member, as a dead path would.
+    DropConnection(String, String),
     Shutdown(oneshot::Sender<()>),
     /// An accept task asks how to answer a newcomer's `JoinStart`.
     JoinQuery {
@@ -140,7 +142,10 @@ pub(crate) enum Input {
     /// Something the session we watch reports.
     Watch(SessionId, WatchEvent),
     /// The host we asked to watch hasn't answered in time.
-    JoinTimeout(SessionId),
+    JoinTimeout(SessionId, u32),
+    /// The connection to the host we watch hasn't come back in time (for
+    /// that wait).
+    ReconnectTimeout(SessionId, u32),
     /// The host's panic key, for the stream it was pressed during; `None`
     /// means ours, whichever it is (`Engine::panic_key`).
     Panic(Option<SessionId>),
@@ -228,6 +233,8 @@ struct Actor {
     next_path_check: Instant,
     backend: Arc<dyn Backend>,
     join_wait: Duration,
+    replace_grace: Duration,
+    reconnect_wait: Duration,
     /// Where the viewer window logs.
     viewer_log: std::path::PathBuf,
     /// Shared with the engine, for the panic key.
@@ -317,6 +324,8 @@ pub(crate) async fn start(
         next_path_check: now + PATH_CHECK_EVERY,
         backend: options.backend,
         join_wait: options.join_wait,
+        replace_grace: options.replace_grace,
+        reconnect_wait: options.reconnect_wait,
         viewer_log: profile.data_dir().join("viewer.log"),
         panic,
         sessions: sessions::Sessions::default(),
@@ -401,6 +410,16 @@ impl Actor {
                     })
                     .unwrap_or_default();
                 let _ = reply.send(list);
+            }
+            Input::DropConnection(room, member) => {
+                let conn = RoomId::from_hex(&room)
+                    .zip(MemberId::from_hex(&member))
+                    .and_then(|(room, member)| self.current_conn(room, member))
+                    .and_then(|conn| self.conns.get(&conn));
+                if let Some(c) = conn {
+                    // As if the peer had gone silent.
+                    admission::close(&c.conn, close_code::TIMED_OUT);
+                }
             }
             Input::Shutdown(_) => unreachable!("handled by run"),
             Input::JoinQuery {
@@ -509,7 +528,10 @@ impl Actor {
             } => self.live_ready(session, *stream, events, reply, now),
             Input::Host(session, event) => self.host_event(session, event, now),
             Input::Watch(session, event) => self.watch_event(session, event, now),
-            Input::JoinTimeout(session) => self.join_timeout(session, now),
+            Input::JoinTimeout(session, attempt) => self.join_timeout(session, attempt, now),
+            Input::ReconnectTimeout(session, attempt) => {
+                self.reconnect_timeout(session, attempt, now);
+            }
             Input::Panic(session) => self.panic_key(session, now),
         }
     }
@@ -1591,6 +1613,12 @@ async fn reader(
                 continue;
             }
             Ok(None) | Err(NetError::Connection(_) | NetError::Bind(_)) => None,
+            // The peer sends `Alive` and has said nothing for 5 s: a killed
+            // or hung app, or a dead path. Its sessions end at once.
+            Err(NetError::TimedOut) => {
+                tracing::info!(conn = ?id, "the peer went silent; closing");
+                Some(close_code::TIMED_OUT)
+            }
             // A message we must understand and don't: the peer is newer.
             Err(NetError::Version(_)) => Some(close_code::VERSION),
             Err(NetError::Protocol(_)) => Some(close_code::PROTOCOL),
@@ -1604,8 +1632,15 @@ async fn reader(
 }
 
 async fn writer(conn: Connection, mut tx: ControlSender, mut out: mpsc::Receiver<Outgoing>) {
+    let mut alive = tokio::time::interval(ALIVE_EVERY);
+    alive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = alive.tick() => {
+                if tx.send(&ControlMessage::Alive(Alive {})).await.is_err() {
+                    return;
+                }
+            }
             item = out.recv() => match item {
                 Some(Outgoing::Message(message)) => {
                     if tx.send(&message).await.is_err() {

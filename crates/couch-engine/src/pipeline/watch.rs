@@ -6,14 +6,34 @@
 //! the user asks for. Input goes through `couch_input::forward`, whose
 //! heartbeat stops when the viewer goes quiet, so a hung viewer lets the
 //! host's dead-man timer release whatever it held.
+//!
+//! Two things can go and come back without ending the watch:
+//! - **the link to the host.** When the connection closes, the window stays
+//!   open and [`WatchEvent::ConnectionLost`] is reported; whoever runs the
+//!   watch either stops it or hands it a new connection
+//!   ([`Watch::reconnect`]). The seat is gone with the old connection.
+//! - **the viewer window**, with [`WatchOptions::restart_viewer`]: a viewer
+//!   that exits without the user leaving (a crash) is started again, at most
+//!   once a minute, and the host is asked for a keyframe.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
+use bytes::Bytes;
 use couch_input::{Permissions, forward::Forwarder};
 use couch_media::{MediaError, clock::Clock};
 use couch_net::{
-    Connection, audio::receive_audio, datagrams::Datagrams, input::InputSender, streams::Streams,
-    video::ViewerVideo,
+    Connection,
+    audio::receive_audio,
+    datagrams::Datagrams,
+    input::InputSender,
+    streams::Streams,
+    video::{VideoFrameIn, ViewerVideo},
 };
 use couch_proto::{
     control::{SeatAssigned, SeatReleased},
@@ -22,7 +42,7 @@ use couch_proto::{
         self, AudioPacket, AudioStats, FrameTiming, HudState, IpcFrame, LocalInput, NetStats,
         RumbleState, SeatState, UserAction, VideoFrameHeader,
     },
-    media::{datagram, decode_payload},
+    media::{AudioDatagram, datagram, decode_payload},
 };
 use tokio::{io::AsyncWrite, sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 
@@ -31,6 +51,10 @@ use super::{Backend, ViewerOptions, ViewerProcess, ipc as pipe};
 /// After asking the viewer to close, how long to let it finish (it releases
 /// what it held) before ending it.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// A viewer window that crashes again within this long stays closed.
+pub const RESTART_LIMIT: Duration = Duration::from_secs(60);
+/// How long a window that went away gets to finish saying what it said.
+const LAST_WORDS: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Default)]
 pub struct WatchOptions {
@@ -40,6 +64,9 @@ pub struct WatchOptions {
     pub viewer: ViewerOptions,
     /// Report every presented frame's timing and the audio stats.
     pub measure: bool,
+    /// Start the viewer window again if it crashes (the app). `couch-cli
+    /// view` leaves it off: `release-check` kills the window on purpose.
+    pub restart_viewer: bool,
 }
 
 /// What watching reports.
@@ -58,16 +85,25 @@ pub enum WatchEvent {
     /// The host's game rumbles this member's gamepad (`couch-cli view`
     /// prints it).
     Rumble(RumbleState),
-    /// The viewer window closed, or the viewer died: watching is over.
+    /// The user closed the viewer window: watching is over.
     ViewerClosed,
-    /// The connection to the host went: watching is over.
-    ConnectionLost,
+    /// The viewer window crashed, and it can't (or may not yet) be started
+    /// again: watching is over.
+    ViewerCrashed,
+    /// The viewer window crashed and was started again.
+    ViewerRestarted,
+    /// The connection to the host went. The window stays open until the
+    /// watch is stopped or given a new connection. `link` numbers the
+    /// connection: 0 for the first, then what [`Watch::reconnect`] returned,
+    /// so a late report about an earlier one can be told apart.
+    ConnectionLost { link: u32 },
 }
 
 enum WatchCmd {
     SeatAssigned(SeatAssigned),
     SeatReleased(SeatReleased),
     Hud(HudState),
+    Reconnect(Box<Link>, u32),
     Stop,
 }
 
@@ -75,6 +111,10 @@ enum WatchCmd {
 pub struct Watch {
     cmds: mpsc::UnboundedSender<WatchCmd>,
     task: Option<JoinHandle<()>>,
+    clock: Arc<dyn Clock>,
+    session: Option<u64>,
+    /// The number of the latest connection handed over.
+    links: AtomicU32,
 }
 
 impl Watch {
@@ -86,30 +126,48 @@ impl Watch {
         conn: Connection,
         datagrams: &Datagrams,
         streams: &Streams,
-        backend: &dyn Backend,
+        backend: Arc<dyn Backend>,
         options: WatchOptions,
     ) -> Result<(Self, mpsc::UnboundedReceiver<WatchEvent>), MediaError> {
-        let viewer = backend.launch_viewer(&options.viewer)?;
+        let window = Window::launch(&*backend, &options.viewer)?;
         let clock = backend.clock();
-        let ctx = Ctx {
-            video: ViewerVideo::start(conn.clone(), streams, options.session, clock.clone()),
-            audio: receive_audio(datagrams),
-            rumbles: datagrams.subscribe(datagram::RUMBLE),
-            input: InputSender::start(conn.clone()),
-            conn,
-            clock,
-            measure: options.measure,
-        };
+        let link = Link::start(conn, datagrams, streams, options.session, clock.clone());
         let (events, events_rx) = mpsc::unbounded_channel();
         let (cmds, cmds_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run(ctx, viewer, cmds_rx, events));
+        let session = options.session;
+        let ctx = Ctx {
+            link: Some(link),
+            link_id: 0,
+            window,
+            backend,
+            options,
+            clock: clock.clone(),
+            events,
+            last_hud: None,
+            last_restart: None,
+        };
+        let task = tokio::spawn(run(ctx, cmds_rx));
         Ok((
             Self {
                 cmds,
                 task: Some(task),
+                clock,
+                session,
+                links: AtomicU32::new(0),
             },
             events_rx,
         ))
+    }
+
+    /// Takes the host's video and sound on a new connection, after
+    /// [`WatchEvent::ConnectionLost`]. As with [`start`](Self::start), the
+    /// subscriptions are in place when this returns: ask to join after.
+    /// Returns the new connection's number, as `ConnectionLost` will name it.
+    pub fn reconnect(&self, conn: Connection, datagrams: &Datagrams, streams: &Streams) -> u32 {
+        let id = self.links.fetch_add(1, Ordering::Relaxed) + 1;
+        let link = Link::start(conn, datagrams, streams, self.session, self.clock.clone());
+        let _ = self.cmds.send(WatchCmd::Reconnect(Box::new(link), id));
+        id
     }
 
     /// The host granted this member a seat.
@@ -141,14 +199,100 @@ impl Drop for Watch {
     }
 }
 
-struct Ctx {
+/// Everything that comes from one connection to the host.
+struct Link {
     conn: Connection,
     video: ViewerVideo,
-    audio: mpsc::Receiver<couch_proto::media::AudioDatagram>,
-    rumbles: mpsc::Receiver<bytes::Bytes>,
+    audio: mpsc::Receiver<AudioDatagram>,
+    rumbles: mpsc::Receiver<Bytes>,
     input: InputSender,
-    clock: std::sync::Arc<dyn Clock>,
-    measure: bool,
+}
+
+impl Link {
+    fn start(
+        conn: Connection,
+        datagrams: &Datagrams,
+        streams: &Streams,
+        session: Option<u64>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            video: ViewerVideo::start(conn.clone(), streams, session, clock),
+            audio: receive_audio(datagrams),
+            rumbles: datagrams.subscribe(datagram::RUMBLE),
+            input: InputSender::start(conn.clone()),
+            conn,
+        }
+    }
+}
+
+enum FromHost {
+    Frame(VideoFrameIn),
+    Audio(AudioDatagram),
+    Rumble(Bytes),
+    Lost,
+}
+
+/// The next thing from the host; never, while there is no connection.
+async fn from_host(link: &mut Option<Link>) -> FromHost {
+    let Some(l) = link.as_mut() else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        frame = l.video.frames.recv() => frame.map_or(FromHost::Lost, FromHost::Frame),
+        Some(packet) = l.audio.recv() => FromHost::Audio(packet),
+        Some(rumble) = l.rumbles.recv() => FromHost::Rumble(rumble),
+        _ = l.conn.closed() => FromHost::Lost,
+    }
+}
+
+/// The viewer process: what we write to it and what it says.
+struct Window {
+    to: ToViewer,
+    said: mpsc::UnboundedReceiver<IpcFrame>,
+    reader: JoinHandle<()>,
+    guard: Box<dyn std::any::Any + Send>,
+    /// The user left (the window's close button, or Leave): its exit is no
+    /// crash.
+    left: bool,
+}
+
+impl Window {
+    fn launch(backend: &dyn Backend, options: &ViewerOptions) -> Result<Self, MediaError> {
+        let ViewerProcess {
+            stdin,
+            mut stdout,
+            guard,
+        } = backend.launch_viewer(options)?;
+        // What the viewer says, until its stdout closes.
+        let (said_tx, said) = mpsc::unbounded_channel::<IpcFrame>();
+        let reader = tokio::spawn(async move {
+            while let Ok(Some(frame)) = pipe::read_frame(&mut stdout).await {
+                if said_tx.send(frame).is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(Self {
+            to: ToViewer {
+                stdin,
+                scratch: Vec::new(),
+            },
+            said,
+            reader,
+            guard,
+            left: false,
+        })
+    }
+
+    /// Lets the viewer close on its own (it releases what it held), then
+    /// ends it if it doesn't.
+    async fn close(mut self) {
+        let _ = self.to.send(ipc::kinds::SHUTDOWN, &[]).await;
+        drop(self.to);
+        let _ = tokio::time::timeout(CLOSE_WAIT, &mut self.reader).await;
+        drop(self.guard);
+    }
 }
 
 /// Writes to the viewer; `false` once it is gone.
@@ -165,60 +309,106 @@ impl ToViewer {
     }
 }
 
-async fn run(
-    mut ctx: Ctx,
-    viewer: ViewerProcess,
-    mut cmds: mpsc::UnboundedReceiver<WatchCmd>,
+struct Ctx {
+    link: Option<Link>,
+    /// The number of `link` (see [`WatchEvent::ConnectionLost`]).
+    link_id: u32,
+    window: Window,
+    backend: Arc<dyn Backend>,
+    options: WatchOptions,
+    clock: Arc<dyn Clock>,
     events: mpsc::UnboundedSender<WatchEvent>,
-) {
-    let ViewerProcess {
-        stdin,
-        mut stdout,
-        guard,
-    } = viewer;
-    let mut to_viewer = ToViewer {
-        stdin,
-        scratch: Vec::new(),
-    };
-    // What the viewer says, until its stdout closes.
-    let (said_tx, mut said) = mpsc::unbounded_channel::<IpcFrame>();
-    let reader = tokio::spawn(async move {
-        while let Ok(Some(frame)) = pipe::read_frame(&mut stdout).await {
-            if said_tx.send(frame).is_err() {
-                return;
-            }
-        }
-    });
-
-    let end = watch(&mut ctx, &mut to_viewer, &mut said, &mut cmds, &events).await;
-    if let Some(end) = end {
-        let _ = events.send(end);
-    }
-
-    // Let the viewer close on its own (it releases what it held), then end
-    // it if it doesn't.
-    let _ = to_viewer.send(ipc::kinds::SHUTDOWN, &[]).await;
-    drop(to_viewer);
-    let _ = tokio::time::timeout(CLOSE_WAIT, reader).await;
-    drop(guard);
+    /// For a restarted window.
+    last_hud: Option<HudState>,
+    last_restart: Option<Instant>,
 }
 
-/// The watching loop; returns how it ended, unless it was asked to stop.
-async fn watch(
-    ctx: &mut Ctx,
-    to_viewer: &mut ToViewer,
-    said: &mut mpsc::UnboundedReceiver<IpcFrame>,
-    cmds: &mut mpsc::UnboundedReceiver<WatchCmd>,
-    events: &mpsc::UnboundedSender<WatchEvent>,
-) -> Option<WatchEvent> {
-    let closed = Some(WatchEvent::ViewerClosed);
-    if !to_viewer
+impl Ctx {
+    fn event(&self, event: WatchEvent) {
+        let _ = self.events.send(event);
+    }
+}
+
+async fn run(mut ctx: Ctx, mut cmds: mpsc::UnboundedReceiver<WatchCmd>) {
+    let end = watch(&mut ctx, &mut cmds).await;
+    if let Some(end) = end {
+        ctx.event(end);
+    }
+    ctx.window.close().await;
+}
+
+/// The window went without the user leaving: start it again if allowed.
+/// `false` when watching must end.
+async fn restart(ctx: &mut Ctx, forwarder: &mut Forwarder) -> bool {
+    let recent = ctx
+        .last_restart
+        .is_some_and(|t| t.elapsed() < RESTART_LIMIT);
+    if !ctx.options.restart_viewer || recent {
+        return false;
+    }
+    tracing::warn!("the viewer window went without leaving; starting it again");
+    let Ok(window) = Window::launch(&*ctx.backend, &ctx.options.viewer) else {
+        return false;
+    };
+    let old = std::mem::replace(&mut ctx.window, window);
+    drop(old.guard);
+    old.reader.abort();
+    ctx.last_restart = Some(Instant::now());
+    // Whatever the old window had down is up now: tell the host at once,
+    // or the heartbeat would keep repeating it.
+    let released = forwarder.viewer_replaced(Instant::now());
+    if let Some(link) = &ctx.link {
+        for out in released {
+            link.input.send(out);
+        }
+    }
+    if !hello(ctx, forwarder).await {
+        return false;
+    }
+    // Its decoder starts empty.
+    if let Some(link) = &ctx.link {
+        link.video.note_decode_error();
+        let epoch = link.video.latest_epoch();
+        ctx.event(WatchEvent::KeyframeNeeded { epoch });
+    }
+    ctx.event(WatchEvent::ViewerRestarted);
+    true
+}
+
+/// What a new window needs first: the version, the HUD, the seat.
+async fn hello(ctx: &mut Ctx, forwarder: &Forwarder) -> bool {
+    let to = &mut ctx.window.to;
+    if !to
         .send(ipc::kinds::HELLO, &ipc::IPC_VERSION.to_be_bytes())
         .await
     {
-        return closed;
+        return false;
     }
+    if let Some(hud) = &ctx.last_hud
+        && !to.send(ipc::kinds::HUD_STATE, &ipc::to_payload(hud)).await
+    {
+        return false;
+    }
+    if forwarder.holding().is_some() {
+        return send_seat(to, forwarder).await;
+    }
+    true
+}
+
+async fn send_seat(to: &mut ToViewer, forwarder: &Forwarder) -> bool {
+    let state = SeatState {
+        holding: forwarder.holding().is_some(),
+        permissions: forwarder.holding().map_or(Permissions::empty(), |h| h.1),
+    };
+    to.send(ipc::kinds::SEAT, &ipc::to_payload(&state)).await
+}
+
+/// The watching loop; returns how it ended, unless it was asked to stop.
+async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> Option<WatchEvent> {
     let mut forwarder = Forwarder::new();
+    if !hello(ctx, &forwarder).await && !restart(ctx, &mut forwarder).await {
+        return Some(WatchEvent::ViewerCrashed);
+    }
     let mut payload = Vec::new();
     let mut input_tick = tokio::time::interval(Duration::from_millis(10));
     input_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -226,114 +416,104 @@ async fn watch(
     let mut net_since = Instant::now();
     let mut received_bytes = 0u64;
 
+    // Each arm says whether the viewer window took what it was sent.
     loop {
-        tokio::select! {
-            frame = ctx.video.frames.recv() => {
-                let Some(frame) = frame else { return Some(WatchEvent::ConnectionLost) };
-                received_bytes += frame.data.len() as u64;
-                if frame.epoch < ctx.video.latest_epoch() {
-                    continue;
-                }
-                payload.clear();
-                VideoFrameHeader {
-                    epoch: frame.epoch,
-                    seq: frame.header.seq,
-                    keyframe: frame.header.keyframe,
-                    capture_us: frame.header.capture_us,
-                    encode_us: frame.header.encode_us,
-                    arrived_us: frame.arrived.0,
-                }
-                .write(&frame.data, &mut payload);
-                if !to_viewer.send(ipc::kinds::VIDEO_FRAME, &payload).await {
-                    return closed;
-                }
-            }
-            Some(packet) = ctx.audio.recv() => {
-                let packet = ipc::to_payload(&AudioPacket {
-                    seq: packet.seq,
-                    capture_us: packet.capture_us,
-                    arrived_us: ctx.clock.now().0,
-                    packet: packet.packet,
-                });
-                if !to_viewer.send(ipc::kinds::AUDIO_PACKET, &packet).await {
-                    return closed;
-                }
-            }
-            frame = said.recv() => {
-                let Some(frame) = frame else { return closed };
-                match frame.kind {
-                    ipc::kinds::INPUT => {
-                        if let Some(local) = ipc::from_payload::<LocalInput>(&frame.payload) {
-                            for out in forwarder.local(local, Instant::now()) {
-                                ctx.input.send(out);
-                            }
-                        }
-                    }
-                    ipc::kinds::FRAME_TIMING if ctx.measure => {
-                        if let Some(timing) = FrameTiming::read(&frame.payload) {
-                            let _ = events.send(WatchEvent::Timing(timing));
-                        }
-                    }
-                    ipc::kinds::AUDIO_STATS if ctx.measure => {
-                        if let Some(stats) = ipc::from_payload(&frame.payload) {
-                            let _ = events.send(WatchEvent::AudioStats(stats));
-                        }
-                    }
-                    ipc::kinds::KEYFRAME_REQUEST => {
-                        ctx.video.note_decode_error();
-                        let epoch = ctx.video.latest_epoch();
-                        let _ = events.send(WatchEvent::KeyframeNeeded { epoch });
-                    }
-                    ipc::kinds::USER_ACTION => {
-                        if let Some(action) = ipc::from_payload(&frame.payload) {
-                            let _ = events.send(WatchEvent::Action(action));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            _ = input_tick.tick() => {
-                for out in forwarder.tick(Instant::now()) {
-                    ctx.input.send(out);
-                }
-            }
-            cmd = cmds.recv() => {
-                match cmd {
-                    Some(WatchCmd::SeatAssigned(s)) => {
-                        let out = forwarder.seat_assigned(s.seat, s.seat_epoch, s.permissions, Instant::now());
-                        for out in out {
-                            ctx.input.send(out);
-                        }
-                    }
-                    Some(WatchCmd::SeatReleased(s)) => forwarder.seat_released(s.seat, s.seat_epoch),
-                    Some(WatchCmd::Hud(hud)) => {
-                        if !to_viewer.send(ipc::kinds::HUD_STATE, &ipc::to_payload(&hud)).await {
-                            return closed;
-                        }
+        let delivered = tokio::select! {
+            from = from_host(&mut ctx.link) => match from {
+                FromHost::Frame(frame) => {
+                    received_bytes += frame.data.len() as u64;
+                    let stale = ctx
+                        .link
+                        .as_ref()
+                        .is_some_and(|l| frame.epoch < l.video.latest_epoch());
+                    if stale {
                         continue;
                     }
-                    Some(WatchCmd::Stop) | None => return None,
+                    payload.clear();
+                    VideoFrameHeader {
+                        epoch: frame.epoch,
+                        seq: frame.header.seq,
+                        keyframe: frame.header.keyframe,
+                        capture_us: frame.header.capture_us,
+                        encode_us: frame.header.encode_us,
+                        arrived_us: frame.arrived.0,
+                    }
+                    .write(&frame.data, &mut payload);
+                    ctx.window.to.send(ipc::kinds::VIDEO_FRAME, &payload).await
                 }
-                let state = SeatState {
-                    holding: forwarder.holding().is_some(),
-                    permissions: forwarder.holding().map_or(Permissions::empty(), |h| h.1),
-                };
-                if !to_viewer.send(ipc::kinds::SEAT, &ipc::to_payload(&state)).await {
-                    return closed;
+                FromHost::Audio(packet) => {
+                    let packet = ipc::to_payload(&AudioPacket {
+                        seq: packet.seq,
+                        capture_us: packet.capture_us,
+                        arrived_us: ctx.clock.now().0,
+                        packet: packet.packet,
+                    });
+                    ctx.window.to.send(ipc::kinds::AUDIO_PACKET, &packet).await
                 }
+                FromHost::Rumble(rumble) => {
+                    let Some(r) = decode_payload::<RumbleDatagram>(&rumble) else {
+                        continue;
+                    };
+                    let state = RumbleState { low: r.low, high: r.high };
+                    ctx.event(WatchEvent::Rumble(state));
+                    ctx.window.to.send(ipc::kinds::RUMBLE, &ipc::to_payload(&state)).await
+                }
+                FromHost::Lost => {
+                    // The seat went with the connection; whatever was held
+                    // was released on the host when it closed.
+                    ctx.link = None;
+                    forwarder = Forwarder::new();
+                    ctx.event(WatchEvent::ConnectionLost { link: ctx.link_id });
+                    send_seat(&mut ctx.window.to, &forwarder).await
+                }
+            },
+            frame = ctx.window.said.recv() => match frame {
+                None => false,
+                Some(frame) => {
+                    said(ctx, &mut forwarder, frame);
+                    true
+                }
+            },
+            _ = input_tick.tick() => {
+                if let Some(link) = &ctx.link {
+                    for out in forwarder.tick(Instant::now()) {
+                        link.input.send(out);
+                    }
+                }
+                true
             }
-            Some(rumble) = ctx.rumbles.recv() => {
-                let Some(r) = decode_payload::<RumbleDatagram>(&rumble) else {
-                    continue;
-                };
-                let state = RumbleState { low: r.low, high: r.high };
-                let _ = events.send(WatchEvent::Rumble(state));
-                if !to_viewer.send(ipc::kinds::RUMBLE, &ipc::to_payload(&state)).await {
-                    return closed;
+            cmd = cmds.recv() => match cmd {
+                Some(WatchCmd::SeatAssigned(s)) => {
+                    let out = forwarder.seat_assigned(s.seat, s.seat_epoch, s.permissions, Instant::now());
+                    if let Some(link) = &ctx.link {
+                        for out in out {
+                            link.input.send(out);
+                        }
+                    }
+                    send_seat(&mut ctx.window.to, &forwarder).await
                 }
-            }
+                Some(WatchCmd::SeatReleased(s)) => {
+                    forwarder.seat_released(s.seat, s.seat_epoch);
+                    send_seat(&mut ctx.window.to, &forwarder).await
+                }
+                Some(WatchCmd::Hud(hud)) => {
+                    let sent = ctx.window.to.send(ipc::kinds::HUD_STATE, &ipc::to_payload(&hud)).await;
+                    ctx.last_hud = Some(hud);
+                    sent
+                }
+                Some(WatchCmd::Reconnect(link, id)) => {
+                    // Whatever the old connection's loss hasn't said yet: no
+                    // seat survives a connection.
+                    ctx.link = Some(*link);
+                    ctx.link_id = id;
+                    forwarder = Forwarder::new();
+                    send_seat(&mut ctx.window.to, &forwarder).await
+                }
+                Some(WatchCmd::Stop) | None => return None,
+            },
             _ = net_tick.tick() => {
-                let path = couch_net::video::selected_path(&ctx.conn);
+                let Some(link) = &ctx.link else { continue };
+                let path = couch_net::video::selected_path(&link.conn);
                 let secs = net_since.elapsed().as_secs_f64().max(1e-3);
                 net_since = Instant::now();
                 let stats = NetStats {
@@ -341,14 +521,73 @@ async fn watch(
                     relayed: path.relayed,
                     receive_bps: (std::mem::take(&mut received_bytes) as f64 * 8.0 / secs) as u32,
                 };
-                let _ = events.send(WatchEvent::Net(stats));
+                ctx.event(WatchEvent::Net(stats));
                 payload.clear();
                 stats.write(&mut payload);
-                if !to_viewer.send(ipc::kinds::NET_STATS, &payload).await {
-                    return closed;
+                ctx.window.to.send(ipc::kinds::NET_STATS, &payload).await
+            }
+        };
+        if !delivered {
+            if ctx.window.left {
+                return Some(WatchEvent::ViewerClosed);
+            }
+            // Its last words may still be on the way (in the pipe, or not yet
+            // passed on by the reader): a Leave says the user closed it, not
+            // a crash. Read until its output ends, briefly.
+            let deadline = tokio::time::Instant::now() + LAST_WORDS;
+            while let Ok(Some(frame)) =
+                tokio::time::timeout_at(deadline, ctx.window.said.recv()).await
+            {
+                said(ctx, &mut forwarder, frame);
+            }
+            if ctx.window.left {
+                return Some(WatchEvent::ViewerClosed);
+            }
+            if !restart(ctx, &mut forwarder).await {
+                return Some(WatchEvent::ViewerCrashed);
+            }
+        }
+    }
+}
+
+/// Something the viewer said.
+fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) {
+    match frame.kind {
+        ipc::kinds::INPUT => {
+            if let Some(local) = ipc::from_payload::<LocalInput>(&frame.payload) {
+                let out = forwarder.local(local, Instant::now());
+                if let Some(link) = &ctx.link {
+                    for out in out {
+                        link.input.send(out);
+                    }
                 }
             }
-            _ = ctx.conn.closed() => return Some(WatchEvent::ConnectionLost),
         }
+        ipc::kinds::FRAME_TIMING if ctx.options.measure => {
+            if let Some(timing) = FrameTiming::read(&frame.payload) {
+                ctx.event(WatchEvent::Timing(timing));
+            }
+        }
+        ipc::kinds::AUDIO_STATS if ctx.options.measure => {
+            if let Some(stats) = ipc::from_payload(&frame.payload) {
+                ctx.event(WatchEvent::AudioStats(stats));
+            }
+        }
+        ipc::kinds::KEYFRAME_REQUEST => {
+            if let Some(link) = &ctx.link {
+                link.video.note_decode_error();
+                let epoch = link.video.latest_epoch();
+                ctx.event(WatchEvent::KeyframeNeeded { epoch });
+            }
+        }
+        ipc::kinds::USER_ACTION => {
+            if let Some(action) = ipc::from_payload::<UserAction>(&frame.payload) {
+                if matches!(action, UserAction::Leave) {
+                    ctx.window.left = true;
+                }
+                ctx.event(WatchEvent::Action(action));
+            }
+        }
+        _ => {}
     }
 }

@@ -201,6 +201,10 @@ pub struct WindowView {
     pub title: String,
     /// The program's file name; may be empty.
     pub app: String,
+    /// The program runs as administrator (and we don't): guests' keyboard
+    /// and mouse can't reach it, and the panic key doesn't work while it is
+    /// in front (measured in M6).
+    pub elevated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -251,6 +255,9 @@ pub enum SessionRole {
     /// Watching, and asked for control.
     Asking,
     Controlling,
+    /// Watching, but the connection to the host went; the stream window
+    /// stays open while it comes back (up to 30 s).
+    Reconnecting,
     /// Not watching.
     None,
 }
@@ -622,6 +629,11 @@ pub struct EngineOptions {
     pub backend: Arc<dyn pipeline::Backend>,
     /// How long a request to watch waits for the host's answer.
     pub join_wait: Duration,
+    /// How long a streamed game may take to show a new window before its
+    /// session ends ([`pipeline::source::REPLACE_GRACE`]).
+    pub replace_grace: Duration,
+    /// How long watching waits for the host's connection to come back.
+    pub reconnect_wait: Duration,
 }
 
 impl EngineOptions {
@@ -639,6 +651,8 @@ impl EngineOptions {
             profile_wait: Duration::from_secs(5),
             backend: pipeline::platform_backend(),
             join_wait: Duration::from_secs(10),
+            replace_grace: pipeline::source::REPLACE_GRACE,
+            reconnect_wait: Duration::from_secs(30),
         }
     }
 }
@@ -695,8 +709,13 @@ impl Engine {
     /// reconnects every remembered room.
     pub async fn start(profile: Profile, options: EngineOptions) -> Result<Self, EngineError> {
         let lock = lock_profile(&profile, options.profile_wait).await?;
-        let (events, _) = broadcast::channel(256);
         let backend = options.backend.clone();
+        // A host here that was killed may have left a guest's keys held.
+        let left = backend.release_left_input();
+        if left > 0 {
+            tracing::warn!("released {left} keys or buttons a crashed host left held");
+        }
+        let (events, _) = broadcast::channel(256);
         let panic = Arc::new(Mutex::new(None));
         let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
         Ok(Self {
@@ -801,6 +820,7 @@ impl Engine {
                             id: w.id.to_string(),
                             title: w.title,
                             app: w.app,
+                            elevated: w.elevated,
                         })
                         .collect(),
                     screens: sources
@@ -850,6 +870,19 @@ impl Engine {
         }
         response.await.unwrap_or_default()
     }
+
+    /// For tests: drops the connection with `member` in `room` as a dead
+    /// path would (closed as timed out); the room redials.
+    #[doc(hidden)]
+    pub async fn drop_connection(&self, room: &str, member: &str) {
+        let _ = self
+            .actor
+            .send(rooms::Input::DropConnection(
+                room.to_string(),
+                member.to_string(),
+            ))
+            .await;
+    }
 }
 
 #[cfg(test)]
@@ -890,6 +923,7 @@ mod tests {
                     id: "1".into(),
                     title: "Bank of Somewhere - Chrome".into(),
                     app: "chrome.exe".into(),
+                    elevated: false,
                 }],
                 screens: Vec::new(),
             })

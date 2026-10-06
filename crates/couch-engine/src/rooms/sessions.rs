@@ -65,6 +65,15 @@ struct Watching {
     watch: Option<Watch>,
     /// A line for the viewer's HUD after a change.
     note: String,
+    /// The number of the watch's current connection
+    /// (`WatchEvent::ConnectionLost`).
+    link: u32,
+    /// Counts joins and waits; a timeout counts only for the one it was set
+    /// for.
+    attempt: u32,
+    /// Since when the host's connection has been gone, until watching
+    /// resumes: one 30 s budget across every drop of a reconnection.
+    away_since: Option<Instant>,
 }
 
 enum WatchState {
@@ -73,6 +82,10 @@ enum WatchState {
     Watching,
     Asking,
     Controlling,
+    /// The connection to the host went: the window stays open while the
+    /// room redials, and watching resumes when the host announces the same
+    /// session on the new connection.
+    Reconnecting,
 }
 
 struct Listing {
@@ -111,7 +124,7 @@ impl Actor {
     // ---- Connections ----
 
     /// The connection in use with `member` in `room`.
-    fn current_conn(&self, room: RoomId, member: MemberId) -> Option<ConnId> {
+    pub(super) fn current_conn(&self, room: RoomId, member: MemberId) -> Option<ConnId> {
         self.rooms
             .get(&room)?
             .room
@@ -188,16 +201,132 @@ impl Actor {
             .as_ref()
             .is_some_and(|w| w.conn == conn)
         {
-            self.end_watch(WatchEnd::ConnectionLost, true, now);
+            self.lost_host(now);
         }
         // Without a connection to its host, a session can't be watched; it
-        // is announced again on the next one.
-        if self.current_conn(room, peer).is_none()
+        // is announced again on the next one. The one we wait to resume
+        // stays listed.
+        let resuming = self
+            .sessions
+            .watching
+            .as_ref()
+            .is_some_and(|w| w.room == room && w.host == peer);
+        if !resuming
+            && self.current_conn(room, peer).is_none()
             && let Some(listings) = self.sessions.directory.get_mut(&room)
             && listings.remove(&peer).is_some()
         {
             self.announce(room, now);
         }
+    }
+
+    /// The connection to the host we watch went: wait for it to come back,
+    /// with the window open, unless we were only joining.
+    fn lost_host(&mut self, now: Instant) {
+        let Some(w) = self.sessions.watching.as_ref() else {
+            return;
+        };
+        match w.state {
+            WatchState::Reconnecting => return,
+            // Asked to watch, not watching yet: the waiting command hears.
+            WatchState::Joining(Some(_)) => {
+                self.end_watch_refused(
+                    WatchEnd::ConnectionLost,
+                    "lost the connection to the host",
+                    now,
+                );
+                return;
+            }
+            // A resumed join: wait again, within the same budget.
+            WatchState::Joining(None)
+            | WatchState::Watching
+            | WatchState::Asking
+            | WatchState::Controlling => {}
+        }
+        let (room, host, session) = (w.room, w.host, w.session);
+        let note = format!("Reconnecting to {}…", self.member_name(room, host));
+        let wait = self.reconnect_wait;
+        let w = self.sessions.watching.as_mut().expect("checked above");
+        w.state = WatchState::Reconnecting;
+        w.note = note;
+        w.attempt += 1;
+        let attempt = w.attempt;
+        let since = *w.away_since.get_or_insert(now);
+        let left = (since + wait).saturating_duration_since(now);
+        tracing::info!(room = ?room, "lost the host's connection; waiting for it to come back");
+        let inbox = self.inbox.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(left).await;
+            let _ = inbox.send(Input::ReconnectTimeout(session, attempt)).await;
+        });
+        self.send_hud();
+        self.announce(room, now);
+    }
+
+    pub(super) fn reconnect_timeout(&mut self, session: SessionId, attempt: u32, now: Instant) {
+        let waiting = self.sessions.watching.as_ref().is_some_and(|w| {
+            w.session == session
+                && w.attempt == attempt
+                && matches!(w.state, WatchState::Reconnecting)
+        });
+        if waiting {
+            self.end_watch(WatchEnd::ConnectionLost, true, now);
+        }
+    }
+
+    /// Drops listings of hosts we have no connection to (kept while we
+    /// waited to resume one).
+    fn forget_unreachable(&mut self, now: Instant) {
+        let rooms: Vec<RoomId> = self.sessions.directory.keys().copied().collect();
+        for room in rooms {
+            let hosts: Vec<MemberId> = self.sessions.directory[&room].keys().copied().collect();
+            let gone: Vec<MemberId> = hosts
+                .into_iter()
+                .filter(|h| self.current_conn(room, *h).is_none())
+                .collect();
+            if !gone.is_empty() {
+                if let Some(listings) = self.sessions.directory.get_mut(&room) {
+                    listings.retain(|h, _| !gone.contains(h));
+                }
+                self.announce(room, now);
+            }
+        }
+    }
+
+    /// The host we wait for announced its session on a new connection: the
+    /// same one resumes (a new viewer, to the host); another one means ours
+    /// ended.
+    fn resume_watching(&mut self, room: RoomId, conn: ConnId, session: SessionId, now: Instant) {
+        let Some(w) = self.sessions.watching.as_ref() else {
+            return;
+        };
+        if w.session != session {
+            self.end_watch(WatchEnd::Ended, true, now);
+            return;
+        }
+        let Some(c) = self.conns.get(&conn) else {
+            return;
+        };
+        let Some(watch) = w.watch.as_ref() else {
+            return;
+        };
+        // Subscribed before asking, as when watching starts.
+        let link = watch.reconnect(c.conn.clone(), &c.datagrams, &c.streams);
+        let w = self.sessions.watching.as_mut().expect("checked above");
+        w.conn = conn;
+        w.link = link;
+        w.state = WatchState::Joining(None);
+        w.note = String::new();
+        w.attempt += 1;
+        let attempt = w.attempt;
+        tracing::info!(room = ?room, "the host is back; joining its stream again");
+        self.send(
+            conn,
+            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session })),
+        );
+        self.join_timer(session, attempt);
+        self.send_hud();
+        self.announce(room, now);
     }
 
     // ---- Messages ----
@@ -228,6 +357,16 @@ impl Actor {
             // To us, the host.
             ControlMessage::SessionJoin(m) => {
                 if ours(&self.sessions, m.session) {
+                    // Joining again on a new connection (it reconnected
+                    // before we saw the old one close): the old stream and
+                    // anything it held go first.
+                    let stale = self.sessions.hosting.as_ref().is_some_and(|h| {
+                        h.session.is_viewer(peer) && h.viewer_conns.get(&peer) != Some(&conn)
+                    });
+                    if stale {
+                        let fx = self.hosting_mut().map(|h| h.session.leave(peer));
+                        self.apply_session(room, fx.unwrap_or_default(), now);
+                    }
                     let fx = self.hosting_mut().map(|h| h.session.join(peer));
                     self.apply_session(room, fx.unwrap_or_default(), now);
                 } else {
@@ -269,6 +408,7 @@ impl Actor {
                 if !a.is_valid() {
                     return;
                 }
+                let session = a.session;
                 let listing = Listing {
                     announce: a,
                     status: None,
@@ -278,6 +418,12 @@ impl Actor {
                     .entry(room)
                     .or_default()
                     .insert(peer, listing);
+                let resuming = self.sessions.watching.as_ref().is_some_and(|w| {
+                    w.room == room && w.host == peer && matches!(w.state, WatchState::Reconnecting)
+                });
+                if resuming {
+                    self.resume_watching(room, conn, session, now);
+                }
                 self.announce(room, now);
             }
             ControlMessage::SessionStatus(s) => {
@@ -328,6 +474,7 @@ impl Actor {
                             _ => return,
                         };
                         w.state = WatchState::Watching;
+                        w.away_since = None;
                         tracing::info!(room = ?room, host = ?peer, "watching a stream");
                         self.send_hud();
                         self.announce(room, now);
@@ -369,7 +516,10 @@ impl Actor {
                 let Some(w) = self.sessions.watching.as_mut() else {
                     return;
                 };
-                if w.room != room || w.host != peer || matches!(w.state, WatchState::Joining(_)) {
+                if w.room != room
+                    || w.host != peer
+                    || matches!(w.state, WatchState::Joining(_) | WatchState::Reconnecting)
+                {
                     return;
                 }
                 w.state = WatchState::Controlling;
@@ -580,6 +730,7 @@ impl Actor {
             first_epoch: SeatEpoch(u32::from_le_bytes(random()?)),
             rc_trace: None,
             netem_elapsed: None,
+            replace_grace: self.replace_grace,
         };
         self.sessions.hosting = Some(Hosting {
             room,
@@ -721,6 +872,10 @@ impl Actor {
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
             HostEvent::SourceClosed => self.end_hosting_on_its_own(EndReason::SourceLost, now),
+            HostEvent::GameExited => self.end_hosting_on_its_own(EndReason::GameExited, now),
+            HostEvent::SourceFollowed { .. } => {
+                tracing::info!("the game opened a new window; streaming that one");
+            }
             HostEvent::CaptureFailed(e) => {
                 tracing::error!("capture failed: {e}");
                 self.end_hosting_on_its_own(EndReason::Error, now);
@@ -910,13 +1065,14 @@ impl Actor {
                 ..ViewerOptions::default()
             },
             measure: false,
+            restart_viewer: true,
         };
         // The subscriptions are in place before the host is asked.
         let (watch, mut events) = Watch::start(
             c.conn.clone(),
             &c.datagrams,
             &c.streams,
-            &*self.backend,
+            self.backend.clone(),
             options,
         )
         .map_err(|e| EngineError::Media(e.to_string()))?;
@@ -928,12 +1084,7 @@ impl Actor {
                 }
             }
         });
-        let inbox = self.inbox.clone();
-        let wait = self.join_wait;
-        tokio::spawn(async move {
-            tokio::time::sleep(wait).await;
-            let _ = inbox.send(Input::JoinTimeout(session)).await;
-        });
+        self.join_timer(session, 0);
         self.send(
             conn,
             Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session })),
@@ -946,17 +1097,30 @@ impl Actor {
             state: WatchState::Joining(None),
             watch: Some(watch),
             note: String::new(),
+            link: 0,
+            attempt: 0,
+            away_since: None,
         });
         self.announce(room, now);
         Ok(None)
     }
 
-    pub(super) fn join_timeout(&mut self, session: SessionId, now: Instant) {
-        let joining = self
-            .sessions
-            .watching
-            .as_ref()
-            .is_some_and(|w| w.session == session && matches!(w.state, WatchState::Joining(_)));
+    /// The host's answer to join attempt `attempt` is due within the wait.
+    fn join_timer(&self, session: SessionId, attempt: u32) {
+        let inbox = self.inbox.clone();
+        let wait = self.join_wait;
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let _ = inbox.send(Input::JoinTimeout(session, attempt)).await;
+        });
+    }
+
+    pub(super) fn join_timeout(&mut self, session: SessionId, attempt: u32, now: Instant) {
+        let joining = self.sessions.watching.as_ref().is_some_and(|w| {
+            w.session == session
+                && w.attempt == attempt
+                && matches!(w.state, WatchState::Joining(_))
+        });
         if joining {
             self.end_watch_refused(WatchEnd::Unavailable, "the host didn't answer", now);
         }
@@ -1002,6 +1166,8 @@ impl Actor {
             });
         }
         self.announce(w.room, now);
+        // A listing kept while we waited to resume is no use now.
+        self.forget_unreachable(now);
     }
 
     pub(super) fn stop_watching(&mut self, now: Instant) -> Result<Response, EngineError> {
@@ -1029,6 +1195,9 @@ impl Actor {
                 self.announce(room, now);
             }
             WatchState::Joining(_) => return Err(EngineError::Refused("not watching yet")),
+            WatchState::Reconnecting => {
+                return Err(EngineError::Refused("reconnecting to the host"));
+            }
             WatchState::Asking | WatchState::Controlling => {}
         }
         Ok(Response::Done)
@@ -1052,7 +1221,7 @@ impl Actor {
             }
             // Given back once the host's release arrives.
             WatchState::Controlling => self.send(conn, Outgoing::Message(cancel)),
-            WatchState::Joining(_) | WatchState::Watching => {}
+            WatchState::Joining(_) | WatchState::Watching | WatchState::Reconnecting => {}
         }
         Ok(Response::Done)
     }
@@ -1080,11 +1249,23 @@ impl Actor {
             WatchEvent::Action(UserAction::CancelControl) => {
                 let _ = self.cancel_control(now);
             }
-            // The user closed the viewer (or it died): either way, gone.
+            // The user closed the viewer.
             WatchEvent::Action(UserAction::Leave) | WatchEvent::ViewerClosed => {
                 self.end_watch(WatchEnd::Left, true, now);
             }
-            WatchEvent::ConnectionLost => self.end_watch(WatchEnd::ConnectionLost, true, now),
+            // It crashed, and too soon after the last time to start again.
+            WatchEvent::ViewerCrashed => {
+                tracing::warn!("the stream window crashed again; stopped watching");
+                self.end_watch(WatchEnd::ViewerFailed, true, now);
+            }
+            WatchEvent::ViewerRestarted => {
+                tracing::warn!("the stream window crashed and was started again");
+            }
+            // The room hears the connection close too; whichever is first
+            // starts the wait for it to come back.
+            // A late report about an earlier connection counts for nothing.
+            WatchEvent::ConnectionLost { link } if link == w.link => self.lost_host(now),
+            WatchEvent::ConnectionLost { .. } => {}
             WatchEvent::Timing(_)
             | WatchEvent::AudioStats(_)
             | WatchEvent::Net(_)
@@ -1101,7 +1282,9 @@ impl Actor {
             title: listing.announce.title.clone(),
             host: self.member_name(w.room, w.host),
             role: match w.state {
-                WatchState::Joining(_) | WatchState::Watching => HudRole::Watching,
+                WatchState::Joining(_) | WatchState::Watching | WatchState::Reconnecting => {
+                    HudRole::Watching
+                }
                 WatchState::Asking => HudRole::Asking,
                 WatchState::Controlling => HudRole::Controlling,
             },
@@ -1260,6 +1443,7 @@ impl Actor {
                     WatchState::Watching => SessionRole::Watching,
                     WatchState::Asking => SessionRole::Asking,
                     WatchState::Controlling => SessionRole::Controlling,
+                    WatchState::Reconnecting => SessionRole::Reconnecting,
                 },
                 _ => SessionRole::None,
             };

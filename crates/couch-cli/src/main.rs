@@ -8,14 +8,18 @@
 //! - `gates`: the rate-control gates (G1, G3 to G5), run and judged;
 //! - `pad-test`: a virtual gamepad that moves by itself;
 //! - `input-sink`: keyboard and mouse injection checked end to end;
-//! - `release-check`: the host releases input whenever a session ends badly.
+//! - `release-check`: the host releases input whenever a session ends badly;
+//! - `fake-game` and `lifecycle-check`: a game swapping its window or
+//!   exiting, and a host killed, are noticed in time.
 
 mod audio_probe;
 mod capture_test;
+mod fake_game;
 mod gates;
 mod host;
 mod input_sink;
 mod latency_probe;
+mod lifecycle_check;
 mod net_args;
 mod pad_test;
 mod probe;
@@ -150,6 +154,9 @@ enum Cmd {
         /// Write every presented frame's timings to this CSV file.
         #[arg(long)]
         timings_csv: Option<PathBuf>,
+        /// Start the viewer window again if it crashes, as the app does.
+        #[arg(long)]
+        restart_viewer: bool,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -224,6 +231,27 @@ enum Cmd {
     /// Kill, close, freeze and stop host and viewer processes, and check the
     /// host releases the viewer's input each time, in time. About 1 minute.
     ReleaseCheck,
+    /// A stand-in game window: swaps its window, closes it or exits when told
+    /// on stdin (`swap`, `close`, `exit`) or at the given times.
+    FakeGame {
+        #[arg(long)]
+        swap_after: Option<f64>,
+        #[arg(long)]
+        close_after: Option<f64>,
+        #[arg(long)]
+        exit_after: Option<f64>,
+    },
+    /// A game swapping its window, exiting, closing it; a host killed, and
+    /// killed holding a key: check each is noticed in time. About 1 minute.
+    LifecycleCheck {
+        /// Run only these: swap, exit, close, kill-host, stale-key.
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+    },
+    /// For `lifecycle-check`: hold one key (a hex HID usage) through the
+    /// host's injector.
+    #[command(hide = true)]
+    HoldKey { usage: String },
 }
 
 fn pair<T: Copy>(v: Option<Vec<T>>) -> Option<(T, T)> {
@@ -323,6 +351,7 @@ async fn main() -> ExitCode {
             viewer_size,
             no_hud,
             timings_csv,
+            restart_viewer,
             net,
         } => {
             view::run(view::Args {
@@ -332,6 +361,7 @@ async fn main() -> ExitCode {
                 viewer_size: pair(viewer_size),
                 hide_hud: no_hud,
                 timings_csv,
+                restart_viewer,
                 net,
             })
             .await
@@ -386,6 +416,19 @@ async fn main() -> ExitCode {
         }
         Cmd::InputSink => tokio::task::block_in_place(input_sink::run),
         Cmd::ReleaseCheck => tokio::task::block_in_place(release_check::run),
+        Cmd::FakeGame {
+            swap_after,
+            close_after,
+            exit_after,
+        } => tokio::task::block_in_place(|| {
+            fake_game::run(fake_game::Args {
+                swap_after,
+                close_after,
+                exit_after,
+            })
+        }),
+        Cmd::LifecycleCheck { only } => tokio::task::block_in_place(|| lifecycle_check::run(&only)),
+        Cmd::HoldKey { usage } => tokio::task::block_in_place(|| lifecycle_check::hold_key(&usage)),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

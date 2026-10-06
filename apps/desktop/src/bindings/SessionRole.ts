@@ -3,4 +3,4 @@
 /**
  * Where this profile stands in a session.
  */
-export type SessionRole = "host" | "joining" | "watching" | "asking" | "controlling" | "none";
+export type SessionRole = "host" | "joining" | "watching" | "asking" | "controlling" | "reconnecting" | "none";

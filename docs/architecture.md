@@ -17,7 +17,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M4a | Rooms in the engine: identity, invites, admission, the mesh | done ([results](m4a-results.md)) |
 | M4b | Lobby UI: rooms, invites and deep links, members with their links, profiles side by side | done ([results](m4b-results.md)) |
 | M5 | Sessions and control: M5a in the engine, M5b on screen | Done ([M5a](m5a-results.md), [M5b](m5b-results.md)) |
-| M6 | Lifecycle and safety | |
+| M6 | Lifecycle and safety: liveness, the game's window and exit, watching that survives drops and crashes, keys released after a host crash, Alt+F4 blocked, the elevated-game warning | done ([results](m6-results.md)) |
 | M7 | Own relay, real-network tests | |
 | M8 | Host overlay window | |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | |
@@ -150,13 +150,30 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
 - **In the engine.** The room actor runs the session protocol (`rooms::sessions`). The media and input run in `couch_engine::pipeline`: `HostStream` (one capture, an encoder per viewer, one sound capture, one input task) and `Watch` (the viewer process). **Input never goes through the actor**: it flows from the connection to the input task's seat router to the injectors.
 - **On screen.** The app's stage shows a card per live session (Watch, ask, stop watching) and, for the host, a panel with the viewers, the requests and the pause; the taskbar flashes on a request. The viewer's HUD shows the session and takes clicks on its bar only while the mouse is free. While a host streams, the panic-key hook (`couch_platform_win::panic_key`, through `pipeline::Backend`) watches the physical keyboard. All shortcuts live in `couch_input::shortcuts`.
 
+## Lifecycle
+
+How sessions survive things going wrong, or end clearly (M6):
+
+| What happens | What the app does | Where |
+|---|---|---|
+| The game swaps its window (display mode, leaving a launcher) | The host follows the new window within the 5 s grace | `pipeline::source`, `couch_platform_win::game` |
+| The game exits | The session ends with "the game exited", at once | same |
+| The window closes, the game runs on | "Source lost" after the grace | same |
+| A peer's app is killed or hangs, or the path dies | `Alive` stops; after 5 s the connection is closed as `timed_out` | `couch_net::control` |
+| The connection to the host drops while watching | The stream window stays ("Reconnecting…"); watching resumes on the next connection if the session is the same, within 30 s | `rooms::sessions`, `pipeline::watch` |
+| The stream window crashes | It is started again (at most once a minute), and asks for a keyframe | `pipeline::watch` |
+| The host app panics | A panic hook lets go of every key and button it holds | `couch_platform_win::held_input` |
+| The host app is killed while a guest holds a key | A marker file records what is held; the next start of the app or of `couch-cli host` lets go of it | same |
+
+`couch-cli lifecycle-check` stages the game's cases, a killed host, and a host killed holding a key, and times each.
+
 ## Safety invariants
 
 These hold in every milestone. Tests guard them from M2 on.
 
 - Guests get gamepad permission only. Keyboard and mouse are an explicit per-member grant.
 - Keyboard and mouse are injected only while the captured game window is in the foreground.
-- Remote members can't send the Windows key combinations, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, or the gamepad Guide button.
+- Remote members can't send the Windows key combinations, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4 (a guest quits through the game's menu), or the gamepad Guide button.
 - A host panic key revokes all control; it ignores injected keystrokes.
 - Every handoff, disconnect and teardown releases held keys and sends a neutral pad state first.
 - Remote input reaches the injectors only through the seat router (`couch_input::router`), which enforces the rules above and the 300 ms dead-man release.
@@ -165,7 +182,7 @@ These hold in every milestone. Tests guard them from M2 on.
 ## Platform limits
 
 - Virtual gamepads on Windows need the ViGEmBus 1.22.0 driver, which is archived but still the only redistributable option. It sits behind the `VirtualPad` trait so a user-mode driver can replace it.
-- **Injection limits.** Elevated game windows, UAC prompts, the lock screen and anti-cheat titles reject injected input. A virtual gamepad still reaches an elevated game, but the panic key's hook probably doesn't see keys aimed at it (not yet measured; see m5b-results.md).
+- **Injection limits.** Elevated game windows, UAC prompts, the lock screen and anti-cheat titles reject injected input. A virtual gamepad still reaches an elevated game, but the panic key's hook doesn't see keys while it is in front (measured in M6). Go live marks windows of programs running as administrator and warns when one is picked; Take back in the app still works.
 - **Exclusive fullscreen.** True exclusive-fullscreen games may not capture through Windows.Graphics.Capture; the Desktop Duplication fallback lands in M9.
 - **macOS.** Planned as a viewer and keyboard/mouse host only. System-wide virtual gamepads need an Apple-restricted entitlement.
 

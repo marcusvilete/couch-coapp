@@ -1,10 +1,18 @@
 //! The control stream: framed `couch_proto::control` messages on the first
 //! bidirectional stream of a connection. The dialer opens it and speaks first
 //! (QUIC only announces a stream once data is sent on it).
+//!
+//! Liveness: whoever owns a [`ControlSender`] sends `Alive` every
+//! [`ALIVE_EVERY`](couch_proto::control::ALIVE_EVERY); the
+//! [`ControlReceiver`] times out a peer that has sent `Alive` and then
+//! nothing for the silent limit. QUIC's own idle timeout (15 s) stays as the
+//! backstop.
+
+use std::time::Duration;
 
 use couch_proto::{
     PROTOCOL_MINOR,
-    control::{ControlMessage, DecodeError, Decoded, Hello},
+    control::{ControlMessage, DecodeError, Decoded, Hello, SILENT_LIMIT},
     envelope,
 };
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -23,6 +31,11 @@ pub struct ControlSender {
 pub struct ControlReceiver {
     stream: RecvStream,
     buf: Vec<u8>,
+    /// Once the peer has sent `Alive`, silence this long ends the stream
+    /// with [`NetError::TimedOut`]. A peer that never sends it (an older
+    /// build) is never timed out.
+    silent_limit: Duration,
+    heard_alive: bool,
 }
 
 impl ControlSender {
@@ -48,8 +61,24 @@ impl ControlSender {
 }
 
 impl ControlReceiver {
+    fn new(stream: RecvStream) -> Self {
+        Self {
+            stream,
+            buf: Vec::new(),
+            silent_limit: SILENT_LIMIT,
+            heard_alive: false,
+        }
+    }
+
+    /// Changes how long a peer that sends `Alive` may stay silent (tests).
+    pub fn set_silent_limit(&mut self, limit: Duration) {
+        self.silent_limit = limit;
+    }
+
     /// The next message; `Ok(None)` when the peer finished the stream.
-    /// Unknown optional message types are skipped.
+    /// Unknown optional message types and `Alive` are skipped; once the peer
+    /// has sent `Alive`, nothing at all for the silent limit is
+    /// [`NetError::TimedOut`].
     pub async fn recv(&mut self) -> Result<Option<ControlMessage>, NetError> {
         loop {
             if let Some((frame, used)) =
@@ -60,6 +89,10 @@ impl ControlReceiver {
                     DecodeError::UnknownRequired(kind) => NetError::Version(kind),
                     other => NetError::Protocol(other.to_string()),
                 })? {
+                    Decoded::Message(ControlMessage::Alive(_)) => {
+                        self.heard_alive = true;
+                        continue;
+                    }
                     Decoded::Message(message) => return Ok(Some(message)),
                     Decoded::SkippedOptional(kind) => {
                         tracing::debug!("skipping unknown optional control message {kind:#06x}");
@@ -67,12 +100,15 @@ impl ControlReceiver {
                     }
                 }
             }
-            match self
-                .stream
-                .read_chunk(64 * 1024)
-                .await
-                .map_err(|e| NetError::Connection(e.to_string()))?
-            {
+            let read = self.stream.read_chunk(64 * 1024);
+            let chunk = if self.heard_alive {
+                tokio::time::timeout(self.silent_limit, read)
+                    .await
+                    .map_err(|_| NetError::TimedOut)?
+            } else {
+                read.await
+            };
+            match chunk.map_err(|e| NetError::Connection(e.to_string()))? {
                 Some(chunk) => self.buf.extend_from_slice(&chunk),
                 None => return Ok(None),
             }
@@ -109,10 +145,7 @@ pub async fn open(conn: &Connection) -> Result<(ControlSender, ControlReceiver, 
         stream: send,
         buf: Vec::new(),
     };
-    let mut receiver = ControlReceiver {
-        stream: recv,
-        buf: Vec::new(),
-    };
+    let mut receiver = ControlReceiver::new(recv);
     sender.send(&hello()).await?;
     let theirs = expect_hello(&mut receiver).await?;
     Ok((sender, receiver, theirs))
@@ -131,10 +164,7 @@ pub async fn accept(
         stream: send,
         buf: Vec::new(),
     };
-    let mut receiver = ControlReceiver {
-        stream: recv,
-        buf: Vec::new(),
-    };
+    let mut receiver = ControlReceiver::new(recv);
     let theirs = expect_hello(&mut receiver).await?;
     sender.send(&hello()).await?;
     Ok((sender, receiver, theirs))

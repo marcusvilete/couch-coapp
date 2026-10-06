@@ -8,7 +8,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -17,8 +17,8 @@ use couch_engine::{
     Command, Engine, EngineError, EngineOptions, Event, MemberLink, Profile, Response, RoomView,
     SessionEnd, SessionRole, SessionView, SourceChoice, WatchEnd,
     pipeline::{
-        AudioKind, Backend, Focus, NativeId, Source, Sources, ViewerOptions, ViewerProcess,
-        WindowSource, ipc,
+        AudioKind, Backend, Focus, GameProcess, NativeId, Source, Sources, ViewerOptions,
+        ViewerProcess, WindowSource, ipc,
     },
     secrets::Unprotected,
 };
@@ -50,14 +50,76 @@ struct Fake {
     kbm: RecordingInjector,
     pads: RecordingPadFactory,
     viewers: Mutex<Vec<FakeViewer>>,
-    /// The window closed: capture says so, and it no longer exists.
-    closed: Arc<AtomicBool>,
+    /// The game: its process, and the window it shows.
+    game: Arc<FakeGame>,
+    /// The current capture's window closed: capture says so.
+    capture_closed: Mutex<Arc<AtomicBool>>,
     clock: Arc<ProcessClock>,
     /// The panic key's handler while the engine has it hooked.
     panic_key: PanicHook,
 }
 
+/// The streamed game's process.
+struct FakeGame {
+    exited: AtomicBool,
+    /// The window it shows; 0 for none.
+    window: AtomicIsize,
+    /// Other windows of the same process (another browser window, say).
+    others: Mutex<Vec<NativeId>>,
+}
+
+impl Default for FakeGame {
+    fn default() -> Self {
+        Self {
+            exited: AtomicBool::new(false),
+            window: AtomicIsize::new(WINDOW),
+            others: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+struct WatchedFakeGame(Arc<FakeGame>);
+
+impl GameProcess for WatchedFakeGame {
+    fn running(&self) -> bool {
+        !self.0.exited.load(Ordering::SeqCst)
+    }
+
+    fn windows(&self) -> Vec<NativeId> {
+        let mut windows = self.0.others.lock().unwrap().clone();
+        match self.0.window.load(Ordering::SeqCst) {
+            0 => {}
+            window => windows.insert(0, window),
+        }
+        windows
+    }
+}
+
 impl Fake {
+    /// The game's window closes; its process goes on.
+    fn close_window(&self) {
+        self.game.window.store(0, Ordering::SeqCst);
+        self.capture_closed
+            .lock()
+            .unwrap()
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// The game destroys its window and shows `window` instead.
+    fn swap_window(&self, window: NativeId) {
+        self.game.window.store(window, Ordering::SeqCst);
+        self.capture_closed
+            .lock()
+            .unwrap()
+            .store(true, Ordering::SeqCst);
+    }
+
+    /// The game exits, and its window with it.
+    fn exit_game(&self) {
+        self.game.exited.store(true, Ordering::SeqCst);
+        self.close_window();
+    }
+
     /// The pad's latest state, if one was plugged.
     fn pad(&self) -> Option<PadState> {
         let plugged = self.pads.plugged.lock().unwrap();
@@ -80,6 +142,7 @@ impl Backend for Fake {
                 id: WINDOW,
                 title: "Celeste".into(),
                 app: "Celeste.exe".into(),
+                elevated: false,
             }],
             screens: Vec::new(),
         })
@@ -90,8 +153,19 @@ impl Backend for Fake {
         source: &Source,
         fps: u32,
     ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError> {
-        let window = matches!(source, Source::Window(_)).then_some(WINDOW);
-        let capturer = FakeCapturer::new(64, 36, fps, self.clock.clone(), self.closed.clone());
+        let window = match source {
+            Source::Window(window) => Some(*window),
+            _ => None,
+        };
+        // As Windows.Graphics.Capture does, a window that isn't there any
+        // more can't be captured.
+        let shown = self.game.window.load(Ordering::SeqCst);
+        if window.is_some_and(|w| w != shown) {
+            return Err(MediaError::Backend("the window is gone".into()));
+        }
+        let closed = Arc::new(AtomicBool::new(false));
+        *self.capture_closed.lock().unwrap() = closed.clone();
+        let capturer = FakeCapturer::new(64, 36, fps, self.clock.clone(), closed);
         Ok((Box::new(capturer), window))
     }
 
@@ -118,8 +192,12 @@ impl Backend for Fake {
         }
     }
 
-    fn window_exists(&self, _window: NativeId) -> bool {
-        !self.closed.load(Ordering::SeqCst)
+    fn window_exists(&self, window: NativeId) -> bool {
+        window != 0 && self.game.window.load(Ordering::SeqCst) == window
+    }
+
+    fn game_process(&self, _window: NativeId) -> Option<Box<dyn GameProcess>> {
+        Some(Box::new(WatchedFakeGame(self.game.clone())))
     }
 
     fn launch_viewer(&self, _options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
@@ -267,8 +345,14 @@ impl FakeViewer {
         );
     }
 
-    /// The user closes the window.
+    /// The user closes the window: like the real one, it says it leaves.
     fn close(&self) {
+        self.action(UserAction::Leave);
+        self.say.lock().unwrap().take();
+    }
+
+    /// The window process dies without a word.
+    fn crash(&self) {
         self.say.lock().unwrap().take();
     }
 
@@ -300,6 +384,8 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
         profile_wait: Duration::from_secs(2),
         backend: fake,
         join_wait: Duration::from_secs(5),
+        replace_grace: Duration::from_millis(500),
+        reconnect_wait: Duration::from_secs(5),
     }
 }
 
@@ -904,11 +990,12 @@ async fn a_host_leaving_the_room_ends_its_stream() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_window_closing_ends_the_session() {
+async fn the_window_closing_ends_the_session_after_the_grace() {
     let (mut a, mut b, mut c, room) = three().await;
     a.go_live(&room, 4).await;
     watching(&room, &a, &b).await;
-    a.fake.closed.store(true, Ordering::SeqCst);
+    a.fake.close_window();
+    let closed = Instant::now();
     let reason = a
         .event("the end", |e| match e {
             Event::SessionEnded { reason, .. } => Some(*reason),
@@ -916,6 +1003,12 @@ async fn the_window_closing_ends_the_session() {
         })
         .await;
     assert_eq!(reason, SessionEnd::SourceLost);
+    // The game still runs: it had the grace (500 ms here) to show a window.
+    assert!(
+        closed.elapsed() >= Duration::from_millis(450),
+        "ended after {:?}",
+        closed.elapsed()
+    );
     assert!(!a.fake.panic_key_hooked(), "the hook goes with the stream");
     let ended = b
         .event("the end of watching", |e| match e {
@@ -926,6 +1019,85 @@ async fn the_window_closing_ends_the_session() {
     assert_eq!(ended, WatchEnd::Ended);
     a.wait_session(&room, &a, "no session", |s| s.is_none())
         .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_game_swapping_its_window_keeps_streaming() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    a.fake.swap_window(WINDOW + 1);
+    // Well past the grace: frames keep coming, from the new window.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let before = window.frames();
+    wait("frames from the new window", || {
+        window.frames() > before + 5
+    })
+    .await;
+    assert!(a.session(&room, &a).await.is_some(), "still live");
+    assert!(b.session(&room, &a).await.is_some(), "still listed");
+    // The window it follows can go too.
+    a.fake.exit_game();
+    let reason = a
+        .event("the end", |e| match e {
+            Event::SessionEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(reason, SessionEnd::GameExited);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_game_exiting_ends_the_session_at_once() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    watching(&room, &a, &b).await;
+    a.fake.exit_game();
+    let exited = Instant::now();
+    let reason = a
+        .event("the end", |e| match e {
+            Event::SessionEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(reason, SessionEnd::GameExited);
+    assert!(
+        exited.elapsed() < Duration::from_millis(450),
+        "no grace for an exited game: {:?}",
+        exited.elapsed()
+    );
+    let ended = b
+        .event("the end of watching", |e| match e {
+            Event::WatchEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(ended, WatchEnd::Ended);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_swap_while_nobody_watches_is_followed_too() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    // Nobody watches, so no capture runs: housekeeping notices.
+    a.fake.swap_window(WINDOW + 1);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(a.session(&room, &a).await.is_some(), "still live");
+    // Someone comes: the capture starts on the new window.
+    let window = watching(&room, &a, &b).await;
+    let before = window.frames();
+    wait("frames", || window.frames() > before + 5).await;
+    a.fake.exit_game();
+    let reason = a
+        .event("the end", |e| match e {
+            Event::SessionEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(reason, SessionEnd::GameExited);
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -1019,6 +1191,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             first_epoch: SeatEpoch(0),
             rc_trace: None,
             netem_elapsed: None,
+            replace_grace: Duration::from_millis(300),
         },
     )
     .await;
@@ -1041,4 +1214,156 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     stream.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crashed_stream_window_is_started_again_once() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let first = watching(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &first).await;
+    // The guest holds A when the window crashes.
+    first.pad(PadButtons::A);
+    wait("A held on the host", || {
+        a.fake.pad() == Some(pressed(PadButtons::A))
+    })
+    .await;
+
+    first.crash();
+    wait("a new window", || b.fake.viewers.lock().unwrap().len() == 2).await;
+    // What the crashed window held is let go, not repeated by the heartbeat.
+    wait("the pad neutral on the host", || {
+        a.fake.pad() == Some(PadState::NEUTRAL)
+    })
+    .await;
+    let second = b.fake.viewer().expect("the new window");
+    wait("frames in the new window", || second.frames() >= 3).await;
+    // It is told it still holds the seat, and its input reaches the game.
+    wait("the seat in the new window", || second.holding()).await;
+    second.pad(PadButtons::A);
+    wait("the new window's input", || {
+        a.fake.pad() == Some(pressed(PadButtons::A))
+    })
+    .await;
+    assert_eq!(
+        b.session(&room, &a).await.map(|s| s.role),
+        Some(SessionRole::Controlling)
+    );
+
+    // Again within a minute: watching ends, and the seat goes back.
+    second.crash();
+    let ended = b
+        .event("the end of watching", |e| match e {
+            Event::WatchEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(ended, WatchEnd::ViewerFailed);
+    a.wait_session(&room, &a, "nobody playing", |s| {
+        s.is_some_and(|s| s.controller.is_none() && s.viewers.is_empty())
+    })
+    .await;
+    assert_eq!(b.fake.viewers.lock().unwrap().len(), 2, "no third window");
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watching_resumes_when_the_connection_to_the_host_comes_back() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &window).await;
+
+    b.engine().drop_connection(&room, &a.id()).await;
+    // The host lets go of the seat with the old connection.
+    a.wait_session(&room, &a, "the seat back with the host", |s| {
+        s.is_some_and(|s| s.controller.is_none())
+    })
+    .await;
+    wait("the window told it lost the seat", || !window.holding()).await;
+    // The room redials; B joins again with the same window.
+    b.wait_session(&room, &a, "watching again", |s| {
+        s.is_some_and(|s| s.role == SessionRole::Watching)
+    })
+    .await;
+    a.wait_session(&room, &a, "B among the viewers again", |s| {
+        s.is_some_and(|s| s.viewers.contains(&b.id()))
+    })
+    .await;
+    let before = window.frames();
+    wait("frames again", || window.frames() > before + 5).await;
+    assert_eq!(b.fake.viewers.lock().unwrap().len(), 1, "the same window");
+    // Asking works as before.
+    give_control(&room, &mut a, &b, &window).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_ended_meanwhile_is_not_resumed() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    b.engine().drop_connection(&room, &a.id()).await;
+    a.ok(Command::StopLive).await;
+    a.go_live(&room, 4).await;
+    let ended = b
+        .event("the end of watching", |e| match e {
+            Event::WatchEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(ended, WatchEnd::Ended);
+    wait("the window closed", || {
+        window.shut_down.load(Ordering::SeqCst)
+    })
+    .await;
+    // The new session is listed, not watched.
+    b.wait_session(&room, &a, "the new session", |s| {
+        s.is_some_and(|s| s.role == SessionRole::None)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_games_other_windows_are_never_followed() {
+    let (mut a, mut b, mut c, room) = three().await;
+    // The game (a browser, say) has another window open all along.
+    a.fake.game.others.lock().unwrap().push(99);
+    a.go_live(&room, 4).await;
+    watching(&room, &a, &b).await;
+    // Let housekeeping note the game's windows while the captured one is up.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    a.fake.close_window();
+    let reason = a
+        .event("the end", |e| match e {
+            Event::SessionEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(
+        reason,
+        SessionEnd::SourceLost,
+        "window 99 must not be streamed"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watching_during_the_grace_waits_for_the_window() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    b.wait_session(&room, &a, "the announcement", |s| s.is_some())
+        .await;
+    // Nobody watches; the window closes, and the game shows a new one a
+    // moment after someone comes to watch.
+    a.fake.close_window();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let reply = b.watch(&room, &a).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    a.fake.game.window.store(WINDOW + 5, Ordering::SeqCst);
+    let window = b.fake.viewer().expect("a viewer window");
+    wait("frames from the new window", || window.frames() >= 5).await;
+    assert!(a.session(&room, &a).await.is_some(), "still live");
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

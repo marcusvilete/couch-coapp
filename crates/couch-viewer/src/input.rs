@@ -91,6 +91,14 @@ impl InputCapture {
 
     pub fn set_seat(&mut self, seat: SeatState) {
         self.seat = Some(seat);
+        // While our keyboard goes to the game, Alt+F4 is the game's (the host
+        // holds it back), never a way to close this window by accident. SDL
+        // reads the hint at each key press.
+        let keyboard = seat.holding && seat.permissions.contains(Permissions::KEYBOARD);
+        sdl3::hint::set(
+            "SDL_WINDOWS_CLOSE_ON_ALT_F4",
+            if keyboard { "0" } else { "1" },
+        );
         if !seat.holding {
             self.rumble(RumbleState::default());
         }

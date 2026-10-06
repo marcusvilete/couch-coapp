@@ -1,6 +1,6 @@
 ---
 name: app-manual-run
-description: Set up and read a manual test of the Couch Co-App desktop app with several profiles on one PC (the default profile plus alice, bob and carol): starting them, where every log is, what one PC can and can't show (games grab the guest's physical controller; keyboard and mouse never reach the game), how to tell a stream problem from a game's choice with xinput-watch.ps1, checking the viewer's HUD without a session, and what to ask the user to try. Use when asking the user to try the app (going live, watching, passing control, the panic key, games), when the user reports something from such a run, or when reading its logs.
+description: Set up and read a manual test of the Couch Co-App desktop app, on one PC with several profiles (the default profile plus alice, bob and carol) or on two PCs with the guest package: starting them, where every log is, what one PC can and can't show (games grab the guest's physical controller; keyboard and mouse never reach the game), how to tell a stream problem from a game's choice with xinput-watch.ps1, checking the viewer's HUD without a session, two-PC setup, checklists per area and traps already met, and what to ask the user to try. Use when asking the user to try the app (going live, watching, passing control, the panic key, games, two PCs), when the user reports something from such a run, or when reading its logs.
 ---
 
 # A manual run of the app on one PC
@@ -77,6 +77,16 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **Expect** the guest's pad to go neutral, "control paused" in the host panel, no Backspace in the game, and `panic key:` in the host's log.
 - **If it fails only in our own window:** something registered the process for raw keyboard input (see `windows-ffi-pitfalls`).
 
+## Lifecycle (M6): what to expect
+
+- **Closing the game** ends the stream with "The game closed". A game that swaps its window (some do when changing display mode) keeps streaming after a short freeze; host log: `the game opened a new window; streaming that one`.
+- **A window that closes while the game runs** ends the stream after 5 s ("went away").
+- **Killing the host app** (Task Manager): its viewers see the connection lost after about 5 s (log: `the peer went silent; closing`).
+- **A dropped connection while watching**: the stream card says "Reconnecting…", the stream window stays, and the stream comes back by itself within 30 s. The guest must ask for control again. Log: `lost the host's connection; waiting for it to come back`, then `the host is back; joining its stream again`.
+- **Killing `couch-viewer.exe`**: use Task Manager's **Details** tab (End task there kills). The window comes back by itself once; a second kill within a minute ends watching ("crashed twice"). Log: `the stream window crashed and was started again`. The Processes tab's End task asks the window to close instead, which counts as leaving: watching just stops.
+- **A program run as administrator** is marked "admin" in Go live, with a warning when picked. Keyboard and mouse can't reach it, and the panic key doesn't work while it is in front (measured in M6); Take back does.
+- On one PC, the network can't be dropped for one pair; two PCs (turn off the guest's network for about 10 s) or the `sessions` scenarios cover it.
+
 ## A full run to ask for
 
 1. Watch, then stop watching.
@@ -90,15 +100,55 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 
 ## Two PCs
 
-The host PC needs ViGEmBus and the app; the guest PC needs the app (built or installed).
-- **Getting the app there:** `.\scripts\pack-guest.ps1` builds the release app and zips it with the stream window and the DLLs into `target\guest\couch-coapp.zip`; `npx --yes http-server target\guest -p 8000` serves it. The guest starts it with `run.cmd`, which logs to `desktop.log` beside it. Its header lists what the guest PC will ask (unblocking the zip, the firewall, pasting invites).
-- **Both sides from the same commit:** `BUILD.txt` in the zip says which.
-- **The guest's controller goes on the guest PC;** with none on the host, games see only the virtual pad.
-
-Two PCs test what one can't:
+The user has a second PC on their home network. Suggest a two-PC run after any change one PC can't show:
 - games reading the guest's pad;
 - keyboard and mouse;
-- real networks and relays;
-- other GPUs.
+- network drops and reconnecting;
+- killing a host;
+- administrator windows;
+- real networks and other GPUs.
 
-If the host has their own controller connected, it stays controller 1, and single-player games may ignore the guest. That is a known limitation, not a bug: see `docs/m5b-results.md` and the "seats and input modes" requirement.
+### Setup
+
+- **Roles.** This PC hosts: it has ViGEmBus, the games and the dev build (`npm run tauri dev`). The other PC is the guest and runs the release package.
+- **The package.**
+  - `.\scripts\pack-guest.ps1` builds the release app and zips it with the stream window and the DLLs into `target\guest\couch-coapp.zip`; `npx --yes http-server target\guest -p 8000` serves it.
+  - Run the script without redirecting its stderr (`2>&1` or `*>&1` with `$ErrorActionPreference = 'Stop'` aborts on Tauri's info lines).
+  - Rebuild it after every change the guest side runs (viewer, engine, UI). `BUILD.txt` names the commit; both sides must match.
+- **On the guest PC** (the script's header has the list):
+  - unblock the zip before extracting;
+  - allow the app on private networks when the firewall asks;
+  - start `run.cmd`;
+  - paste the invite into the Join box (release builds don't register `couchco://`).
+- **Controllers.** The guest's controller goes on the guest PC. Keep none on the host for co-op games: the host's own controller takes a slot first, and the guest's pad may not work (seen in Fling to the Finish). Single-player games took the guest's pad either way.
+- **The link.** The stream window's HUD should say "Direct". "Relay" means the firewall or the network blocked the direct path.
+
+### Checklists
+
+Pick what the change touched; add the basics (watch, ask, pass control, the panic key, stop) every time.
+
+| Area | Ask the user to | Expect |
+|---|---|---|
+| Gamepad in games | play a single-player game, then a co-op one, as the guest | the guest drives the game; for co-op, no controller on the host |
+| Keyboard and mouse | go live with keyboard and mouse on, the guest plays with them | input reaches the game only while its window is in front on the host; the Windows key, Alt+Tab, Alt+F4, Ctrl+Esc never do |
+| Alt+F4 on the guest | press it while holding the controller with keyboard, then while only watching | holding: nothing happens; watching: the stream window closes (that counts as leaving) |
+| Display mode | switch the game between windowed and full screen, also from the guest | the stream goes on; the guest's input works in both (the host's log says "the game opened a new window" if the game swapped windows) |
+| Game exit | quit the game | everyone gets "The game closed" |
+| Network drop | turn off the guest's network for about 10 s while it plays | frozen picture, "Reconnecting…", the stream comes back within 30 s, the guest has to ask for control again |
+| Host killed | end the host app in Task Manager | the guest is told the stream ended within about 5 s |
+| Stream window crash | on the guest, Task Manager's **Details** tab, End task on `couch-viewer.exe`; again within a minute | it comes back by itself, still holding the controller; the second time, watching ends |
+| Administrator window | run Notepad as administrator, go live with it | Go live marks it "admin" with a warning; keyboard and mouse can't reach it; the panic key doesn't work while it is in front (Take back does) |
+
+### Reading the results
+
+- **Logs.**
+  - The guest's app log is `desktop.log` next to `run.cmd`; its stream window's is `viewer.log` in `%LOCALAPPDATA%\CouchCoApp\profiles\<profile>` on that PC.
+  - The host's (default profile) is the `npm run tauri dev` terminal.
+  - Ask for the lines around the moment, naming what to look for (`seat status=`, `lost the host's connection`, `the stream window crashed`, `the peer went silent`).
+- **Traps already met** (not bugs):
+  - Task Manager's **Processes** tab End task asks the window to close: that is leaving, so watching just stops. Only the Details tab kills.
+  - An administrator window: Windows keeps a normal program's input and hooks from it. Expected; the warning says so.
+  - Alt+F4 while only watching closes the guest's own window.
+  - A host controller taking player 1 in co-op: the seats and input modes work will handle it.
+  - A full-screen game ignoring the guest once (M5b): an observation, not a known bug; note whether it happens again.
+- **Record** each run in the milestone's results file ("Your run" row), and new observations the user wants kept in the polish backlog memory.

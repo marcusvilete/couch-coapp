@@ -4,4 +4,10 @@ export type WindowView = { id: string, title: string,
 /**
  * The program's file name; may be empty.
  */
-app: string, };
+app: string, 
+/**
+ * The program runs as administrator (and we don't): guests' keyboard
+ * and mouse can't reach it, and the panic key doesn't work while it is
+ * in front (measured in M6).
+ */
+elevated: boolean, };

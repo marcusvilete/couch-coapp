@@ -24,6 +24,8 @@ pub mod type_ids {
 
     pub const HELLO: u16 = MUST_UNDERSTAND | 0x0001;
     pub const GOODBYE: u16 = MUST_UNDERSTAND | 0x0002;
+    /// Optional: a peer that doesn't know it is simply never timed out.
+    pub const ALIVE: u16 = 0x0003;
     pub const KEYFRAME_REQUEST: u16 = MUST_UNDERSTAND | 0x0101;
     pub const SEAT_ASSIGNED: u16 = MUST_UNDERSTAND | 0x0201;
     pub const SEAT_RELEASED: u16 = MUST_UNDERSTAND | 0x0202;
@@ -71,7 +73,16 @@ pub mod close_code {
     pub const PROTOCOL: u32 = 10;
     /// Not on the owner's member list (any more).
     pub const NOT_MEMBER: u32 = 11;
+    /// Nothing heard for [`SILENT_LIMIT`](crate::control::SILENT_LIMIT) from
+    /// a peer that sends `Alive`.
+    pub const TIMED_OUT: u32 = 12;
 }
+
+/// Each side sends [`Alive`] after saying nothing for this long.
+pub const ALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+/// A peer that has sent `Alive` and then says nothing for this long is taken
+/// for gone: its connection is closed with `TIMED_OUT`.
+pub const SILENT_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Host to a member: you now hold this seat. Input must carry `seat_epoch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +113,11 @@ pub enum KeyframeReason {
     DecoderError,
 }
 
+/// "Still here": each side sends it after a second of saying nothing, so a
+/// peer silent for 5 s can be taken for gone (docs/protocol.md, Liveness).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alive {}
+
 /// Sent first, by both sides, on every control stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
@@ -117,6 +133,7 @@ pub struct Hello {
 pub enum ControlMessage {
     Hello(Hello),
     Goodbye(Goodbye),
+    Alive(Alive),
     KeyframeRequest(KeyframeRequest),
     SeatAssigned(SeatAssigned),
     SeatReleased(SeatReleased),
@@ -190,6 +207,7 @@ impl ControlMessage {
         match self {
             Self::Hello(_) => type_ids::HELLO,
             Self::Goodbye(_) => type_ids::GOODBYE,
+            Self::Alive(_) => type_ids::ALIVE,
             Self::KeyframeRequest(_) => type_ids::KEYFRAME_REQUEST,
             Self::SeatAssigned(_) => type_ids::SEAT_ASSIGNED,
             Self::SeatReleased(_) => type_ids::SEAT_RELEASED,
@@ -218,6 +236,7 @@ impl ControlMessage {
         let payload = match self {
             Self::Hello(m) => postcard::to_stdvec(m)?,
             Self::Goodbye(m) => postcard::to_stdvec(m)?,
+            Self::Alive(m) => postcard::to_stdvec(m)?,
             Self::KeyframeRequest(m) => postcard::to_stdvec(m)?,
             Self::SeatAssigned(m) => postcard::to_stdvec(m)?,
             Self::SeatReleased(m) => postcard::to_stdvec(m)?,
@@ -248,6 +267,7 @@ impl ControlMessage {
         let message = match frame.msg_type {
             type_ids::HELLO => Self::Hello(payload(frame)?),
             type_ids::GOODBYE => Self::Goodbye(payload(frame)?),
+            type_ids::ALIVE => Self::Alive(payload(frame)?),
             type_ids::KEYFRAME_REQUEST => Self::KeyframeRequest(payload(frame)?),
             type_ids::SEAT_ASSIGNED => Self::SeatAssigned(payload(frame)?),
             type_ids::SEAT_RELEASED => Self::SeatReleased(payload(frame)?),
@@ -344,6 +364,16 @@ mod tests {
             ControlMessage::from_frame(&frame).unwrap(),
             Decoded::Message(message)
         );
+    }
+
+    #[test]
+    fn alive_is_optional_and_empty() {
+        let mut buf = Vec::new();
+        ControlMessage::Alive(Alive {}).encode(&mut buf).unwrap();
+        let (frame, _) = envelope::decode(&buf).unwrap().unwrap();
+        assert!(!frame.must_understand());
+        assert!(frame.payload.is_empty());
+        roundtrip(ControlMessage::Alive(Alive {}));
     }
 
     #[test]

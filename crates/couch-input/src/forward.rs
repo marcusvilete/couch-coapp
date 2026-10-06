@@ -110,6 +110,32 @@ impl Forwarder {
         }
     }
 
+    /// The viewer window was replaced (it crashed and was started again):
+    /// nothing the old one had down is down any more. The hold stays.
+    /// Returns what tells the host at once: a neutral pad and, with keyboard
+    /// or mouse, an empty held set (the host releases what it isn't in).
+    pub fn viewer_replaced(&mut self, now: Instant) -> Vec<Outgoing> {
+        self.pad = PadSnapshot::default();
+        self.keys = KeyBitmap::default();
+        self.buttons = 0;
+        let Some(h) = self.hold else {
+            return Vec::new();
+        };
+        let mut out = vec![self.pad_datagram(now)];
+        if h.permissions
+            .intersects(Permissions::KEYBOARD | Permissions::MOUSE)
+        {
+            self.next_sync = Some(now + HELD_SYNC);
+            out.push(Outgoing::Stream(InputMessage::Held(HeldInput {
+                seat: h.seat,
+                seat_epoch: h.epoch,
+                keys: self.keys,
+                buttons: self.buttons,
+            })));
+        }
+        out
+    }
+
     pub fn local(&mut self, input: LocalInput, now: Instant) -> Vec<Outgoing> {
         let mut out = Vec::new();
         self.viewer_heard = Some(now);
@@ -299,6 +325,48 @@ mod tests {
         // It's back.
         f.local(LocalInput::Alive, at(1_050));
         assert_eq!(f.tick(at(1_050)).len(), 1);
+    }
+
+    #[test]
+    fn a_replaced_viewer_holds_nothing_down() {
+        let t0 = Instant::now();
+        let all = Permissions::GAMEPAD | Permissions::KEYBOARD | Permissions::MOUSE;
+        let mut f = holding(all, t0);
+        let held = PadSnapshot {
+            buttons: 0x1000,
+            right_trigger: 255,
+            ..Default::default()
+        };
+        f.local(LocalInput::Pad(held), t0);
+        f.local(key(0x1A, true), t0);
+        f.local(
+            LocalInput::MouseButton {
+                button: 1,
+                down: true,
+            },
+            t0,
+        );
+
+        let out = f.viewer_replaced(t0);
+        assert!(
+            matches!(
+                out[..],
+                [
+                    Outgoing::Pad(PadDatagram { pad, .. }),
+                    Outgoing::Stream(InputMessage::Held(HeldInput { keys, buttons: 0, .. })),
+                ] if pad == PadSnapshot::default() && keys == KeyBitmap::default()
+            ),
+            "{out:?}"
+        );
+        // The heartbeat goes on, neutral, and the hold stays.
+        f.local(LocalInput::Alive, t0);
+        assert!(f.tick(t0 + PAD_REFRESH).iter().all(|o| match o {
+            Outgoing::Pad(p) => p.pad == PadSnapshot::default(),
+            _ => true,
+        }));
+        assert!(f.holding().is_some());
+        // The new window's first press of the same key goes through.
+        assert_eq!(f.local(key(0x1A, true), t0).len(), 1);
     }
 
     #[test]
