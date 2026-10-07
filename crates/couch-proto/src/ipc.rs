@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 6;
+pub const IPC_VERSION: u16 = 7;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -38,6 +38,9 @@ pub mod kinds {
     pub const SEAT: u8 = 0x07;
     /// main -> viewer: rumble the local gamepad.
     pub const RUMBLE: u8 = 0x08;
+    /// main -> viewer, right after `HELLO`: the user's shortcut keys
+    /// ([`super::ShortcutKeys`]). Until it arrives, the defaults apply.
+    pub const SHORTCUTS: u8 = 0x09;
 
     /// viewer -> main: a local input event for the host ([`super::LocalInput`]).
     pub const INPUT: u8 = 0x81;
@@ -276,6 +279,14 @@ pub enum UserAction {
 pub struct RumbleState {
     pub low: u8,
     pub high: u8,
+}
+
+/// Payload of [`kinds::SHORTCUTS`] (postcard): the shortcut rows the user
+/// moved off their defaults, by row id (`couch_input::shortcuts`), with the
+/// HID usage of each one's key. The viewer checks them as the app does.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortcutKeys {
+    pub keys: std::collections::BTreeMap<String, u16>,
 }
 
 /// Payload of [`kinds::AUDIO_PACKET`] (postcard): an audio datagram as it
@@ -549,6 +560,10 @@ mod tests {
         ] {
             assert_eq!(from_payload(&to_payload(&action)), Some(action));
         }
+        let keys = ShortcutKeys {
+            keys: [("panic".to_string(), 0x13)].into(),
+        };
+        assert_eq!(from_payload(&to_payload(&keys)), Some(keys));
     }
 
     #[test]

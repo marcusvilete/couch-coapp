@@ -105,6 +105,15 @@ Needs HidHide installed on the host (administrator, then a restart; installed on
 - **Stopping** shows the controller again (log: `the host's controller is shown again`). If the app was killed, it stays hidden until the next start of the app or of `couch-cli host` (log: `showed 1 controller(s) hidden by a host that crashed`). HidHide's own configuration client (Start menu) also shows and clears the list.
 - **If hiding fails**, the host panel says why and the host plays outside the seats, as in P1.
 
+## Settings and the splash (P3): what to expect
+
+- **The splash** ("Player 2 joins") plays at every start for about 3 s: two controllers slide in, land on a couch, the name types out, the picture holds a second, then fades. A click or a key skips it. It animates even with Windows' animation effects off (the user's choice; their PC has them off). It covers the lobby's first load only; the engine is already running.
+- **⚙ Settings** in the user panel, two tabs:
+  - **Shortcuts:** Change waits for a key (Esc cancels; Ctrl, Alt and Shift needn't be held, and are ignored). A refused key says why under its row ("Ctrl+Alt+Shift+P already does this: …", "that key can't be used", "only F1 to F12 (but F4)"). Default and Reset all put keys back. Saved in the profile's `shortcuts.json`. The panic key changes from the next Go live (the host panel's reminder names the key in use); the stream window's keys from the next window opened (its bar's hint names them).
+  - **Network:** iroh's public relays (the default) or My relay with a URL (https; `http://localhost…` for a local `iroh-relay --dev`). Saved in `network.json`; "Applies when the app restarts" with Restart now (asks once more while streaming or watching). The line under it says which relay we're connected through. A typo in the URL is refused at Save. To try the production endpoint shape on one PC, give a profile iroh's own relay as "My relay" (the host shown in the status line, as `https://…`): it then runs without iroh's address lookup, and must still meet the others.
+- **Keys are checked within one profile only.** On one PC, a viewer profile's chord set to the hosting profile's panic key is swallowed by the host's hook and presses the panic key. Not a bug (on two PCs they never meet); keep them apart when testing.
+- **Restart now** goes through the normal exit (the rooms hear we go), then starts the same profile again; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the guest package): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`import.meta.env.DEV`). Pressing it under `tauri dev` once ended both, leaving no app running.
+
 ## A full run to ask for
 
 1. Watch, then stop watching.

@@ -8,7 +8,6 @@ import type { InputSetup } from "./bindings/InputSetup";
 import type { RoomView } from "./bindings/RoomView";
 import type { SeatChoice } from "./bindings/SeatChoice";
 import type { SessionView } from "./bindings/SessionView";
-import type { ShortcutView } from "./bindings/ShortcutView";
 import type { SourceList } from "./bindings/SourceList";
 import { engineCommand, errorText, request } from "./engine";
 import { Avatar, MAX_NAME_BYTES, Modal, truncateBytes } from "./ui";
@@ -852,49 +851,6 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
           </p>
         )}
       </form>
-    </Modal>
-  );
-}
-
-// ---- Shortcuts ----
-
-const SCOPES: Record<ShortcutView["scope"], string> = {
-  viewer: "In the stream window",
-  host: "Anywhere, while you stream",
-};
-
-export function ShortcutsDialog(props: { onClose: () => void }) {
-  const [shortcuts, setShortcuts] = useState<ShortcutView[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    request({ type: "getShortcuts" }, "shortcuts")
-      .then((r) => setShortcuts(r.shortcuts))
-      .catch((e) => setError(errorText(e)));
-  }, []);
-  return (
-    <Modal title="Keyboard shortcuts" onClose={props.onClose} footer={<button className="primary" onClick={props.onClose}>Close</button>}>
-      {error && <p className="error">{error}</p>}
-      {shortcuts && (
-        <table className="shortcuts">
-          <tbody>
-            {shortcuts.map((s) => (
-              <tr key={s.keys}>
-                <td>
-                  <kbd>{s.keys}</kbd>
-                </td>
-                <td>
-                  {s.action}
-                  <span className="hint">
-                    {SCOPES[s.scope]}
-                    {s.condition && `, ${s.condition}`}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      <p className="hint">Shortcuts are never sent to the game. Changing them is coming in a later version.</p>
     </Modal>
   );
 }

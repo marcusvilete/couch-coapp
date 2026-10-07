@@ -23,6 +23,14 @@ async fn engine_command(
     engine.handle(command).await.map_err(|e| e.to_string())
 }
 
+/// Starts the app again, as after a change in Settings → Network. It goes
+/// through the usual exit, so the rooms hear we are going (`RunEvent::Exit`
+/// below) and the single-instance lock is let go before the new one starts.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.request_restart();
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         // Plain text when logging to a file (scripts/profiles.ps1).
@@ -99,7 +107,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![engine_command])
+        .invoke_handler(tauri::generate_handler![engine_command, restart_app])
         // No raw keyboard and mouse input for this process. We don't use
         // device events, and while a process registered for raw keyboard
         // input is in front, Windows skips its own low-level keyboard hooks:
@@ -110,9 +118,10 @@ pub fn run() {
 
     // Past `build`, we are this profile's only instance.
     tracing::info!(profile = profile.name(), data_dir = %profile.data_dir().display(), "starting");
+    // With the relay chosen in Settings → Network.
+    let options = EngineOptions::desktop(&profile);
     let engine =
-        tauri::async_runtime::block_on(Engine::start(profile, EngineOptions::development()))
-            .unwrap_or_else(|e| fail(e));
+        tauri::async_runtime::block_on(Engine::start(profile, options)).unwrap_or_else(|e| fail(e));
     app.manage(engine);
 
     app.run(|app, event| {

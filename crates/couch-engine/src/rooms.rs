@@ -84,6 +84,8 @@ type Reply = oneshot::Sender<Result<Response, EngineError>>;
 pub(crate) enum Input {
     Command(Command, Reply),
     Connections(String, oneshot::Sender<Vec<(String, bool)>>),
+    /// The relay we are reachable through now, if any.
+    HomeRelay(oneshot::Sender<Option<String>>),
     /// For tests: drop the connection with a member, as a dead path would.
     DropConnection(String, String),
     Shutdown(oneshot::Sender<()>),
@@ -235,8 +237,9 @@ struct Actor {
     join_wait: Duration,
     replace_grace: Duration,
     reconnect_wait: Duration,
-    /// Where the viewer window logs.
-    viewer_log: std::path::PathBuf,
+    /// The profile's folder: the viewer window logs there, and the user's
+    /// shortcut keys are read from there when going live or watching.
+    data_dir: std::path::PathBuf,
     /// Shared with the engine, for the panic key.
     panic: Arc<Mutex<Option<PanicHandle>>>,
     sessions: sessions::Sessions,
@@ -326,7 +329,7 @@ pub(crate) async fn start(
         join_wait: options.join_wait,
         replace_grace: options.replace_grace,
         reconnect_wait: options.reconnect_wait,
-        viewer_log: profile.data_dir().join("viewer.log"),
+        data_dir: profile.data_dir().to_path_buf(),
         panic,
         sessions: sessions::Sessions::default(),
     };
@@ -410,6 +413,9 @@ impl Actor {
                     })
                     .unwrap_or_default();
                 let _ = reply.send(list);
+            }
+            Input::HomeRelay(reply) => {
+                let _ = reply.send(self.addr.relay.clone());
             }
             Input::DropConnection(room, member) => {
                 let conn = RoomId::from_hex(&room)
@@ -573,7 +579,12 @@ impl Actor {
             Command::LeaveRoom { room } => self.leave(&room, now),
             Command::BanMember { room, member } => self.ban(&room, &member, now),
             // Answered by the engine itself.
-            Command::GetShortcuts | Command::ListSources => Err(EngineError::Stopped),
+            Command::GetShortcuts
+            | Command::SetShortcut { .. }
+            | Command::ResetShortcuts { .. }
+            | Command::GetNetwork
+            | Command::SetNetwork { .. }
+            | Command::ListSources => Err(EngineError::Stopped),
             Command::GoLive {
                 room,
                 source,

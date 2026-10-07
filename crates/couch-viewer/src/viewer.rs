@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use couch_codec_ffmpeg::FfmpegDecoder;
-use couch_input::shortcuts::Shortcut;
+use couch_input::shortcuts::{Shortcut, Shortcuts};
 use couch_media::{DecodedFrame, Micros, Nv12Frame, VideoDecoder, barcode, mailbox::Mailbox};
 use couch_proto::ipc::{FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, UserAction};
 use sdl3::{
@@ -217,6 +217,15 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     redraw = true;
                 }
                 ForWindow::Rumble(rumble) => input.rumble(rumble),
+                ForWindow::Shortcuts(keys) => {
+                    let (shortcuts, skipped) = Shortcuts::with_keys(&keys.keys);
+                    for (id, e) in skipped {
+                        tracing::warn!("shortcut {id}: {e}; its default applies");
+                    }
+                    input.set_shortcuts(shortcuts.clone());
+                    hud.shortcuts = shortcuts;
+                    redraw = true;
+                }
                 ForWindow::Hud(state) => {
                     let wanted = format!("{} · {} · Couch Co-App", state.title, state.host);
                     if wanted != title {

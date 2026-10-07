@@ -303,6 +303,7 @@ Each exchange must finish within 10 s. At most 32 incoming connections are being
 - **Only the owner makes invites**, and each has its own random token, which the owner keeps.
 - **Lifetime.** An invite works for 7 days (`expires`, seconds since 1970, also shown to the joiner) and for anyone who has it and the password. It stops working on expiry, on the owner's "revoke invites", on a ban, or after 5 wrong passwords. At most 32 are kept; making another drops the one closest to expiring.
 - **The address is the owner's own.** With relays configured that is its relay alone, never an IP address, so an invite posted in a chat publishes nobody's address. If the relay isn't known yet (just after startup), making the invite waits up to 10 s for it, then fails with "not connected to the relay yet". Without relays (a LAN, the tests), direct addresses are all there is.
+- **Each member names its own relay.** Settings → Network (P3) chooses iroh's public relays or one relay by URL (https; http only on this PC, for testing), per profile, from the next start. Invites and member records carry each member's own relay, and iroh dials a relay outside its own list, so members on different relays still meet (iroh's own `endpoint_relay_map_change` test covers that). With either choice iroh tries a direct path first; the relay starts the connection and carries it when no direct path is found.
 - **Parsing** accepts the bare payload or anything ending in `#<payload>`, in any case, with whitespace ignored, up to 4096 characters.
 - **Joining needs the owner online.** Nobody else admits newcomers, so a join while the owner's app is closed fails with "the room's owner isn't online".
 - **Opening a link only fills in the join screen.** Any web page can open a `couchco://` link, so the app previews the invite (the room's name, which only the invite claims, and whether it expired) and sends nothing until the user types the password and clicks Join. Links open in the default profile, since Windows runs one command per link scheme.
@@ -421,19 +422,22 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
 | `0x07` | main to viewer | Seat state (postcard): `{holding, permissions}`. The viewer captures the mouse only while holding with mouse permission |
 | `0x08` | main to viewer | Rumble (postcard): `{low u8, high u8}` |
+| `0x09` | main to viewer | Shortcut keys (postcard): `{keys: map of row id to HID usage}`, the rows the user moved off their defaults, sent right after Hello. The viewer checks them as the app does (`Shortcuts::with_keys`); rows that don't fit keep their defaults, which also apply until this frame arrives (P3) |
 | `0x81` | viewer to main | Local input (postcard `LocalInput`): `Key{usage, down}`, `MouseButton{button, down}`, `MouseMotion{dx, dy}`, `Wheel{dx, dy}`, `Pad(snapshot)` or `Alive` (every 100 ms). Deltas; the main process keeps the running totals |
 | `0x82` | viewer to main | Frame timing: `{epoch, seq, capture_us, arrived_us, decoded_us, presented_us, barcode_us}` |
 | `0x83` | viewer to main | User action (postcard): `RequestControl(seat u8)`, `CancelControl` (withdraw or give back), `Leave`. The viewer also sends `Leave` when its window is closed (M6): a viewer that exits without it crashed, and the app starts it again, at most once a minute |
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 | `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
 
-`IPC_VERSION` (now 6: the host on a seat in P2, then `host_on_seats`) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 7: the shortcut keys in P3) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
-**Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the panic-key hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. In the viewer, with Ctrl+Alt+Shift held:
+**Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the panic-key hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;
 - F toggles full screen;
 - H shows or hides the HUD; F3 alone does too, unless the keyboard is being forwarded;
 - M frees the mouse; clicking the window captures it again.
+
+The user may move each row to another key in Settings (P3), never its modifiers: chord rows keep Ctrl+Alt+Shift, and the row that works alone takes only F-keys. Only keys from `shortcuts::KEYS` are allowed (letters, digits, F-keys but F4, Backspace, punctuation): never Esc, Tab, Delete, the gray navigation keys (keyboards wrap them in fake Shift events the panic-key hook can't tell from Shift), Enter, Space, the modifiers, the Windows keys, Pause, Print Screen or the numpad. No two rows share a key, the panic key included, and the panic key can be moved but not removed. The keys are saved per profile in `shortcuts.json`; the panic key's applies at the next Go live, the viewer's in the next stream window (the `0x09` frame).
 
 **The HUD's bar.** The session bar (title, host, who plays, this viewer's state, a note, and buttons for the same actions plus Leave) takes clicks only while the mouse is free. A click on it goes to the HUD alone: it is never forwarded and never captures the mouse.
 

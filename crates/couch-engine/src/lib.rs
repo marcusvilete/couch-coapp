@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+use couch_input::shortcuts::{ShortcutError, Shortcuts};
 use couch_net::endpoint::RelayChoice;
 use couch_proto::{invite::InviteError, session::SeatKind};
 use couch_room::{
@@ -104,8 +105,28 @@ pub enum Command {
         room: String,
         member: String,
     },
-    /// Every keyboard shortcut, for the app to list (read-only for now).
+    /// Every keyboard shortcut, with the user's keys.
     GetShortcuts,
+    /// Moves a shortcut to another key, keeping its modifiers. `code` is the
+    /// browser's `KeyboardEvent.code` of the key pressed ("KeyP"). Answers
+    /// with every shortcut. The panic key changes at the next Go live, the
+    /// viewer's keys in the next stream window.
+    SetShortcut {
+        id: String,
+        code: String,
+    },
+    /// Puts one shortcut back on its default key, or all of them with
+    /// `None`. Answers with every shortcut.
+    ResetShortcuts {
+        id: Option<String>,
+    },
+    /// The relay setting, saved and in use, and the relay we are reachable
+    /// through now.
+    GetNetwork,
+    /// Saves the relay setting; it applies when the app starts again.
+    SetNetwork {
+        relay: RelaySetting,
+    },
     /// Windows and screens that could be streamed. Nothing is sent anywhere.
     ListSources,
     /// Starts streaming `source` to `room`. One stream at a time, and not
@@ -176,8 +197,14 @@ pub enum Command {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ShortcutView {
+    /// Names the row for [`Command::SetShortcut`].
+    pub id: String,
     /// Such as "Ctrl+Alt+Shift+H".
     pub keys: String,
+    /// Ctrl+Alt+Shift come with the key; otherwise only F-keys are allowed.
+    pub chord: bool,
+    /// On its default key.
+    pub is_default: bool,
     pub action: String,
     pub scope: ShortcutScope,
     /// When it applies, if not always; empty otherwise.
@@ -192,6 +219,69 @@ pub enum ShortcutScope {
     Viewer,
     /// Anywhere on this PC while streaming.
     Host,
+}
+
+/// Which relay server the app uses to start connections and to carry them
+/// when a direct path fails. Saved per profile; applies at the next start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum RelaySetting {
+    /// iroh's public relays: for testing only (their terms cover hobby use).
+    #[default]
+    Public,
+    /// One relay server by URL, such as our own (`iroh-relay`). No
+    /// third-party address lookup.
+    Custom(String),
+}
+
+impl RelaySetting {
+    /// What the endpoint binds with. A custom URL must be https, or http
+    /// on this PC for testing.
+    pub fn choice(&self) -> Result<RelayChoice, EngineError> {
+        match self {
+            Self::Public => Ok(RelayChoice::N0Public),
+            Self::Custom(url) => {
+                let invalid = |why: &str| EngineError::InvalidRelay(why.to_string());
+                let parsed: couch_net::RelayUrl = url
+                    .trim()
+                    .parse()
+                    .map_err(|_| invalid("that isn't a web address"))?;
+                let local = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
+                match parsed.scheme() {
+                    "https" => {}
+                    "http" if local => {}
+                    _ => return Err(invalid("it must start with https://")),
+                }
+                if parsed.host_str().is_none_or(str::is_empty) {
+                    return Err(invalid("it names no server"));
+                }
+                // The setting is logged and shown: no credentials in it.
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return Err(invalid("it can't carry a user name or password"));
+                }
+                Ok(RelayChoice::Custom(vec![parsed]))
+            }
+        }
+    }
+}
+
+/// Answer to [`Command::GetNetwork`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NetworkView {
+    /// What applies at the next start.
+    pub saved: RelaySetting,
+    /// What this run uses; `None` without relays (tests). A saved setting
+    /// that no longer parses runs as public, so the two can differ.
+    pub in_use: Option<RelaySetting>,
+    /// The relay we are reachable through now; `None` until connected.
+    pub home_relay: Option<String>,
+    /// The saved setting differs from the one in use: it applies at the
+    /// next start. Compared as iroh reads URLs (`https://a.b` is in use as
+    /// `https://a.b/`), never as typed.
+    pub restart_needed: bool,
 }
 
 /// A window or screen from [`Command::ListSources`].
@@ -460,6 +550,7 @@ pub enum Response {
     OpenedInvite { link: Option<String> },
     Sources(SourceList),
     Shortcuts { shortcuts: Vec<ShortcutView> },
+    Network(NetworkView),
     Done,
 }
 
@@ -498,6 +589,18 @@ impl fmt::Debug for Command {
                 .finish(),
             // Window titles are the user's business; the log needn't see them.
             Self::GetShortcuts => f.write_str("GetShortcuts"),
+            Self::SetShortcut { id, code } => f
+                .debug_struct("SetShortcut")
+                .field("id", id)
+                .field("code", code)
+                .finish(),
+            Self::ResetShortcuts { id } => {
+                f.debug_struct("ResetShortcuts").field("id", id).finish()
+            }
+            Self::GetNetwork => f.write_str("GetNetwork"),
+            Self::SetNetwork { relay } => {
+                f.debug_struct("SetNetwork").field("relay", relay).finish()
+            }
             Self::ListSources => f.write_str("ListSources"),
             Self::GoLive {
                 room,
@@ -573,6 +676,7 @@ impl fmt::Debug for Response {
                 .debug_struct("Shortcuts")
                 .field("shortcuts", &shortcuts.len())
                 .finish(),
+            Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
             Self::Done => f.write_str("Done"),
         }
     }
@@ -765,6 +869,10 @@ pub enum EngineError {
     NotLive,
     #[error("you aren't watching a stream")]
     NotWatching,
+    #[error(transparent)]
+    Shortcut(#[from] ShortcutError),
+    #[error("that relay address won't work: {0}")]
+    InvalidRelay(String),
     /// Capture, encoding or the viewer window failed; the text says how.
     #[error("{0}")]
     Media(String),
@@ -819,6 +927,41 @@ impl EngineOptions {
             reconnect_wait: Duration::from_secs(30),
         }
     }
+
+    /// The desktop app: [`Self::development`] with the profile's saved relay
+    /// setting (Settings → Network). A saved setting that no longer parses
+    /// is logged and the public relays are used; Settings shows both.
+    pub fn desktop(profile: &Profile) -> Self {
+        let saved = store::network(profile.data_dir()).relay;
+        let relays = saved.choice().unwrap_or_else(|e| {
+            tracing::warn!("the saved relay setting: {e}; using iroh's public relays");
+            RelayChoice::N0Public
+        });
+        Self {
+            relays,
+            ..Self::development()
+        }
+    }
+}
+
+/// What a running endpoint uses, as a setting.
+fn relay_in_use(relays: &RelayChoice) -> Option<RelaySetting> {
+    match relays {
+        RelayChoice::N0Public => Some(RelaySetting::Public),
+        RelayChoice::Custom(urls) => urls.first().map(|u| RelaySetting::Custom(u.to_string())),
+        RelayChoice::Disabled => None,
+    }
+}
+
+/// Whether `saved` would start differently from what runs: both as iroh
+/// reads them, so a URL typed without iroh's trailing slash still
+/// matches. A saved setting that doesn't parse runs as public
+/// ([`EngineOptions::desktop`]), so a restart wouldn't change that.
+fn restart_needed(saved: &RelaySetting, in_use: &Option<RelaySetting>) -> bool {
+    let applies_as = saved
+        .choice()
+        .map_or(Some(RelaySetting::Public), |c| relay_in_use(&c));
+    applies_as != *in_use
 }
 
 /// Takes the profile's lock file, waiting up to `wait` for another engine
@@ -864,6 +1007,11 @@ pub struct Engine {
     backend: Arc<dyn pipeline::Backend>,
     /// While we stream: releases every seat without waiting for the actor.
     panic: Arc<Mutex<Option<pipeline::host::PanicHandle>>>,
+    /// The relay setting this run's endpoint was bound with.
+    relay_in_use: Option<RelaySetting>,
+    /// Held while the shortcut keys are read, changed and written, so two
+    /// changes at once can't lose one.
+    shortcuts_edit: Mutex<()>,
     /// Held while this engine runs; see [`lock_profile`].
     _lock: std::fs::File,
 }
@@ -881,6 +1029,7 @@ impl Engine {
         }
         let (events, _) = broadcast::channel(256);
         let panic = Arc::new(Mutex::new(None));
+        let relay_in_use = relay_in_use(&options.relays);
         let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
         Ok(Self {
             profile,
@@ -890,8 +1039,48 @@ impl Engine {
             opened: Mutex::new(None),
             backend,
             panic,
+            relay_in_use,
+            shortcuts_edit: Mutex::new(()),
             _lock: lock,
         })
+    }
+
+    /// Every shortcut as the app lists it, with the user's keys.
+    fn shortcut_views(shortcuts: &Shortcuts) -> Response {
+        Response::Shortcuts {
+            shortcuts: shortcuts
+                .rows()
+                .iter()
+                .map(|b| ShortcutView {
+                    id: b.id.to_string(),
+                    keys: b.keys(),
+                    chord: b.chord,
+                    is_default: shortcuts.is_default(b.id),
+                    action: b.action.to_string(),
+                    scope: match b.scope {
+                        couch_input::shortcuts::Scope::Viewer => ShortcutScope::Viewer,
+                        couch_input::shortcuts::Scope::Host => ShortcutScope::Host,
+                    },
+                    condition: b.condition.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Reads the shortcut keys, changes them with `edit` and saves them.
+    fn edit_shortcuts(
+        &self,
+        edit: impl FnOnce(&mut Shortcuts) -> Result<(), ShortcutError>,
+    ) -> Result<Response, EngineError> {
+        let _editing = self
+            .shortcuts_edit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = self.profile.data_dir();
+        let mut shortcuts = store::shortcuts(dir);
+        edit(&mut shortcuts)?;
+        store::save_shortcuts(dir, &shortcuts)?;
+        Ok(Self::shortcut_views(&shortcuts))
     }
 
     /// The host's panic key: every seat of our stream back to us at once,
@@ -956,20 +1145,47 @@ impl Engine {
                     .unwrap_or_else(PoisonError::into_inner)
                     .take(),
             }),
-            Command::GetShortcuts => Ok(Response::Shortcuts {
-                shortcuts: couch_input::shortcuts::SHORTCUTS
-                    .iter()
-                    .map(|b| ShortcutView {
-                        keys: b.keys(),
-                        action: b.action.to_string(),
-                        scope: match b.scope {
-                            couch_input::shortcuts::Scope::Viewer => ShortcutScope::Viewer,
-                            couch_input::shortcuts::Scope::Host => ShortcutScope::Host,
-                        },
-                        condition: b.condition.to_string(),
-                    })
-                    .collect(),
+            Command::GetShortcuts => Ok(Self::shortcut_views(&store::shortcuts(
+                self.profile.data_dir(),
+            ))),
+            Command::SetShortcut { id, code } => self.edit_shortcuts(|s| {
+                let key = couch_input::shortcuts::key_for_code(&code)
+                    .ok_or(ShortcutError::KeyNotAllowed)?;
+                s.set(&id, key.usage)
             }),
+            Command::ResetShortcuts { id } => self.edit_shortcuts(|s| match id {
+                Some(id) => s.reset(&id),
+                None => {
+                    *s = Shortcuts::default();
+                    Ok(())
+                }
+            }),
+            Command::GetNetwork => {
+                let (reply, home) = oneshot::channel();
+                self.actor
+                    .send(rooms::Input::HomeRelay(reply))
+                    .await
+                    .map_err(|_| EngineError::Stopped)?;
+                let saved = store::network(self.profile.data_dir()).relay;
+                Ok(Response::Network(NetworkView {
+                    restart_needed: restart_needed(&saved, &self.relay_in_use),
+                    saved,
+                    in_use: self.relay_in_use.clone(),
+                    home_relay: home.await.map_err(|_| EngineError::Stopped)?,
+                }))
+            }
+            Command::SetNetwork { relay } => {
+                // Checked now, so a typo shows here rather than at the next
+                // start.
+                relay.choice()?;
+                let relay = match relay {
+                    RelaySetting::Custom(url) => RelaySetting::Custom(url.trim().to_string()),
+                    public => public,
+                };
+                let dir = self.profile.data_dir();
+                store::save_network(dir, &store::NetworkSettings { relay })?;
+                Ok(Response::Done)
+            }
             Command::ListSources => {
                 let backend = self.backend.clone();
                 let (sources, controllers, host_controllers, hiding) =
@@ -1220,8 +1436,147 @@ mod tests {
         };
         assert_eq!(shortcuts[0].keys, "Ctrl+Alt+Shift+Backspace");
         assert_eq!(shortcuts[0].scope, ShortcutScope::Host);
+        assert!(shortcuts[0].is_default && shortcuts[0].chord);
         assert_eq!(shortcuts.len(), couch_input::shortcuts::SHORTCUTS.len());
         engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shortcuts_move_are_refused_and_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path()).await;
+        let set = |id: &str, code: &str| {
+            engine.handle(Command::SetShortcut {
+                id: id.into(),
+                code: code.into(),
+            })
+        };
+        let Response::Shortcuts { shortcuts } = set("panic", "KeyP").await.unwrap() else {
+            panic!("expected shortcuts");
+        };
+        assert_eq!(shortcuts[0].keys, "Ctrl+Alt+Shift+P");
+        assert!(!shortcuts[0].is_default);
+        // Kept for the next start.
+        let data = engine.profile().data_dir().to_path_buf();
+        assert_eq!(
+            store::shortcuts(&data)
+                .binding(couch_input::shortcuts::Shortcut::Panic)
+                .keys(),
+            "Ctrl+Alt+Shift+P"
+        );
+
+        // A key another row has, one not allowed, a row that doesn't exist.
+        let taken = set("fullscreen", "KeyP").await.unwrap_err().to_string();
+        assert!(
+            taken.contains("Ctrl+Alt+Shift+P already does this"),
+            "{taken}"
+        );
+        assert!(set("panic", "Escape").await.is_err());
+        assert!(set("panic", "NotAKey").await.is_err());
+        assert!(set("nothing", "KeyQ").await.is_err());
+        assert!(set("toggleHudAlone", "KeyQ").await.is_err());
+
+        set("fullscreen", "KeyJ").await.unwrap();
+        engine
+            .handle(Command::ResetShortcuts {
+                id: Some("panic".into()),
+            })
+            .await
+            .unwrap();
+        let shortcuts = store::shortcuts(&data);
+        assert!(shortcuts.is_default("panic"));
+        assert!(!shortcuts.is_default("fullscreen"));
+        engine
+            .handle(Command::ResetShortcuts { id: None })
+            .await
+            .unwrap();
+        assert_eq!(store::shortcuts(&data), Shortcuts::default());
+        engine.shutdown().await;
+    }
+
+    #[test]
+    fn a_relay_url_in_use_matches_it_as_typed() {
+        let typed = RelaySetting::Custom("https://relay.example.com".into());
+        let running = relay_in_use(&typed.choice().unwrap());
+        assert_eq!(
+            running,
+            Some(RelaySetting::Custom("https://relay.example.com/".into())),
+            "iroh's own form"
+        );
+        assert!(!restart_needed(&typed, &running));
+        assert!(restart_needed(&RelaySetting::Public, &running));
+        assert!(restart_needed(&typed, &Some(RelaySetting::Public)));
+        assert!(!restart_needed(
+            &RelaySetting::Public,
+            &Some(RelaySetting::Public)
+        ));
+        // Broken: it runs as public, and restarting changes nothing.
+        let broken = RelaySetting::Custom("nonsense".into());
+        assert!(!restart_needed(&broken, &Some(RelaySetting::Public)));
+    }
+
+    #[tokio::test]
+    async fn the_relay_setting_is_checked_saved_and_applies_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path()).await;
+        let network = || async {
+            let Response::Network(view) = engine.handle(Command::GetNetwork).await.unwrap() else {
+                panic!("expected the network view");
+            };
+            view
+        };
+        let first = network().await;
+        assert_eq!(first.saved, RelaySetting::Public);
+        assert_eq!(first.in_use, None, "the tests run without relays");
+        assert_eq!(first.home_relay, None);
+
+        for bad in [
+            "relay.example.com",
+            "http://relay.example.com",
+            "ftp://relay.example.com",
+            "https://",
+            "https://user:token@relay.example.com",
+        ] {
+            assert!(
+                engine
+                    .handle(Command::SetNetwork {
+                        relay: RelaySetting::Custom(bad.into()),
+                    })
+                    .await
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        for good in [" https://relay.example.com ", "http://localhost:3340"] {
+            engine
+                .handle(Command::SetNetwork {
+                    relay: RelaySetting::Custom(good.into()),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                network().await.saved,
+                RelaySetting::Custom(good.trim().into())
+            );
+        }
+        engine.shutdown().await;
+
+        // The next start binds with it.
+        let profile = Profile::new("test", dir.path()).unwrap();
+        let RelayChoice::Custom(urls) = EngineOptions::desktop(&profile).relays else {
+            panic!("expected our relay");
+        };
+        assert_eq!(urls[0].host_str(), Some("localhost"));
+        // A hand-edited file that no longer parses falls back to public.
+        std::fs::write(
+            profile.data_dir().join("network.json"),
+            br#"{"relay": {"custom": "nonsense"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            EngineOptions::desktop(&profile).relays,
+            RelayChoice::N0Public
+        ));
     }
 
     #[test]

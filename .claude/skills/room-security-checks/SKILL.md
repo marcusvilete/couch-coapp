@@ -46,6 +46,7 @@ cargo test -p couch-engine --test sessions              # sessions over the same
 | The host never joins its own session as a viewer, and its own controller's seat changes send no `SeatReleased` to anyone | `HostSession::join`, `rooms::sessions` (`HostEvent::Revoked`) | `the_host_never_watches_their_own_session` |
 | A ban, a departure or a lost connection ends watching and releases the viewer's input | `session_closed`, `end_room_sessions` | engine `a_ban_while_watching_ends_it`, `a_host_leaving_the_room_ends_its_stream` |
 | Window titles stay out of logs | `Debug` of `GoLive` and `Sources` | `window_titles_stay_out_of_debug` |
+| The relay is the user's choice (P3): public or one https URL (http only for localhost), applied at start; with relays configured, invites still carry the relay alone, never an IP | `RelaySetting::choice`, `EngineOptions::desktop`, `Actor::invite` (`allow_ips`) | engine `the_relay_setting_is_checked_saved_and_applies_at_start`; the `--ignored` relay test after touching the endpoint |
 
 ## Review the diff for
 
@@ -65,7 +66,7 @@ cargo test -p couch-engine --test sessions              # sessions over the same
 ## What isn't covered automatically
 
 - **Several profiles on one machine**: `npm run tauri dev` in `apps\desktop`, then `.\scripts\profiles.ps1` (alice, bob, carol). Ask the user to join, ban, leave and close a room with one of them closed meanwhile, and to open an invite link from a browser. `docs/m4b-results.md` has the full list.
-- **Across networks and NATs**: needs our relay (M7) and a second machine.
+- **Across networks and NATs**: a second machine on another network, through iroh's public relays (or a relay set in Settings → Network); our own relay comes in M7. Members on different relay settings must still meet (iroh dials a relay outside its own list).
 - **The admission composition itself**: needs an outside review before any public release.
 
 ## After the checks

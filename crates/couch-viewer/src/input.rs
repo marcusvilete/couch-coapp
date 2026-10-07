@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use couch_gamepad::{read_pad, rumble_strength};
 use couch_input::{
     DEV_PAD_IDS, HidUsage, XBOX_360_IDS,
-    shortcuts::{self, Shortcut},
+    shortcuts::{Shortcut, Shortcuts},
 };
 use couch_proto::{
     ids::Permissions,
@@ -42,6 +42,9 @@ pub struct InputCapture {
     active: Option<JoystickId>,
     last_pad: PadSnapshot,
     seat: Option<SeatState>,
+    /// The table in use: the defaults until the main process sends the
+    /// user's keys.
+    shortcuts: Shortcuts,
     focused: bool,
     /// The user freed the mouse with the hotkey.
     mouse_freed: bool,
@@ -73,6 +76,7 @@ impl InputCapture {
             active: None,
             last_pad: PadSnapshot::default(),
             seat: None,
+            shortcuts: Shortcuts::default(),
             focused: false,
             mouse_freed: false,
             captured: false,
@@ -103,6 +107,12 @@ impl InputCapture {
         if !seat.holding {
             self.rumble(RumbleState::default());
         }
+    }
+
+    /// The user's shortcut keys. Keys forwarded and still down stay
+    /// tracked, so a key that becomes a shortcut while held still goes up.
+    pub fn set_shortcuts(&mut self, shortcuts: Shortcuts) {
+        self.shortcuts = shortcuts;
     }
 
     pub fn rumble(&mut self, rumble: RumbleState) {
@@ -141,7 +151,7 @@ impl InputCapture {
                     if self.captured {
                         format!(
                             "  ({} frees the mouse)",
-                            shortcuts::binding(Shortcut::FreeMouse).keys()
+                            self.shortcuts.binding(Shortcut::FreeMouse).keys()
                         )
                     } else {
                         "  (click to capture the mouse)".to_string()
@@ -179,7 +189,9 @@ impl InputCapture {
                     && hotkey(*keymod, Mod::LALTMOD, Mod::RALTMOD)
                     && hotkey(*keymod, Mod::LSHIFTMOD, Mod::RSHIFTMOD);
                 // F3 alone is a shortcut only while keys aren't being sent.
-                let shortcut = shortcuts::viewer_shortcut(HidUsage(usage), chord)
+                let shortcut = self
+                    .shortcuts
+                    .viewer_shortcut(HidUsage(usage), chord)
                     .filter(|_| chord || !self.may(Permissions::KEYBOARD));
                 let Some(shortcut) = shortcut else {
                     if self.focused && self.keys.insert(usage) {

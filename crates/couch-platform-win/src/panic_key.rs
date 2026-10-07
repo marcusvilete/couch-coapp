@@ -516,6 +516,26 @@ mod tests {
         );
     }
 
+    /// Every key the user may move a shortcut to has a plain scancode, so
+    /// the hook can be installed on it (`install` refuses others) and no
+    /// keyboard's fake Shift events come with it.
+    #[test]
+    fn every_allowed_shortcut_key_has_a_plain_scancode() {
+        for key in couch_input::shortcuts::KEYS {
+            assert!(
+                matches!(
+                    key_code(key.usage.0),
+                    Some(KeyCode::Scan {
+                        extended: false,
+                        ..
+                    })
+                ),
+                "{} has no plain scancode",
+                key.name
+            );
+        }
+    }
+
     #[test]
     fn the_extended_twin_is_another_key() {
         // Numpad Enter is Enter's scancode with E0: not the same key.

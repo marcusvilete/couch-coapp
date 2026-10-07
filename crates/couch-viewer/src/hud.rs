@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use couch_input::shortcuts::{self, Shortcut};
+use couch_input::shortcuts::{Shortcut, Shortcuts};
 use couch_proto::{
     ipc::{HudRole, HudSeat, HudState, UserAction},
     session::seat_phrase,
@@ -39,13 +39,15 @@ pub struct Hud {
     ctx: egui::Context,
     renderer: egui_wgpu::Renderer,
     started: Instant,
-    /// The whole HUD (Ctrl+Alt+Shift+H).
+    /// The whole HUD (Ctrl+Alt+Shift+H by default).
     pub visible: bool,
     pub show_stats: bool,
     /// Full screen now, for the button's label.
     pub fullscreen: bool,
     /// No picture has arrived yet.
     pub waiting: bool,
+    /// The keys the bar's hint names.
+    pub shortcuts: Shortcuts,
     session: Option<HudState>,
     note: Option<(String, Instant)>,
     changed_at: Option<Instant>,
@@ -80,6 +82,7 @@ impl Hud {
             show_stats: true,
             fullscreen: false,
             waiting: false,
+            shortcuts: Shortcuts::default(),
             session: None,
             note: None,
             changed_at: None,
@@ -287,6 +290,7 @@ impl Hud {
                             self.note.as_ref().map(|(n, _)| n.as_str()),
                             self.fullscreen,
                             self.show_stats,
+                            &self.shortcuts,
                             &mut actions,
                         )
                     });
@@ -363,6 +367,7 @@ fn session_bar(
     note: Option<&str>,
     fullscreen: bool,
     stats: bool,
+    shortcuts: &Shortcuts,
     clicks: &mut Vec<BarClick>,
 ) {
     egui::Frame::new()
@@ -468,9 +473,9 @@ fn session_bar(
             ui.label(
                 RichText::new(format!(
                     "{}: ask or give back · {}: full screen · {}: hide",
-                    shortcuts::binding(Shortcut::ToggleControl).keys(),
-                    shortcuts::binding(Shortcut::Fullscreen).key_name,
-                    shortcuts::binding(Shortcut::ToggleHud).key_name,
+                    shortcuts.binding(Shortcut::ToggleControl).keys(),
+                    shortcuts.binding(Shortcut::Fullscreen).key_name(),
+                    shortcuts.binding(Shortcut::ToggleHud).key_name(),
                 ))
                 .small()
                 .color(Color32::GRAY),

@@ -864,12 +864,17 @@ async fn joins_through_the_public_relay() {
     stop_all(&mut [&mut a, &mut b]).await;
 }
 
-/// A UDP port free on both IPv4 and IPv6 right now.
+/// A UDP port free on both IPv4 and IPv6, never handed out twice in this
+/// process: the OS may offer a port again once our probe lets go of it,
+/// before the engine that got it first has bound it.
 fn free_port() -> u16 {
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
     loop {
         let v4 = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         let port = v4.local_addr().unwrap().port();
-        if std::net::UdpSocket::bind(("::", port)).is_ok() {
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) && std::net::UdpSocket::bind(("::", port)).is_ok() {
+            given.push(port);
             return port;
         }
     }

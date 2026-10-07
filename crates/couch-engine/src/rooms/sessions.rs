@@ -12,14 +12,11 @@
 
 use std::{any::Any, collections::BTreeMap};
 
-use couch_input::{
-    local::ControllerIds,
-    shortcuts::{self, Shortcut},
-};
+use couch_input::{local::ControllerIds, shortcuts::Shortcut};
 use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
-    ipc::{HudRole, HudSeat, HudState, UserAction},
+    ipc::{HudRole, HudSeat, HudState, ShortcutKeys, UserAction},
     session::{
         Cancel, ControlCancel, ControlRequest, EndReason, GameFocus, JoinResult, SeatKind,
         SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, seat_labels, seat_phrase,
@@ -55,9 +52,10 @@ struct Hosting {
     /// The connection each viewer joined on. When it closes, the viewer
     /// has gone: its stream and input were bound to it.
     viewer_conns: BTreeMap<MemberId, ConnId>,
-    /// The panic key's hook, in place while the stream runs; `None` if it
-    /// couldn't be installed.
-    panic_key: Option<Box<dyn Any + Send>>,
+    /// The panic key's hook, in place while the stream runs, with the keys
+    /// it listens for ("Ctrl+Alt+Shift+Backspace"); `None` if it couldn't be
+    /// installed.
+    panic_key: Option<(Box<dyn Any + Send>, String)>,
     /// Whether the streamed window is in front, as last reported; `None`
     /// before the first report, and always for a screen.
     in_front: Option<bool>,
@@ -899,8 +897,12 @@ impl Actor {
                 });
             }
         };
-        h.panic_key = match self.backend.panic_key(Box::new(on_press)) {
-            Ok(hook) => Some(hook),
+        // The user's key, read now: a change made while live applies at
+        // the next Go live.
+        let shortcuts = crate::store::shortcuts(&self.data_dir);
+        let panic = shortcuts.binding(Shortcut::Panic);
+        h.panic_key = match self.backend.panic_key(panic.key, Box::new(on_press)) {
+            Ok(hook) => Some((hook, panic.keys())),
             Err(e) => {
                 tracing::error!("no panic key while streaming: {e}");
                 None
@@ -1221,12 +1223,15 @@ impl Actor {
         let options = WatchOptions {
             session: Some(session.0),
             viewer: ViewerOptions {
-                log: Some(self.viewer_log.clone()),
+                log: Some(self.data_dir.join("viewer.log")),
                 hide_stats: true,
                 ..ViewerOptions::default()
             },
             measure: false,
             restart_viewer: true,
+            shortcuts: ShortcutKeys {
+                keys: crate::store::shortcuts(&self.data_dir).changed(),
+            },
         };
         // The subscriptions are in place before the host is asked.
         let (watch, mut events) = Watch::start(
@@ -1646,10 +1651,7 @@ impl Actor {
                     })
                     .collect(),
                 asked_seat: None,
-                panic_key: h
-                    .panic_key
-                    .is_some()
-                    .then(|| shortcuts::binding(Shortcut::Panic).keys()),
+                panic_key: h.panic_key.as_ref().map(|(_, keys)| keys.clone()),
                 host_controller: h.controller.clone().and_then(Result::ok),
                 host_controller_problem: h.controller.clone().and_then(Result::err),
             });

@@ -6,9 +6,8 @@ use std::{any::Any, process::Stdio, sync::Arc, time::Duration};
 
 use couch_codec_ffmpeg::FfmpegEncoder;
 use couch_input::{
-    DEV_PAD_IDS, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
+    DEV_PAD_IDS, HidUsage, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
     local::{ControllerIds, LocalPads},
-    shortcuts::{self, Shortcut},
 };
 use couch_media::{
     AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, audio::ToneSource,
@@ -233,9 +232,12 @@ impl Backend for WindowsBackend {
         })
     }
 
-    fn panic_key(&self, on_press: Box<dyn Fn() + Send>) -> Result<Box<dyn Any + Send>, MediaError> {
-        let key = shortcuts::binding(Shortcut::Panic).key.0;
-        let hook = PanicKey::install(key, on_press)
+    fn panic_key(
+        &self,
+        key: HidUsage,
+        on_press: Box<dyn Fn() + Send>,
+    ) -> Result<Box<dyn Any + Send>, MediaError> {
+        let hook = PanicKey::install(key.0, on_press)
             .map_err(|e| MediaError::Backend(format!("the panic-key hook: {e}")))?;
         Ok(Box::new(hook))
     }

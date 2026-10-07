@@ -24,7 +24,7 @@ pub mod watch;
 use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
 
 use couch_input::{
-    InputError, KbmInjector, VirtualPad,
+    HidUsage, InputError, KbmInjector, VirtualPad,
     local::{ControllerIds, LocalPads},
 };
 use couch_media::{AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, clock::Clock};
@@ -232,10 +232,15 @@ pub trait Backend: Send + Sync + 'static {
         0
     }
 
-    /// Hooks the host's panic key (`couch_input::shortcuts`) until the
-    /// returned guard drops. Only physical presses count, never injected
-    /// ones. `on_press` runs on the hook's own thread and must return at once.
-    fn panic_key(&self, on_press: Box<dyn Fn() + Send>) -> Result<Box<dyn Any + Send>, MediaError>;
+    /// Hooks the host's panic key, Ctrl+Alt+Shift+`key` (the panic row of
+    /// the user's `couch_input::shortcuts::Shortcuts`), until the returned
+    /// guard drops. Only physical presses count, never injected ones.
+    /// `on_press` runs on the hook's own thread and must return at once.
+    fn panic_key(
+        &self,
+        key: HidUsage,
+        on_press: Box<dyn Fn() + Send>,
+    ) -> Result<Box<dyn Any + Send>, MediaError>;
 }
 
 /// This machine's backend: Windows' own, or one that refuses everything
@@ -290,7 +295,11 @@ impl Backend for Unsupported {
     fn launch_viewer(&self, _: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
         Err(unsupported())
     }
-    fn panic_key(&self, _: Box<dyn Fn() + Send>) -> Result<Box<dyn Any + Send>, MediaError> {
+    fn panic_key(
+        &self,
+        _: HidUsage,
+        _: Box<dyn Fn() + Send>,
+    ) -> Result<Box<dyn Any + Send>, MediaError> {
         Err(unsupported())
     }
 }

@@ -8,7 +8,7 @@ use std::{
 
 use couch_proto::ipc::{
     self, AudioPacket, AudioStats, FrameTiming, HudState, LocalInput, NetStats, RumbleState,
-    SeatState, UserAction, VideoFrameHeader,
+    SeatState, ShortcutKeys, UserAction, VideoFrameHeader,
 };
 
 use crate::audio::AudioFeed;
@@ -24,6 +24,7 @@ pub enum ForWindow {
     Seat(SeatState),
     Rumble(RumbleState),
     Hud(HudState),
+    Shortcuts(ShortcutKeys),
 }
 
 /// What the viewer sends back.
@@ -84,13 +85,19 @@ pub fn spawn_reader(
                         *net.lock().unwrap() = NetStats::read(&frame.payload);
                         continue;
                     }
-                    ipc::kinds::SEAT | ipc::kinds::RUMBLE | ipc::kinds::HUD_STATE => {
+                    ipc::kinds::SEAT
+                    | ipc::kinds::RUMBLE
+                    | ipc::kinds::HUD_STATE
+                    | ipc::kinds::SHORTCUTS => {
                         let message = match frame.kind {
                             ipc::kinds::SEAT => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Seat)
                             }
                             ipc::kinds::RUMBLE => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Rumble)
+                            }
+                            ipc::kinds::SHORTCUTS => {
+                                ipc::from_payload(&frame.payload).map(ForWindow::Shortcuts)
                             }
                             _ => ipc::from_payload(&frame.payload).map(ForWindow::Hud),
                         };

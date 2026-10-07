@@ -6,9 +6,21 @@ import type { ShortcutScope } from "./ShortcutScope";
  */
 export type ShortcutView = { 
 /**
+ * Names the row for [`Command::SetShortcut`].
+ */
+id: string, 
+/**
  * Such as "Ctrl+Alt+Shift+H".
  */
-keys: string, action: string, scope: ShortcutScope, 
+keys: string, 
+/**
+ * Ctrl+Alt+Shift come with the key; otherwise only F-keys are allowed.
+ */
+chord: boolean, 
+/**
+ * On its default key.
+ */
+isDefault: boolean, action: string, scope: ShortcutScope, 
 /**
  * When it applies, if not always; empty otherwise.
  */

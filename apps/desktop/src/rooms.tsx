@@ -126,7 +126,7 @@ export function RoomColumn(props: {
   info: EngineInfo | null;
   actions: RoomActions;
   onEditName: () => void;
-  onShortcuts: () => void;
+  onSettings: () => void;
 }) {
   const { room } = props;
   return (
@@ -147,7 +147,7 @@ export function RoomColumn(props: {
         </div>
       )}
       {!room && <div className="column-body" />}
-      <UserPanel profile={props.profile} info={props.info} onEdit={props.onEditName} onShortcuts={props.onShortcuts} />
+      <UserPanel profile={props.profile} info={props.info} onEdit={props.onEditName} onSettings={props.onSettings} />
     </aside>
   );
 }
@@ -277,7 +277,7 @@ function UserPanel(props: {
   profile: ProfileView | null;
   info: EngineInfo | null;
   onEdit: () => void;
-  onShortcuts: () => void;
+  onSettings: () => void;
 }) {
   const name = props.profile?.displayName ?? "…";
   const profile = props.info?.profile;
@@ -290,8 +290,8 @@ function UserPanel(props: {
         </span>
         {profile && profile !== "default" && <span className="user-profile">profile {profile}</span>}
       </div>
-      <button className="icon" title="Keyboard shortcuts" aria-label="Keyboard shortcuts" onClick={props.onShortcuts}>
-        ⌨
+      <button className="icon" title="Settings: shortcuts and network" aria-label="Settings" onClick={props.onSettings}>
+        ⚙
       </button>
       <button className="icon" title="Change your name" aria-label="Change your name" onClick={props.onEdit}>
         ✎

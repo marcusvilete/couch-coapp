@@ -6,10 +6,12 @@ export function Modal(props: {
   title: string;
   onClose: () => void;
   busy?: boolean;
+  /** Room for a table, such as Settings'. */
+  wide?: boolean;
   children: ReactNode;
   footer?: ReactNode;
 }) {
-  const { title, onClose, busy, children, footer } = props;
+  const { title, onClose, busy, wide, children, footer } = props;
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -30,7 +32,14 @@ export function Modal(props: {
         if (e.target === e.currentTarget && !busy) onClose();
       }}
     >
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title} ref={box} tabIndex={-1}>
+      <div
+        className={wide ? "modal wide" : "modal"}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        ref={box}
+        tabIndex={-1}
+      >
         <h2>{title}</h2>
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-footer">{footer}</div>}

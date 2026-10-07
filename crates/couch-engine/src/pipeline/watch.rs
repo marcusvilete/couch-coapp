@@ -40,7 +40,7 @@ use couch_proto::{
     input::RumbleDatagram,
     ipc::{
         self, AudioPacket, AudioStats, FrameTiming, HudState, IpcFrame, LocalInput, NetStats,
-        RumbleState, SeatState, UserAction, VideoFrameHeader,
+        RumbleState, SeatState, ShortcutKeys, UserAction, VideoFrameHeader,
     },
     media::{AudioDatagram, datagram, decode_payload},
 };
@@ -67,6 +67,9 @@ pub struct WatchOptions {
     /// Start the viewer window again if it crashes (the app). `couch-cli
     /// view` leaves it off: `release-check` kills the window on purpose.
     pub restart_viewer: bool,
+    /// The user's shortcut keys, sent to every window right after `HELLO`;
+    /// empty for the defaults.
+    pub shortcuts: ShortcutKeys,
 }
 
 /// What watching reports.
@@ -375,12 +378,19 @@ async fn restart(ctx: &mut Ctx, forwarder: &mut Forwarder) -> bool {
     true
 }
 
-/// What a new window needs first: the version, the HUD, the seat.
+/// What a new window needs first: the version, the user's shortcut keys,
+/// the HUD, the seat.
 async fn hello(ctx: &mut Ctx, forwarder: &Forwarder) -> bool {
     let to = &mut ctx.window.to;
     if !to
         .send(ipc::kinds::HELLO, &ipc::IPC_VERSION.to_be_bytes())
         .await
+        || !to
+            .send(
+                ipc::kinds::SHORTCUTS,
+                &ipc::to_payload(&ctx.options.shortcuts),
+            )
+            .await
     {
         return false;
     }

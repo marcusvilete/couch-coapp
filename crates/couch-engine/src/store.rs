@@ -2,6 +2,11 @@
 //! - `identity.key`: the endpoint's secret key, sealed.
 //! - `settings.json`: the display name. Nothing secret.
 //! - `input-setups.json`: the input setup last used with each program.
+//! - `shortcuts.json`: the shortcut keys the user moved off their defaults.
+//! - `network.json`: the relay to use (applies when the engine starts).
+//!
+//! The room actor rewrites `settings.json` whole, so what the engine itself
+//! writes has files of its own.
 //! - `rooms/<room id>.room`: one remembered room each, sealed: its saved
 //!   state and, for rooms we own, the invites and the password key (never
 //!   the password).
@@ -13,16 +18,25 @@ use std::{
     sync::Arc,
 };
 
+use couch_input::shortcuts::Shortcuts;
 use couch_net::SecretKey;
 use couch_proto::ids::RoomId;
 use couch_room::room::SavedRoom;
 use serde::{Deserialize, Serialize};
 
-use crate::{InputSetup, secrets::SecretStore};
+use crate::{InputSetup, RelaySetting, secrets::SecretStore};
+
+/// `network.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct NetworkSettings {
+    pub relay: RelaySetting,
+}
 
 const IDENTITY_FILE: &str = "identity.key";
 const SETTINGS_FILE: &str = "settings.json";
 const INPUT_SETUPS_FILE: &str = "input-setups.json";
+const SHORTCUTS_FILE: &str = "shortcuts.json";
+const NETWORK_FILE: &str = "network.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread.
@@ -206,6 +220,51 @@ pub(crate) fn save_input_setup(dir: &Path, app: &str, setup: InputSetup) -> Resu
     write_atomic(&dir.join(INPUT_SETUPS_FILE), &bytes)
 }
 
+/// The user's shortcut keys (`shortcuts.json`: the rows moved off their
+/// defaults, by row id). Keys that no longer fit are logged and left at
+/// their defaults. Only the engine writes it.
+pub(crate) fn shortcuts(dir: &Path) -> Shortcuts {
+    let path = dir.join(SHORTCUTS_FILE);
+    let keys: BTreeMap<String, u16> = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            BTreeMap::new()
+        }),
+        Err(_) => BTreeMap::new(),
+    };
+    let (shortcuts, skipped) = Shortcuts::with_keys(&keys);
+    for (id, e) in skipped {
+        tracing::warn!(
+            "shortcut {id} in {}: {e}; its default applies",
+            path.display()
+        );
+    }
+    shortcuts
+}
+
+pub(crate) fn save_shortcuts(dir: &Path, shortcuts: &Shortcuts) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(&shortcuts.changed()).expect("keys serialize");
+    write_atomic(&dir.join(SHORTCUTS_FILE), &bytes)
+}
+
+/// The network settings (`network.json`); the defaults if there are none or
+/// they can't be read. Only the engine writes it.
+pub(crate) fn network(dir: &Path) -> NetworkSettings {
+    let path = dir.join(NETWORK_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            NetworkSettings::default()
+        }),
+        Err(_) => NetworkSettings::default(),
+    }
+}
+
+pub(crate) fn save_network(dir: &Path, network: &NetworkSettings) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(network).expect("settings serialize");
+    write_atomic(&dir.join(NETWORK_FILE), &bytes)
+}
+
 /// Writes a sibling temporary file and renames it over `path`, so a crash
 /// leaves the old file or the new one, never half of one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
@@ -321,5 +380,50 @@ mod tests {
         // A damaged file is ignored, not an error.
         fs::write(dir.path().join(INPUT_SETUPS_FILE), b"{").unwrap();
         assert!(input_setups(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn shortcut_keys_roundtrip_and_bad_ones_fall_back() {
+        use couch_input::{HidUsage, shortcuts::Shortcut};
+
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(shortcuts(dir.path()), Shortcuts::default());
+        let mut moved = Shortcuts::default();
+        moved.set("panic", HidUsage(0x13)).unwrap();
+        save_shortcuts(dir.path(), &moved).unwrap();
+        assert_eq!(shortcuts(dir.path()), moved);
+        // Only what moved is written.
+        let text = fs::read_to_string(dir.path().join(SHORTCUTS_FILE)).unwrap();
+        assert!(text.contains("panic") && !text.contains("fullscreen"));
+
+        // Esc isn't allowed: that row keeps its default, the rest applies.
+        fs::write(
+            dir.path().join(SHORTCUTS_FILE),
+            br#"{"panic": 41, "fullscreen": 13}"#,
+        )
+        .unwrap();
+        let table = shortcuts(dir.path());
+        assert!(table.is_default("panic"));
+        assert_eq!(table.binding(Shortcut::Fullscreen).key, HidUsage(13));
+        fs::write(dir.path().join(SHORTCUTS_FILE), b"[").unwrap();
+        assert_eq!(shortcuts(dir.path()), Shortcuts::default());
+    }
+
+    #[test]
+    fn network_settings_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(network(dir.path()).relay, RelaySetting::Public);
+        let custom = NetworkSettings {
+            relay: RelaySetting::Custom("https://relay.example.com".into()),
+        };
+        save_network(dir.path(), &custom).unwrap();
+        assert_eq!(network(dir.path()), custom);
+        let text = fs::read_to_string(dir.path().join(NETWORK_FILE)).unwrap();
+        assert!(
+            text.contains(r#""custom": "https://relay.example.com""#),
+            "{text}"
+        );
+        fs::write(dir.path().join(NETWORK_FILE), b"{}").unwrap();
+        assert_eq!(network(dir.path()), NetworkSettings::default());
     }
 }

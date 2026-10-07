@@ -24,7 +24,7 @@ use couch_engine::{
     secrets::Unprotected,
 };
 use couch_input::{
-    InputError, KbmInjector, PadButtons, PadState, Rumble, VirtualPad, VirtualPadFactory,
+    HidUsage, InputError, KbmInjector, PadButtons, PadState, Rumble, VirtualPad, VirtualPadFactory,
     local::{ControllerIds, LOCAL_PAD_EVERY, LocalController, LocalPad, LocalPads},
 };
 use couch_media::{
@@ -35,7 +35,7 @@ use couch_media::{
 use couch_net::endpoint::RelayChoice;
 use couch_proto::{
     input::PadSnapshot,
-    ipc::{HudState, LocalInput, SeatState, UserAction, VideoFrameHeader},
+    ipc::{HudState, LocalInput, SeatState, ShortcutKeys, UserAction, VideoFrameHeader},
     session::SeatKind,
 };
 use couch_room::{limits::LimitConfig, room::Timings};
@@ -62,6 +62,8 @@ struct Fake {
     clock: Arc<ProcessClock>,
     /// The panic key's handler while the engine has it hooked.
     panic_key: PanicHook,
+    /// The key the panic-key hook was last installed on.
+    panic_key_on: Mutex<Option<HidUsage>>,
     /// The game window isn't in front (another window took the focus).
     away: AtomicBool,
     /// The host's own controller.
@@ -339,9 +341,11 @@ impl Backend for Fake {
 
     fn panic_key(
         &self,
+        key: HidUsage,
         on_press: Box<dyn Fn() + Send>,
     ) -> Result<Box<dyn std::any::Any + Send>, MediaError> {
         *self.panic_key.lock().unwrap() = Some(on_press);
+        *self.panic_key_on.lock().unwrap() = Some(key);
         Ok(Box::new(Unhook(self.panic_key.clone())))
     }
 }
@@ -390,6 +394,9 @@ struct FakeViewer {
     /// Pipe frames to send back: (kind, payload).
     say: Arc<Mutex<Option<Said>>>,
     shut_down: Arc<AtomicBool>,
+    /// The kinds of the first frames from the main process, in order.
+    first_kinds: Arc<Mutex<Vec<u8>>>,
+    shortcuts: Arc<Mutex<Option<ShortcutKeys>>>,
 }
 
 impl FakeViewer {
@@ -407,7 +414,16 @@ impl FakeViewer {
                 tokio::select! {
                     frame = ipc::read_frame(&mut viewer_in) => {
                         let Ok(Some(frame)) = frame else { break };
+                        {
+                            let mut first = v.first_kinds.lock().unwrap();
+                            if first.len() < 4 {
+                                first.push(frame.kind);
+                            }
+                        }
                         match frame.kind {
+                            couch_proto::ipc::kinds::SHORTCUTS => {
+                                *v.shortcuts.lock().unwrap() = couch_proto::ipc::from_payload(&frame.payload);
+                            }
                             couch_proto::ipc::kinds::VIDEO_FRAME => {
                                 if let Some((header, _)) = VideoFrameHeader::read(&frame.payload) {
                                     v.first_was_key.lock().unwrap().get_or_insert(header.keyframe);
@@ -823,12 +839,17 @@ async fn stop_all(members: &mut [&mut Member]) {
     }
 }
 
-/// A UDP port free on both IPv4 and IPv6 right now.
+/// A UDP port free on both IPv4 and IPv6, never handed out twice in this
+/// process: the OS may offer a port again once our probe lets go of it,
+/// before the engine that got it first has bound it.
 fn free_port() -> u16 {
+    static GIVEN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
     loop {
         let v4 = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         let port = v4.local_addr().unwrap().port();
-        if std::net::UdpSocket::bind(("::", port)).is_ok() {
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) && std::net::UdpSocket::bind(("::", port)).is_ok() {
+            given.push(port);
             return port;
         }
     }
@@ -1815,6 +1836,71 @@ async fn the_input_setup_is_remembered_for_the_program() {
         assert!(Instant::now() < deadline, "the setup remembered");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moved_shortcuts_reach_the_hook_and_the_stream_window() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let set = |id: &str, code: &str| Command::SetShortcut {
+        id: id.into(),
+        code: code.into(),
+    };
+    a.ok(set("panic", "KeyP")).await;
+    b.ok(set("fullscreen", "KeyJ")).await;
+    b.ok(set("toggleHudAlone", "F2")).await;
+
+    a.go_live(&room, 4).await;
+    assert_eq!(*a.fake.panic_key_on.lock().unwrap(), Some(HidUsage(0x13)));
+    assert_eq!(
+        a.session(&room, &a).await.unwrap().panic_key.as_deref(),
+        Some("Ctrl+Alt+Shift+P")
+    );
+    assert!(a.fake.press_panic_key());
+    a.wait_session(&room, &a, "control paused", |s| {
+        s.is_some_and(|s| s.control_paused)
+    })
+    .await;
+
+    // The window hears B's keys right after the version, before anything
+    // else; C's window gets an empty list (the defaults).
+    let b_window = watching(&room, &a, &b).await;
+    wait("B's window has its keys", || {
+        b_window.shortcuts.lock().unwrap().is_some()
+    })
+    .await;
+    assert_eq!(
+        b_window.first_kinds.lock().unwrap()[..2],
+        [
+            couch_proto::ipc::kinds::HELLO,
+            couch_proto::ipc::kinds::SHORTCUTS
+        ]
+    );
+    assert_eq!(
+        b_window.shortcuts.lock().unwrap().clone().unwrap().keys,
+        [
+            ("fullscreen".to_string(), 0x0D),
+            ("toggleHudAlone".to_string(), 0x3B)
+        ]
+        .into()
+    );
+    let c_window = watching(&room, &a, &c).await;
+    wait("C's window has the defaults", || {
+        c_window
+            .shortcuts
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|s| s.keys.is_empty())
+    })
+    .await;
+
+    // A change while live applies at the next Go live.
+    a.ok(set("panic", "KeyO")).await;
+    assert_eq!(*a.fake.panic_key_on.lock().unwrap(), Some(HidUsage(0x13)));
+    a.ok(Command::StopLive).await;
+    a.go_live(&room, 4).await;
+    assert_eq!(*a.fake.panic_key_on.lock().unwrap(), Some(HidUsage(0x12)));
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

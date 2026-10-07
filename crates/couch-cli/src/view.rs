@@ -168,6 +168,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             // Off by default: `release-check` kills the window on purpose and
             // expects the connection to close.
             restart_viewer: args.restart_viewer,
+            // The default keys.
+            shortcuts: Default::default(),
         },
     )?;
     control_tx

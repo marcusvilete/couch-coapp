@@ -5,7 +5,9 @@ import { ChangePasswordDialog, ConfirmDialog, CreateRoomDialog, InviteDialog, Jo
 import { request } from "./engine";
 import { useLobby } from "./lobby";
 import { RoomColumn, RoomRail, Welcome, type RoomActions } from "./rooms";
-import { GoLiveDialog, ShortcutsDialog, Stage, busyIn } from "./sessions";
+import { GoLiveDialog, Stage, busyIn } from "./sessions";
+import { SettingsDialog } from "./settings";
+import { Splash } from "./splash";
 import { Modal } from "./ui";
 import "./App.css";
 
@@ -16,7 +18,7 @@ type Dialog =
   | { kind: "invite"; room: RoomView }
   | { kind: "name" }
   | { kind: "goLive"; room: RoomView }
-  | { kind: "shortcuts" }
+  | { kind: "settings" }
   | { kind: "password"; room: RoomView }
   | { kind: "confirm"; title: string; body: string; action: string; danger?: boolean; run: () => Promise<unknown> };
 
@@ -55,6 +57,8 @@ function App() {
   const [selected, setSelected] = useState<string | null>(remembered);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const close = useCallback(() => setDialog(null), []);
+  const [splash, setSplash] = useState(true);
+  const endSplash = useCallback(() => setSplash(false), []);
 
   const [order, setOrder] = useState<string[]>(rememberedOrder);
   const rooms = ordered(lobby.rooms, order);
@@ -185,7 +189,7 @@ function App() {
         info={lobby.info}
         actions={actions}
         onEditName={() => setDialog({ kind: "name" })}
-        onShortcuts={() => setDialog({ kind: "shortcuts" })}
+        onSettings={() => setDialog({ kind: "settings" })}
       />
       {room ? (
         <Stage
@@ -272,7 +276,8 @@ function App() {
           }}
         />
       )}
-      {dialog?.kind === "shortcuts" && <ShortcutsDialog onClose={close} />}
+      {dialog?.kind === "settings" && <SettingsDialog section="shortcuts" busy={busyIn(rooms)} onClose={close} />}
+      {splash && <Splash ready={lobby.loaded || lobby.failure != null} onDone={endSplash} />}
       {dialog?.kind === "confirm" && (
         <ConfirmDialog
           title={dialog.title}
