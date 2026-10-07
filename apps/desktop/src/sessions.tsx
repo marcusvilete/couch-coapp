@@ -283,7 +283,8 @@ function HostPanel(props: {
       {pad && (
         <p className="banner" role="status">
           Your {pad} is hidden from games while you're live. If the game still reacts to it directly, reconnect it once
-          (unplug it and plug it back, or turn it off and on) so games and Steam let go of it.
+          (turn it off and on, or unplug it and plug it back into the same port) so games and Steam let go of it. If a
+          seat gets no player in a Steam game, turn Steam Input off for that game.
         </p>
       )}
       {s.hostControllerProblem && (
@@ -810,9 +811,9 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
                 {sources.hiding === "notInstalled"
                   ? "To play on a seat with your controller, install HidHide (it needs administrator rights, then a restart): github.com/nefarius/HidHide/releases."
                   : sources.hiding === "busy"
-                    ? "HidHide's configuration window is open: close it, then refresh the list above."
+                    ? "HidHide is busy right now. If its configuration window is open, close it; then refresh the list above."
                     : controller
-                      ? "It is hidden from games while you're live and plays its seat through Couch Co-App, so every seat, yours included, can be handed over. Reconnect it once after going live, so games and Steam let go of it."
+                      ? "It is hidden from games while you're live and plays its seat through Couch Co-App, so every seat, yours included, can be handed over. Reconnect it once after going live, so games and Steam let go of it. For a Steam game, turn Steam Input off for it (the game's Properties → Controller): otherwise Steam may keep a player for your hidden controller, and one seat gets none."
                       : "You play outside the seats, as the game sees your controller."}
               </p>
             </>

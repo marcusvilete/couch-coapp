@@ -59,9 +59,17 @@ Found while planning, from its documentation and source (MIT; we only call its c
 - **CLI:** `host --host-pad` claims seat 0 again whenever its hold ends; `--allow-kbm` applies to the first guest's seat; `host-pad --feed` goes through a seat router, as the app does.
 - **Text:** a `subst` drive's path is refused for the whitelist; the host panel's "no seat" line says only the seat you last played comes back; a forced "none" in Go live is no longer remembered as your choice; `CLAUDE.md` named a command that doesn't exist.
 
+**Your runs with the app (one PC, Fling to the Finish, Multiplayer with 4 controllers, your DualSense on a seat):**
+- **One seat short.** Only 3 of the 4 seats got a player in the game; on the 4th, "Play here" did nothing in it. `xinput-watch` showed all four slots working, so our side delivered every seat. (The slots' order doesn't match the seats': Windows numbers XInput slots itself, as seen since M5b.)
+- **A wrong turn.** We first suspected the game kept player 1 for the controller it saw at start, before Go live hid it, and I added a "Hide it now" button for hiding before starting the game. It didn't change anything, and was rolled back before committing.
+- **The cause was Steam Input.** With it on for the game, Steam kept a player for the hidden DualSense. With it off, all 4 seats worked, in the original order too: the game running with the DualSense visible, then Go live hiding it, then one reconnect. Go live and the host panel now say to turn Steam Input off for the game.
+- **"HidHide's configuration window is open" when it wasn't.** The Go live dialog's check tried HidHide's control device once, and any failure read as that window. Something else held the device for a moment, perhaps HidHide's own watchdog service or our app. The check now waits up to a second, like hiding does; an unexpected error no longer reads as busy; and the text says "busy" without guessing why. Gone on your next try.
+- **Steam's global "PlayStation Controller Support" off works as well,** but then the DualSense works in games only through our app (while live). Turning Steam Input off for the one game is enough.
+
 ## Things to know
 
-- **Reconnect once after going live.** HidHide refuses only new opens; until the controller is reconnected, a game or Steam that had it open still sees it beside our pad. The host panel says so.
+- **Turn Steam Input off for the game** (Steam → the game's Properties → Controller) when you play on a seat: with it on, Steam keeps a player for your hidden controller and one seat gets none (Fling to the Finish).
+- **Reconnect it once after going live.** HidHide refuses only new opens; until the controller is reconnected, a game or Steam that had it open still sees it beside our pad. The host panel says so.
 - **Killed while live, your controller stays hidden** until the app (or `couch-cli host`) starts again. HidHide's own configuration client (Start menu) also shows and clears the list. HidHide's session blacklist would remove this, once released.
 - **HidHide's "Enable device hiding"** is turned on while you're live if it was off, and off again afterwards (by the last of our hosts on this PC to stop). With it on, anything else you put on HidHide's list is hidden too, as you'd expect.
 - **Our exe stays on HidHide's whitelist** (it only lets our own exe see hidden devices). In development that is the debug and release `couch-cli.exe` and the app's exe, by path.
@@ -81,7 +89,7 @@ Found while planning, from its documentation and source (MIT; we only call its c
 
 ## Your run (to do, two PCs; a fresh `pack-guest.ps1` build on the guest)
 
-1. Fling to the Finish, Multiplayer with 2 controllers, "Your controller: DualSense" in Go live. After going live, turn the DualSense off and on, then start (or return to) the game. You play player 1 on Controller 1; the guest asks for Controller 2 and plays player 2.
+1. **Steam Input off for Fling to the Finish** (in Steam). Start the game, go live on its window: Multiplayer with 2 controllers, "Your controller: DualSense". Turn the DualSense off and on. You play on Controller 1; the guest asks for Controller 2. Both get a player in the game.
 2. Pass Controller 1 to the guest (they move to it; you're on no seat). Take it back: it comes back to your controller. Then "Play here" on Controller 2 (the guest there loses it), and pass Controller 1 to the guest again.
 3. Single player: you play the seat; pass it, take it back (it comes back to your controller); the panic key with the guest playing (you keep playing).
 4. Stop: your DualSense works in games again (maybe after one reconnect). Then go live again, end the app from Task Manager's Details tab, start it again: the DualSense is back.

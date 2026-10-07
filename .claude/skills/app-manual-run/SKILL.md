@@ -100,6 +100,7 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 Needs HidHide installed on the host (administrator, then a restart; installed on the user's PC on 2026-10-06) and a controller that isn't an Xbox 360 one (theirs is a DualSense, on Bluetooth).
 - **Go live's "Your controller".** Lists the host's controllers (never our pads) when a seat has a pad; the choice is remembered in the profile's web storage. Its line says what HidHide allows: not installed (with the download page), its configuration window open (close it, refresh), or ready.
 - **After going live** the host panel says the controller is hidden and asks to reconnect it once. Until then, a game or Steam that had it open still sees it. After it, `joy.cpl` (closed and reopened) lists only "Xbox 360 Controller", and `xinput-watch.ps1` shows the host's input in that pad's slot.
+- **Steam Input off for the game** (its Properties → Controller), or one seat gets no player in it: Steam keeps a player for the hidden controller. Turning off Steam's global PlayStation support instead also works, but then the DualSense works in games only while live.
 - **The seats list** shows "you (DualSense Wireless Controller)" on Controller 1, Take back on guests' seats, and Play here on the others with a pad. Passing the host's seat to a guest leaves the host on none; Take back (or the guest giving it back or leaving) returns it. The panic key removes guests but the host keeps playing.
 - **Stopping** shows the controller again (log: `the host's controller is shown again`). If the app was killed, it stays hidden until the next start of the app or of `couch-cli host` (log: `showed 1 controller(s) hidden by a host that crashed`). HidHide's own configuration client (Start menu) also shows and clears the list.
 - **If hiding fails**, the host panel says why and the host plays outside the seats, as in P1.
@@ -172,5 +173,7 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
   - Alt+F4 while only watching closes the guest's own window.
   - A host controller taking player 1 in co-op when it isn't on a seat: Go live warns; choosing it in "Your controller" (P2) hides it.
   - The host's controller still working in a game right after going live: it wasn't reconnected yet (HidHide refuses only new opens).
+  - With the host's controller on a seat, one seat short in the game (3 of 4 work, `xinput-watch` shows all 4 slots moving): Steam Input is on for the game and keeps a player for the hidden controller. Turn it off (the game's Properties → Controller). Seen with Fling to the Finish.
+  - Seat order isn't XInput slot order: Windows numbers the slots itself. Tell seats apart by moving one pad at a time in `xinput-watch`.
   - A full-screen game ignoring the guest once (M5b): an observation, not a known bug; note whether it happens again.
 - **Record** each run in the milestone's results file ("Your run" row), and new observations the user wants kept in the polish backlog memory.

@@ -64,7 +64,8 @@ use crate::{
 pub enum State {
     NotInstalled,
     Ready,
-    /// Another program holds its control device: its configuration window.
+    /// Another program held its control device for over a second: most
+    /// likely its configuration window.
     Busy,
 }
 
@@ -72,7 +73,7 @@ pub enum State {
 pub enum HideError {
     #[error("HidHide isn't installed")]
     NotInstalled,
-    #[error("HidHide's configuration window is open; close it and try again")]
+    #[error("HidHide is busy (its configuration window may be open); try again in a moment")]
     Busy,
     #[error("that controller isn't plugged in")]
     NotFound,
@@ -82,15 +83,22 @@ pub enum HideError {
     Failed(String),
 }
 
-/// Whether HidHide is installed and free to use.
+/// Whether HidHide is installed and free to use. Waits up to a second for
+/// another holder of its control device to let go: its watchdog service
+/// and our own calls hold it for moments too, not only its configuration
+/// window.
 pub fn state() -> State {
-    match Control::open() {
+    match Control::open_patiently() {
         Ok(_) => State::Ready,
         Err(HideError::NotInstalled) => State::NotInstalled,
-        Err(HideError::Busy) => State::Busy,
-        Err(e) => {
-            tracing::debug!("HidHide: {e}");
+        Err(HideError::Busy) => {
+            tracing::info!("HidHide's control device stayed busy for a second");
             State::Busy
+        }
+        // Not a known reason to wait: say ready, and let hiding report it.
+        Err(e) => {
+            tracing::warn!("HidHide: {e}");
+            State::Ready
         }
     }
 }

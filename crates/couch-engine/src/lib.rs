@@ -237,7 +237,8 @@ pub enum HidingView {
     /// HidHide isn't installed: the controller can't play through a seat.
     NotInstalled,
     Ready,
-    /// HidHide's configuration window is open; close it first.
+    /// Something held HidHide for over a second, most likely its
+    /// configuration window.
     Busy,
 }
 

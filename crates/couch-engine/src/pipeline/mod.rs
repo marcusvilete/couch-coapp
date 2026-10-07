@@ -114,7 +114,8 @@ pub enum Hiding {
     /// Nothing to hide with: HidHide isn't installed.
     Unavailable,
     Ready,
-    /// HidHide is busy: its configuration window is open.
+    /// HidHide stayed busy for a second: most likely its configuration
+    /// window is open.
     Busy,
 }
 
