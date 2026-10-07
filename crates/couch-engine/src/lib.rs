@@ -156,13 +156,14 @@ pub enum Command {
         member: String,
         seat: u8,
     },
-    /// While streaming: take a seat back from a viewer, or every seat with
-    /// `None`. A seat that was ours comes back to our controller.
+    /// While streaming: take a seat back from a viewer, or leave the one our
+    /// controller plays, or every seat but ours with `None`. The seat stays
+    /// empty; our controller takes one again only with [`Self::PlaySeat`].
     TakeBackControl {
         seat: Option<u8>,
     },
-    /// While streaming, with our controller on a seat: play another seat
-    /// with it. A viewer on that seat loses it.
+    /// While streaming, with our controller playing through the seats: play
+    /// this seat with it. A viewer on that seat loses it.
     PlaySeat {
         seat: u8,
     },
@@ -372,6 +373,9 @@ pub struct SessionView {
     pub viewers: Vec<String>,
     /// The seats players can hold, by seat id; one is single player.
     pub seats: Vec<SeatView>,
+    /// The host's own controller plays only through the seats (hidden from
+    /// the game): a seat nobody holds is empty, and the host may play none.
+    pub host_on_seats: bool,
     /// The host took control back with the panic key and hasn't allowed it
     /// again.
     pub control_paused: bool,

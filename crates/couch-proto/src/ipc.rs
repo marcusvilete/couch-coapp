@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 5;
+pub const IPC_VERSION: u16 = 6;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -216,6 +216,9 @@ pub struct HudState {
     pub role: HudRole,
     /// The session's seats, by seat id.
     pub seats: Vec<HudSeat>,
+    /// The host's own controller plays only through the seats: a seat
+    /// nobody holds is empty, and the host may play none.
+    pub host_on_seats: bool,
     pub viewers: u8,
     /// The host took control back with the panic key; asking is pointless
     /// until the host allows control again.
@@ -532,6 +535,7 @@ mod tests {
                     asked: false,
                 },
             ],
+            host_on_seats: true,
             viewers: 3,
             control_paused: false,
             game_in_front: false,

@@ -128,6 +128,10 @@ pub struct SessionStatus {
     /// `None` while the host plays outside the seats, with whatever devices
     /// the game sees directly, as on a seat no viewer holds.
     pub host_seat: Option<SeatId>,
+    /// The host's own controller plays only through the seats, hidden from
+    /// the game: with `host_seat` `None` the host plays no seat, and a seat
+    /// nobody holds is empty. `false` while the host plays outside the seats.
+    pub host_on_seats: bool,
     /// The host took control back with the panic key; requests are declined
     /// until the host allows control again.
     pub control_paused: bool,
@@ -135,16 +139,16 @@ pub struct SessionStatus {
 
 impl SessionStatus {
     /// Every holder is a viewer, no viewer holds two seats, and the host's
-    /// seat is a seat no viewer holds.
+    /// seat is a seat no viewer holds, only while the host plays on seats.
     pub fn is_valid(&self) -> bool {
         let held: Vec<MemberId> = self.holders.iter().flatten().copied().collect();
         self.viewers.len() <= MAX_VIEWERS_LISTED
             && self.holders.len() <= MAX_SEATS
             && held.iter().all(|h| self.viewers.contains(h))
             && held.iter().enumerate().all(|(i, h)| !held[..i].contains(h))
-            && self
-                .host_seat
-                .is_none_or(|s| self.holders.get(usize::from(s.0)) == Some(&None))
+            && self.host_seat.is_none_or(|s| {
+                self.host_on_seats && self.holders.get(usize::from(s.0)) == Some(&None)
+            })
     }
 
     /// The seat `member` holds, if any.
@@ -322,9 +326,26 @@ mod tests {
             viewers: vec![bia, cai],
             holders: vec![Some(bia), None, Some(cai)],
             host_seat: Some(SeatId(1)),
+            host_on_seats: true,
             control_paused: false,
         };
         assert!(status.is_valid());
+        assert!(
+            !SessionStatus {
+                host_on_seats: false,
+                ..status.clone()
+            }
+            .is_valid(),
+            "a host on a seat plays on seats"
+        );
+        assert!(
+            SessionStatus {
+                host_seat: None,
+                ..status.clone()
+            }
+            .is_valid(),
+            "on seats, the host may hold none"
+        );
         assert!(
             !SessionStatus {
                 host_seat: Some(SeatId(0)),
@@ -384,6 +405,7 @@ mod tests {
             viewers: vec![MemberId([0xff; 32]); MAX_VIEWERS_LISTED],
             holders: vec![Some(MemberId([0xff; 32])); MAX_SEATS],
             host_seat: Some(SeatId(u8::MAX)),
+            host_on_seats: true,
             control_paused: true,
         };
         let len = postcard::to_stdvec(&status).unwrap().len();

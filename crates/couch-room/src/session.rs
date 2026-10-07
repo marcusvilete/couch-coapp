@@ -7,7 +7,7 @@
 //! **The seat router decides who plays.** `couch_input::router::SeatRouter`
 //! enforces every input rule and is the only judge of who holds each seat.
 //! This machine asks it to hand over or take back seats ([`Effect::Grant`],
-//! [`Effect::Revoke`], [`Effect::RevokeAll`]) and only mirrors the outcome:
+//! [`Effect::Revoke`], [`Effect::RevokeViewers`]) and only mirrors the outcome:
 //! the engine reports each of the router's grants and revocations to
 //! [`HostSession::seat_changed`], including those the router makes alone (a
 //! holder who went quiet too long).
@@ -22,10 +22,12 @@
 //! controller, read on the host, drives a seat's pad through the router like
 //! a viewer's, with the pad only. They start on the first seat with a pad,
 //! hold one seat at a time, and may take a seat while control is paused (the
-//! panic key gives control back to them). When the seat they last held comes
-//! free and they hold none, it goes back to them through [`Effect::Claim`],
-//! which the router carries out only if the seat is still free, so it can
-//! never take a seat from a viewer it was just passed to.
+//! panic key gives control back to them). When a viewer lets go of the seat
+//! they last held (gives it back, leaves, goes quiet) and they hold none, it
+//! goes back to them through [`Effect::Claim`], which the router carries out
+//! only if the seat is still free, so it can never take a seat from a viewer
+//! it was just passed to. A seat the host takes back, their own included,
+//! stays empty until they play one again.
 
 use std::{
     collections::BTreeMap,
@@ -114,16 +116,35 @@ pub enum Effect {
         seat: SeatId,
         holder: Option<MemberId>,
     },
-    /// Ask the seat router to free every seat at once (the host's comes
-    /// back to them with a [`Effect::Claim`] once the router reports it).
-    RevokeAll,
+    /// Ask the seat router to free every seat a viewer holds at once (the
+    /// panic key); the one the host plays stays theirs.
+    RevokeViewers,
     /// Ask the seat router to hand `seat` to `member` only if nobody holds
-    /// it: the host's seat coming back to them.
+    /// it: the host's seat coming back to them. Refused while control is
+    /// paused.
     Claim { seat: SeatId, member: MemberId },
     /// A viewer asked for a seat: the host should notice.
     Requested(MemberId, SeatId),
     /// Something the host's UI shows changed.
     Changed,
+}
+
+/// What the host last did with the seat their controller last played.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Home {
+    /// They play it: if it goes free on its own (their controller went
+    /// quiet, say), it comes back to them.
+    Playing,
+    /// They passed it to a viewer: it comes back when that viewer lets go
+    /// (gives it back, leaves, goes quiet). It stays `Lent` once back with
+    /// the host: telling that apart would mean trusting the router's
+    /// reports, which may trail a newer pass. Taking everything back then
+    /// makes it `LeftEmpty` though they play it, which only matters if their
+    /// own seat goes free on its own (their controller's reader stopped).
+    Lent,
+    /// They took it back, or left it: it stays empty until they play a seat
+    /// again.
+    LeftEmpty,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +163,9 @@ pub struct HostSession {
     /// The seat the host last held, which comes back to them when free;
     /// `None` while the host plays outside the seats.
     host_home: Option<SeatId>,
+    /// What the host last did with `host_home`. Only the host's own actions
+    /// change it, never the router's reports, which may be out of date.
+    home: Home,
     paused: bool,
     ended: bool,
 }
@@ -170,6 +194,7 @@ impl HostSession {
             id,
             holders: vec![None; config.seats.len()],
             host_home,
+            home: Home::Playing,
             config,
             viewers: Vec::new(),
             requests: Vec::new(),
@@ -272,6 +297,7 @@ impl HostSession {
                 .map(|h| h.filter(|h| !self.is_host(*h)))
                 .collect(),
             host_seat: self.host_seat(),
+            host_on_seats: self.host().is_some(),
             control_paused: self.paused,
         })
     }
@@ -290,11 +316,17 @@ impl HostSession {
         self.reclaim().into_iter().collect()
     }
 
-    /// The host's seat back to them, if they hold none and it is free (as
-    /// far as the mirror knows: the router checks again).
+    /// The host's seat back to them, if they hold none, it is free (as far
+    /// as the mirror knows: the router checks again), and they didn't take
+    /// it back to leave it empty. Never while control is paused: the panic
+    /// key leaves the host the seat they play, and frees the rest.
     fn reclaim(&self) -> Option<Effect> {
         let (host, home) = (self.host()?, self.host_home?);
-        if self.ended || self.seat_of(host).is_some() || self.holders[usize::from(home.0)].is_some()
+        if self.ended
+            || self.paused
+            || self.home == Home::LeftEmpty
+            || self.seat_of(host).is_some()
+            || self.holders[usize::from(home.0)].is_some()
         {
             return None;
         }
@@ -564,30 +596,38 @@ impl HostSession {
         Ok(fx)
     }
 
-    /// The host takes `seat` back from a viewer, or every seat with `None`.
-    /// Sent to the router even if no viewer seems to hold it: a grant may
-    /// still be on its way. The seat goes free, or back to the host if it is
-    /// the one they last held and they hold none.
+    /// The host takes `seat` back from a viewer, or leaves their own, or
+    /// takes every seat but their own with `None`. Sent to the router even
+    /// if no viewer seems to hold it: a grant may still be on its way. The
+    /// seat goes free and stays free: the host plays one again only with
+    /// [`Self::play`].
     pub fn take_back(&mut self, seat: Option<SeatId>) -> Vec<Effect> {
         if self.ended {
             return Vec::new();
         }
-        let seats = match seat {
-            Some(seat) if self.has_seat(seat) => vec![seat],
+        match seat {
+            Some(seat) if self.has_seat(seat) => {
+                if self.host_home == Some(seat) {
+                    self.home = Home::LeftEmpty;
+                }
+                vec![Effect::Revoke { seat, holder: None }]
+            }
             Some(_) => Vec::new(),
-            None => (0..self.config.seats.len())
-                .map(|i| SeatId(i as u8))
-                .collect(),
-        };
-        seats
-            .into_iter()
-            // The host's own seat stays theirs.
-            .filter(|seat| {
-                self.host()
-                    .is_none_or(|host| self.holders[usize::from(seat.0)] != Some(host))
-            })
-            .map(|seat| Effect::Revoke { seat, holder: None })
-            .collect()
+            // The router itself tells the host's own seat apart: the mirror
+            // may not know of it yet.
+            None => {
+                self.everything_taken_back();
+                vec![Effect::RevokeViewers]
+            }
+        }
+    }
+
+    /// Every viewer's seat taken back: the host's, if they had passed it
+    /// on, stays empty too.
+    fn everything_taken_back(&mut self) {
+        if self.home == Home::Lent {
+            self.home = Home::LeftEmpty;
+        }
     }
 
     /// The host plays `seat` with their own controller. A viewer on it loses
@@ -605,25 +645,32 @@ impl HostSession {
             return Err(SessionError::NoPad);
         }
         if self.holders[usize::from(seat.0)] == Some(host) {
+            // Playing it already, as far as the mirror knows; if a leave is
+            // still on its way, the seat comes back to them once it lands.
+            if self.host_home == Some(seat) {
+                self.home = Home::Playing;
+            }
             return Ok(Vec::new());
         }
         // From now on only this seat comes back to the host: a claim for the
         // old one, once the router frees it, would give them two.
         self.host_home = Some(seat);
+        self.home = Home::Playing;
         let mut fx = self.grant(host, seat);
         fx.push(Effect::Changed);
         Ok(fx)
     }
 
-    /// The panic key: every seat freed (the host's comes back to them as the
-    /// router reports it), every request declined, and no more control for
+    /// The panic key: every seat a viewer holds freed (the one the host
+    /// plays stays theirs), every request declined, and no more control for
     /// viewers until the host allows it again. Pressing it again releases
     /// again.
     pub fn panic(&mut self) -> Vec<Effect> {
-        let mut fx = vec![Effect::RevokeAll];
+        let mut fx = vec![Effect::RevokeViewers];
         if self.ended {
             return fx;
         }
+        self.everything_taken_back();
         let waiting = std::mem::take(&mut self.requests);
         fx.extend(waiting.into_iter().map(|(member, _)| self.declined(member)));
         if !self.paused {
@@ -634,12 +681,16 @@ impl HostSession {
         fx
     }
 
+    /// Viewers may be given control again. The host's seat, if it went free
+    /// meanwhile without being left empty on purpose, comes back to them.
     pub fn allow_control(&mut self) -> Vec<Effect> {
         if self.ended || !self.paused {
             return Vec::new();
         }
         self.paused = false;
-        vec![Effect::Broadcast(self.status()), Effect::Changed]
+        let mut fx: Vec<Effect> = self.reclaim().into_iter().collect();
+        fx.extend([Effect::Broadcast(self.status()), Effect::Changed]);
+        fx
     }
 
     /// The session is over: everyone in the room is told why. The engine
@@ -662,7 +713,11 @@ impl HostSession {
     /// Revokes `member` from every other seat, then grants `seat`: the
     /// router takes them in order, so nobody ever holds two seats, even with
     /// a grant still on its way.
-    fn grant(&self, member: MemberId, seat: SeatId) -> Vec<Effect> {
+    fn grant(&mut self, member: MemberId, seat: SeatId) -> Vec<Effect> {
+        // The host's seat passed on: it comes back when that viewer lets go.
+        if !self.is_host(member) && self.host_home == Some(seat) {
+            self.home = Home::Lent;
+        }
         let mut fx: Vec<Effect> = (0..self.config.seats.len())
             .map(|i| SeatId(i as u8))
             .filter(|s| *s != seat)

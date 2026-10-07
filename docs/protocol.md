@@ -48,7 +48,7 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x8204` | `ControlCancel { session, what: Request \| Seat }` | Viewer to host: withdraw my request (my seat stays), or give my seat back |
 | `0x8205` | `ControlDeclined { session }` | Host to viewer: no (or not now: the panic key) |
 | `0x0601` | `SessionAnnounce { session, title, seats [Controller \| KeyboardMouse \| Both], max_viewers u8 }` | Optional. Host to each connected member: a session is live, with these seats |
-| `0x0602` | `SessionStatus { session, viewers [member id], holders [member id?], host_seat SeatId?, control_paused }` | Optional. Host to each connected member: who watches, which viewer holds each seat, and the seat the host plays with their own controller |
+| `0x0602` | `SessionStatus { session, viewers [member id], holders [member id?], host_seat SeatId?, host_on_seats bool, control_paused }` | Optional. Host to each connected member: who watches, which viewer holds each seat, the seat the host plays with their own controller, and whether that controller plays only through the seats |
 | `0x0603` | `SessionEnded { session, reason }` | Optional. Host to each connected member |
 | `0x8604` | `SessionJoin { session }` | Member to host: let me watch |
 | `0x8605` | `SessionJoinReply { session, result: Joined \| Full \| Ended \| Unavailable }` | Host to member |
@@ -341,9 +341,10 @@ A session is a member streaming a game to others in the same room, over the room
 - **Where the host plays.** Either outside the seats, with whatever devices the game sees directly (in single player while nobody holds the seat, in multiplayer beside the seats), or **on a seat** (P2), when the host chose their own controller at go-live:
   - the host app reads that controller (`couch_gamepad`) and feeds its state into the seat router as the host's own holder, with the pad permission only (the host's keyboard and mouse reach the game directly anyway);
   - the controller is hidden from games meanwhile (HidHide; see the architecture), so every player the game sees is one of the seats' virtual pads, and any seat, the host's included, can be handed over;
-  - the host starts on the first seat with a pad, holds one seat at a time, and may move to another (a viewer on it loses it). The seat they last held comes back to them when it comes free and they hold none: the host's seat router grants such a *claim* only if the seat is still free and the host holds no other, so it never takes a seat from a viewer it was just passed to;
+  - the host starts on the first seat with a pad, holds one seat at a time, and may move to another (a viewer on it loses it). When a viewer lets go of the seat the host last held (gives it back, leaves, goes quiet) and the host holds none, it comes back to them: the host's seat router grants such a *claim* only if the seat is still free, the host holds no other and control isn't paused, so it never takes a seat from a viewer it was just passed to;
+  - a seat the host takes back, or leaves (their own), stays empty: the host's controller takes a seat again only when the host moves to one;
   - viewers may ask for the host's seat; the host decides, as for any seat.
-- `SessionStatus.holders` has one entry per seat and names viewers only; `host_seat` names the seat the host plays, if any. A receiver ignores a status whose length differs from the announcement's seats, where a holder isn't a viewer, where one viewer holds two seats, or whose `host_seat` isn't a seat or is held by a viewer.
+- `SessionStatus.holders` has one entry per seat and names viewers only; `host_seat` names the seat the host plays, if any; `host_on_seats` says the host's controller plays only through the seats, so a seat nobody holds is empty and the host may play none (otherwise the host plays outside the seats, and a free single-player seat is the host's). A receiver ignores a status whose length differs from the announcement's seats, where a holder isn't a viewer, where one viewer holds two seats, or whose `host_seat` isn't a seat, is held by a viewer, or comes without `host_on_seats`.
 
 **Control.**
 - A viewer asks for a seat with `ControlRequest`: a free one, one another viewer holds, or another than its own (a move). The host accepts (a `SeatAssigned` follows) or declines (`ControlDeclined`); a declined viewer's next request within 5 s is declined at once. Each viewer has one request pending at most; asking for another seat replaces it. A seat that doesn't exist is ignored.
@@ -358,8 +359,8 @@ A session is a member streaming a game to others in the same room, over the room
 - and to each new viewer, once known.
 - Nothing is sent for a screen. A viewer assumes the game is in front until told otherwise, and shows a lasting line in the stream window while it isn't.
 
-The session messages changed in place in P1 (seats in `SessionAnnounce`, `SessionStatus` and `ControlRequest`) and P2 (`SessionStatus.host_seat`): nothing had been publicly released, and both sides always run the same build.
-- **The panic key** (Ctrl+Alt+Shift+Backspace on the host's own keyboard) releases every seat at once, declines pending requests and pauses control (`control_paused` in the status) until the host allows it again. A grant to a viewer already on its way to the seat router when the key is pressed is refused too. The host's own controller is not paused: its seat comes back to it at once, and it may still move between seats. The stream goes on.
+The session messages changed in place in P1 (seats in `SessionAnnounce`, `SessionStatus` and `ControlRequest`) and P2 (`SessionStatus.host_seat` and `host_on_seats`): nothing had been publicly released, and both sides always run the same build.
+- **The panic key** (Ctrl+Alt+Shift+Backspace on the host's own keyboard) releases every seat a viewer holds at once, declines pending requests and pauses control (`control_paused` in the status) until the host allows it again. A grant to a viewer already on its way to the seat router when the key is pressed is refused too. The host's own controller is not paused: it keeps the seat it plays, and it may still move between seats. A seat the host had passed on stays empty; nothing comes back to the host while control is paused. The stream goes on.
   - It is a low-level keyboard hook (`couch_platform_win::panic_key`), installed while the host streams. Only physical key events count: injected ones (`LLKHF_INJECTED`, which is what a guest's keys become) are passed on and never change which modifiers it believes are held, so a guest can neither press it nor complete it. A modifier also counts only while Windows still has it down, so a key-up lost to the secure desktop doesn't leave it held; but once a guest's injected event has touched that modifier, only the physical state counts, because Windows' down bit is shared and a guest's key-up would clear it while the host holds the key. A guest can't block the key either.
   - Auto-repeat is told from a new press by timing (a repeat follows within Windows' longest repeat delay, 1 s). A Backspace already held before the chord is completed stays the game's, repeats and release included, so it never sticks down.
   - The chord's key-down, repeats and key-up are swallowed; the game never sees them. The hook releases straight through the input task, from its own thread, then tells the room actor.
@@ -415,7 +416,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x01` | main to viewer | Hello: `IPC_VERSION` as a big-endian `u16`. A viewer that speaks another version stops |
 | `0x02` | main to viewer | Video frame |
 | `0x03` | main to viewer | Audio packet (postcard): `{seq, capture_us, arrived_us, packet}`, the datagram plus its arrival time on this machine |
-| `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], viewers u8, control_paused, game_in_front, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller |
+| `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], host_on_seats, viewers u8, control_paused, game_in_front, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller; `host_on_seats` that the host's controller plays only through the seats (a free seat is empty) |
 | `0x05` | main to viewer | Shutdown |
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
 | `0x07` | main to viewer | Seat state (postcard): `{holding, permissions}`. The viewer captures the mouse only while holding with mouse permission |
@@ -426,7 +427,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 | `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
 
-`IPC_VERSION` (now 5: the host on a seat in P2) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 6: the host on a seat in P2, then `host_on_seats`) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the panic-key hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. In the viewer, with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;

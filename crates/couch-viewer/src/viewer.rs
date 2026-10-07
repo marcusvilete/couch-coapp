@@ -389,6 +389,7 @@ fn preview_session(role: HudRole) -> HudState {
             ),
             seat("Keyboard and mouse", false, Some("Carol"), false, false),
         ],
+        host_on_seats: true,
         viewers: 2,
         control_paused: false,
         game_in_front: !playing,

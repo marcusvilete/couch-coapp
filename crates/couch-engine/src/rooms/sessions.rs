@@ -585,6 +585,7 @@ impl Actor {
                 self.announce(room, now);
             }
             ControlMessage::SeatReleased(s) => {
+                let labels = self.seat_labels();
                 let Some(w) = self.sessions.watching.as_mut() else {
                     return;
                 };
@@ -601,7 +602,12 @@ impl Actor {
                 // While asking to move, the old seat goes first: still asking.
                 if matches!(w.state, WatchState::Controlling(held) if held == seat) {
                     w.state = WatchState::Watching;
-                    w.note = "Your seat went back to the host".into();
+                    // Taken back, passed on or given back: the host may or
+                    // may not play it now.
+                    let label = labels
+                        .get(usize::from(seat.0))
+                        .map_or("a seat", String::as_str);
+                    w.note = format!("You no longer have {}", seat_phrase(label));
                     self.send_hud();
                     self.announce(room, now);
                 }
@@ -699,9 +705,9 @@ impl Actor {
                         stream.revoke(seat, holder);
                     }
                 }
-                SessionEffect::RevokeAll => {
+                SessionEffect::RevokeViewers => {
                     if let Some(stream) = self.stream() {
-                        stream.revoke_all();
+                        stream.revoke_viewers();
                     }
                 }
                 SessionEffect::Claim { seat, member } => {
@@ -1129,11 +1135,12 @@ impl Actor {
     }
 
     pub(super) fn allow_control(&mut self, now: Instant) -> Result<Response, EngineError> {
-        let done = self.our_session(|s| Ok(s.allow_control()), now)?;
+        // First: the host's seat may come back with a claim, which the input
+        // task refuses while paused.
         if let Some(stream) = self.stream() {
             stream.allow_grants();
         }
-        Ok(done)
+        self.our_session(|s| Ok(s.allow_control()), now)
     }
 
     /// The panic key. The engine has already released through the stream's
@@ -1492,6 +1499,7 @@ impl Actor {
                 WatchState::Controlling(_) => HudRole::Controlling,
             },
             seats,
+            host_on_seats: status.is_some_and(|s| s.host_on_seats),
             viewers: status.map_or(0, |s| s.viewers.len().min(255) as u8),
             control_paused: status.is_some_and(|s| s.control_paused),
             game_in_front: w.in_front,
@@ -1626,6 +1634,7 @@ impl Actor {
                 max_viewers: s.config().max_viewers,
                 viewers: s.viewers().iter().map(MemberId::to_hex).collect(),
                 seats: seat_views(&s.config().seats, s.holders(), self.me),
+                host_on_seats: s.host().is_some(),
                 control_paused: s.control_paused(),
                 role: SessionRole::Host,
                 requests: s
@@ -1679,6 +1688,7 @@ impl Actor {
                     s.viewers.iter().map(MemberId::to_hex).collect()
                 }),
                 seats: seat_views(&listing.announce.seats, &holders, *host),
+                host_on_seats: status.is_some_and(|s| s.host_on_seats),
                 control_paused: status.is_some_and(|s| s.control_paused),
                 role,
                 requests: Vec::new(),

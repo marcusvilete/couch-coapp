@@ -1884,9 +1884,27 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
         "the host is off it"
     );
 
-    // Taken back: it goes back to the host's controller.
+    // Taken back: it stays empty, and the host's controller drives nothing.
     a.ok(Command::TakeBackControl { seat: Some(0) }).await;
     wait("B's seat gone", || !b_window.holding()).await;
+    wait("the pad let go", || a.fake.pad() == Some(PadState::NEUTRAL)).await;
+    c.wait_session(&room, &a, "an empty seat, from C", |s| {
+        s.is_some_and(|s| s.host_on_seats && holder(s, 0).is_none())
+    })
+    .await;
+    wait("the HUD's empty seat", || {
+        b_window
+            .hud
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|h| h.host_on_seats && h.seats[0].holder.is_none())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(a.fake.pad(), Some(PadState::NEUTRAL), "nobody on it");
+    // Play here puts the host's controller back on it.
+    a.ok(Command::PlaySeat { seat: 0 }).await;
     wait("the host's X", || {
         a.fake.pad() == Some(pressed(PadButtons::X))
     })
@@ -1896,10 +1914,29 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
     })
     .await;
 
-    // The panic key: B out, the host keeps playing while control is paused.
+    // The panic key with B on the seat: B out, and it stays empty; the
+    // host may still take it while control is paused.
     give_seat(&room, &mut a, &b, &b_window, 0).await;
     assert!(a.fake.press_panic_key());
     wait("B's seat gone again", || !b_window.holding()).await;
+    a.wait_session(&room, &a, "paused, the seat empty", |s| {
+        s.is_some_and(|s| s.control_paused && holder(s, 0).is_none())
+    })
+    .await;
+    // And it stays so: no claim gives it to the host's controller.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(a.fake.pad(), Some(PadState::NEUTRAL), "still empty");
+    a.wait_session(&room, &a, "still empty", |s| {
+        s.is_some_and(|s| holder(s, 0).is_none())
+    })
+    .await;
+    a.ok(Command::PlaySeat { seat: 0 }).await;
+    a.wait_session(&room, &a, "the host on while paused", |s| {
+        s.is_some_and(|s| host_on(s, 0, &a))
+    })
+    .await;
+    // The panic key again: the host keeps the seat they play.
+    assert!(a.fake.press_panic_key());
     a.fake.local_press(PadButtons::Y);
     wait("the host's Y", || {
         a.fake.pad() == Some(pressed(PadButtons::Y))

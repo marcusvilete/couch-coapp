@@ -35,7 +35,7 @@ export function nameOf(room: RoomView, member: string | null | undefined): strin
  * the host while a seat is free if they play outside the seats. */
 export function playersOf(session: SessionView): string[] {
   const holders = session.seats.flatMap((s) => (s.holder ? [s.holder] : []));
-  const outside = !session.seats.some((s) => s.host) && holders.length < session.seats.length;
+  const outside = !session.hostOnSeats && holders.length < session.seats.length;
   return outside ? [...holders, session.host] : holders;
 }
 
@@ -44,14 +44,17 @@ export function seatPhrase(label: string): string {
   return /\d$/.test(label) ? label : `the ${label.toLowerCase()}`;
 }
 
-/** "Bia is playing" (the host while nobody holds the one seat), or per seat:
- * "Controller 1: Ana · Controller 2: free". A host playing outside the seats,
- * on whatever the game sees directly, is listed beside them: "Ana: own
- * controller". */
+/** "Bia is playing" (the host while nobody holds the one seat and they play
+ * outside it), or per seat: "Controller 1: Ana · Controller 2: free". A host
+ * playing outside the seats, on whatever the game sees directly, is listed
+ * beside them: "Ana: own controller". */
 function whoPlays(room: RoomView, s: SessionView): string {
-  if (s.seats.length === 1) return `${nameOf(room, s.seats[0].holder ?? s.host)} is playing`;
+  if (s.seats.length === 1) {
+    const holder = s.seats[0].holder ?? (s.hostOnSeats ? null : s.host);
+    return holder ? `${nameOf(room, holder)} is playing` : "Nobody is playing";
+  }
   const seats = s.seats.map((seat) => `${seat.label}: ${seat.holder ? nameOf(room, seat.holder) : "free"}`);
-  const outside = s.seats.some((seat) => seat.host) ? [] : [`${nameOf(room, s.host)}: own controller`];
+  const outside = s.hostOnSeats ? [] : [`${nameOf(room, s.host)}: own controller`];
   return [...seats, ...outside].join(" · ");
 }
 
@@ -350,9 +353,13 @@ function HostPanel(props: {
                   {seat.label}
                   <span className="hint"> · {holderName(seat)}</span>
                 </span>
-                {seat.holder && !seat.host && (
-                  <button disabled={busy != null} onClick={() => run(`take-${i}`, { type: "takeBackControl", seat: i })}>
-                    Take back
+                {seat.holder && (
+                  <button
+                    disabled={busy != null}
+                    title={seat.host ? `Your ${pad ?? "controller"} stops playing it; it stays empty` : "It stays empty"}
+                    onClick={() => run(`take-${i}`, { type: "takeBackControl", seat: i })}
+                  >
+                    {seat.host ? "Leave" : "Take back"}
                   </button>
                 )}
                 {pad && seat.pad && !seat.host && (
@@ -369,7 +376,7 @@ function HostPanel(props: {
           </ul>
           <p className="hint">
             {pad
-              ? "Every player in the game is one of these seats, yours included, so any of them can be handed over. The game numbers its players itself, usually in the order controllers join."
+              ? "Every player in the game is one of these seats, yours included, so any of them can be handed over. A seat you take back or leave stays empty; Play here puts your controller on one. The game numbers its players itself, usually in the order controllers join."
               : "The game numbers its players itself, usually in the order controllers join, and your own controller counts: it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat doesn't respond, move them to another one."}
           </p>
         </div>
@@ -440,7 +447,7 @@ function HostPanel(props: {
         {pad
           ? ourSeat >= 0
             ? `You play ${single ? "the seat" : s.seats[ourSeat].label} with your ${pad}; your keyboard and mouse work beside the seats.`
-            : `Your ${pad} plays no seat now: taking back the seat you last played gives it back to you${single ? "" : ", or use Play here"}. Your keyboard and mouse still work.`
+            : `Your ${pad} plays no seat now: use Play here to take one. Your keyboard and mouse still work.`
           : single
             ? s.seats[0].holder
               ? `${nameOf(room, s.seats[0].holder)} is playing; your own controller, keyboard and mouse still work too.`

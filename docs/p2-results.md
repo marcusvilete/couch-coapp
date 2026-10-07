@@ -4,7 +4,7 @@ In your P1 co-op run, Fling to the Finish gave player 1 to your DualSense, which
 - **The app reads your controller** and feeds its state into the seat router as your own holder, like a guest's pad (`couch_gamepad`, SDL3 on a thread of its own).
 - **HidHide hides the physical controller** from every other program while you're live (`couch_platform_win::hidhide`). Every player the game sees is then one of our virtual pads, and any seat, yours included, can be handed to anyone.
 - **You start on Controller 1** (the first seat with a pad). "Play here" moves you to another seat. A guest may ask for yours; you decide.
-- **Your seat comes back to you** when the guest you gave it to gives it back, leaves or has it taken back. The panic key removes the guests and leaves you playing.
+- **Your seat comes back to you** when the guest you gave it to gives it back or leaves. **A seat you take back stays empty**, and so does your own when you leave it ("Leave"); "Play here" puts your controller on a seat again. The panic key removes the guests and leaves you playing (changed after your two-PC run; see below).
 
 Your decisions:
 - hide per session: at Go live, shown again at Stop;
@@ -12,8 +12,8 @@ Your decisions:
 - without HidHide, play outside the seats as in P1.
 
 **Wire changes** (in place; nothing is publicly released):
-- `SessionStatus.host_seat`: the seat the host plays, if any. `holders` stays viewers only.
-- Viewer IPC v5: `HudSeat.host`.
+- `SessionStatus.host_seat`: the seat the host plays, if any. `holders` stays viewers only. Later `host_on_seats`: the host's controller plays only through the seats, so guests see an empty seat as empty.
+- Viewer IPC v5: `HudSeat.host`; v6: `HudState.host_on_seats`.
 
 Measured 2026-10-06 on the M1 PC (RTX 3060 Ti), HidHide 1.5.230 installed the same day, your DualSense on Bluetooth.
 
@@ -66,6 +66,18 @@ Found while planning, from its documentation and source (MIT; we only call its c
 - **"HidHide's configuration window is open" when it wasn't.** The Go live dialog's check tried HidHide's control device once, and any failure read as that window. Something else held the device for a moment, perhaps HidHide's own watchdog service or our app. The check now waits up to a second, like hiding does; an unexpected error no longer reads as busy; and the text says "busy" without guessing why. Gone on your next try.
 - **Steam's global "PlayStation Controller Support" off works as well,** but then the DualSense works in games only through our app (while live). Turning Steam Input off for the one game is enough.
 
+**Your two-PC run (2026-10-07):** everything worked. One finding: in co-op a seat could end up empty by chance (after "Play here", say), but never on purpose, because taking a seat back gave it to your controller. Your choice: **Take back always leaves the seat empty.** What changed:
+- **Take back** leaves the seat empty, your own included: your row now has **Leave**. "Play here" is how your controller takes a seat again. A guest giving your seat back, or leaving, still returns it to you.
+- **The panic key** frees only the guests' seats (`RevokeViewers`, which the input task applies, sparing the seat your controller plays) instead of freeing every seat and handing yours back. A seat you had passed on stays empty, and nothing comes back to you while control is paused; allowing control again returns your seat only if it went free on its own.
+  - Found by the session scenario while building this: the hook frees the seats from its own thread, so the router's report could reach the session before the panic did, and the session handed the seat back. The input task now refuses claims while paused, and Allow control clears that pause before its claim.
+  - Found by the property test: "take every seat back" used the session's mirror to spare your seat, which may not know of it yet, so it could take your seat. It now sends `RevokeViewers` too.
+- **Guests' screens no longer say "Ana: own controller"** while your controller plays no seat: it is hidden from the game. `SessionStatus.host_on_seats` tells them; a free single-player seat then reads "Nobody is playing".
+- **From the review** (a subagent; each finding checked against the code):
+  - **A late router report could still refill a seat taken back.** Pass your seat, then Take back before the router's reports arrive: the guest's late "granted" report cleared the "left empty" flag, so its "revoked" report gave the seat to your controller. The panic key had the same flaw (it read the session's possibly stale view of your seat). Now only your own actions decide (`Home`: playing, lent to a guest, left empty); reports never change it. Test: `late_reports_dont_refill_a_seat_taken_back`. One simplification: a seat you lent that came back to you stays "lent", so taking everything back marks it "left empty" while you play it; that only matters if your controller's reader stops, since it reports neutral even while the controller is unplugged.
+  - **The property test checked one direction only.** It now keeps its own model of what you did, from the ops, and checks both ways: no claim (including from late reports) for a seat you left empty, and your seat back unless a guest has it, you left it empty, or control is paused. A run of 50000 cases found one more case, from moving to a seat the mirror still showed you on; fixed, and its seed is saved in `proptest-regressions`.
+  - The engine scenario now checks the seat stays empty for 200 ms after the panic key; the guest's note on losing a seat says "You no longer have Controller 1" instead of "went back to the host".
+- Checks: session machine 74 tests (new: `a_seat_taken_back_stays_empty`, `late_reports_dont_refill_a_seat_taken_back`), the property test 50000 runs once; session scenarios 28, 4 runs in a row (the host's scenario now takes the seat back, sees it empty from the guests' side and the stream window, plays it again, and presses the panic key both ways); workspace, clippy, fmt, `tsc` and the Vite build clean.
+
 ## Things to know
 
 - **Turn Steam Input off for the game** (Steam → the game's Properties → Controller) when you play on a seat: with it on, Steam keeps a player for your hidden controller and one seat gets none (Fling to the Finish).
@@ -83,17 +95,17 @@ Found while planning, from its documentation and source (MIT; we only call its c
 
 ## Follow-ups
 
-- **Your two-PC run** (below).
+- **Your two-PC run:** done 2026-10-07; a short re-check of the seats after the Take back change (below).
 - **M10:** offer HidHide in the installer, as for ViGEmBus.
 - **Then the rest of the polish backlog:** the shortcut editor, choosing the relay (Settings → Network), the splash screen, the full-screen re-check.
 
-## Your run (to do, two PCs; a fresh `pack-guest.ps1` build on the guest)
+## Your run (two PCs; a fresh `pack-guest.ps1` build on the guest)
 
-1. **Steam Input off for Fling to the Finish** (in Steam). Start the game, go live on its window: Multiplayer with 2 controllers, "Your controller: DualSense". Turn the DualSense off and on. You play on Controller 1; the guest asks for Controller 2. Both get a player in the game.
-2. Pass Controller 1 to the guest (they move to it; you're on no seat). Take it back: it comes back to your controller. Then "Play here" on Controller 2 (the guest there loses it), and pass Controller 1 to the guest again.
-3. Single player: you play the seat; pass it, take it back (it comes back to your controller); the panic key with the guest playing (you keep playing).
-4. Stop: your DualSense works in games again (maybe after one reconnect). Then go live again, end the app from Task Manager's Details tab, start it again: the DualSense is back.
-5. The basics: watch, ask, the "game not in front" line, stop.
+Done 2026-10-07: everything worked. The re-check after the Take back change, done the same day on one PC (the default profile hosting with your DualSense, alice and bob watching, `xinput-watch` showing the host's input), all as described:
+1. Co-op with 2 controllers, your DualSense on Controller 1. Pass Controller 1 to the guest, then Take back: Controller 1 stays empty (the guest's stage card and stream window say "free", not "own controller"), and your DualSense drives nothing. "Play here" on it: you play again.
+2. "Leave" on your own row: empty again. "Play here" brings you back.
+3. The guest on Controller 2, you on Controller 1: the panic key. The guest is out, you keep playing. Then pass Controller 1 to the guest and press it again: Controller 1 stays empty. Allow control.
+4. Single player: pass the seat, give it back from the guest's side (it returns to you); pass it again, Take back ("Nobody is playing" on the guest's side).
 
 ## How to reproduce
 

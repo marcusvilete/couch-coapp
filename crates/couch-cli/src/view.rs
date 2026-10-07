@@ -262,7 +262,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     watch.seat_assigned(s);
                 }
                 ControlMessage::SeatReleased(s) => {
-                    println!("seat {} went back to the host", s.seat.0);
+                    println!("seat {} released", s.seat.0);
                     watch.seat_released(s);
                 }
                 _ => {}

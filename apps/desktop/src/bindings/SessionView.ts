@@ -20,6 +20,11 @@ viewers: Array<string>,
  */
 seats: Array<SeatView>, 
 /**
+ * The host's own controller plays only through the seats (hidden from
+ * the game): a seat nobody holds is empty, and the host may play none.
+ */
+hostOnSeats: boolean, 
+/**
  * The host took control back with the panic key and hasn't allowed it
  * again.
  */

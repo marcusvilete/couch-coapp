@@ -722,13 +722,21 @@ impl HostStream {
         let _ = self.input.send(InputCmd::Revoke { seat, holder });
     }
 
-    /// Every seat back to the host at once.
+    /// Every seat back to the host at once, their own controller's included.
     pub fn revoke_all(&self) {
         let _ = self.input.send(InputCmd::RevokeAll);
     }
 
-    /// The panic key: every seat back to the host, and no grant goes through
-    /// until [`HostStream::allow_grants`], even one already on its way.
+    /// Every seat a viewer holds back to the host at once; the one the
+    /// host's own controller plays stays theirs.
+    pub fn revoke_viewers(&self) {
+        let _ = self.input.send(InputCmd::RevokeViewers);
+    }
+
+    /// The panic key: every seat a viewer holds back to the host (their own
+    /// controller keeps the seat it plays), and no grant to a viewer, nor any
+    /// claim, goes through until [`HostStream::allow_grants`], even one
+    /// already on its way.
     pub fn panic(&self) {
         self.panic_handle().panic();
     }
@@ -811,11 +819,12 @@ pub struct PanicHandle {
 }
 
 impl PanicHandle {
-    /// Every seat back to the host; grants refused until allowed again. The
-    /// flag is set first, so a grant already queued is refused too.
+    /// Every seat a viewer holds back to the host; grants to viewers and
+    /// claims refused until allowed again. The flag is set first, so one
+    /// already queued is refused too.
     pub fn panic(&self) {
         self.paused.store(true, Ordering::SeqCst);
-        let _ = self.input.send(InputCmd::RevokeAll);
+        let _ = self.input.send(InputCmd::RevokeViewers);
     }
 }
 
@@ -1410,7 +1419,10 @@ enum InputCmd {
         holder: Option<MemberId>,
     },
     RevokeAll,
-    /// Grant only if the seat is free and `member`, the host, holds none.
+    /// Every seat but the one the host's own controller plays.
+    RevokeViewers,
+    /// Grant only if the seat is free, `member`, the host, holds none, and
+    /// the panic key hasn't paused control.
     Claim {
         seat: SeatId,
         member: MemberId,
@@ -1749,9 +1761,18 @@ async fn input_loop(
                     let effects = st.router.revoke_all();
                     st.deliver(effects);
                 }
+                Some(InputCmd::RevokeViewers) => {
+                    let ours = host.and_then(|h| st.seat_of(h));
+                    let seats: Vec<SeatId> = st.seats().filter(|s| Some(*s) != ours).collect();
+                    for seat in seats {
+                        let effects = st.router.revoke(seat);
+                        st.deliver(effects);
+                    }
+                }
                 Some(InputCmd::Claim { seat, member }) => {
                     let free = st.router.seat(seat).is_some_and(|s| s.1.is_none());
-                    if !released && host == Some(member) && free && st.seat_of(member).is_none() {
+                    let paused = st.shared.grants_paused.load(Ordering::SeqCst);
+                    if !released && !paused && host == Some(member) && free && st.seat_of(member).is_none() {
                         let effects = st.router.grant(seat, member, Permissions::GAMEPAD, Instant::now());
                         st.deliver(effects);
                     }
