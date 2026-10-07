@@ -29,6 +29,7 @@ Your decisions:
 - `network.json` per profile: `"public"` or `{"custom": "https://…"}`. A URL must be https (http only for `localhost` and `127.0.0.1`, for testing); a typo is refused when you save.
 - The desktop app starts with `EngineOptions::desktop`, which reads it. A custom URL runs iroh's minimal preset (no third-party address lookup), the shape M7 planned for production.
 - **Restart now** goes through the app's normal exit (the rooms hear you go, the single-instance lock is let go), then starts the same profile. Release builds only: in your run, pressing it in the default profile under `npm run tauri dev` ended `tauri dev` too (it stops with its app, the page server with it), and nothing was left running. Development builds now say to close the app and start it again instead. The button itself is still to be tried in a release build.
+- **Restart now felt unresponsive** in your release-build try: nothing changed on screen while the app told its rooms it was going. Now a "Restarting Couch Co-App…" screen with a spinner covers the window at once (painted before the restart is asked for), until the window closes; the new one opens with the splash. You tried it on the guest PC's release build: it works.
 - **"Applies when the app restarts" stayed after the restart** in your run: the screen compared the URL as typed (`https://use1-1.relay.n0.iroh.link`) with the one in use, which iroh writes with a trailing slash. The engine now makes that comparison itself, as iroh reads both (`NetworkView.restart_needed`, test `a_relay_url_in_use_matches_it_as_typed`).
 - **Members on different relays still meet:** invites and member records carry each member's own relay, and iroh dials relays outside its own list.
   - I planned a test of our own for this, with two local relays. iroh's test `endpoint_relay_map_change` already does exactly that: a client connects through a relay missing from its own list. So I relied on it rather than adding iroh's test relay server as a dependency.
@@ -54,7 +55,7 @@ Your decisions:
 | `input-sink` | 118 keys, 5 buttons, 4 moves, 3 wheel turns through the seat router; 6 blocked combinations held back | pass |
 | `release-check` | 273 / 60 / 164 / 380 / 0 ms (limits unchanged) | pass |
 | `lifecycle-check` | swap 28 ms; exit 22 ms; source lost 5.2 s; stream window restarted 41 ms; host lost 4.7 s; a key left held released at the next start | pass |
-| Your run | Below: the splash (after two changes: longer, and always animated), the panic key moved to P, alice's moved keys, and your own relay URL (after the restart-message fix) all work. Restart now is still to try in a release build (the guest package) | pass |
+| Your run | Below: the splash (after two changes: longer, and always animated), the panic key moved to P, alice's moved keys, and your own relay URL (after the restart-message fix) all work; Restart now works in the guest package's release build, with its restarting screen | pass |
 
 ## Review
 

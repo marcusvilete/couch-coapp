@@ -20,7 +20,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M6 | Lifecycle and safety: liveness, the game's window and exit, watching that survives drops and crashes, keys released after a host crash, Alt+F4 blocked, the elevated-game warning | done ([results](m6-results.md)) |
 | P1 | Seats and input modes: single player or multiplayer per game, a pad per controller seat, a keyboard seat, requests that name a seat; the "game not in front" notice | done ([results](p1-results.md)) |
 | P2 | The host on a seat: the host's controller drives a seat's virtual pad, and HidHide hides the physical one, so any seat can be handed over | done, two-PC run included; Take back now leaves a seat empty ([results](p2-results.md)) |
-| P3 | Settings: the shortcut editor (each shortcut to another key) and the relay (Settings → Network); the splash screen | done, one-PC run included; Restart now still to try in a release build ([results](p3-results.md)) |
+| P3 | Settings: the shortcut editor (each shortcut to another key) and the relay (Settings → Network); the splash screen | done, one-PC run and Restart now in a release build included ([results](p3-results.md)) |
 | Polish | The full-screen re-check, with the internet test with friends | |
 | M8 | Host overlay window | |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | |

@@ -15,11 +15,13 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
   const [section, setSection] = useState<SettingsSection>(props.section);
   // While a shortcut waits for its key, Escape cancels that, not the dialog.
   const [capturing, setCapturing] = useState(false);
+  // The app is closing to start again: nothing closes this meanwhile.
+  const [restarting, setRestarting] = useState(false);
   return (
     <Modal
       title="Settings"
       onClose={props.onClose}
-      busy={capturing}
+      busy={capturing || restarting}
       wide
       footer={
         <button className="primary" onClick={props.onClose} disabled={capturing}>
@@ -49,9 +51,24 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
       {section === "shortcuts" ? (
         <ShortcutsSection onCapturing={setCapturing} />
       ) : (
-        <NetworkSection busy={props.busy} />
+        <NetworkSection busy={props.busy} onRestarting={setRestarting} />
       )}
+      {restarting && <Restarting />}
     </Modal>
+  );
+}
+
+/** Covers the app while it closes to start again: telling the rooms we go
+ * takes a moment, then the new window opens with the splash. */
+function Restarting() {
+  return (
+    <div className="splash restarting" role="status" aria-live="assertive">
+      <div className="restarting-box">
+        <span className="restarting-spinner" aria-hidden="true" />
+        <strong>Restarting Couch Co-App…</strong>
+        <span className="hint">Telling your rooms you're stepping out. The app opens again in a few seconds.</span>
+      </div>
+    </div>
   );
 }
 
@@ -213,7 +230,7 @@ function hostOf(url: string): string {
   }
 }
 
-function NetworkSection(props: { busy: Busy }) {
+function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean) => void }) {
   const [view, setView] = useState<NetworkView | null>(null);
   /** Saving or restarting failed; stays until the next try. */
   const [error, setError] = useState<string | null>(null);
@@ -268,12 +285,20 @@ function NetworkSection(props: { busy: Busy }) {
     }
   };
 
-  const restart = () => {
+  const restart = async () => {
     if ((props.busy.hosting || props.busy.watching) && !confirmRestart) {
       setConfirmRestart(true);
       return;
     }
-    invoke("restart_app").catch((e) => setError(errorText(e)));
+    // Saying goodbye to the rooms takes a moment, and the window freezes
+    // while it happens: show that something is going on first, and let it
+    // paint before asking.
+    props.onRestarting(true);
+    await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
+    invoke("restart_app").catch((e) => {
+      props.onRestarting(false);
+      setError(errorText(e));
+    });
   };
 
   return (
