@@ -3,7 +3,8 @@
 //! - [`router`]: on the host, decides which remote input reaches the game;
 //! - [`forward`]: on a viewer, turns local input into what goes on the wire;
 //! - [`filter`]: keys a remote member may never press;
-//! - [`shortcuts`]: every local shortcut, in one table.
+//! - [`shortcuts`]: every local shortcut, in one table;
+//! - [`local`]: the host's own controller, read to play through a seat.
 //!
 //! Keys travel as physical positions (USB HID usages), never as characters, so
 //! the host's keyboard layout decides what a key types and WASD stays WASD on
@@ -11,6 +12,7 @@
 
 pub mod filter;
 pub mod forward;
+pub mod local;
 pub mod router;
 pub mod shortcuts;
 

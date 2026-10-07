@@ -1,0 +1,16 @@
+[package]
+name = "couch-gamepad"
+description = "Physical gamepads through SDL3: their state in XInput's terms, and the host's own controller read on a thread of its own."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+couch-input.workspace = true
+couch-proto.workspace = true
+sdl3.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

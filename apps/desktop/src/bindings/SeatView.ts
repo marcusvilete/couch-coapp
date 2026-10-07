@@ -13,6 +13,11 @@ label: string,
  */
 pad: boolean, keyboardMouse: boolean, 
 /**
- * The viewer holding it; `None` while the host has it.
+ * Who plays it: a viewer, or the host with their own controller.
+ * `None` while free.
  */
-holder: string | null, };
+holder: string | null, 
+/**
+ * The host plays it with their own controller.
+ */
+host: boolean, };

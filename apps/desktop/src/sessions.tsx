@@ -3,6 +3,7 @@
 // The engine decides everything; these only show its state and send commands.
 import { useEffect, useState, type FormEvent } from "react";
 import type { Command } from "./bindings/Command";
+import type { HostController } from "./bindings/HostController";
 import type { InputSetup } from "./bindings/InputSetup";
 import type { RoomView } from "./bindings/RoomView";
 import type { SeatChoice } from "./bindings/SeatChoice";
@@ -30,10 +31,12 @@ export function nameOf(room: RoomView, member: string | null | undefined): strin
   return room.members.find((m) => m.id === member)?.name ?? "someone";
 }
 
-/** Who plays: each seat's holder, and the host while a seat is free. */
+/** Who plays: each seat's holder (the host's own controller included), and
+ * the host while a seat is free if they play outside the seats. */
 export function playersOf(session: SessionView): string[] {
   const holders = session.seats.flatMap((s) => (s.holder ? [s.holder] : []));
-  return holders.length < session.seats.length ? [...holders, session.host] : holders;
+  const outside = !session.seats.some((s) => s.host) && holders.length < session.seats.length;
+  return outside ? [...holders, session.host] : holders;
 }
 
 /** A seat's label in a sentence: "the controller", "Controller 2". */
@@ -42,12 +45,14 @@ export function seatPhrase(label: string): string {
 }
 
 /** "Bia is playing" (the host while nobody holds the one seat), or per seat:
- * "Controller 1: Bia · Controller 2: free · Ana: own controller", the host
- * playing on their own devices beside the seats. */
+ * "Controller 1: Ana · Controller 2: free". A host playing outside the seats,
+ * on whatever the game sees directly, is listed beside them: "Ana: own
+ * controller". */
 function whoPlays(room: RoomView, s: SessionView): string {
   if (s.seats.length === 1) return `${nameOf(room, s.seats[0].holder ?? s.host)} is playing`;
   const seats = s.seats.map((seat) => `${seat.label}: ${seat.holder ? nameOf(room, seat.holder) : "free"}`);
-  return [...seats, `${nameOf(room, s.host)}: own controller`].join(" · ");
+  const outside = s.seats.some((seat) => seat.host) ? [] : [`${nameOf(room, s.host)}: own controller`];
+  return [...seats, ...outside].join(" · ");
 }
 
 function allowsKbm(s: SessionView): boolean {
@@ -255,6 +260,12 @@ function HostPanel(props: {
   const seatOf = (member: string) => s.seats.findIndex((seat) => seat.holder === member);
   const single = s.seats.length === 1;
   const pass = (member: string, seat: number) => run(`pass-${member}`, { type: "passControl", member, seat });
+  // Our own controller plays through a seat (hidden from games), or we play
+  // outside the seats on whatever the game sees directly.
+  const pad = s.hostController;
+  const ourSeat = s.seats.findIndex((seat) => seat.host);
+  const holderName = (seat: SessionView["seats"][number]) =>
+    seat.host ? `you (${pad ?? "your controller"})` : seat.holder ? nameOf(room, seat.holder) : "free";
   return (
     <section className="host-panel" aria-label="Your stream">
       <div className="host-head">
@@ -269,9 +280,24 @@ function HostPanel(props: {
         </button>
       </div>
 
+      {pad && (
+        <p className="banner" role="status">
+          Your {pad} is hidden from games while you're live. If the game still reacts to it directly, reconnect it once
+          (unplug it and plug it back, or turn it off and on) so games and Steam let go of it.
+        </p>
+      )}
+      {s.hostControllerProblem && (
+        <p className="banner warn" role="status">
+          Your controller can't play through a seat: {s.hostControllerProblem}. You play on it directly, beside the seats.
+        </p>
+      )}
+
       {s.controlPaused && (
         <div className="banner warn offer" role="status">
-          <span>You took the controller back with the panic key. Nobody can play until you allow it.</span>
+          <span>
+            You took the controller back with the panic key. Nobody else can play until you allow it
+            {pad ? "; you still can" : ""}.
+          </span>
           <button disabled={busy != null} onClick={() => run("allow", { type: "allowControl" })}>
             Allow control
           </button>
@@ -301,16 +327,16 @@ function HostPanel(props: {
         </div>
       )}
 
-      {!single && (
+      {(!single || pad) && (
         <div className="host-list">
           <h4>Seats — {s.seats.length}</h4>
           <ul>
             <li className="own-devices">
               <span className="seat-kind" aria-hidden="true">
-                🎮
+                {pad ? "⌨" : "🎮"}
               </span>
               <span className="member-name">
-                Your own controller, keyboard and mouse
+                {pad ? "Your keyboard and mouse" : "Your own controller, keyboard and mouse"}
                 <span className="hint"> · you, beside the seats</span>
               </span>
             </li>
@@ -321,20 +347,29 @@ function HostPanel(props: {
                 </span>
                 <span className="member-name">
                   {seat.label}
-                  <span className="hint"> · {seat.holder ? nameOf(room, seat.holder) : "free"}</span>
+                  <span className="hint"> · {holderName(seat)}</span>
                 </span>
-                {seat.holder && (
+                {seat.holder && !seat.host && (
                   <button disabled={busy != null} onClick={() => run(`take-${i}`, { type: "takeBackControl", seat: i })}>
                     Take back
+                  </button>
+                )}
+                {pad && seat.pad && !seat.host && (
+                  <button
+                    disabled={busy != null}
+                    title={seat.holder ? `${nameOf(room, seat.holder)} loses it` : undefined}
+                    onClick={() => run(`play-${i}`, { type: "playSeat", seat: i })}
+                  >
+                    Play here
                   </button>
                 )}
               </li>
             ))}
           </ul>
           <p className="hint">
-            The game numbers its players itself, usually in the order controllers join, and your own controller counts:
-            it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat
-            doesn't respond, move them to another one.
+            {pad
+              ? "Every player in the game is one of these seats, yours included, so any of them can be handed over. The game numbers its players itself, usually in the order controllers join."
+              : "The game numbers its players itself, usually in the order controllers join, and your own controller counts: it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat doesn't respond, move them to another one."}
           </p>
         </div>
       )}
@@ -387,7 +422,7 @@ function HostPanel(props: {
                         i === seat ? null : (
                           <option key={i} value={i}>
                             {other.label}
-                            {other.holder ? ` (${nameOf(room, other.holder)}'s)` : ""}
+                            {other.host ? " (yours)" : other.holder ? ` (${nameOf(room, other.holder)}'s)` : ""}
                           </option>
                         ),
                       )}
@@ -401,11 +436,15 @@ function HostPanel(props: {
       </div>
 
       <p className="hint">
-        {single
-          ? s.seats[0].holder
-            ? `${nameOf(room, s.seats[0].holder)} is playing; your own controller, keyboard and mouse still work too.`
-            : "You're playing."
-          : "You play on your own controller, keyboard and mouse, beside the seats."}{" "}
+        {pad
+          ? ourSeat >= 0
+            ? `You play ${single ? "the seat" : s.seats[ourSeat].label} with your ${pad}; your keyboard and mouse work beside the seats.`
+            : `Your ${pad} plays no seat now: taking back the seat you last played gives it back to you${single ? "" : ", or use Play here"}. Your keyboard and mouse still work.`
+          : single
+            ? s.seats[0].holder
+              ? `${nameOf(room, s.seats[0].holder)} is playing; your own controller, keyboard and mouse still work too.`
+              : "You're playing."
+            : "You play on your own controller, keyboard and mouse, beside the seats."}{" "}
         {s.panicKey ? (
           <>
             <kbd>{s.panicKey}</kbd> takes the controller back from anyone at once, even from inside the game.
@@ -430,6 +469,30 @@ const QUALITIES: { mbps: number; label: string }[] = [
 
 type Picked = { kind: "window" | "screen"; id: string; title: string };
 
+/** Where Go live remembers our controller choice (this profile's own web
+ * storage): a `padKey`, or "" for none. */
+const MY_PAD_KEY = "couch.goLive.controller";
+
+function padKey(c: HostController): string {
+  return `${c.vendor}:${c.product}`;
+}
+
+function readStored(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // A convenience only.
+  }
+}
+
 export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLive: (room: RoomView) => void }) {
   const [sources, setSources] = useState<SourceList | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -445,13 +508,23 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
   const [seatChoice, setSeatChoice] = useState<SeatChoice>("controller");
   const [controllers, setControllers] = useState(2);
   const [kbmSeat, setKbmSeat] = useState(false);
+  // Our controller to play through a seat, as `padKey`; "" plays outside.
+  const [myPad, setMyPad] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
     setLoadError(null);
     request({ type: "listSources" }, "sources")
-      .then(setSources)
+      .then((list) => {
+        setSources(list);
+        // The last choice comes back if that controller is here; otherwise
+        // the first one, if it can be hidden.
+        const last = readStored(MY_PAD_KEY);
+        const keys = list.hostControllers.map(padKey);
+        const ready = list.hiding === "ready";
+        setMyPad(!ready ? "" : last === "" ? "" : last != null && keys.includes(last) ? last : (keys[0] ?? ""));
+      })
       .catch((e) => setLoadError(errorText(e)));
   };
   useEffect(load, []);
@@ -482,6 +555,10 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
     mode === "single" ? { mode: "single", seat: seatChoice } : { mode: "multi", controllers, keyboardMouse: kbmSeat };
   const kbm = mode === "single" ? seatChoice !== "controller" : kbmSeat;
   const isWindow = picked?.kind !== "screen";
+  // Our controller needs a seat with a pad.
+  const padSeat = mode === "multi" || seatChoice !== "keyboardMouse";
+  const hostControllers = sources?.hostControllers ?? [];
+  const controller = padSeat ? (hostControllers.find((c) => padKey(c) === myPad) ?? null) : null;
 
   // Whole Mbit/s only: "50abc" or "1e9" isn't a limit.
   const uploadMbps = limitUpload ? (/^\s*\d{1,5}\s*$/.test(upload) ? Number(upload) : Number.NaN) : null;
@@ -514,9 +591,13 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
           upload_mbps: uploadMbps,
           max_viewers: viewers,
           input,
+          controller,
         },
         "room",
       );
+      // Only a real choice is remembered: with HidHide missing or busy the
+      // select was forced to "none".
+      if (hostControllers.length > 0 && sources?.hiding === "ready") writeStored(MY_PAD_KEY, myPad);
       props.onLive(room);
     } catch (e) {
       setError(errorText(e));
@@ -704,12 +785,36 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
                 <input type="checkbox" checked={kbmSeat} disabled={!isWindow} onChange={(e) => setKbmSeat(e.target.checked)} />
                 Plus a seat with keyboard and mouse
               </label>
-              {(sources?.controllers ?? 0) > 0 && (
+              {(sources?.controllers ?? 0) > 0 && controller == null && (
                 <p className="banner warn" role="status">
                   A controller is plugged into this PC. Games may give it a player's place, and then a guest's controller
-                  may not work. If that happens, unplug yours and play on a seat like the others.
+                  may not work. Play on a seat with it (below), or unplug it.
                 </p>
               )}
+            </>
+          )}
+          {sources && hostControllers.length > 0 && padSeat && (
+            <>
+              <label>
+                Your controller
+                <select value={myPad} disabled={sources.hiding !== "ready"} onChange={(e) => setMyPad(e.target.value)}>
+                  <option value="">Not on a seat: the game sees it directly</option>
+                  {hostControllers.map((c) => (
+                    <option key={padKey(c)} value={padKey(c)}>
+                      {c.name}: you start on {mode === "multi" ? "Controller 1" : "the seat"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="hint">
+                {sources.hiding === "notInstalled"
+                  ? "To play on a seat with your controller, install HidHide (it needs administrator rights, then a restart): github.com/nefarius/HidHide/releases."
+                  : sources.hiding === "busy"
+                    ? "HidHide's configuration window is open: close it, then refresh the list above."
+                    : controller
+                      ? "It is hidden from games while you're live and plays its seat through Couch Co-App, so every seat, yours included, can be handed over. Reconnect it once after going live, so games and Steam let go of it."
+                      : "You play outside the seats, as the game sees your controller."}
+              </p>
             </>
           )}
           <p className="hint">

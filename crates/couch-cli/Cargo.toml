@@ -23,6 +23,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+couch-gamepad.workspace = true
 couch-platform-win.workspace = true
 
 [lints]

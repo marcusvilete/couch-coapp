@@ -583,6 +583,7 @@ impl Actor {
                 upload_mbps,
                 max_viewers,
                 input,
+                controller,
             } => {
                 let go = sessions::GoLive {
                     room,
@@ -593,6 +594,7 @@ impl Actor {
                     upload_mbps,
                     max_viewers,
                     input,
+                    controller,
                 };
                 // Answers later, once the stream has started.
                 if let Err(e) = self.go_live(go, reply, now) {
@@ -612,6 +614,7 @@ impl Actor {
             Command::AnswerControl { member, accept } => self.answer_control(&member, accept, now),
             Command::PassControl { member, seat } => self.pass_control(&member, SeatId(seat), now),
             Command::TakeBackControl { seat } => self.take_back_control(seat.map(SeatId), now),
+            Command::PlaySeat { seat } => self.play_seat(SeatId(seat), now),
             Command::AllowControl => self.allow_control(now),
         };
         let _ = reply.send(result);

@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 4;
+pub const IPC_VERSION: u16 = 5;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -237,8 +237,10 @@ pub struct HudSeat {
     pub pad: bool,
     /// Its holder may use keyboard and mouse.
     pub keyboard_mouse: bool,
-    /// Its holder's display name; `None` while the host has it.
+    /// Its holder's display name, the host's included; `None` while free.
     pub holder: Option<String>,
+    /// The host plays it with their own controller.
+    pub host: bool,
     /// This viewer holds it.
     pub mine: bool,
     /// This viewer asked for it and waits for the host.
@@ -516,6 +518,7 @@ mod tests {
                     pad: true,
                     keyboard_mouse: false,
                     holder: Some("Bia".into()),
+                    host: false,
                     mine: false,
                     asked: true,
                 },
@@ -523,7 +526,8 @@ mod tests {
                     label: "Controller 2".into(),
                     pad: true,
                     keyboard_mouse: false,
-                    holder: None,
+                    holder: Some("Ana".into()),
+                    host: true,
                     mine: false,
                     asked: false,
                 },

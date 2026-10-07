@@ -1042,6 +1042,7 @@ dependencies = [
  "couch-codec-ffmpeg",
  "couch-codec-opus",
  "couch-engine",
+ "couch-gamepad",
  "couch-input",
  "couch-media",
  "couch-net",
@@ -1097,6 +1098,7 @@ dependencies = [
  "bytes",
  "couch-codec-ffmpeg",
  "couch-codec-opus",
+ "couch-gamepad",
  "couch-input",
  "couch-media",
  "couch-net",
@@ -1115,6 +1117,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ts-rs",
+]
+
+[[package]]
+name = "couch-gamepad"
+version = "0.1.0"
+dependencies = [
+ "couch-input",
+ "couch-proto",
+ "sdl3",
+ "tracing",
 ]
 
 [[package]]
@@ -1217,6 +1229,7 @@ dependencies = [
  "anyhow",
  "couch-codec-ffmpeg",
  "couch-codec-opus",
+ "couch-gamepad",
  "couch-input",
  "couch-media",
  "couch-platform-win",

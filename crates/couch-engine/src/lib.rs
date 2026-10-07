@@ -126,6 +126,10 @@ pub enum Command {
         /// window source; they go in only while it is in front. Remembered
         /// for the window's program.
         input: InputSetup,
+        /// The host's own controller, to play through a seat: hidden from
+        /// games while live, it drives the first seat with a pad. `None`
+        /// plays outside the seats, with whatever the game sees directly.
+        controller: Option<HostController>,
     },
     StopLive,
     /// Watches `host`'s stream in `room`, in a viewer window. Answers once
@@ -152,9 +156,15 @@ pub enum Command {
         member: String,
         seat: u8,
     },
-    /// While streaming: take a seat back, or every seat with `None`.
+    /// While streaming: take a seat back from a viewer, or every seat with
+    /// `None`. A seat that was ours comes back to our controller.
     TakeBackControl {
         seat: Option<u8>,
+    },
+    /// While streaming, with our controller on a seat: play another seat
+    /// with it. A viewer on that seat loses it.
+    PlaySeat {
+        seat: u8,
     },
     /// While streaming: let viewers have control again after the panic key.
     AllowControl,
@@ -201,6 +211,34 @@ pub struct SourceList {
     /// Game controllers plugged into this PC. In a multiplayer game, one
     /// can take a guest's place, so Go live warns.
     pub controllers: u32,
+    /// This PC's own controllers that could play through a seat (never our
+    /// virtual pads, nor a controller with their ids).
+    pub host_controllers: Vec<HostController>,
+    /// Whether a controller can be hidden from games (HidHide).
+    pub hiding: HidingView,
+}
+
+/// One of the host's own controllers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct HostController {
+    pub name: String,
+    /// Its USB ids, which find it again after it is reconnected.
+    pub vendor: u16,
+    pub product: u16,
+}
+
+/// Whether the host's controller can be hidden from games.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum HidingView {
+    /// HidHide isn't installed: the controller can't play through a seat.
+    NotInstalled,
+    Ready,
+    /// HidHide's configuration window is open; close it first.
+    Busy,
 }
 
 /// How the game takes input, chosen when going live and remembered per
@@ -277,8 +315,11 @@ pub struct SeatView {
     /// It drives a virtual controller.
     pub pad: bool,
     pub keyboard_mouse: bool,
-    /// The viewer holding it; `None` while the host has it.
+    /// Who plays it: a viewer, or the host with their own controller.
+    /// `None` while free.
     pub holder: Option<String>,
+    /// The host plays it with their own controller.
+    pub host: bool,
 }
 
 /// A viewer asking for a seat, for the host.
@@ -341,6 +382,12 @@ pub struct SessionView {
     /// For the host: the panic key's keys, while its hook is in place;
     /// `None` if it couldn't be installed (the app warns).
     pub panic_key: Option<String>,
+    /// For the host: their controller playing through a seat, hidden from
+    /// games, if they chose one and it works.
+    pub host_controller: Option<String>,
+    /// For the host: why the controller they chose doesn't play through a
+    /// seat (they play outside the seats instead).
+    pub host_controller_problem: Option<String>,
 }
 
 /// Where this profile stands in a session.
@@ -454,6 +501,7 @@ impl fmt::Debug for Command {
                 upload_mbps,
                 max_viewers,
                 input,
+                controller,
                 ..
             } => f
                 .debug_struct("GoLive")
@@ -463,6 +511,7 @@ impl fmt::Debug for Command {
                 .field("upload_mbps", upload_mbps)
                 .field("max_viewers", max_viewers)
                 .field("input", input)
+                .field("controller", controller)
                 .finish_non_exhaustive(),
             Self::StopLive => f.write_str("StopLive"),
             Self::Watch { room, host } => f
@@ -490,6 +539,7 @@ impl fmt::Debug for Command {
                 .debug_struct("TakeBackControl")
                 .field("seat", seat)
                 .finish(),
+            Self::PlaySeat { seat } => f.debug_struct("PlaySeat").field("seat", seat).finish(),
             Self::AllowControl => f.write_str("AllowControl"),
         }
     }
@@ -917,10 +967,25 @@ impl Engine {
             }),
             Command::ListSources => {
                 let backend = self.backend.clone();
-                let (sources, controllers) =
-                    tokio::task::spawn_blocking(move || (backend.sources(), backend.controllers()))
-                        .await
-                        .map_err(|_| EngineError::Stopped)?;
+                let (sources, controllers, host_controllers, hiding) =
+                    tokio::task::spawn_blocking(move || {
+                        let host_controllers = match backend.local_pads().map(|p| p.list()) {
+                            Some(Ok(list)) => list,
+                            Some(Err(e)) => {
+                                tracing::warn!("listing this PC's controllers: {e}");
+                                Vec::new()
+                            }
+                            None => Vec::new(),
+                        };
+                        (
+                            backend.sources(),
+                            backend.controllers(),
+                            host_controllers,
+                            backend.hiding(),
+                        )
+                    })
+                    .await
+                    .map_err(|_| EngineError::Stopped)?;
                 let sources = sources.map_err(|e| EngineError::Media(e.to_string()))?;
                 let setups = store::input_setups(self.profile.data_dir());
                 Ok(Response::Sources(SourceList {
@@ -947,6 +1012,19 @@ impl Engine {
                         })
                         .collect(),
                     controllers: u32::try_from(controllers).unwrap_or(u32::MAX),
+                    host_controllers: host_controllers
+                        .into_iter()
+                        .map(|c| HostController {
+                            name: c.name,
+                            vendor: c.ids.vendor,
+                            product: c.ids.product,
+                        })
+                        .collect(),
+                    hiding: match hiding {
+                        pipeline::Hiding::Unavailable => HidingView::NotInstalled,
+                        pipeline::Hiding::Ready => HidingView::Ready,
+                        pipeline::Hiding::Busy => HidingView::Busy,
+                    },
                 }))
             }
             Command::GoLive {
@@ -1058,6 +1136,7 @@ mod tests {
                 upload_mbps: None,
                 max_viewers: 4,
                 input: InputSetup::default(),
+                controller: None,
             }
         );
         assert!(!shown.contains("Bank"), "{shown}");
@@ -1073,6 +1152,8 @@ mod tests {
                 }],
                 screens: Vec::new(),
                 controllers: 0,
+                host_controllers: Vec::new(),
+                hiding: HidingView::NotInstalled,
             })
         );
         assert!(!list.contains("Bank"), "{list}");

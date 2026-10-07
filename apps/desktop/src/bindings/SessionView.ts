@@ -36,4 +36,14 @@ askedSeat: number | null,
  * For the host: the panic key's keys, while its hook is in place;
  * `None` if it couldn't be installed (the app warns).
  */
-panicKey: string | null, };
+panicKey: string | null, 
+/**
+ * For the host: their controller playing through a seat, hidden from
+ * games, if they chose one and it works.
+ */
+hostController: string | null, 
+/**
+ * For the host: why the controller they chose doesn't play through a
+ * seat (they play outside the seats instead).
+ */
+hostControllerProblem: string | null, };

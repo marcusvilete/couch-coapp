@@ -23,7 +23,10 @@ pub mod watch;
 
 use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
 
-use couch_input::{InputError, KbmInjector, VirtualPad};
+use couch_input::{
+    InputError, KbmInjector, VirtualPad,
+    local::{ControllerIds, LocalPads},
+};
 use couch_media::{AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, clock::Clock};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -104,6 +107,17 @@ pub enum AudioKind {
     Tone,
 }
 
+/// Whether the host's controller can be hidden from games
+/// ([`Backend::hiding`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hiding {
+    /// Nothing to hide with: HidHide isn't installed.
+    Unavailable,
+    Ready,
+    /// HidHide is busy: its configuration window is open.
+    Busy,
+}
+
 /// Where keyboard and mouse would land, checked right before every input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Focus {
@@ -179,6 +193,23 @@ pub trait Backend: Send + Sync + 'static {
         0
     }
 
+    /// The host's own controllers, which can play through a seat. Never our
+    /// virtual pads.
+    fn local_pads(&self) -> Option<&dyn LocalPads> {
+        None
+    }
+
+    /// Whether a controller could be hidden from games now.
+    fn hiding(&self) -> Hiding {
+        Hiding::Unavailable
+    }
+
+    /// Hides the host's controller from every program but this one until
+    /// the returned guard drops (HidHide on Windows). Blocks briefly.
+    fn hide_controller(&self, _ids: ControllerIds) -> Result<Box<dyn Any + Send>, String> {
+        Err("hiding controllers isn't available here".into())
+    }
+
     fn focus(&self, window: NativeId) -> Focus;
 
     fn window_exists(&self, window: NativeId) -> bool;
@@ -193,9 +224,9 @@ pub trait Backend: Send + Sync + 'static {
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError>;
 
     /// At start, before any input: lets go of keys and buttons a host on
-    /// this machine left held when it crashed or was killed, and makes a
-    /// panic in this process let go of what it holds. Returns how many were
-    /// left held.
+    /// this machine left held when it crashed or was killed, shows games any
+    /// controller it left hidden, and makes a panic in this process let go
+    /// of what it holds. Returns how many keys and buttons were left held.
     fn release_left_input(&self) -> usize {
         0
     }

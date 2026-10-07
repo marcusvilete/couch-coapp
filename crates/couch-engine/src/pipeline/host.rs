@@ -21,6 +21,7 @@
 //! process is gone, or with `SourceClosed` when the grace runs out.
 
 use std::{
+    any::Any,
     collections::{BTreeMap, HashMap},
     fs::File,
     io::{LineWriter, Write},
@@ -35,7 +36,8 @@ use std::{
 
 use couch_codec_opus::OpusEncoder;
 use couch_input::{
-    KbmInjector, MemberId, Permissions, Rumble, SeatEpoch, SeatId, VirtualPad,
+    KbmInjector, MemberId, PadState, Permissions, Rumble, SeatEpoch, SeatId, VirtualPad,
+    local::{ControllerIds, LocalPad},
     router::{self, Effect, Input, SeatRouter, SeatStatus},
 };
 use couch_media::{
@@ -55,7 +57,7 @@ use couch_net::{
     video::HostVideo,
 };
 use couch_proto::{
-    input::RumbleDatagram,
+    input::{PadDatagram, RumbleDatagram},
     media::{AudioDatagram, reset_code},
     session::SeatKind,
 };
@@ -135,6 +137,20 @@ pub struct HostOptions {
     /// How long a game may take to show a new window before the stream ends
     /// ([`source::REPLACE_GRACE`]; shorter in tests).
     pub replace_grace: Duration,
+    /// The host's own controller, played through a seat.
+    pub local: Option<LocalSeat>,
+}
+
+/// The host's own controller, read on this PC and played through a seat like
+/// a viewer's: its input goes through the seat router as `member`'s, which
+/// [`HostStream::claim`] and [`HostStream::grant`] give a seat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalSeat {
+    /// The host's own id, as the router's holder.
+    pub member: MemberId,
+    pub controller: ControllerIds,
+    /// Hide it from games first, or they would see it beside its seat's pad.
+    pub hide: bool,
 }
 
 /// What a host stream reports.
@@ -212,6 +228,8 @@ pub struct HostStream {
     input: mpsc::UnboundedSender<InputCmd>,
     input_task: Option<tokio::task::JoinHandle<()>>,
     housekeeping: AbortHandle,
+    /// Whether the host's controller plays through a seat, or why not.
+    local: Option<Result<(), String>>,
 }
 
 struct Shared {
@@ -447,17 +465,34 @@ impl HostStream {
         options: HostOptions,
     ) -> (Self, mpsc::UnboundedReceiver<HostEvent>) {
         let (events, events_rx) = mpsc::unbounded_channel();
+        let (local_tx, local_rx) = mpsc::channel::<PadState>(LOCAL_QUEUE);
         let plugged = {
             let backend = backend.clone();
             let real_ids = options.real_pad_ids;
             let seats = options.seats.clone();
+            let local = options.local;
             tokio::task::spawn_blocking(move || {
-                seats
+                let pads = seats
                     .iter()
                     .map(|kind| kind.has_pad().then(|| backend.plug_pad(real_ids)))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                let local = local.map(|local| start_local(&*backend, local, local_tx));
+                (pads, local)
             })
             .await
+        };
+        let (plugged, local) = match plugged {
+            Ok((pads, local)) => (Ok(pads), local),
+            Err(e) => (Err(e), None),
+        };
+        let (local, local_status, hidden) = match local {
+            Some(Ok((pad, hidden))) => (Some(pad), Some(Ok(())), hidden),
+            Some(Err(e)) => (None, Some(Err(e)), None),
+            None => (
+                None,
+                options.local.map(|_| Err("it didn't start".to_string())),
+                None,
+            ),
         };
         let window = match options.source {
             Source::Window(id) => id,
@@ -516,8 +551,30 @@ impl HostStream {
             let sh = shared.clone();
             let _ = tokio::task::spawn_blocking(move || sh.watch_game(window)).await;
         }
+        let local_seat = shared.options.local;
+        match (local_seat, &local_status) {
+            (Some(l), Some(Ok(()))) => shared.note(format!(
+                "the host's controller {:04x}:{:04x} plays through a seat{}",
+                l.controller.vendor,
+                l.controller.product,
+                if hidden.is_some() {
+                    ", hidden from games"
+                } else {
+                    ""
+                }
+            )),
+            (Some(_), Some(Err(e))) => shared.note(format!(
+                "the host's controller can't play through a seat: {e}"
+            )),
+            _ => {}
+        }
+        let local = local.zip(local_seat).map(|(pad, seat)| LocalFeed {
+            member: seat.member,
+            pad,
+            states: local_rx,
+        });
         let (input, cmds) = mpsc::unbounded_channel();
-        let input_task = tokio::spawn(input_loop(shared.clone(), pads, cmds));
+        let input_task = tokio::spawn(input_loop(shared.clone(), pads, local, hidden, cmds));
         let housekeeping = tokio::spawn(housekeeping(Arc::downgrade(&shared))).abort_handle();
         (
             Self {
@@ -525,9 +582,23 @@ impl HostStream {
                 input,
                 input_task: Some(input_task),
                 housekeeping,
+                local: local_status,
             },
             events_rx,
         )
+    }
+
+    /// Whether the host's controller plays through a seat: `None` if it
+    /// wasn't asked to, or why it can't.
+    pub fn local_seat(&self) -> Option<&Result<(), String>> {
+        self.local.as_ref()
+    }
+
+    /// Hands `seat` to `member` only if nobody holds it and `member` holds no
+    /// other: the host's own seat coming back to them. Only the host's own
+    /// controller may claim; other claims are ignored.
+    pub fn claim(&self, seat: SeatId, member: MemberId) {
+        let _ = self.input.send(InputCmd::Claim { seat, member });
     }
 
     /// The captured window, once known.
@@ -1279,6 +1350,48 @@ impl RcTrace {
 
 // ---- Input ----
 
+/// The host's controller states waiting for the input task; full snapshots,
+/// so dropping some when it falls behind loses nothing.
+const LOCAL_QUEUE: usize = 64;
+
+/// The host's controller while it plays through a seat.
+struct LocalFeed {
+    member: MemberId,
+    pad: Box<dyn LocalPad>,
+    states: mpsc::Receiver<PadState>,
+}
+
+/// Keeps the host's controller hidden from games until dropped.
+type HiddenGuard = Box<dyn Any + Send>;
+
+/// Hides the host's controller if asked, then follows it, its states going
+/// to `states`. Blocks: hiding and starting the reader take a moment.
+/// Returns the followed pad and the hiding guard.
+fn start_local(
+    backend: &dyn Backend,
+    local: LocalSeat,
+    states: mpsc::Sender<PadState>,
+) -> Result<(Box<dyn LocalPad>, Option<HiddenGuard>), String> {
+    let pads = backend
+        .local_pads()
+        .ok_or_else(|| "this PC's controllers can't be read".to_string())?;
+    let hidden = if local.hide {
+        Some(backend.hide_controller(local.controller)?)
+    } else {
+        None
+    };
+    // A failure here drops `hidden`: the controller is shown again.
+    let pad = pads
+        .follow(
+            local.controller,
+            Box::new(move |state| {
+                let _ = states.try_send(state);
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((pad, hidden))
+}
+
 enum InputCmd {
     AddViewer {
         member: MemberId,
@@ -1297,6 +1410,11 @@ enum InputCmd {
         holder: Option<MemberId>,
     },
     RevokeAll,
+    /// Grant only if the seat is free and `member`, the host, holds none.
+    Claim {
+        seat: SeatId,
+        member: MemberId,
+    },
     /// Release everything, then answer: the first step of stopping.
     ReleaseAll(oneshot::Sender<()>),
     /// Unplug the pads and end, then answer: the last step.
@@ -1327,6 +1445,16 @@ struct Inputs {
     /// Whether the game window is in front now, and what was last reported
     /// and when. `None` for a screen: nothing to report.
     focus: Option<FocusReport>,
+    /// The host's controller, while it plays through a seat.
+    local: Option<Local>,
+}
+
+/// The host's controller, in the input task.
+struct Local {
+    member: MemberId,
+    pad: Box<dyn LocalPad>,
+    /// Its states, numbered as a viewer numbers its pad datagrams.
+    seq: u32,
 }
 
 struct FocusReport {
@@ -1421,10 +1549,49 @@ impl Inputs {
         self.send_rumble(now);
     }
 
-    /// A seat's rumble goes only to its holder. A running rumble is
-    /// repeated, so a lost "stop" can't leave a controller shaking: the
-    /// viewer ends each one after a second.
+    /// The seat `member` holds in the router.
+    fn seat_of(&self, member: MemberId) -> Option<SeatId> {
+        self.seats()
+            .find(|seat| self.router.seat(*seat).is_some_and(|s| s.1 == Some(member)))
+    }
+
+    /// The host's controller moved, or reports itself still: into the router
+    /// as the host's input on the seat they hold, like a viewer's pad
+    /// datagram. Dropped while they hold none.
+    fn local_input(&mut self, state: PadState) {
+        let Some(member) = self.local.as_ref().map(|l| l.member) else {
+            return;
+        };
+        let Some(seat) = self.seat_of(member) else {
+            return;
+        };
+        let Some((epoch, ..)) = self.router.seat(seat) else {
+            return;
+        };
+        let Some(local) = self.local.as_mut() else {
+            return;
+        };
+        local.seq = local.seq.wrapping_add(1);
+        let datagram = PadDatagram {
+            seat,
+            seat_epoch: epoch,
+            seq: local.seq,
+            pad: state.into(),
+        };
+        let mut effects = self.refresh_focus();
+        effects.extend(
+            self.router
+                .handle(member, Input::Pad(datagram), Instant::now()),
+        );
+        self.deliver(effects);
+    }
+
+    /// A seat's rumble goes only to its holder: a viewer's stream window, or
+    /// the host's controller. A running rumble is repeated, so a lost "stop"
+    /// can't leave a controller shaking: each one ends after a second.
     fn send_rumble(&mut self, now: Instant) {
+        let host = self.local.as_ref().map(|l| l.member);
+        let host_seated = host.and_then(|h| self.seat_of(h)).is_some();
         for seat in self.seats() {
             let i = usize::from(seat.0);
             if let Some(Some(pad)) = self.pads.get_mut(i)
@@ -1433,17 +1600,34 @@ impl Inputs {
                 self.rumble[i].now = r;
                 self.shared.event(HostEvent::Rumble(r));
             }
+            let holder = self.router.seat(seat).and_then(|s| s.1);
             let rumble = &mut self.rumble[i];
-            let Some(holder) = self.router.seat(seat).and_then(|s| s.1) else {
+            let (to, sent, at) = rumble.sent;
+            // The seat left the host, and they hold no other: their
+            // controller stops at once. (A viewer's stream window stops when
+            // it hears its seat went. A host who moved gets the new seat's
+            // rumble from its own turn of this loop.)
+            if to.is_some()
+                && to == host
+                && holder != host
+                && !host_seated
+                && let Some(local) = &self.local
+            {
+                local.pad.rumble(Rumble::default());
+            }
+            let Some(holder) = holder else {
                 rumble.sent = (None, Rumble::default(), now);
                 continue;
             };
-            let (to, sent, at) = rumble.sent;
             let repeat = rumble.now != Rumble::default() && now.duration_since(at) >= RUMBLE_REPEAT;
             if to == Some(holder) && sent == rumble.now && !repeat {
                 continue;
             }
-            if let Some((_, conn)) = self.viewers.get(&holder) {
+            if Some(holder) == host {
+                if let Some(local) = &self.local {
+                    local.pad.rumble(rumble.now);
+                }
+            } else if let Some((_, conn)) = self.viewers.get(&holder) {
                 send_rumble(
                     conn,
                     RumbleDatagram {
@@ -1458,12 +1642,28 @@ impl Inputs {
     }
 }
 
+/// `hidden` keeps the host's controller hidden from games; it is dropped
+/// last, after the pads are unplugged, so no game sees it while it still has
+/// a seat's pad.
 async fn input_loop(
     shared: Arc<Shared>,
     pads: Vec<Option<Box<dyn VirtualPad>>>,
+    local: Option<LocalFeed>,
+    hidden: Option<HiddenGuard>,
     mut cmds: mpsc::UnboundedReceiver<InputCmd>,
 ) {
     let (tx, mut inputs) = mpsc::channel::<(MemberId, Input)>(1024);
+    let (local, mut local_states) = match local {
+        Some(feed) => (
+            Some(Local {
+                member: feed.member,
+                pad: feed.pad,
+                seq: 0,
+            }),
+            Some(feed.states),
+        ),
+        None => (None, None),
+    };
     let seats = shared.options.seats.len();
     let start = Instant::now();
     let mut st = Inputs {
@@ -1485,14 +1685,18 @@ async fn input_loop(
             // The first report may go at once.
             at: start.checked_sub(FOCUS_COALESCE).unwrap_or(start),
         }),
+        local,
         shared,
     };
     for seat in st.seats() {
         st.status[usize::from(seat.0)] = st.router.seat(seat).map(|s| s.2);
     }
+    let host = st.local.as_ref().map(|l| l.member);
     let mut tick = tokio::time::interval(INPUT_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut done = None;
+    // Stopping released everything: nobody gets a seat again.
+    let mut released = false;
 
     loop {
         tokio::select! {
@@ -1520,7 +1724,11 @@ async fn input_loop(
                     st.shared.event(HostEvent::ViewerGone { member, at });
                 }
                 Some(InputCmd::Grant { seat, member, permissions }) => {
-                    if st.shared.grants_paused.load(Ordering::SeqCst) {
+                    // The panic key gives control back to the host: their own
+                    // controller may still move between seats.
+                    if released {
+                        tracing::info!(member = ?member, "stopping: a grant was refused");
+                    } else if st.shared.grants_paused.load(Ordering::SeqCst) && Some(member) != host {
                         tracing::info!(member = ?member, "panic key: a grant on its way was refused");
                     } else {
                         let effects = st.router.grant(seat, member, permissions, Instant::now());
@@ -1541,7 +1749,15 @@ async fn input_loop(
                     let effects = st.router.revoke_all();
                     st.deliver(effects);
                 }
+                Some(InputCmd::Claim { seat, member }) => {
+                    let free = st.router.seat(seat).is_some_and(|s| s.1.is_none());
+                    if !released && host == Some(member) && free && st.seat_of(member).is_none() {
+                        let effects = st.router.grant(seat, member, Permissions::GAMEPAD, Instant::now());
+                        st.deliver(effects);
+                    }
+                }
                 Some(InputCmd::ReleaseAll(ack)) => {
+                    released = true;
                     let effects = st.router.revoke_all();
                     st.deliver(effects);
                     let at = st.shared.now();
@@ -1560,6 +1776,12 @@ async fn input_loop(
                 effects.extend(st.router.handle(member, input, Instant::now()));
                 st.deliver(effects);
             }
+            state = next_local(&mut local_states) => match state {
+                Some(state) => st.local_input(state),
+                // The reader stopped: the host's seat goes quiet, and the
+                // dead-man timer releases it.
+                None => local_states = None,
+            },
             _ = tick.tick() => st.tick(Instant::now()),
         }
     }
@@ -1571,8 +1793,21 @@ async fn input_loop(
         task.abort();
     }
     drop(st);
+    // The pads are gone: games may see the host's controller again. Showing
+    // it talks to the driver, off the runtime's threads.
+    if let Some(hidden) = hidden {
+        let _ = tokio::task::spawn_blocking(move || drop(hidden)).await;
+    }
     if let Some(ack) = done {
         let _ = ack.send(());
+    }
+}
+
+/// The host controller's next state; never, without one.
+async fn next_local(states: &mut Option<mpsc::Receiver<PadState>>) -> Option<PadState> {
+    match states {
+        Some(states) => states.recv().await,
+        None => std::future::pending().await,
     }
 }
 

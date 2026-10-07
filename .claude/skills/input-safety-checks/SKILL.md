@@ -1,6 +1,6 @@
 ---
 name: input-safety-checks
-description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink`, `lifecycle-check` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch_engine::pipeline (host, watch), the engine's rooms::sessions, couch-cli's host/view, couch-platform-win's sendinput, held_input, markers, keymap, vigem, foreground, game or panic_key code, couch_engine::pipeline::source, couch_input::shortcuts, or anything on the viewer/host teardown path; and before reporting or committing such a change.
+description: Verify that Couch Co-App's remote input stays safe after a change, with `couch-cli release-check`, `input-sink`, `lifecycle-check` and the router tests: the host must release a viewer's keys, buttons and pad whenever a session ends badly, and inject only what the seat router allows. Use after changing couch_input (router, forward, filter), couch_net::input or datagrams, couch-viewer's input, pipe or shutdown code, couch_engine::pipeline (host, watch), the engine's rooms::sessions, couch-cli's host/view/host-pad, couch_gamepad, couch-platform-win's sendinput, held_input, hidhide, markers, keymap, vigem, foreground, game or panic_key code, couch_engine::pipeline::source, couch_input::shortcuts, or anything on the viewer/host teardown path; and before reporting or committing such a change.
 ---
 
 # Input safety checks
@@ -16,6 +16,15 @@ description: Verify that Couch Co-App's remote input stays safe after a change, 
 - **One seat per viewer.** `HostSession::grant` revokes the viewer from every other seat before the grant, on the same ordered channel. The session property test checks that the router never sees a member on two seats, even with reports arriving late. Never reorder those effects.
 
 The session scenarios `two_guests_play_two_pads_at_once`, `moving_to_another_seat_lets_go_of_the_old_one_first` and `a_keyboard_seat_types_and_never_drives_a_pad` cover it end to end with recording pads.
+
+**The host on a seat** (P2). The host's own controller is one more holder in the same router, never a shortcut around it:
+- **Through the router.** The input task wraps the reader's states (`InputCmd::Local`) as pad datagrams for the seat the host holds, with its current epoch, under the host's member id. Granted the pad permission only. While the host holds no seat, its states are dropped.
+- **Claims, not grants, bring the host's seat back** (`HostSession::reclaim`, `InputCmd::Claim`): the router takes one only if the seat is free and the host holds none, and only from the host. A plain grant could take a seat a viewer was just passed. The session property test runs with and without the host, its router model taking claims only for free seats, and checks the host never holds two seats and ends back on their seat unless a viewer has it.
+- **The panic key doesn't pause the host:** the pipeline refuses paused grants to viewers only.
+- **After stopping** (`ReleaseAll`), no grant or claim goes through.
+- **The hidden controller** (`couch_platform_win::hidhide`) is shown again after the pads are unplugged (the input task drops its guard last), and `restore_stale` in `Backend::release_left_input` undoes what a killed host left (its marker in `%LOCALAPPDATA%\CouchCoApp\hidden-controllers\`).
+
+Scenarios: `the_hosts_controller_plays_a_seat_and_gets_it_back`, `the_host_plays_another_seat_and_feels_its_rumble`, `a_controller_that_cant_be_hidden_plays_outside_the_seats`, with a fake controller (a thread reporting every 100 ms, like the real reader) and a fake hiding guard.
 
 ## Run
 
@@ -100,6 +109,11 @@ Ctrl+C and closing the host's console run the same code path as Ctrl+Break. Ctrl
   - The `Chord` unit tests cover the logic, including a guest's injected modifier key-ups (which clear Windows' shared down bit) not blocking it, and a Backspace held before the chord staying the game's. `the_panic_key_takes_control_back_until_allowed` covers the wiring with a fake hook, and every end path checks the hook goes.
   - Never log or block inside the hook callback: every key on the PC waits for it.
 - **The user's DualSense going silent in `joy.cpl`** while SDL or Steam holds it in enhanced mode is normal.
+- **The host's own controller and HidHide** (P2; needs HidHide installed and a controller that isn't an Xbox 360 one). After touching `couch_gamepad`, `hidhide.rs`, `controllers.rs` or the host pipeline's local input:
+  - `couch-cli host-pad` lists the controller, never our pads; run it while `pad-test --count 2` runs to check our pads stay unlisted.
+  - `couch-cli host-pad --feed 1 --secs 300` with `joy.cpl` and `xinput-watch.ps1` open: after the user reconnects the controller once, `joy.cpl` (closed and reopened) lists only "Xbox 360 Controller", which moves with it. At the end the controller is back and the marker is gone.
+  - Kill a feed with `Stop-Process -Force`: the marker stays and `joy.cpl` lists no controller; the next `couch-cli host-pad` prints "showed 1 controller(s) a crashed host had left hidden", and the controller is back.
+  - If the controller stays hidden for good: HidHide's configuration client (Start menu) shows the blacklist; remove its entries there, or start `couch-cli host-pad` once.
 
 ## After the checks
 

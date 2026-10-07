@@ -26,6 +26,7 @@ tracing.workspace = true
 ts-rs.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+couch-gamepad.workspace = true
 couch-platform-win.workspace = true
 
 [dev-dependencies]

@@ -1,5 +1,7 @@
 //! Game controllers plugged into this PC, counted for Go live's warning: in
 //! a multiplayer game, the host's own controller can take a player's place.
+//! Also every present device with its ids, class and container ([`present`]),
+//! which `crate::hidhide` uses to find all of one controller's nodes.
 //!
 //! Counts present HID collections that are joysticks or gamepads (usage page
 //! 1, usage 4 or 5). XInput controllers show one too, and so do our own
@@ -14,8 +16,9 @@
 use windows::{
     Win32::Devices::DeviceAndDriverInstallation::{
         DIGCF_ALLCLASSES, DIGCF_PRESENT, HDEVINFO, SETUP_DI_REGISTRY_PROPERTY, SP_DEVINFO_DATA,
-        SPDRP_COMPATIBLEIDS, SPDRP_HARDWAREID, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
-        SetupDiGetClassDevsW, SetupDiGetDeviceRegistryPropertyW,
+        SPDRP_BASE_CONTAINERID, SPDRP_CLASSGUID, SPDRP_COMPATIBLEIDS, SPDRP_HARDWAREID,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
     },
     core::w,
 };
@@ -58,8 +61,64 @@ pub fn count() -> usize {
     count
 }
 
-/// A device's hardware or compatible ids (a `REG_MULTI_SZ`); empty if it
-/// has none.
+/// A device plugged in now, as [`present`] lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Device {
+    /// As `SetupDiGetDeviceInstanceId` gives it, e.g. `HID\VID_054C&PID_0CE6&MI_03\7&...`.
+    pub instance_id: String,
+    pub hardware_ids: Vec<String>,
+    /// Its setup class, as `{xxxxxxxx-...}`.
+    pub class: String,
+    /// The physical device it belongs to: every node of one controller (its
+    /// USB or Bluetooth node, its HID children, its XInput node) shares it.
+    pub container: Option<String>,
+}
+
+/// Every device plugged in now, of any class; empty if they can't be listed.
+pub(crate) fn present() -> Vec<Device> {
+    // SAFETY: no class GUID or enumerator, and no window; the returned set
+    // is destroyed by the guard.
+    let Ok(set) =
+        (unsafe { SetupDiGetClassDevsW(None, None, None, DIGCF_ALLCLASSES | DIGCF_PRESENT) })
+    else {
+        return Vec::new();
+    };
+    let set = DevInfo(set);
+    let mut devices = Vec::new();
+    for index in 0.. {
+        let mut data = SP_DEVINFO_DATA {
+            cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: as in `count`.
+        if unsafe { SetupDiEnumDeviceInfo(set.0, index, &mut data) }.is_err() {
+            break;
+        }
+        let mut id = [0u16; 512];
+        let mut needed = 0u32;
+        // SAFETY: `id` is a writable buffer whose length the binding passes;
+        // `data` came from enumerating this set. Instance ids are at most 200
+        // characters (MAX_DEVICE_ID_LEN).
+        if unsafe { SetupDiGetDeviceInstanceIdW(set.0, &data, Some(&mut id), Some(&mut needed)) }
+            .is_err()
+        {
+            continue;
+        }
+        let first = |property| ids(&set, &data, property).into_iter().next();
+        devices.push(Device {
+            instance_id: String::from_utf16_lossy(
+                &id[..id.iter().position(|&c| c == 0).unwrap_or(0)],
+            ),
+            hardware_ids: ids(&set, &data, SPDRP_HARDWAREID),
+            class: first(SPDRP_CLASSGUID).unwrap_or_default(),
+            container: first(SPDRP_BASE_CONTAINERID),
+        });
+    }
+    devices
+}
+
+/// A device's string or string list property (a `REG_SZ` or `REG_MULTI_SZ`,
+/// such as its hardware or compatible ids); empty if it has none.
 fn ids(set: &DevInfo, data: &SP_DEVINFO_DATA, property: SETUP_DI_REGISTRY_PROPERTY) -> Vec<String> {
     let mut buf = vec![0u8; 2048];
     let mut needed = 0u32;
@@ -123,5 +182,15 @@ mod tests {
     fn counting_controllers_works() {
         let n = count();
         assert!(n < 64, "{n}");
+    }
+
+    /// Every PC has devices with instance ids and classes.
+    #[test]
+    fn listing_devices_works() {
+        let devices = present();
+        assert!(!devices.is_empty());
+        assert!(devices.iter().all(|d| !d.instance_id.is_empty()));
+        assert!(devices.iter().any(|d| d.class.starts_with('{')));
+        assert!(devices.iter().any(|d| d.container.is_some()));
     }
 }

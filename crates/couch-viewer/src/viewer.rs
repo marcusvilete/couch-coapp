@@ -361,13 +361,15 @@ pub fn run(options: WindowOptions) -> Result<()> {
 }
 
 /// A made-up multiplayer session for `--hud-preview`: two controllers and a
-/// keyboard seat. Playing, the game is out of front on the host.
+/// keyboard seat, the host on the first with their own controller. Playing,
+/// the game is out of front on the host.
 fn preview_session(role: HudRole) -> HudState {
     let seat = |label: &str, pad, holder: Option<&str>, mine, asked| HudSeat {
         label: label.into(),
         pad,
         keyboard_mouse: !pad,
         holder: holder.map(Into::into),
+        host: holder == Some("Alice"),
         mine,
         asked,
     };
@@ -377,7 +379,7 @@ fn preview_session(role: HudRole) -> HudState {
         host: "Alice".into(),
         role,
         seats: vec![
-            seat("Controller 1", true, Some("Carol"), false, false),
+            seat("Controller 1", true, Some("Alice"), false, false),
             seat(
                 "Controller 2",
                 true,
@@ -385,7 +387,7 @@ fn preview_session(role: HudRole) -> HudState {
                 playing,
                 role == HudRole::Asking,
             ),
-            seat("Keyboard and mouse", false, None, false, false),
+            seat("Keyboard and mouse", false, Some("Carol"), false, false),
         ],
         viewers: 2,
         control_paused: false,

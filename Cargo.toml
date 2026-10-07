@@ -17,6 +17,7 @@ couch-media = { path = "crates/couch-media" }
 couch-codec-ffmpeg = { path = "crates/couch-codec-ffmpeg" }
 couch-codec-opus = { path = "crates/couch-codec-opus" }
 couch-input = { path = "crates/couch-input" }
+couch-gamepad = { path = "crates/couch-gamepad" }
 couch-platform-win = { path = "crates/couch-platform-win" }
 couch-engine = { path = "crates/couch-engine" }
 couch-testkit = { path = "crates/couch-testkit" }

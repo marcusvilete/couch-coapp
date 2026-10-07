@@ -12,7 +12,10 @@
 
 use std::{any::Any, collections::BTreeMap};
 
-use couch_input::shortcuts::{self, Shortcut};
+use couch_input::{
+    local::ControllerIds,
+    shortcuts::{self, Shortcut},
+};
 use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
@@ -26,11 +29,11 @@ use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 
 use super::*;
 use crate::{
-    InputSetup, RequestView, SeatView, SessionEnd, SessionRole, SessionView, SourceChoice,
-    WatchEnd,
+    HostController, InputSetup, RequestView, SeatView, SessionEnd, SessionRole, SessionView,
+    SourceChoice, WatchEnd,
     pipeline::{
         AudioChoice, Source, ViewerOptions,
-        host::{HostOptions, Rates},
+        host::{HostOptions, LocalSeat, Rates},
         watch::{Watch, WatchOptions},
     },
 };
@@ -58,6 +61,9 @@ struct Hosting {
     /// Whether the streamed window is in front, as last reported; `None`
     /// before the first report, and always for a screen.
     in_front: Option<bool>,
+    /// Our own controller, if we chose to play through a seat: its name, or
+    /// why it can't.
+    controller: Option<Result<String, String>>,
 }
 
 struct Watching {
@@ -115,6 +121,7 @@ pub(super) struct GoLive {
     pub upload_mbps: Option<u32>,
     pub max_viewers: u8,
     pub input: InputSetup,
+    pub controller: Option<HostController>,
 }
 
 fn end_reason(reason: EndReason) -> SessionEnd {
@@ -697,6 +704,11 @@ impl Actor {
                         stream.revoke_all();
                     }
                 }
+                SessionEffect::Claim { seat, member } => {
+                    if let Some(stream) = self.stream() {
+                        stream.claim(seat, member);
+                    }
+                }
                 SessionEffect::Requested(member, seat) => {
                     tracing::info!(member = ?member, ?seat, "a viewer asks for a seat");
                     let label = self
@@ -795,10 +807,13 @@ impl Actor {
         }
         let session = SessionId(u64::from_le_bytes(random()?));
         let seats = go.input.seats();
+        // Our controller plays through a seat only if one has a pad.
+        let controller = go.controller.filter(|_| seats.iter().any(|s| s.has_pad()));
         let config = SessionConfig {
             title: go.title.trim().to_string(),
             seats: seats.clone(),
             max_viewers: go.max_viewers,
+            host: controller.as_ref().map(|_| self.me),
         };
         let host_session = HostSession::new(session, config)?;
         let defaults = Rates::default();
@@ -822,6 +837,14 @@ impl Actor {
             rc_trace: None,
             netem_elapsed: None,
             replace_grace: self.replace_grace,
+            local: controller.as_ref().map(|c| LocalSeat {
+                member: self.me,
+                controller: ControllerIds {
+                    vendor: c.vendor,
+                    product: c.product,
+                },
+                hide: true,
+            }),
         };
         self.sessions.hosting = Some(Hosting {
             room,
@@ -830,6 +853,7 @@ impl Actor {
             viewer_conns: BTreeMap::new(),
             panic_key: None,
             in_front: None,
+            controller: controller.map(|c| Ok(c.name)),
         });
         Ok((session, options))
     }
@@ -876,7 +900,15 @@ impl Actor {
                 None
             }
         };
+        // Our controller plays through a seat, or couldn't after all.
+        if let Some(Err(e)) = stream.local_seat() {
+            tracing::warn!("our controller can't play through a seat: {e}");
+            h.session.without_host();
+            h.controller = Some(Err(e.clone()));
+        }
+        let start = h.session.start();
         h.stream = Some(stream);
+        self.apply_session(room, start, now);
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
@@ -950,11 +982,14 @@ impl Actor {
                 seat,
                 epoch,
             } => {
-                let released = couch_proto::control::SeatReleased {
-                    seat,
-                    seat_epoch: epoch,
-                };
-                self.send_to(room, member, ControlMessage::SeatReleased(released));
+                // Our own controller's seat needs no telling.
+                if member != self.me {
+                    let released = couch_proto::control::SeatReleased {
+                        seat,
+                        seat_epoch: epoch,
+                    };
+                    self.send_to(room, member, ControlMessage::SeatReleased(released));
+                }
                 let fx = self
                     .hosting_mut()
                     .map(|h| h.session.seat_changed(seat, None));
@@ -1083,6 +1118,14 @@ impl Actor {
         now: Instant,
     ) -> Result<Response, EngineError> {
         self.our_session(|s| Ok(s.take_back(seat)), now)
+    }
+
+    pub(super) fn play_seat(
+        &mut self,
+        seat: SeatId,
+        now: Instant,
+    ) -> Result<Response, EngineError> {
+        self.our_session(|s| Ok(s.play(seat)?), now)
     }
 
     pub(super) fn allow_control(&mut self, now: Instant) -> Result<Response, EngineError> {
@@ -1422,12 +1465,17 @@ impl Actor {
             .zip(kinds)
             .enumerate()
             .map(|(i, (label, kind))| {
-                let holder = status.and_then(|s| s.holders.get(i).copied().flatten());
+                let host = status.is_some_and(|s| s.host_seat == Some(SeatId(i as u8)));
+                let holder = match host {
+                    true => Some(w.host),
+                    false => status.and_then(|s| s.holders.get(i).copied().flatten()),
+                };
                 HudSeat {
                     label,
                     pad: kind.has_pad(),
                     keyboard_mouse: kind.has_keyboard_mouse(),
                     holder: holder.map(|h| self.member_name(w.room, h)),
+                    host,
                     mine: w.holding == Some(SeatId(i as u8)),
                     asked: asked == Some(SeatId(i as u8)),
                 }
@@ -1577,7 +1625,7 @@ impl Actor {
                 title: s.config().title.clone(),
                 max_viewers: s.config().max_viewers,
                 viewers: s.viewers().iter().map(MemberId::to_hex).collect(),
-                seats: seat_views(&s.config().seats, s.holders()),
+                seats: seat_views(&s.config().seats, s.holders(), self.me),
                 control_paused: s.control_paused(),
                 role: SessionRole::Host,
                 requests: s
@@ -1593,6 +1641,8 @@ impl Actor {
                     .panic_key
                     .is_some()
                     .then(|| shortcuts::binding(Shortcut::Panic).keys()),
+                host_controller: h.controller.clone().and_then(Result::ok),
+                host_controller_problem: h.controller.clone().and_then(Result::err),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -1611,10 +1661,16 @@ impl Actor {
                 },
                 _ => SessionRole::None,
             };
-            let holders = status.map_or_else(
+            let mut holders = status.map_or_else(
                 || vec![None; listing.announce.seats.len()],
                 |s| s.holders.clone(),
             );
+            if let Some(slot) = status
+                .and_then(|s| s.host_seat)
+                .and_then(|seat| holders.get_mut(usize::from(seat.0)))
+            {
+                *slot = Some(*host);
+            }
             views.push(SessionView {
                 host: host.to_hex(),
                 title: listing.announce.title.clone(),
@@ -1622,29 +1678,35 @@ impl Actor {
                 viewers: status.map_or_else(Vec::new, |s| {
                     s.viewers.iter().map(MemberId::to_hex).collect()
                 }),
-                seats: seat_views(&listing.announce.seats, &holders),
+                seats: seat_views(&listing.announce.seats, &holders, *host),
                 control_paused: status.is_some_and(|s| s.control_paused),
                 role,
                 requests: Vec::new(),
                 asked_seat,
                 panic_key: None,
+                host_controller: None,
+                host_controller_problem: None,
             });
         }
         views
     }
 }
 
-/// A session's seats with their holders, for the UI.
-fn seat_views(seats: &[SeatKind], holders: &[Option<MemberId>]) -> Vec<SeatView> {
+/// A session's seats with their holders, `host` included, for the UI.
+fn seat_views(seats: &[SeatKind], holders: &[Option<MemberId>], host: MemberId) -> Vec<SeatView> {
     seat_labels(seats)
         .into_iter()
         .zip(seats)
         .enumerate()
-        .map(|(i, (label, kind))| SeatView {
-            label,
-            pad: kind.has_pad(),
-            keyboard_mouse: kind.has_keyboard_mouse(),
-            holder: holders.get(i).copied().flatten().map(|h| h.to_hex()),
+        .map(|(i, (label, kind))| {
+            let holder = holders.get(i).copied().flatten();
+            SeatView {
+                label,
+                pad: kind.has_pad(),
+                keyboard_mouse: kind.has_keyboard_mouse(),
+                holder: holder.map(|h| h.to_hex()),
+                host: holder == Some(host),
+            }
         })
         .collect()
 }

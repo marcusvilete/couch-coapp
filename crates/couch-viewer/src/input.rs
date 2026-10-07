@@ -9,8 +9,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Result, anyhow};
+use couch_gamepad::{read_pad, rumble_strength};
 use couch_input::{
-    DEV_PAD_IDS, HidUsage, PadButtons, XBOX_360_IDS,
+    DEV_PAD_IDS, HidUsage, XBOX_360_IDS,
     shortcuts::{self, Shortcut},
 };
 use couch_proto::{
@@ -21,7 +22,7 @@ use couch_proto::{
 use sdl3::{
     GamepadSubsystem,
     event::{Event, WindowEvent},
-    gamepad::{Axis, Button, Gamepad},
+    gamepad::Gamepad,
     joystick::JoystickId,
     keyboard::Mod,
     mouse::{MouseButton, MouseUtil, MouseWheelDirection},
@@ -106,11 +107,14 @@ impl InputCapture {
 
     pub fn rumble(&mut self, rumble: RumbleState) {
         let id = self.active.or_else(|| self.pads.keys().next().copied());
-        if let Some(pad) = id.and_then(|id| self.pads.get_mut(&id)) {
-            let scale = |v: u8| u16::from(v) * 257;
-            if let Err(e) = pad.set_rumble(scale(rumble.low), scale(rumble.high), RUMBLE_MS) {
-                tracing::debug!("rumble failed: {e}");
-            }
+        if let Some(pad) = id.and_then(|id| self.pads.get_mut(&id))
+            && let Err(e) = pad.set_rumble(
+                rumble_strength(rumble.low),
+                rumble_strength(rumble.high),
+                RUMBLE_MS,
+            )
+        {
+            tracing::debug!("rumble failed: {e}");
         }
     }
 
@@ -381,44 +385,6 @@ fn take_whole(rest: &mut (f32, f32), x: f32, y: f32) -> (i32, i32) {
     rest.0 -= whole.0;
     rest.1 -= whole.1;
     (whole.0 as i32, whole.1 as i32)
-}
-
-/// A pad's state in XInput's terms: up is positive on the sticks, triggers
-/// run 0 to 255.
-fn read_pad(pad: &Gamepad) -> PadSnapshot {
-    let mut buttons = PadButtons::empty();
-    for (button, bit) in [
-        (Button::South, PadButtons::A),
-        (Button::East, PadButtons::B),
-        (Button::West, PadButtons::X),
-        (Button::North, PadButtons::Y),
-        (Button::Back, PadButtons::BACK),
-        (Button::Guide, PadButtons::GUIDE),
-        (Button::Start, PadButtons::START),
-        (Button::LeftStick, PadButtons::LEFT_THUMB),
-        (Button::RightStick, PadButtons::RIGHT_THUMB),
-        (Button::LeftShoulder, PadButtons::LEFT_SHOULDER),
-        (Button::RightShoulder, PadButtons::RIGHT_SHOULDER),
-        (Button::DPadUp, PadButtons::DPAD_UP),
-        (Button::DPadDown, PadButtons::DPAD_DOWN),
-        (Button::DPadLeft, PadButtons::DPAD_LEFT),
-        (Button::DPadRight, PadButtons::DPAD_RIGHT),
-    ] {
-        if pad.button(button) {
-            buttons |= bit;
-        }
-    }
-    let up = |v: i16| (-i32::from(v)).clamp(-32768, 32767) as i16;
-    let trigger = |v: i16| (i32::from(v.max(0)) * 255 / 32767) as u8;
-    PadSnapshot {
-        buttons: buttons.bits(),
-        left_trigger: trigger(pad.axis(Axis::TriggerLeft)),
-        right_trigger: trigger(pad.axis(Axis::TriggerRight)),
-        left_x: pad.axis(Axis::LeftX),
-        left_y: up(pad.axis(Axis::LeftY)),
-        right_x: pad.axis(Axis::RightX),
-        right_y: up(pad.axis(Axis::RightY)),
-    }
 }
 
 #[cfg(test)]

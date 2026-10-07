@@ -39,7 +39,7 @@ cd apps\desktop; npm run tauri dev        # the default profile; builds couch-vi
 
 - **Games pick the guest's physical controller.** The guest's controller (the user's DualSense) is plugged into the host's PC too, and games read it directly. Graveyard Keeper 2 (Unity) binds the player to it, and lets alice's virtual pad only move through menus with the D-pad. Steam settings don't change that.
   - So "the guest can't play the game" on one PC is not evidence of a bug.
-  - Check our side with `xinput-watch.ps1` (below). A real game test needs a second PC as the guest, or HidHide hiding the controller from games.
+  - Check our side with `xinput-watch.ps1` (below). A real game test needs a second PC as the guest. (HidHide hides only the *host's* controller, and only from programs other than ours; the stream window on the same PC is another program, so with the host's controller hidden it can't read it either.)
 - **Keyboard and mouse never reach the game on one PC.** They go in only while the game window is in front, and then the stream window doesn't have the keyboard. That is by design.
 - **Steam notifications.** Steam announces each virtual pad as it is plugged in ("Xbox 360 Controller"). Each go-live or `pad-test --real-pad-ids` shows one.
   - "XInput Controller #N" means made-up ids: the pad is a CLI test pad, or something regressed in `real_pad_ids`.
@@ -95,6 +95,15 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **Moving.** A guest holding Controller 1 who asks for Controller 2 keeps the first until the host accepts; then the first goes neutral and the second follows them. Host log: `seat` lines for both.
 - **The "game not in front" line.** With alice live and the game window behind another window, the guests' stream windows say "The game isn't in front on Ana's PC"; for a player the bar stays up until it comes back. On one PC the stream window itself takes the front, so expect the line while clicking in it: that is right.
 
+## The host on a seat (P2): what to expect
+
+Needs HidHide installed on the host (administrator, then a restart; installed on the user's PC on 2026-10-06) and a controller that isn't an Xbox 360 one (theirs is a DualSense, on Bluetooth).
+- **Go live's "Your controller".** Lists the host's controllers (never our pads) when a seat has a pad; the choice is remembered in the profile's web storage. Its line says what HidHide allows: not installed (with the download page), its configuration window open (close it, refresh), or ready.
+- **After going live** the host panel says the controller is hidden and asks to reconnect it once. Until then, a game or Steam that had it open still sees it. After it, `joy.cpl` (closed and reopened) lists only "Xbox 360 Controller", and `xinput-watch.ps1` shows the host's input in that pad's slot.
+- **The seats list** shows "you (DualSense Wireless Controller)" on Controller 1, Take back on guests' seats, and Play here on the others with a pad. Passing the host's seat to a guest leaves the host on none; Take back (or the guest giving it back or leaving) returns it. The panic key removes guests but the host keeps playing.
+- **Stopping** shows the controller again (log: `the host's controller is shown again`). If the app was killed, it stays hidden until the next start of the app or of `couch-cli host` (log: `showed 1 controller(s) hidden by a host that crashed`). HidHide's own configuration client (Start menu) also shows and clears the list.
+- **If hiding fails**, the host panel says why and the host plays outside the seats, as in P1.
+
 ## A full run to ask for
 
 1. Watch, then stop watching.
@@ -128,7 +137,7 @@ The user has a second PC on their home network. Suggest a two-PC run after any c
   - allow the app on private networks when the firewall asks;
   - start `run.cmd`;
   - paste the invite into the Join box (release builds don't register `couchco://`).
-- **Controllers.** The guest's controller goes on the guest PC. Keep none on the host for co-op games: the host's own controller takes a slot first, and the guest's pad may not work (seen in Fling to the Finish). Single-player games took the guest's pad either way.
+- **Controllers.** The guest's controller goes on the guest PC. On the host, for co-op games, either choose the host's controller in Go live (P2: hidden, it plays Controller 1, and the host reconnects it once) or keep none plugged in: otherwise the game sees it directly, gives it a player, and a guest's pad may not work (seen in Fling to the Finish in P1). Single-player games took the guest's pad either way.
 - **The link.** The stream window's HUD should say "Direct". "Relay" means the firewall or the network blocked the direct path.
 
 ### Checklists
@@ -148,7 +157,7 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
 | Administrator window | run Notepad as administrator, go live with it | Go live marks it "admin" with a warning; keyboard and mouse can't reach it; the panic key doesn't work while it is in front (Take back does) |
 | Single-player seat kinds | go live with a controller seat, then the same game with a keyboard-and-mouse seat | the guest drives the game with exactly that, nothing else |
 | Multiplayer | a co-op game (Fling to the Finish) with 2 controllers, no controller on the host; the guest asks for Controller 2 | the guest plays player 2; asking for and moving between seats works |
-| Host's controller in co-op (the P1 investigation) | the same with the host's controller plugged in, `xinput-watch.ps1` running on the host | note each slot (host's pad, the virtual ones) and whether the game ignores the guest's pad; the answer decides whether hiding the host's controllers (HidHide) comes next |
+| The host on a seat (P2) | Go live in co-op with 2 controllers and "Your controller" chosen; reconnect it; start the game; the guest asks for Controller 2; then pass Controller 1 to the guest and Play here on Controller 2; then take it back | the host plays player 1 and the guest player 2; every seat can be handed over; `joy.cpl` on the host lists only our pads; after Stop the host's controller works in games again |
 | Game not in front | with keyboard and mouse on, the host switches to another window | the guest's stream window says the game isn't in front; the line goes when the game is back |
 
 ### Reading the results
@@ -161,6 +170,7 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
   - Task Manager's **Processes** tab End task asks the window to close: that is leaving, so watching just stops. Only the Details tab kills.
   - An administrator window: Windows keeps a normal program's input and hooks from it. Expected; the warning says so.
   - Alt+F4 while only watching closes the guest's own window.
-  - A host controller taking player 1 in co-op: Go live warns (P1); whether to hide it waits on the P1 investigation.
+  - A host controller taking player 1 in co-op when it isn't on a seat: Go live warns; choosing it in "Your controller" (P2) hides it.
+  - The host's controller still working in a game right after going live: it wasn't reconnected yet (HidHide refuses only new opens).
   - A full-screen game ignoring the guest once (M5b): an observation, not a known bug; note whether it happens again.
 - **Record** each run in the milestone's results file ("Your run" row), and new observations the user wants kept in the polish backlog memory.

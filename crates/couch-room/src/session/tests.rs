@@ -16,6 +16,7 @@ fn config(max_viewers: u8) -> SessionConfig {
         title: "Celeste".into(),
         seats: vec![SeatKind::Controller],
         max_viewers,
+        host: None,
     }
 }
 
@@ -249,6 +250,208 @@ fn two_guests_play_two_seats() {
     );
     s.seat_changed(S0, None);
     assert_eq!(s.holders(), &[None, Some(BIA)]);
+}
+
+// ---- The host on a seat ----
+
+const HOST: MemberId = MemberId([9; 32]);
+
+fn hosted(seats: &[SeatKind]) -> HostSession {
+    HostSession::new(
+        SessionId(1),
+        SessionConfig {
+            seats: seats.to_vec(),
+            host: Some(HOST),
+            ..config(4)
+        },
+    )
+    .unwrap()
+}
+
+fn claims(fx: &[Effect]) -> Vec<(SeatId, MemberId)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Claim { seat, member } => Some((*seat, *member)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn status_of(s: &HostSession) -> SessionStatus {
+    match s.status() {
+        ControlMessage::SessionStatus(status) => status,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_host_starts_on_the_first_seat_with_a_pad() {
+    let s = hosted(&[SeatKind::KeyboardMouse, SeatKind::Controller]);
+    assert_eq!(
+        s.start(),
+        vec![Effect::Claim {
+            seat: S1,
+            member: HOST
+        }]
+    );
+
+    let mut s = hosted(&[SeatKind::Controller, SeatKind::Controller]);
+    assert_eq!(claims(&s.start()), vec![(S0, HOST)]);
+    let fx = s.seat_changed(S0, Some(HOST));
+    assert!(broadcasts_status(&fx));
+    assert_eq!(s.holders(), &[Some(HOST), None]);
+    assert_eq!(s.host_seat(), Some(S0));
+    // On the wire, the host's seat is apart from the viewers'.
+    let status = status_of(&s);
+    assert_eq!(status.holders, vec![None, None]);
+    assert_eq!(status.host_seat, Some(S0));
+    assert!(status.is_valid());
+
+    // Nothing to play with a keyboard seat alone, and nothing without a host.
+    let s = hosted(&[SeatKind::KeyboardMouse]);
+    assert!(s.start().is_empty());
+    assert_eq!(s.host(), None);
+    let s = with_seats(&[SeatKind::Controller]);
+    assert!(s.start().is_empty());
+    assert_eq!(status_of(&s).host_seat, None);
+}
+
+#[test]
+fn the_hosts_seat_comes_back_when_a_viewer_lets_go() {
+    let now = Instant::now();
+    let mut s = hosted(&[SeatKind::Both]);
+    s.start();
+    s.seat_changed(S0, Some(HOST));
+    s.join(ANA);
+    s.request(ANA, S0, now);
+    let fx = s.answer(ANA, true, now).unwrap();
+    assert_eq!(grant_of(&fx), Some((S0, ANA, SeatKind::Both.permissions())));
+    // The router ends the host's hold first. The claim this causes reaches
+    // it after the grant, so it finds the seat taken and does nothing.
+    let fx = s.seat_changed(S0, None);
+    assert_eq!(claims(&fx), vec![(S0, HOST)]);
+    s.seat_changed(S0, Some(ANA));
+    assert_eq!(s.host_seat(), None);
+    assert_eq!(status_of(&s).host_seat, None);
+
+    // Taken back: it goes back to the host.
+    assert_eq!(
+        s.take_back(Some(S0)),
+        vec![Effect::Revoke {
+            seat: S0,
+            holder: None
+        }]
+    );
+    assert_eq!(claims(&s.seat_changed(S0, None)), vec![(S0, HOST)]);
+    s.seat_changed(S0, Some(HOST));
+
+    // Given back, or the viewer leaves: the same.
+    s.pass(ANA, S0).unwrap();
+    s.seat_changed(S0, None);
+    s.seat_changed(S0, Some(ANA));
+    s.give_back(ANA);
+    assert_eq!(claims(&s.seat_changed(S0, None)), vec![(S0, HOST)]);
+    s.seat_changed(S0, Some(HOST));
+    s.pass(ANA, S0).unwrap();
+    s.seat_changed(S0, None);
+    s.seat_changed(S0, Some(ANA));
+    let fx = s.leave(ANA);
+    let stop = fx
+        .iter()
+        .position(|e| *e == Effect::StopViewer(ANA))
+        .unwrap();
+    let claim = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Claim { .. }))
+        .unwrap();
+    assert!(stop < claim, "the viewer's seat is freed before the claim");
+
+    // Taking every seat back leaves the host's own alone.
+    s.seat_changed(S0, Some(HOST));
+    assert!(s.take_back(None).is_empty());
+}
+
+#[test]
+fn the_host_plays_another_seat() {
+    let mut s = hosted(&[
+        SeatKind::Controller,
+        SeatKind::Controller,
+        SeatKind::KeyboardMouse,
+    ]);
+    s.start();
+    s.seat_changed(S0, Some(HOST));
+    s.join(ANA);
+    s.pass(ANA, S1).unwrap();
+    s.seat_changed(S1, Some(ANA));
+
+    assert_eq!(s.play(SeatId(2)).unwrap_err(), SessionError::NoPad);
+    assert_eq!(s.play(SeatId(3)).unwrap_err(), SessionError::NoSuchSeat);
+    assert!(s.play(S0).unwrap().is_empty(), "already there");
+    let fx = s.play(S1).unwrap();
+    let revoke = fx
+        .iter()
+        .position(|e| {
+            *e == Effect::Revoke {
+                seat: S0,
+                holder: Some(HOST),
+            }
+        })
+        .unwrap();
+    let grant = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Grant { .. }))
+        .unwrap();
+    assert!(revoke < grant, "the old seat first");
+    assert_eq!(grant_of(&fx), Some((S1, HOST, Permissions::GAMEPAD)));
+    // The router frees the old seat: no claim for it, or the host would
+    // hold two.
+    assert!(claims(&s.seat_changed(S0, None)).is_empty());
+    // Ana's hold ends; a claim for the host's new seat is harmless.
+    s.seat_changed(S1, None);
+    s.seat_changed(S1, Some(HOST));
+    assert_eq!(s.holders(), &[None, Some(HOST), None]);
+    // A late report of the old seat is sent back.
+    assert_eq!(
+        s.seat_changed(S0, Some(HOST)),
+        vec![Effect::Revoke {
+            seat: S0,
+            holder: Some(HOST)
+        }]
+    );
+
+    // Without the host on a seat, there's nothing to play.
+    let mut s = with_seats(&[SeatKind::Controller]);
+    assert_eq!(s.play(S0).unwrap_err(), SessionError::HostNotOnASeat);
+}
+
+#[test]
+fn the_panic_key_leaves_the_host_their_seat() {
+    let mut s = hosted(&[SeatKind::Controller, SeatKind::Controller]);
+    s.start();
+    s.seat_changed(S0, Some(HOST));
+    s.join(ANA);
+    s.pass(ANA, S1).unwrap();
+    s.seat_changed(S1, Some(ANA));
+    assert!(s.panic().contains(&Effect::RevokeAll));
+    // The router frees both; the host's comes back while still paused.
+    assert_eq!(claims(&s.seat_changed(S0, None)), vec![(S0, HOST)]);
+    assert!(
+        s.seat_changed(S0, Some(HOST))
+            .iter()
+            .all(|e| !matches!(e, Effect::Revoke { .. }))
+    );
+    assert!(claims(&s.seat_changed(S1, None)).is_empty());
+    assert_eq!(s.holders(), &[Some(HOST), None]);
+    // The host may even move while paused; viewers may not be passed to.
+    assert!(s.play(S1).is_ok());
+    assert_eq!(s.pass(ANA, S0).unwrap_err(), SessionError::ControlPaused);
+}
+
+#[test]
+fn the_host_never_watches_their_own_session() {
+    let mut s = hosted(&[SeatKind::Controller]);
+    assert!(s.join(HOST).is_empty());
+    assert!(!s.is_viewer(HOST));
 }
 
 #[test]
@@ -555,6 +758,8 @@ enum Op {
     Answer(u8, bool),
     Pass(u8, u8),
     TakeBack(Option<u8>),
+    /// The host moves to a seat.
+    Play(u8),
     Panic,
     Allow,
     /// The router hands one report to the session.
@@ -578,6 +783,7 @@ fn op() -> impl Strategy<Value = Op> {
         (who.clone(), any::<bool>()).prop_map(|(w, a)| Op::Answer(w, a)),
         (who, seat.clone()).prop_map(|(w, s)| Op::Pass(w, s)),
         proptest::option::of(seat.clone()).prop_map(Op::TakeBack),
+        seat.clone().prop_map(Op::Play),
         Just(Op::Panic),
         Just(Op::Allow),
         Just(Op::Deliver),
@@ -634,6 +840,16 @@ impl Router {
                         self.release(i);
                     }
                 }
+                Effect::Claim { seat, member } => {
+                    // Only a free seat. (The host pipeline also refuses a
+                    // claim from someone already holding one; the session
+                    // must not need that, so this doesn't.)
+                    let i = usize::from(seat.0);
+                    if self.holders[i].is_none() {
+                        self.holders[i] = Some(member);
+                        self.reports.push_back((seat, Some(member)));
+                    }
+                }
                 Effect::RevokeAll => self.release_all(),
                 Effect::StopViewer(member) => {
                     for seat in 0..self.holders.len() {
@@ -662,16 +878,26 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn only_viewers_ever_play_and_one_seat_each(ops in proptest::collection::vec(op(), 1..100)) {
+    fn only_viewers_and_the_host_play_and_one_seat_each(
+        host_plays in any::<bool>(),
+        ops in proptest::collection::vec(op(), 1..100),
+    ) {
         let t0 = Instant::now();
         let mut now = t0;
         let mut s = HostSession::new(
             SessionId(9),
-            SessionConfig { seats: SEATS.to_vec(), ..config(3) },
+            SessionConfig {
+                seats: SEATS.to_vec(),
+                host: host_plays.then_some(HOST),
+                ..config(3)
+            },
         )
         .unwrap();
         let mut router = Router::new();
         let mut declined_at: BTreeMap<MemberId, Instant> = BTreeMap::new();
+        let fx = s.start();
+        prop_assert_eq!(fx.len(), usize::from(host_plays));
+        router.apply(&fx);
 
         for op in ops {
             let paused_before = s.control_paused();
@@ -698,6 +924,7 @@ proptest! {
                 }
                 Op::Pass(i, seat) => s.pass(member(i), SeatId(seat)).unwrap_or_default(),
                 Op::TakeBack(seat) => s.take_back(seat.map(SeatId)),
+                Op::Play(seat) => s.play(SeatId(seat)).unwrap_or_default(),
                 Op::Panic => s.panic(),
                 Op::Allow => s.allow_control(),
                 Op::Deliver => match router.reports.pop_front() {
@@ -722,9 +949,20 @@ proptest! {
 
             for effect in &fx {
                 if let Effect::Grant { seat, member, permissions } = effect {
-                    prop_assert!(!paused_before && !ended_before, "a grant while paused or ended");
-                    prop_assert!(s.is_viewer(*member), "a grant to a non-viewer");
-                    prop_assert_eq!(*permissions, SEATS[usize::from(seat.0)].permissions());
+                    prop_assert!(!ended_before, "a grant after the end");
+                    if *member == HOST {
+                        prop_assert!(host_plays);
+                        prop_assert_eq!(*permissions, Permissions::GAMEPAD, "the host's pad only");
+                        prop_assert!(SEATS[usize::from(seat.0)].permissions().contains(Permissions::GAMEPAD));
+                    } else {
+                        prop_assert!(!paused_before, "a grant to a viewer while paused");
+                        prop_assert!(s.is_viewer(*member), "a grant to a non-viewer");
+                        prop_assert_eq!(*permissions, SEATS[usize::from(seat.0)].permissions());
+                    }
+                }
+                if let Effect::Claim { member, .. } = effect {
+                    prop_assert!(host_plays && *member == HOST, "only the host claims");
+                    prop_assert!(!ended_before);
                 }
                 if let Effect::Requested(member, seat) = effect {
                     let cooling = declined_at
@@ -744,7 +982,13 @@ proptest! {
             unique.dedup();
             prop_assert_eq!(unique.len(), viewers.len());
             for holder in s.holders().iter().flatten() {
-                prop_assert!(s.is_viewer(*holder), "a holder is a viewer");
+                prop_assert!(
+                    s.is_viewer(*holder) || (host_plays && *holder == HOST),
+                    "a holder is a viewer or the host"
+                );
+            }
+            if let ControlMessage::SessionStatus(status) = s.status() {
+                prop_assert!(status.is_valid(), "{:?}", status);
             }
             prop_assert!(s.requests().iter().all(|(r, _)| s.is_viewer(*r)));
             let mut askers: Vec<MemberId> = s.requests().iter().map(|(r, _)| *r).collect();
@@ -756,8 +1000,10 @@ proptest! {
             }
         }
 
-        // Once every report has arrived, the mirror matches the router, and
-        // only viewers, in a session neither paused nor over, hold seats.
+        // Once every report has arrived, the mirror matches the router; only
+        // viewers, in a session neither paused nor over, and the host, in a
+        // session not over, hold seats; and the host is back on their seat
+        // unless a viewer has it.
         for _ in 0..256 {
             let Some((seat, holder)) = router.reports.pop_front() else { break };
             let fx = s.seat_changed(seat, holder);
@@ -767,7 +1013,19 @@ proptest! {
         prop_assert!(router.reports.is_empty());
         prop_assert_eq!(&router.holders[..], s.holders());
         for holder in router.holders.iter().flatten() {
-            prop_assert!(s.is_viewer(*holder) && !s.control_paused() && !s.is_ended());
+            if *holder == HOST {
+                prop_assert!(!s.is_ended());
+            } else {
+                prop_assert!(s.is_viewer(*holder) && !s.control_paused() && !s.is_ended());
+            }
+        }
+        if host_plays && !s.is_ended() && s.host_seat().is_none() {
+            let home = usize::from(s.host_home.unwrap().0);
+            prop_assert!(
+                router.holders[home].is_some(),
+                "the host's seat is free but not theirs: {:?}",
+                router.holders
+            );
         }
     }
 }

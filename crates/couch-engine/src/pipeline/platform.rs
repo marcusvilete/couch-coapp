@@ -1,12 +1,13 @@
 //! The Windows backend: Windows.Graphics.Capture, FFmpeg's encoders, WASAPI
-//! loopback, `SendInput`, ViGEm pads, the panic-key hook, and `couch-viewer` as a
-//! child process.
+//! loopback, `SendInput`, ViGEm pads, the host's controller through SDL3 and
+//! HidHide, the panic-key hook, and `couch-viewer` as a child process.
 
 use std::{any::Any, process::Stdio, sync::Arc, time::Duration};
 
 use couch_codec_ffmpeg::FfmpegEncoder;
 use couch_input::{
     DEV_PAD_IDS, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
+    local::{ControllerIds, LocalPads},
     shortcuts::{self, Shortcut},
 };
 use couch_media::{
@@ -18,15 +19,15 @@ use couch_platform_win::{
     capture::{self, CaptureOptions, CaptureSource, MonitorId, WgcCapturer},
     clock::QpcClock,
     foreground::{self, WindowId},
-    game, held_input,
+    game, held_input, hidhide,
     panic_key::PanicKey,
     sendinput::SendInputInjector,
     vigem::VigemPadFactory,
 };
 
 use super::{
-    AudioKind, Backend, Focus, GameProcess, NativeId, ScreenSource, Source, Sources, ViewerOptions,
-    ViewerProcess, WindowSource,
+    AudioKind, Backend, Focus, GameProcess, Hiding, NativeId, ScreenSource, Source, Sources,
+    ViewerOptions, ViewerProcess, WindowSource,
 };
 
 /// The viewer, next to our own exe.
@@ -139,6 +140,24 @@ impl Backend for WindowsBackend {
         couch_platform_win::controllers::count()
     }
 
+    fn local_pads(&self) -> Option<&dyn LocalPads> {
+        Some(couch_gamepad::host_pads())
+    }
+
+    fn hiding(&self) -> Hiding {
+        match hidhide::state() {
+            hidhide::State::NotInstalled => Hiding::Unavailable,
+            hidhide::State::Ready => Hiding::Ready,
+            hidhide::State::Busy => Hiding::Busy,
+        }
+    }
+
+    fn hide_controller(&self, ids: ControllerIds) -> Result<Box<dyn Any + Send>, String> {
+        hidhide::hide(ids)
+            .map(|hidden| Box::new(hidden) as Box<dyn Any + Send>)
+            .map_err(|e| e.to_string())
+    }
+
     fn focus(&self, window: NativeId) -> Focus {
         let window = WindowId(window);
         Focus {
@@ -153,6 +172,8 @@ impl Backend for WindowsBackend {
 
     fn release_left_input(&self) -> usize {
         held_input::release_on_panic();
+        // A controller a crashed host left hidden works in games again.
+        hidhide::restore_stale();
         held_input::release_stale()
     }
 

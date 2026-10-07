@@ -19,8 +19,8 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M5 | Sessions and control: M5a in the engine, M5b on screen | Done ([M5a](m5a-results.md), [M5b](m5b-results.md)) |
 | M6 | Lifecycle and safety: liveness, the game's window and exit, watching that survives drops and crashes, keys released after a host crash, Alt+F4 blocked, the elevated-game warning | done ([results](m6-results.md)) |
 | P1 | Seats and input modes: single player or multiplayer per game, a pad per controller seat, a keyboard seat, requests that name a seat; the "game not in front" notice | done ([results](p1-results.md)) |
-| P2 | The host on a seat: the host's controller drives a seat's virtual pad, and HidHide hides the physical one, so any seat can be handed over | next |
-| Polish | The rest of the polish backlog: the shortcut editor, choosing the relay, hiding the host's controllers if needed | |
+| P2 | The host on a seat: the host's controller drives a seat's virtual pad, and HidHide hides the physical one, so any seat can be handed over | done; the two-PC run is to come ([results](p2-results.md)) |
+| Polish | The rest of the polish backlog: the shortcut editor, choosing the relay (Settings → Network), the splash screen, the full-screen re-check | |
 | M8 | Host overlay window | |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | |
 | M7 | Own relay, the https invite page, the production relay setup | moved to just before M10: until then, iroh's public relays serve development and real-network tests |
@@ -58,7 +58,8 @@ Host machine                                    Viewer machine
 | `couch-net` | iroh endpoint, its gate and congestion controller; the password check (SPAKE2); control, video, audio and input channels, datagram routing and the stream acceptor, netem test transport | `couch-proto`, `couch-media`, `couch-input` |
 | `couch-codec-ffmpeg` | Everything that touches FFmpeg (video) | `couch-media` |
 | `couch-codec-opus` | Opus encode, decode and loss concealment, through libopus built from source (the `opus` crate, needs CMake) | `couch-media`, `couch-proto` |
-| `couch-platform-win` | Everything that calls Windows APIs, including WASAPI loopback capture, `SendInput`, ViGEm pads and DPAPI | `couch-media`, `couch-input` |
+| `couch-platform-win` | Everything that calls Windows APIs, including WASAPI loopback capture, `SendInput`, ViGEm pads, HidHide and DPAPI | `couch-media`, `couch-input` |
+| `couch-gamepad` | Physical gamepads through SDL3: a pad's state in XInput's terms (shared with the viewer), and the host's own controller, read on an SDL thread of its own | `couch-input`, `couch-proto` |
 | `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out. Runs the rooms and their sessions over iroh; keeps the identity and remembered rooms (DPAPI-sealed) in the profile folder. Its `pipeline` (host and viewer side of a stream, behind a `Backend` trait) is shared with `couch-cli` | everything above |
 | `couch-viewer` | The viewer binary | `couch-proto`, `couch-input`, media and codec crates |
 | `couch-cli` | Developer harness on the engine's pipeline: `probe`, `host`, `view`, `latency-probe`, `gates`, `pad-test`, `input-sink`, `release-check`, `capture-test`, `screen-scan` | anything |
@@ -151,7 +152,12 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
   - multiplayer: 1 to 4 controller seats, each its own virtual pad, plus optionally one keyboard-and-mouse seat.
 
   The seat's kind sets its holder's permissions. One seat per viewer: a grant revokes that viewer's other seat first. Only one holder at a time has keyboard and mouse (the router refuses a second).
-- **"The host has control."** The host's own devices drive the game directly: in single player while nobody holds the seat, in multiplayer beside the seats. Hiding the host's own controllers from the game (HidHide) waits on P1's co-op investigation.
+- **The host on a seat** (P2). In P1's co-op run, the game gave player 1 to the host's own DualSense, so a guest's virtual pad got no player. So the host can now play a seat too: Go live's "Your controller" choice.
+  - **Reading it.** The engine reads that controller with SDL3 on a thread of its own (`couch_gamepad::host_pads`; the `sdl3` crate allows one SDL thread per process, and nothing else in the app uses SDL). Its states enter the input task and go through the seat router as the host's own holder, with the pad permission only.
+  - **Hiding it.** HidHide hides the controller from every other program while the host is live (`couch_platform_win::hidhide`): every node of it, by container id, and our exe goes on its whitelist. HidHide refuses only new opens, so a game or Steam that had the controller open keeps it until it is reconnected; the app asks the host to do that once.
+  - **Showing it again.** With HidHide 1.5.230 (the latest release) the entries go on its persistent blacklist, and a marker file records exactly what we changed: stopping undoes it after the pads are unplugged, and the next start of the app or of `couch-cli host` undoes what a killed host left. HidHide's newer session blacklist, which the driver clears when our process exits, is used when present.
+  - **The seats.** The host starts on the first seat with a pad and holds one at a time. Their last seat comes back to them when it comes free (a *claim*, granted only if the seat is still free). The panic key doesn't pause them.
+  - **Without it** (no HidHide, no controller, or the host's choice) the host plays outside the seats, as in P1: in single player while nobody holds the seat, in multiplayer beside them.
 - **Handoff.** Passing a seat changes its holder and increments its epoch, releasing first. The virtual pads stay plugged in for the whole session, so the game never sees a controller disconnect.
 - **Requests.** Viewers ask for a seat; the host accepts or declines, passes a seat without a request, or takes one or all back. The panic key takes everything back and pauses control.
 - **The game's focus.** The host's input task notices the streamed window leaving the front and tells the viewers (`GameFocus`), whose stream window says why input may not work.
@@ -173,6 +179,7 @@ How sessions survive things going wrong, or end clearly (M6):
 | The stream window crashes | It is started again (at most once a minute), and asks for a keyframe | `pipeline::watch` |
 | The host app panics | A panic hook lets go of every key and button it holds | `couch_platform_win::held_input` |
 | The host app is killed while a guest holds a key | A marker file records what is held; the next start of the app or of `couch-cli host` lets go of it | same |
+| The host app is killed while the host's controller is hidden (P2) | A marker file records what was hidden; the next start of the app or of `couch-cli host` shows it again. Until then the controller doesn't work in games | `couch_platform_win::hidhide` |
 
 `couch-cli lifecycle-check` stages the game's cases, a killed host, and a host killed holding a key, and times each.
 
@@ -185,12 +192,14 @@ These hold in every milestone. Tests guard them from M2 on.
 - Remote members can't send the Windows key combinations, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4 (a guest quits through the game's menu), or the gamepad Guide button.
 - A host panic key revokes all control; it ignores injected keystrokes.
 - Every handoff, disconnect and teardown releases held keys and sends a neutral pad state first.
-- Remote input reaches the injectors only through the seat router (`couch_input::router`), which enforces the rules above and the 300 ms dead-man release.
+- Remote input reaches the injectors only through the seat router (`couch_input::router`), which enforces the rules above and the 300 ms dead-man release. So does the host's own controller when it plays a seat (P2).
+- A controller the app hides from games is shown again when the session ends, and at the next start after a crash.
 - Data from peers is size-limited and parsed defensively. Envelope frames are capped at 64 KiB and IPC frames at 16 MiB.
 
 ## Platform limits
 
 - Virtual gamepads on Windows need the ViGEmBus 1.22.0 driver, which is archived but still the only redistributable option. It sits behind the `VirtualPad` trait so a user-mode driver can replace it.
+- **The host on a seat** needs HidHide (MIT; 1.5.230, May 2024), a driver installed once with administrator rights and a restart; M10's installer can offer it. Our virtual pads report a real Xbox 360 controller's ids, so a real Xbox 360 controller on the host can't be told from them and can't play a seat (Xbox One and later, PlayStation and Switch Pro controllers can).
 - **Injection limits.** Elevated game windows, UAC prompts, the lock screen and anti-cheat titles reject injected input. A virtual gamepad still reaches an elevated game, but the panic key's hook doesn't see keys while it is in front (measured in M6). Go live marks windows of programs running as administrator and warns when one is picked; Take back in the app still works.
 - **Exclusive fullscreen.** True exclusive-fullscreen games may not capture through Windows.Graphics.Capture; the Desktop Duplication fallback lands in M9.
 - **macOS.** Planned as a viewer and keyboard/mouse host only. System-wide virtual gamepads need an Apple-restricted entitlement.

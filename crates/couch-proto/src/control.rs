@@ -469,6 +469,7 @@ mod tests {
                 session,
                 viewers: vec![MemberId([1; 32]), MemberId([2; 32])],
                 holders: vec![None, Some(MemberId([2; 32]))],
+                host_seat: Some(SeatId(0)),
                 control_paused: true,
             }),
             ControlMessage::SessionEnded(SessionEnded {

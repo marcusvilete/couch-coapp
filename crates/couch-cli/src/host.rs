@@ -2,14 +2,15 @@
 //! its audio, to up to `--max-viewers` viewers at once, each with an encoder
 //! and rate control of its own (`couch_engine::pipeline::host`, the app's
 //! own pipeline). The first viewer to connect gets the seat while nobody
-//! holds it; the app instead hands the seat out on request.
+//! holds it; the app instead hands the seat out on request. With
+//! `--host-pad`, this PC's controller plays seat 0 for good.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use couch_engine::pipeline::{
     AudioChoice, Source,
-    host::{HostEvent, HostOptions, HostStream, NetemElapsed, Rates, ViewerStats},
+    host::{HostEvent, HostOptions, HostStream, LocalSeat, NetemElapsed, Rates, ViewerStats},
     platform_backend,
     source::REPLACE_GRACE,
 };
@@ -43,9 +44,12 @@ pub struct Args {
     /// What the viewer holding seat 0 may send: the gamepad by default.
     pub permissions: Permissions,
     /// Virtual pads, one per seat: each viewer that connects gets the first
-    /// free seat (only seat 0 may have keyboard and mouse).
+    /// free seat (only the first viewer's may have keyboard and mouse).
     pub pads: u8,
     pub real_pad_ids: bool,
+    /// This PC's controller N (from 1) plays seat 0.
+    pub host_pad: Option<usize>,
+    pub hide_host_pad: bool,
     pub audio: AudioChoice,
     pub net: NetArgs,
 }
@@ -89,6 +93,37 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     if left > 0 {
         println!("released {left} keys or buttons a crashed host left held");
     }
+    let local = match args.host_pad {
+        Some(n) => {
+            let pads = backend
+                .local_pads()
+                .context("this PC's controllers can't be read")?;
+            let list = pads.list()?;
+            let chosen = n
+                .checked_sub(1)
+                .and_then(|i| list.get(i))
+                .with_context(|| {
+                    format!("there is no controller {n}; `couch-cli host-pad` lists them")
+                })?;
+            println!(
+                "seat 0: {} ({:04x}:{:04x}){}",
+                chosen.name,
+                chosen.ids.vendor,
+                chosen.ids.product,
+                if args.hide_host_pad {
+                    ", hidden from games: reconnect it once"
+                } else {
+                    ""
+                }
+            );
+            Some(LocalSeat {
+                member: MemberId(*endpoint.id().as_bytes()),
+                controller: chosen.ids,
+                hide: args.hide_host_pad,
+            })
+        }
+        None => None,
+    };
     event_line("started", qpc_now());
     let (stream, mut events) = HostStream::start(
         backend,
@@ -110,6 +145,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             rc_trace: args.rc_trace.clone(),
             netem_elapsed,
             replace_grace: REPLACE_GRACE,
+            local,
         },
     )
     .await;
@@ -126,6 +162,22 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     let mut viewers: HashMap<MemberId, Viewer> = HashMap::new();
     let mut holders: Vec<Option<MemberId>> = vec![None; usize::from(args.pads.max(1))];
+    // Our controller takes seat 0 for good: claimed again whenever its hold
+    // ends (the reader went quiet past the router's limits, say).
+    let mut host = None;
+    if let Some(local) = local {
+        match stream.local_seat() {
+            Some(Ok(())) => {
+                holders[0] = Some(local.member);
+                stream.claim(SeatId(0), local.member);
+                host = Some(local.member);
+            }
+            Some(Err(e)) => println!("this PC's controller can't play seat 0: {e}"),
+            None => {}
+        }
+    }
+    // The first viewer's seat is the one that may get keyboard and mouse.
+    let first_guest_seat = usize::from(host.is_some());
     let started = std::time::Instant::now();
     let since = || started.elapsed().as_secs_f64();
     let stop = stop_requested();
@@ -145,7 +197,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     stream.add_viewer(member, conn.clone(), &channels.0, &channels.1);
                     if let Some(free) = holders.iter().position(Option::is_none) {
                         holders[free] = Some(member);
-                        let permissions = if free == 0 { args.permissions } else { Permissions::GAMEPAD };
+                        let permissions = if free == first_guest_seat { args.permissions } else { Permissions::GAMEPAD };
                         stream.grant(SeatId(free as u8), member, permissions);
                     }
                     viewers.insert(member, Viewer { conn, control, _channels: channels });
@@ -164,6 +216,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 }
             },
             Some(event) = events.recv() => {
+                if let HostEvent::Revoked { member, seat, .. } = &event
+                    && Some(*member) == host
+                {
+                    stream.claim(*seat, *member);
+                }
                 if let Some(ended) = on_event(event, &viewers, since()) {
                     break ended;
                 }

@@ -17,6 +17,7 @@ mod capture_test;
 mod fake_game;
 mod gates;
 mod host;
+mod host_pad;
 mod input_sink;
 mod latency_probe;
 mod lifecycle_check;
@@ -135,6 +136,14 @@ enum Cmd {
         /// skips; some games only accept the real ones.
         #[arg(long)]
         real_pad_ids: bool,
+        /// Play seat 0 with this PC's controller N (as `host-pad` lists them,
+        /// from 1), hidden from games while streaming; viewers take the next
+        /// free seats.
+        #[arg(long)]
+        host_pad: Option<usize>,
+        /// With `--host-pad`: don't hide the controller from games.
+        #[arg(long)]
+        show_host_pad: bool,
         /// Whose sound to stream.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
@@ -232,6 +241,18 @@ enum Cmd {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
         count: u8,
     },
+    /// List this PC's controllers and HidHide's state; with `--feed N`, hide
+    /// controller N and drive a virtual pad from it, as a host on a seat does.
+    HostPad {
+        /// The controller to feed, as listed (from 1).
+        #[arg(long)]
+        feed: Option<usize>,
+        #[arg(long, default_value_t = 30)]
+        secs: u64,
+        /// Feed without hiding the controller from other programs.
+        #[arg(long)]
+        no_hide: bool,
+    },
     /// Inject a scripted keyboard and mouse run into a test window and check
     /// it arrived intact.
     InputSink,
@@ -311,6 +332,8 @@ async fn main() -> ExitCode {
             allow_kbm,
             pads,
             real_pad_ids,
+            host_pad,
+            show_host_pad,
             audio,
             net,
         } => {
@@ -342,6 +365,8 @@ async fn main() -> ExitCode {
                 },
                 pads,
                 real_pad_ids,
+                host_pad,
+                hide_host_pad: !show_host_pad,
                 audio: match audio {
                     AudioArg::Auto => AudioChoice::Auto,
                     AudioArg::Game => AudioChoice::Game,
@@ -425,6 +450,11 @@ async fn main() -> ExitCode {
             real_pad_ids,
             count,
         } => tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids, count)),
+        Cmd::HostPad {
+            feed,
+            secs,
+            no_hide,
+        } => tokio::task::block_in_place(|| host_pad::run(feed, secs, !no_hide)),
         Cmd::InputSink => tokio::task::block_in_place(input_sink::run),
         Cmd::ReleaseCheck => tokio::task::block_in_place(release_check::run),
         Cmd::FakeGame {

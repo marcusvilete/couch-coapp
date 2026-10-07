@@ -479,23 +479,28 @@ fn session_bar(
 }
 
 /// "Bia is playing" (the host, while nobody holds the one seat), or with
-/// several seats "Controller 1: Bia · Controller 2: free · Ana: own
-/// controller": the host plays on their own devices beside the seats.
+/// several seats "Controller 1: Ana · Controller 2: free". A host who plays
+/// outside the seats, on whatever the game sees directly, is listed beside
+/// them: "Ana: own controller".
 fn who_plays(s: &HudState) -> String {
     match s.seats.as_slice() {
         [seat] => format!("{} is playing", seat.holder.as_deref().unwrap_or(&s.host)),
-        seats => seats
-            .iter()
-            .map(|seat| {
-                format!(
-                    "{}: {}",
-                    seat.label,
-                    seat.holder.as_deref().unwrap_or("free")
-                )
-            })
-            .chain(std::iter::once(format!("{}: own controller", s.host)))
-            .collect::<Vec<_>>()
-            .join(" · "),
+        seats => {
+            let outside = (!seats.iter().any(|seat| seat.host))
+                .then(|| format!("{}: own controller", s.host));
+            seats
+                .iter()
+                .map(|seat| {
+                    format!(
+                        "{}: {}",
+                        seat.label,
+                        seat.holder.as_deref().unwrap_or("free")
+                    )
+                })
+                .chain(outside)
+                .collect::<Vec<_>>()
+                .join(" · ")
+        }
     }
 }
 
@@ -522,4 +527,58 @@ pub fn seat_to_ask(s: &HudState) -> Option<u8> {
         .position(|seat| seat.holder.is_none() && !seat.mine);
     let other = s.seats.iter().position(|seat| !seat.mine);
     free.or(other).map(|i| i as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seat(label: &str, holder: Option<&str>, host: bool) -> HudSeat {
+        HudSeat {
+            label: label.into(),
+            pad: true,
+            keyboard_mouse: false,
+            holder: holder.map(Into::into),
+            host,
+            mine: false,
+            asked: false,
+        }
+    }
+
+    fn session(seats: Vec<HudSeat>) -> HudState {
+        HudState {
+            title: "Fling to the Finish".into(),
+            host: "Ana".into(),
+            role: HudRole::Watching,
+            seats,
+            viewers: 1,
+            control_paused: false,
+            game_in_front: true,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_host_shows_on_their_seat_or_beside_the_seats() {
+        let on_a_seat = session(vec![
+            seat("Controller 1", Some("Ana"), true),
+            seat("Controller 2", None, false),
+        ]);
+        assert_eq!(
+            who_plays(&on_a_seat),
+            "Controller 1: Ana · Controller 2: free"
+        );
+        let beside = session(vec![
+            seat("Controller 1", Some("Bia"), false),
+            seat("Controller 2", None, false),
+        ]);
+        assert_eq!(
+            who_plays(&beside),
+            "Controller 1: Bia · Controller 2: free · Ana: own controller"
+        );
+        let single = session(vec![seat("Controller", None, false)]);
+        assert_eq!(who_plays(&single), "Ana is playing");
+        // The free seat is the one to ask for, not the host's.
+        assert_eq!(seat_to_ask(&on_a_seat), Some(1));
+    }
 }
