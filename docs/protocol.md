@@ -431,13 +431,17 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 
 `IPC_VERSION` (now 7: the shortcut keys in P3) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
-**Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the panic-key hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
+**Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the host-keys hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;
 - F toggles full screen;
 - H shows or hides the HUD; F3 alone does too, unless the keyboard is being forwarded;
 - M frees the mouse; clicking the window captures it again.
 
-The user may move each row to another key in Settings (P3), never its modifiers: chord rows keep Ctrl+Alt+Shift, and the row that works alone takes only F-keys. Only keys from `shortcuts::KEYS` are allowed (letters, digits, F-keys but F4, Backspace, punctuation): never Esc, Tab, Delete, the gray navigation keys (keyboards wrap them in fake Shift events the panic-key hook can't tell from Shift), Enter, Space, the modifiers, the Windows keys, Pause, Print Screen or the numpad. No two rows share a key, the panic key included, and the panic key can be moved but not removed. The keys are saved per profile in `shortcuts.json`; the panic key's applies at the next Go live, the viewer's in the next stream window (the `0x09` frame).
+On the host, while streaming, with Ctrl+Alt+Shift held (`couch_platform_win::host_keys`, one low-level hook for all three; physical keys only, so a guest's injected keys never count and the game never sees them):
+- Backspace is the panic key;
+- Y accepts and N declines the oldest request for a seat (M8), but only once it has been pending for 1 s, so a key meant for one request never answers another that just arrived in its place. The host overlay shows the requests and these keys over the game.
+
+The user may move each row to another key in Settings (P3), never its modifiers: chord rows keep Ctrl+Alt+Shift, and the row that works alone takes only F-keys. Only keys from `shortcuts::KEYS` are allowed (letters, digits, F-keys but F4, Backspace, punctuation): never Esc, Tab, Delete, the gray navigation keys (keyboards wrap them in fake Shift events the panic-key hook can't tell from Shift), Enter, Space, the modifiers, the Windows keys, Pause, Print Screen or the numpad. No two rows share a key, the panic key included, and the panic key can be moved but not removed. The keys are saved per profile in `shortcuts.json`; the host's keys apply at the next Go live, the viewer's in the next stream window (the `0x09` frame).
 
 **The HUD's bar.** The session bar (title, host, who plays, this viewer's state, a note, and buttons for the same actions plus Leave) takes clicks only while the mouse is free. A click on it goes to the HUD alone: it is never forwarded and never captures the mouse.
 

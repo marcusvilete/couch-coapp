@@ -197,7 +197,14 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 Some(Shortcut::ToggleHud) => hud.visible = !hud.visible,
                 Some(Shortcut::ToggleControl) => toggle_control(&mut hud, &out_tx),
                 Some(Shortcut::Fullscreen) => toggle_fullscreen(&mut window, &mut hud),
-                Some(Shortcut::FreeMouse | Shortcut::Panic) | None => continue,
+                // The host's keys are never the viewer's (scope Host).
+                Some(
+                    Shortcut::FreeMouse
+                    | Shortcut::Panic
+                    | Shortcut::AcceptRequest
+                    | Shortcut::DeclineRequest,
+                )
+                | None => continue,
             }
             redraw = true;
         }

@@ -12,7 +12,7 @@
 
 use std::{any::Any, collections::BTreeMap};
 
-use couch_input::{local::ControllerIds, shortcuts::Shortcut};
+use couch_input::{HidUsage, local::ControllerIds, shortcuts::Shortcut};
 use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
@@ -26,14 +26,18 @@ use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 
 use super::*;
 use crate::{
-    HostController, InputSetup, RequestView, SeatView, SessionEnd, SessionRole, SessionView,
-    SourceChoice, WatchEnd,
+    AnswerKeys, HostController, InputSetup, RequestView, ScreenArea, SeatView, SessionEnd,
+    SessionRole, SessionView, SourceChoice, WatchEnd,
     pipeline::{
         AudioChoice, Source, ViewerOptions,
         host::{HostOptions, LocalSeat, Rates},
         watch::{Watch, WatchOptions},
     },
 };
+
+/// How long a request must have been pending before the host's Accept or
+/// Decline key answers it: long enough to have been seen on the overlay.
+const ANSWER_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub(super) struct Sessions {
@@ -52,10 +56,18 @@ struct Hosting {
     /// The connection each viewer joined on. When it closes, the viewer
     /// has gone: its stream and input were bound to it.
     viewer_conns: BTreeMap<MemberId, ConnId>,
-    /// The panic key's hook, in place while the stream runs, with the keys
-    /// it listens for ("Ctrl+Alt+Shift+Backspace"); `None` if it couldn't be
-    /// installed.
+    /// The host keys' hook, in place while the stream runs, with the panic
+    /// key it listens for ("Ctrl+Alt+Shift+Backspace"); `None` if it
+    /// couldn't be installed.
     panic_key: Option<(Box<dyn Any + Send>, String)>,
+    /// The Accept and Decline keys the hook listens for, as shown.
+    answer_keys: Option<(String, String)>,
+    /// The oldest pending request, the one the answer keys answer, and since
+    /// when it has been the oldest (not since it arrived: a request moves to
+    /// the front when the one before it goes).
+    first: Option<((MemberId, SeatId), Instant)>,
+    /// Where the overlay goes (the streamed window's or screen's monitor).
+    overlay_area: Option<ScreenArea>,
     /// Whether the streamed window is in front, as last reported; `None`
     /// before the first report, and always for a screen.
     in_front: Option<bool>,
@@ -737,6 +749,14 @@ impl Actor {
         if !more.is_empty() {
             self.apply_session(room, more, now);
         }
+        // Every change to the requests goes through here: note when the
+        // oldest became the oldest.
+        if let Some(h) = self.sessions.hosting.as_mut() {
+            let head = h.session.requests().first().copied();
+            if head != h.first.map(|(request, _)| request) {
+                h.first = head.map(|request| (request, now));
+            }
+        }
         if changed {
             self.announce(room, now);
         }
@@ -809,6 +829,7 @@ impl Actor {
                 "keyboard and mouse need a window as the source",
             ));
         }
+        let overlay_area = self.backend.overlay_area(&source);
         let session = SessionId(u64::from_le_bytes(random()?));
         let seats = go.input.seats();
         // Our controller plays through a seat only if one has a pad.
@@ -856,6 +877,9 @@ impl Actor {
             stream: None,
             viewer_conns: BTreeMap::new(),
             panic_key: None,
+            answer_keys: None,
+            first: None,
+            overlay_area,
             in_front: None,
             controller: controller.map(|c| Ok(c.name)),
         });
@@ -883,30 +907,64 @@ impl Actor {
         };
         let room = h.room;
         *self.panic.lock().unwrap_or_else(PoisonError::into_inner) = Some(stream.panic_handle());
-        // The hook releases straight through the input task, from its own
-        // thread, before the actor hears of it.
+        // The panic key releases straight through the input task, from the
+        // hook's own thread, before the actor hears of it. Accept and
+        // Decline go to the actor.
         let on_press = {
             let handle = stream.panic_handle();
             let inbox = self.inbox.clone();
             let runtime = tokio::runtime::Handle::current();
-            move || {
-                handle.panic();
+            move |key: Shortcut| {
+                let input = match key {
+                    Shortcut::Panic => {
+                        handle.panic();
+                        Input::Panic(Some(session))
+                    }
+                    Shortcut::AcceptRequest | Shortcut::DeclineRequest => Input::AnswerFirst {
+                        session,
+                        accept: key == Shortcut::AcceptRequest,
+                    },
+                    _ => return,
+                };
                 let inbox = inbox.clone();
                 runtime.spawn(async move {
-                    let _ = inbox.send(Input::Panic(Some(session))).await;
+                    let _ = inbox.send(input).await;
                 });
             }
         };
-        // The user's key, read now: a change made while live applies at
+        // The user's keys, read now: a change made while live applies at
         // the next Go live.
         let shortcuts = crate::store::shortcuts(&self.data_dir);
+        let keys: Vec<_> = Shortcut::HOST
+            .iter()
+            .map(|&s| (shortcuts.binding(s).key, s))
+            .collect();
+        let on_press = std::sync::Arc::new(on_press);
+        let hook = |keys: &[(HidUsage, Shortcut)]| {
+            let on_press = on_press.clone();
+            self.backend
+                .host_keys(keys, Box::new(move |key| on_press(key)))
+        };
         let panic = shortcuts.binding(Shortcut::Panic);
-        h.panic_key = match self.backend.panic_key(panic.key, Box::new(on_press)) {
-            Ok(hook) => Some((hook, panic.keys())),
-            Err(e) => {
-                tracing::error!("no panic key while streaming: {e}");
-                None
+        h.panic_key = match hook(&keys) {
+            Ok(guard) => {
+                h.answer_keys = Some((
+                    shortcuts.binding(Shortcut::AcceptRequest).keys(),
+                    shortcuts.binding(Shortcut::DeclineRequest).keys(),
+                ));
+                Some((guard, panic.keys()))
             }
+            // Never the panic key lost for an answer key's sake: it alone.
+            Err(e) => match hook(&[(panic.key, Shortcut::Panic)]) {
+                Ok(guard) => {
+                    tracing::error!("no keys to answer requests while streaming: {e}");
+                    Some((guard, panic.keys()))
+                }
+                Err(e) => {
+                    tracing::error!("no panic key while streaming: {e}");
+                    None
+                }
+            },
         };
         // Our controller plays through a seat, or couldn't after all.
         if let Some(Err(e)) = stream.local_seat() {
@@ -1166,6 +1224,37 @@ impl Actor {
         }
         let fx = h.session.panic();
         self.apply_session(room, fx, now);
+    }
+
+    /// The host's Accept or Decline key: answers the oldest request, once
+    /// it has been the oldest for [`ANSWER_AFTER`], so a key pressed for one
+    /// request never answers another that just took its place (arrived, or
+    /// moved up when the one before it went).
+    pub(super) fn answer_first(&mut self, session: SessionId, accept: bool, now: Instant) {
+        let Some(h) = self
+            .sessions
+            .hosting
+            .as_ref()
+            .filter(|h| h.session.id() == session && h.stream.is_some())
+        else {
+            return;
+        };
+        let Some(&(member, seat)) = h.session.requests().first() else {
+            tracing::info!("an answer key was pressed, but nobody asks");
+            return;
+        };
+        // A first we haven't noted counts as just in.
+        let seen = h.first.is_some_and(|(first, since)| {
+            first == (member, seat) && now.saturating_duration_since(since) >= ANSWER_AFTER
+        });
+        if !seen {
+            tracing::info!(member = ?member, "an answer key was pressed for a request too new at the front to have been seen; ignored");
+            return;
+        }
+        tracing::info!(member = ?member, ?seat, accept, "answering with the host's key");
+        if let Err(e) = self.our_session(|s| Ok(s.answer(member, accept, now)?), now) {
+            tracing::warn!("answering with the host's key: {e}");
+        }
     }
 
     // ---- Watching ----
@@ -1652,6 +1741,11 @@ impl Actor {
                     .collect(),
                 asked_seat: None,
                 panic_key: h.panic_key.as_ref().map(|(_, keys)| keys.clone()),
+                answer_keys: h
+                    .answer_keys
+                    .clone()
+                    .map(|(accept, decline)| AnswerKeys { accept, decline }),
+                overlay_area: h.overlay_area,
                 host_controller: h.controller.clone().and_then(Result::ok),
                 host_controller_problem: h.controller.clone().and_then(Result::err),
             });
@@ -1696,6 +1790,8 @@ impl Actor {
                 requests: Vec::new(),
                 asked_seat,
                 panic_key: None,
+                answer_keys: None,
+                overlay_area: None,
                 host_controller: None,
                 host_controller_problem: None,
             });

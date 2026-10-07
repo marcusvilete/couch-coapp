@@ -151,6 +151,12 @@ pub(crate) enum Input {
     /// The host's panic key, for the stream it was pressed during; `None`
     /// means ours, whichever it is (`Engine::panic_key`).
     Panic(Option<SessionId>),
+    /// The host's Accept or Decline key, during this stream: answers the
+    /// oldest request, if it has been pending long enough to be seen.
+    AnswerFirst {
+        session: SessionId,
+        accept: bool,
+    },
 }
 
 pub(crate) enum JoinAnswer {
@@ -539,6 +545,7 @@ impl Actor {
                 self.reconnect_timeout(session, attempt, now);
             }
             Input::Panic(session) => self.panic_key(session, now),
+            Input::AnswerFirst { session, accept } => self.answer_first(session, accept, now),
         }
     }
 

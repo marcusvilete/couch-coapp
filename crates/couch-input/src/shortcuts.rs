@@ -28,6 +28,16 @@ pub enum Shortcut {
     Fullscreen,
     /// Host: take the controller back from everyone and pause control.
     Panic,
+    /// Host: accept the oldest request for a seat.
+    AcceptRequest,
+    /// Host: decline the oldest request for a seat.
+    DeclineRequest,
+}
+
+impl Shortcut {
+    /// The host's shortcuts, which the host-keys hook watches for while
+    /// streaming (the panic key first).
+    pub const HOST: [Self; 3] = [Self::Panic, Self::AcceptRequest, Self::DeclineRequest];
 }
 
 /// Where a shortcut works.
@@ -112,7 +122,7 @@ const fn f(usage: u16, name: &'static str) -> Key {
 ///   the numpad.
 ///
 /// Every key here has a plain, non-extended scancode, which the panic-key
-/// hook needs (`couch_platform_win::panic_key`, tested there).
+/// hook needs (`couch_platform_win::host_keys`, tested there).
 pub const KEYS: &[Key] = &[
     k(0x04, "A", "KeyA"),
     k(0x05, "B", "KeyB"),
@@ -189,6 +199,8 @@ const KEY_C: HidUsage = HidUsage(0x06);
 const KEY_F: HidUsage = HidUsage(0x09);
 const KEY_H: HidUsage = HidUsage(0x0B);
 const KEY_M: HidUsage = HidUsage(0x10);
+const KEY_N: HidUsage = HidUsage(0x11);
+const KEY_Y: HidUsage = HidUsage(0x1C);
 const KEY_BACKSPACE: HidUsage = HidUsage(0x2A);
 const KEY_F3: HidUsage = HidUsage(0x3C);
 
@@ -202,6 +214,24 @@ pub const SHORTCUTS: &[Binding] = &[
         action: "Take the controller back from everyone and pause control",
         scope: Scope::Host,
         condition: "while you stream; the game never sees it",
+    },
+    Binding {
+        id: "acceptRequest",
+        shortcut: Shortcut::AcceptRequest,
+        chord: true,
+        key: KEY_Y,
+        action: "Accept the oldest request for a seat",
+        scope: Scope::Host,
+        condition: "while you stream and someone asks; the game never sees it",
+    },
+    Binding {
+        id: "declineRequest",
+        shortcut: Shortcut::DeclineRequest,
+        chord: true,
+        key: KEY_N,
+        action: "Decline the oldest request for a seat",
+        scope: Scope::Host,
+        condition: "while you stream and someone asks; the game never sees it",
     },
     Binding {
         id: "toggleControl",
@@ -437,9 +467,30 @@ mod tests {
             Shortcut::ToggleControl,
             Shortcut::Fullscreen,
             Shortcut::Panic,
+            Shortcut::AcceptRequest,
+            Shortcut::DeclineRequest,
         ] {
             assert_eq!(table.binding(s).shortcut, s);
         }
+    }
+
+    #[test]
+    fn the_hosts_keys_are_chords_and_never_the_viewers() {
+        let table = Shortcuts::default();
+        for s in Shortcut::HOST {
+            let b = table.binding(s);
+            assert_eq!(b.scope, Scope::Host, "{}", b.id);
+            assert!(b.chord, "{}", b.id);
+            assert_eq!(table.viewer_shortcut(b.key, true), None, "{}", b.id);
+        }
+        assert_eq!(
+            table.binding(Shortcut::AcceptRequest).keys(),
+            "Ctrl+Alt+Shift+Y"
+        );
+        assert_eq!(
+            table.binding(Shortcut::DeclineRequest).keys(),
+            "Ctrl+Alt+Shift+N"
+        );
     }
 
     #[test]

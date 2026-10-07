@@ -1,14 +1,17 @@
-//! The host's panic key: a low-level keyboard hook (`WH_KEYBOARD_LL`) on a
-//! thread of its own, installed while the host streams.
+//! The host's keys while streaming: the panic key, and the keys that answer
+//! a viewer's request (M8). One low-level keyboard hook (`WH_KEYBOARD_LL`)
+//! on a thread of its own, installed while the host streams, watching for
+//! Ctrl+Alt+Shift plus any of its keys.
 //!
 //! - **Only physical keys count.** Injected events (`LLKHF_INJECTED`, which
 //!   is what `SendInput` produces, including a guest's keys) are passed on
 //!   untouched and never change what the hook believes is held. So a guest
-//!   can neither press the panic key nor hold a modifier that completes it.
-//!   Nor can a guest block it: Windows keeps one down bit per key for
-//!   physical and injected input alike, so once a guest's event touched a
-//!   modifier, the hook trusts only its own physical tracking for it.
-//! - **The game never sees the key.** The chord's key-down, its repeats and
+//!   can neither press one of these keys (the panic key, or Accept on their
+//!   own request) nor hold a modifier that completes one. Nor can a guest
+//!   block them: Windows keeps one down bit per key for physical and
+//!   injected input alike, so once a guest's event touched a modifier, the
+//!   hook trusts only its own physical tracking for it.
+//! - **The game never sees the keys.** A chord's key-down, its repeats and
 //!   its key-up are swallowed. The modifiers themselves pass through.
 //! - **The hook returns quickly.** Windows drops a low-level hook that keeps
 //!   it waiting, so the callback only flips a flag and sends a message.
@@ -51,22 +54,33 @@ const VK_LMENU: u32 = 0xA4;
 const VK_RMENU: u32 = 0xA5;
 
 /// The installed hook. Dropping it removes the hook and ends its thread.
-pub struct PanicKey {
+pub struct HostKeys {
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
 }
 
-impl PanicKey {
-    /// Hooks Ctrl+Alt+Shift+`key` (a HID usage). `on_press` runs on the
-    /// hook's thread, once per press; it must return at once.
-    pub fn install(key: u16, on_press: impl Fn() + Send + 'static) -> windows::core::Result<Self> {
-        let Some(KeyCode::Scan { code, extended }) = key_code(key) else {
-            return Err(Error::new(E_INVALIDARG, "the panic key has no scancode"));
-        };
-        let chord = Chord::new(code, extended);
+impl HostKeys {
+    /// Hooks Ctrl+Alt+Shift plus each of `keys` (HID usages, no two alike).
+    /// `on_press` gets the pressed key's index in `keys`, once per press; it
+    /// runs on the hook's thread and must return at once.
+    pub fn install(
+        keys: &[u16],
+        on_press: impl Fn(usize) + Send + 'static,
+    ) -> windows::core::Result<Self> {
+        let mut codes = Vec::with_capacity(keys.len());
+        for &key in keys {
+            let Some(KeyCode::Scan { code, extended }) = key_code(key) else {
+                return Err(Error::new(E_INVALIDARG, "a host key has no scancode"));
+            };
+            if codes.contains(&(code, extended)) {
+                return Err(Error::new(E_INVALIDARG, "two host keys are the same key"));
+            }
+            codes.push((code, extended));
+        }
+        let chord = Chord::new(&codes);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
-            .name("panic-key".into())
+            .name("host-keys".into())
             .spawn(move || hook_thread(chord, Box::new(on_press), &ready_tx))
             .map_err(|e| Error::new(E_INVALIDARG, e.to_string()))?;
         match ready_rx.recv() {
@@ -80,19 +94,19 @@ impl PanicKey {
             }
             Err(_) => {
                 let _ = thread.join();
-                Err(Error::new(E_INVALIDARG, "the panic-key thread died"))
+                Err(Error::new(E_INVALIDARG, "the host-keys thread died"))
             }
         }
     }
 }
 
-impl Drop for PanicKey {
+impl Drop for HostKeys {
     fn drop(&mut self) {
         // SAFETY: posting a message to a thread id has no memory effects;
         // the thread made its queue before reporting its id.
         if let Err(e) = unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) }
         {
-            tracing::warn!("stopping the panic-key hook: {e}");
+            tracing::warn!("stopping the host-keys hook: {e}");
             return;
         }
         if let Some(thread) = self.thread.take() {
@@ -103,7 +117,7 @@ impl Drop for PanicKey {
 
 struct HookState {
     chord: Chord,
-    on_press: Box<dyn Fn() + Send>,
+    on_press: Box<dyn Fn(usize) + Send>,
 }
 
 thread_local! {
@@ -114,7 +128,7 @@ thread_local! {
 
 fn hook_thread(
     chord: Chord,
-    on_press: Box<dyn Fn() + Send>,
+    on_press: Box<dyn Fn(usize) + Send>,
     ready: &mpsc::SyncSender<windows::core::Result<u32>>,
 ) {
     let mut msg = MSG::default();
@@ -143,7 +157,7 @@ fn hook_thread(
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {}
     // SAFETY: `hook` was installed above and not yet removed.
     if let Err(e) = unsafe { UnhookWindowsHookEx(hook) } {
-        tracing::warn!("removing the panic-key hook: {e}");
+        tracing::warn!("removing the host-keys hook: {e}");
     }
     HOOK.with(|h| h.borrow_mut().take());
 }
@@ -173,10 +187,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 return Verdict::Pass;
             };
             let verdict = state.chord.key(event, os_down);
-            if verdict == Verdict::Pressed {
+            if let Verdict::Pressed(i) = verdict {
                 let on_press = &state.on_press;
-                if std::panic::catch_unwind(AssertUnwindSafe(on_press)).is_err() {
-                    tracing::error!("the panic key's handler panicked");
+                if std::panic::catch_unwind(AssertUnwindSafe(|| on_press(i))).is_err() {
+                    tracing::error!("a host key's handler panicked");
                 }
             }
             verdict
@@ -218,10 +232,10 @@ const VK_MENU: u32 = 0x12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     Pass,
-    /// The chord's key, repeating or going up: the game mustn't see it.
+    /// A chord's key, repeating or going up: the game mustn't see it.
     Swallow,
-    /// The panic key was pressed: act, and swallow it.
-    Pressed,
+    /// The chord with this key (its index) was pressed: act, and swallow it.
+    Pressed(usize),
 }
 
 /// One modifier key (one side), as the hook sees it.
@@ -237,36 +251,49 @@ struct Modifier {
     injected_since: bool,
 }
 
-/// What the chord's own key is doing.
+/// What a chord's own key is doing.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum KeyState {
     #[default]
     Up,
-    /// It went down as the panic key: its repeats and release are ours.
+    /// It went down as a chord: its repeats and release are ours.
     Ours,
     /// It went down without the chord: the game has it, repeats and release
     /// included, even if the chord is completed meanwhile.
     Passed,
 }
 
-/// Which modifiers are physically held, and what the chord's key is doing.
-#[derive(Debug, Default)]
-struct Chord {
+/// One of the hook's keys.
+#[derive(Debug, Default, Clone, Copy)]
+struct ChordKey {
     scan: u32,
     extended: bool,
+    state: KeyState,
+    /// When it last did anything.
+    time_ms: u32,
+}
+
+/// Which modifiers are physically held, and what each chord's key is doing.
+#[derive(Debug, Default)]
+struct Chord {
     /// Indexed by `vk - VK_LSHIFT`: left and right Shift, Ctrl, Alt.
     modifiers: [Modifier; 6],
-    key: KeyState,
-    /// When the chord's key last did anything.
-    key_time_ms: u32,
+    keys: Vec<ChordKey>,
 }
 
 impl Chord {
-    fn new(scan: u16, extended: bool) -> Self {
+    /// `keys`: each key's scancode, and whether it is extended.
+    fn new(keys: &[(u16, bool)]) -> Self {
         Self {
-            scan: u32::from(scan),
-            extended,
-            ..Self::default()
+            modifiers: Default::default(),
+            keys: keys
+                .iter()
+                .map(|&(scan, extended)| ChordKey {
+                    scan: u32::from(scan),
+                    extended,
+                    ..ChordKey::default()
+                })
+                .collect(),
         }
     }
 
@@ -286,30 +313,39 @@ impl Chord {
             }
             return Verdict::Pass;
         }
-        if e.injected || e.scan != self.scan || e.extended != self.extended {
+        if e.injected {
             return Verdict::Pass;
         }
+        let Some(i) = self
+            .keys
+            .iter()
+            .position(|k| k.scan == e.scan && k.extended == e.extended)
+        else {
+            return Verdict::Pass;
+        };
+        let held = e.down && self.held(&os_down);
+        let key = &mut self.keys[i];
         // A down right after the last event is an auto-repeat; after a
         // longer gap it is a new press (the key-up before it got lost).
-        let repeat = e.time_ms.wrapping_sub(self.key_time_ms) <= REPEAT_GAP_MS;
-        self.key_time_ms = e.time_ms;
-        match (e.down, self.key) {
+        let repeat = e.time_ms.wrapping_sub(key.time_ms) <= REPEAT_GAP_MS;
+        key.time_ms = e.time_ms;
+        match (e.down, key.state) {
             (true, KeyState::Ours) if repeat => Verdict::Swallow,
             (true, KeyState::Passed) if repeat => Verdict::Pass,
-            (true, _) if self.held(&os_down) => {
-                self.key = KeyState::Ours;
-                Verdict::Pressed
+            (true, _) if held => {
+                key.state = KeyState::Ours;
+                Verdict::Pressed(i)
             }
             (true, _) => {
-                self.key = KeyState::Passed;
+                key.state = KeyState::Passed;
                 Verdict::Pass
             }
             (false, KeyState::Ours) => {
-                self.key = KeyState::Up;
+                key.state = KeyState::Up;
                 Verdict::Swallow
             }
             (false, _) => {
-                self.key = KeyState::Up;
+                key.state = KeyState::Up;
                 Verdict::Pass
             }
         }
@@ -349,6 +385,22 @@ mod tests {
     use super::*;
 
     const BACKSPACE: u32 = 0x0E;
+    const Y: u32 = 0x15;
+    const N: u32 = 0x31;
+
+    /// A hook with Backspace only, as the panic key alone.
+    fn backspace() -> Chord {
+        Chord::new(&[(BACKSPACE as u16, false)])
+    }
+
+    /// The panic key, Accept and Decline, as the app installs them.
+    fn three() -> Chord {
+        Chord::new(&[
+            (BACKSPACE as u16, false),
+            (Y as u16, false),
+            (N as u16, false),
+        ])
+    }
 
     fn key(vk: u32, scan: u32, down: bool) -> KeyEvent {
         KeyEvent {
@@ -383,6 +435,20 @@ mod tests {
         down: false,
         ..BS_DOWN
     };
+    const Y_DOWN: KeyEvent = KeyEvent {
+        vk: 0x59,
+        scan: Y,
+        ..BS_DOWN
+    };
+    const Y_UP: KeyEvent = KeyEvent {
+        down: false,
+        ..Y_DOWN
+    };
+    const N_DOWN: KeyEvent = KeyEvent {
+        vk: 0x4E,
+        scan: N,
+        ..BS_DOWN
+    };
 
     fn hold_chord(c: &mut Chord, right: bool) {
         let r = u32::from(right);
@@ -394,19 +460,19 @@ mod tests {
     #[test]
     fn the_chord_presses_once_and_hides_the_key() {
         for right in [false, true] {
-            let mut c = Chord::new(BACKSPACE as u16, false);
+            let mut c = backspace();
             hold_chord(&mut c, right);
-            assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pressed);
+            assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pressed(0));
             // Auto-repeat, then the release: swallowed, not pressed again.
             assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Swallow);
             assert_eq!(c.key(BS_UP, |_| true), Verdict::Swallow);
-            assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pressed);
+            assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pressed(0));
         }
     }
 
     #[test]
     fn backspace_alone_or_with_part_of_the_chord_is_the_games() {
-        let mut c = Chord::new(BACKSPACE as u16, false);
+        let mut c = backspace();
         assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pass);
         assert_eq!(c.key(BS_UP, |_| true), Verdict::Pass);
         c.key(key(VK_LCONTROL, 0, true), |_| true);
@@ -417,7 +483,7 @@ mod tests {
 
     #[test]
     fn injected_keys_never_count() {
-        let mut c = Chord::new(BACKSPACE as u16, false);
+        let mut c = backspace();
         // A guest's injected chord does nothing...
         for vk in [VK_LCONTROL, VK_LMENU, VK_LSHIFT] {
             assert_eq!(c.key(injected(key(vk, 0, true)), |_| true), Verdict::Pass);
@@ -432,7 +498,7 @@ mod tests {
         assert_eq!(c.key(BS_UP, |_| true), Verdict::Pass);
         c.key(key(VK_LSHIFT, 0, true), |_| true);
         assert_eq!(c.key(injected(BS_DOWN), |_| true), Verdict::Pass);
-        assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pressed);
+        assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pressed(0));
         // Nor can an injected key-up release a physical modifier.
         assert_eq!(
             c.key(injected(key(VK_LSHIFT, 0, false)), |_| true),
@@ -446,7 +512,7 @@ mod tests {
     #[test]
     fn a_guests_modifier_key_ups_cannot_block_it() {
         for vk in [VK_LSHIFT, VK_LCONTROL, VK_LMENU, VK_SHIFT, VK_CONTROL] {
-            let mut c = Chord::new(BACKSPACE as u16, false);
+            let mut c = backspace();
             hold_chord(&mut c, false);
             c.key(injected(key(vk, 0, true)), |_| true);
             c.key(injected(key(vk, 0, false)), |_| true);
@@ -456,7 +522,7 @@ mod tests {
                 VK_CONTROL => !(VK_LCONTROL..=VK_RCONTROL).contains(&k),
                 _ => k != vk,
             };
-            assert_eq!(c.key(BS_DOWN, cleared), Verdict::Pressed, "vk {vk:#x}");
+            assert_eq!(c.key(BS_DOWN, cleared), Verdict::Pressed(0), "vk {vk:#x}");
         }
     }
 
@@ -464,30 +530,30 @@ mod tests {
     /// game: its repeats and its release pass, so it never sticks down.
     #[test]
     fn a_backspace_held_before_the_chord_stays_the_games() {
-        let mut c = Chord::new(BACKSPACE as u16, false);
+        let mut c = backspace();
         assert_eq!(c.key(at(BS_DOWN, 0), |_| true), Verdict::Pass);
         hold_chord(&mut c, false);
         assert_eq!(c.key(at(BS_DOWN, 500), |_| true), Verdict::Pass);
         assert_eq!(c.key(at(BS_DOWN, 533), |_| true), Verdict::Pass);
         assert_eq!(c.key(at(BS_UP, 560), |_| true), Verdict::Pass);
         // A fresh press with the chord held is the panic key.
-        assert_eq!(c.key(at(BS_DOWN, 900), |_| true), Verdict::Pressed);
+        assert_eq!(c.key(at(BS_DOWN, 900), |_| true), Verdict::Pressed(0));
     }
 
     /// If the panic key's key-up never arrived, the next press long after
     /// is a new press, not a repeat.
     #[test]
     fn a_lost_key_up_costs_no_press() {
-        let mut c = Chord::new(BACKSPACE as u16, false);
+        let mut c = backspace();
         hold_chord(&mut c, false);
-        assert_eq!(c.key(at(BS_DOWN, 1_000), |_| true), Verdict::Pressed);
+        assert_eq!(c.key(at(BS_DOWN, 1_000), |_| true), Verdict::Pressed(0));
         assert_eq!(c.key(at(BS_DOWN, 1_500), |_| true), Verdict::Swallow);
-        assert_eq!(c.key(at(BS_DOWN, 5_000), |_| true), Verdict::Pressed);
+        assert_eq!(c.key(at(BS_DOWN, 5_000), |_| true), Verdict::Pressed(0));
     }
 
     #[test]
     fn a_lost_key_up_does_not_hold_a_modifier_forever() {
-        let mut c = Chord::new(BACKSPACE as u16, false);
+        let mut c = backspace();
         hold_chord(&mut c, false);
         // Ctrl and Alt came up on the secure desktop; Windows knows.
         let only_shift = |vk| vk == VK_LSHIFT;
@@ -496,10 +562,53 @@ mod tests {
 
     #[test]
     fn releasing_a_modifier_ends_the_chord() {
-        let mut c = Chord::new(BACKSPACE as u16, false);
+        let mut c = backspace();
         hold_chord(&mut c, false);
         c.key(key(VK_LMENU, 0, false), |_| true);
         assert_eq!(c.key(BS_DOWN, |_| true), Verdict::Pass);
+    }
+
+    /// Each key is its own chord, reported by its index.
+    #[test]
+    fn several_keys_each_press_their_own() {
+        let mut c = three();
+        hold_chord(&mut c, false);
+        assert_eq!(c.key(at(Y_DOWN, 0), |_| true), Verdict::Pressed(1));
+        assert_eq!(c.key(at(Y_UP, 50), |_| true), Verdict::Swallow);
+        assert_eq!(c.key(at(N_DOWN, 100), |_| true), Verdict::Pressed(2));
+        assert_eq!(c.key(at(BS_DOWN, 150), |_| true), Verdict::Pressed(0));
+        // Other keys under the chord stay the game's.
+        assert_eq!(c.key(key(0x41, 0x1E, true), |_| true), Verdict::Pass);
+    }
+
+    /// One key held as the game's and another pressed as a chord keep their
+    /// own states: neither's repeats or release change the other.
+    #[test]
+    fn keys_keep_their_own_state() {
+        let mut c = three();
+        // Y held for the game before the chord.
+        assert_eq!(c.key(at(Y_DOWN, 0), |_| true), Verdict::Pass);
+        hold_chord(&mut c, false);
+        assert_eq!(c.key(at(N_DOWN, 300), |_| true), Verdict::Pressed(2));
+        // Y's repeats and release still pass; N's repeat is still ours.
+        assert_eq!(c.key(at(Y_DOWN, 330), |_| true), Verdict::Pass);
+        assert_eq!(c.key(at(N_DOWN, 340), |_| true), Verdict::Swallow);
+        assert_eq!(c.key(at(Y_UP, 360), |_| true), Verdict::Pass);
+    }
+
+    /// A guest holding the keyboard seat can't answer their own request:
+    /// an injected Y or N, with injected or real modifiers, never counts.
+    #[test]
+    fn injected_answer_keys_never_count() {
+        let mut c = three();
+        for vk in [VK_LCONTROL, VK_LMENU, VK_LSHIFT] {
+            c.key(injected(key(vk, 0, true)), |_| true);
+        }
+        assert_eq!(c.key(injected(Y_DOWN), |_| true), Verdict::Pass);
+        assert_eq!(c.key(injected(N_DOWN), |_| true), Verdict::Pass);
+        hold_chord(&mut c, false);
+        assert_eq!(c.key(injected(Y_DOWN), |_| true), Verdict::Pass);
+        assert_eq!(c.key(injected(N_DOWN), |_| true), Verdict::Pass);
     }
 
     /// The real hook goes in and comes out promptly. (Pressing it needs a
@@ -507,12 +616,16 @@ mod tests {
     #[test]
     fn installs_and_removes() {
         let started = std::time::Instant::now();
-        let hook = PanicKey::install(0x2A, || {}).expect("installing the hook");
+        let hook = HostKeys::install(&[0x2A, 0x1C, 0x11], |_| {}).expect("installing the hook");
         drop(hook);
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(
-            PanicKey::install(0x48, || {}).is_err(),
+            HostKeys::install(&[0x2A, 0x48], |_| {}).is_err(),
             "Pause has no plain scancode"
+        );
+        assert!(
+            HostKeys::install(&[0x2A, 0x2A], |_| {}).is_err(),
+            "two keys alike"
         );
     }
 
@@ -539,7 +652,7 @@ mod tests {
     #[test]
     fn the_extended_twin_is_another_key() {
         // Numpad Enter is Enter's scancode with E0: not the same key.
-        let mut c = Chord::new(0x1C, false);
+        let mut c = Chord::new(&[(0x1C, false)]);
         hold_chord(&mut c, false);
         let mut numpad_enter = key(0x0D, 0x1C, true);
         numpad_enter.extended = true;

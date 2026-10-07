@@ -8,6 +8,7 @@ use couch_codec_ffmpeg::FfmpegEncoder;
 use couch_input::{
     DEV_PAD_IDS, HidUsage, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
     local::{ControllerIds, LocalPads},
+    shortcuts::Shortcut,
 };
 use couch_media::{
     AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, audio::ToneSource,
@@ -19,7 +20,8 @@ use couch_platform_win::{
     clock::QpcClock,
     foreground::{self, WindowId},
     game, held_input, hidhide,
-    panic_key::PanicKey,
+    host_keys::HostKeys,
+    monitor,
     sendinput::SendInputInjector,
     vigem::VigemPadFactory,
 };
@@ -28,6 +30,7 @@ use super::{
     AudioKind, Backend, Focus, GameProcess, Hiding, NativeId, ScreenSource, Source, Sources,
     ViewerOptions, ViewerProcess, WindowSource,
 };
+use crate::ScreenArea;
 
 /// The viewer, next to our own exe.
 const VIEWER_EXE: &str = "couch-viewer.exe";
@@ -232,13 +235,33 @@ impl Backend for WindowsBackend {
         })
     }
 
-    fn panic_key(
+    fn overlay_area(&self, source: &Source) -> Option<ScreenArea> {
+        let area = match source {
+            Source::Window(window) => monitor::of_window(*window),
+            Source::Screen(screen) => monitor::of_monitor(*screen),
+            _ => monitor::primary(),
+        }?;
+        Some(ScreenArea {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        })
+    }
+
+    fn host_keys(
         &self,
-        key: HidUsage,
-        on_press: Box<dyn Fn() + Send>,
+        keys: &[(HidUsage, Shortcut)],
+        on_press: Box<dyn Fn(Shortcut) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError> {
-        let hook = PanicKey::install(key.0, on_press)
-            .map_err(|e| MediaError::Backend(format!("the panic-key hook: {e}")))?;
+        let usages: Vec<u16> = keys.iter().map(|(key, _)| key.0).collect();
+        let shortcuts: Vec<Shortcut> = keys.iter().map(|&(_, s)| s).collect();
+        let hook = HostKeys::install(&usages, move |i| {
+            if let Some(&shortcut) = shortcuts.get(i) {
+                on_press(shortcut);
+            }
+        })
+        .map_err(|e| MediaError::Backend(format!("the host-keys hook: {e}")))?;
         Ok(Box::new(hook))
     }
 }

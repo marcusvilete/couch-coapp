@@ -477,12 +477,39 @@ pub struct SessionView {
     /// For the host: the panic key's keys, while its hook is in place;
     /// `None` if it couldn't be installed (the app warns).
     pub panic_key: Option<String>,
+    /// For the host: the keys that accept and decline the oldest request,
+    /// while the hook is in place.
+    pub answer_keys: Option<AnswerKeys>,
+    /// For the host: where the overlay goes, the work area of the monitor
+    /// showing what we stream; `None` where unknown.
+    pub overlay_area: Option<ScreenArea>,
     /// For the host: their controller playing through a seat, hidden from
     /// games, if they chose one and it works.
     pub host_controller: Option<String>,
     /// For the host: why the controller they chose doesn't play through a
     /// seat (they play outside the seats instead).
     pub host_controller_problem: Option<String>,
+}
+
+/// The host's keys for answering requests from inside a game (M8), such as
+/// "Ctrl+Alt+Shift+Y".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AnswerKeys {
+    pub accept: String,
+    pub decline: String,
+}
+
+/// A rectangle on the desktop, in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ScreenArea {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// Where this profile stands in a session.

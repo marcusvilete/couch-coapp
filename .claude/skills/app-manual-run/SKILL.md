@@ -114,6 +114,16 @@ Needs HidHide installed on the host (administrator, then a restart; installed on
 - **Keys are checked within one profile only.** On one PC, a viewer profile's chord set to the hosting profile's panic key is swallowed by the host's hook and presses the panic key. Not a bug (on two PCs they never meet); keep them apart when testing.
 - **Restart now** shows a "Restarting Couch Co-App…" screen with a spinner, goes through the normal exit (the rooms hear we go; a second or two), then starts the same profile again, which opens with the splash; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the guest package): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`import.meta.env.DEV`). Pressing it under `tauri dev` once ended both, leaving no app running.
 
+## The host overlay (M8): what to expect
+
+- **When it shows:** only while this profile streams, something is pending or just happened, and the app's own window isn't in front (it shows the same). A corner window, top right of the monitor showing the streamed window (or the streamed screen), opened for each burst and closed when empty, so there's a short delay (about a third of a second) before the first toast.
+- **What it shows:** each request ("bob asks for Controller 2"), the oldest framed in orange with its keys (Ctrl+Alt+Shift+Y accept, N decline by default); notes that fade after about 4 s (started or stopped watching, now plays or no longer plays a seat, no longer asking, control paused).
+- **The keys** answer the oldest request, only once it has been pending 1 s (an immediate press does nothing; log: `too new to have been seen`). They go through the panic key's hook: a game running as administrator in front hides them from us, as for the panic key.
+- **The chime:** two tones from the main window on each request, if Settings → Overlay allows. It needs the Go live click (the webview's autoplay rule), so it only sounds for streams started from this run of the app.
+- **What to check every time:** the game keeps the focus when toasts come and go (guests' stream windows would say "the game isn't in front" otherwise, and their keyboard would stop); clicks on the overlay's corner reach the game; a stream of the whole screen doesn't show the overlay.
+- **On one PC** the stream window of a watching profile is usually in front, not the game: test with the game in front and the stream windows behind it.
+- **True exclusive full screen** draws over the overlay; only the chime and the keys work there.
+
 ## A full run to ask for
 
 1. Watch, then stop watching.
@@ -184,5 +194,7 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
   - The host's controller still working in a game right after going live: it wasn't reconnected yet (HidHide refuses only new opens).
   - With the host's controller on a seat, one seat short in the game (3 of 4 work, `xinput-watch` shows all 4 slots moving): Steam Input is on for the game and keeps a player for the hidden controller. Turn it off (the game's Properties → Controller). Seen with Fling to the Finish.
   - Seat order isn't XInput slot order: Windows numbers the slots itself. Tell seats apart by moving one pad at a time in `xinput-watch`.
-  - A full-screen game ignoring the guest once (M5b): an observation, not a known bug; note whether it happens again.
+  - A full-screen game ignoring the guest once (M5b): not seen since. On two PCs over the internet (M8) full screen worked, switched to from the guest too. If it comes back, run `xinput-watch.ps1` on the host to tell a game ignoring the pad from input not arriving.
+  - A yellow border around the streamed window on a Windows 10 host: Windows draws it while capturing, and only Windows 11 lets us hide it. It isn't in the stream. (Before M8's fix, a Windows 10 host's every stream ended at its first viewer: "Toggling the capture border is not supported".)
+  - A guest package's empty `desktop.log`: an old `run.cmd` that saved only stderr; repack, or end its last line with `>> "%~dp0desktop.log" 2>&1`.
 - **Record** each run in the milestone's results file ("Your run" row), and new observations the user wants kept in the polish backlog memory.

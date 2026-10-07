@@ -21,8 +21,8 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | P1 | Seats and input modes: single player or multiplayer per game, a pad per controller seat, a keyboard seat, requests that name a seat; the "game not in front" notice | done ([results](p1-results.md)) |
 | P2 | The host on a seat: the host's controller drives a seat's virtual pad, and HidHide hides the physical one, so any seat can be handed over | done, two-PC run included; Take back now leaves a seat empty ([results](p2-results.md)) |
 | P3 | Settings: the shortcut editor (each shortcut to another key) and the relay (Settings → Network); the splash screen | done, one-PC run and Restart now in a release build included ([results](p3-results.md)) |
-| Polish | The full-screen re-check, with the internet test with friends | |
-| M8 | Host overlay window | |
+| Polish | The full-screen re-check, with the internet test with friends | done: two PCs over the internet, a direct link; full screen worked, switched to remotely too ([M8 results](m8-results.md)) |
+| M8 | Host overlay: requests and session notes over the game, answered with keys; a chime | done, your one-PC run included; also a fix for hosting on Windows 10 ([results](m8-results.md)) |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | |
 | M7 | Own relay, the https invite page, the production relay setup | moved to just before M10: until then, iroh's public relays serve development and real-network tests |
 | M10 | Packaging | |
@@ -164,7 +164,12 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
 - **The game's focus.** The host's input task notices the streamed window leaving the front and tells the viewers (`GameFocus`), whose stream window says why input may not work.
 - **Disconnects.** If a viewer leaves, closes its window, loses its connection or is banned, everything it held is released at once.
 - **In the engine.** The room actor runs the session protocol (`rooms::sessions`). The media and input run in `couch_engine::pipeline`: `HostStream` (one capture, an encoder per viewer, one sound capture, one input task) and `Watch` (the viewer process). **Input never goes through the actor**: it flows from the connection to the input task's seat router to the injectors.
-- **On screen.** The app's stage shows a card per live session (Watch, ask, stop watching) and, for the host, a panel with the viewers, the requests and the pause; the taskbar flashes on a request. The viewer's HUD shows the session and takes clicks on its bar only while the mouse is free. While a host streams, the panic-key hook (`couch_platform_win::panic_key`, through `pipeline::Backend`) watches the physical keyboard. All shortcuts live in `couch_input::shortcuts`.
+- **On screen.** The app's stage shows a card per live session (Watch, ask, stop watching) and, for the host, a panel with the viewers, the requests and the pause; the taskbar flashes on a request. The viewer's HUD shows the session and takes clicks on its bar only while the mouse is free. While a host streams, the host-keys hook (`couch_platform_win::host_keys`, through `pipeline::Backend`) watches the physical keyboard for the panic key and the keys that answer requests. All shortcuts live in `couch_input::shortcuts`.
+- **The host overlay** (M8). Requests and short notes about the session (watching, leaving, who plays, control paused) show in a corner over the game, on the monitor showing what is streamed, so the host needn't leave it:
+  - **Answering:** Ctrl+Alt+Shift+Y accepts and N declines the oldest request, through the same hook as the panic key, so a guest's injected keys never count. A request must have been pending 1 s first.
+  - **The window:** opened by the app's main window when there is something to show and closed when not (`useOverlay.ts`). It never takes the focus (no-activate, created unfocused; never hidden and shown again), clicks pass through it, and it is left out of captures (`WDA_EXCLUDEFROMCAPTURE`), so it never shows in a stream of the screen. It stays away while the app's own window is in front, which shows the same.
+  - **The chime:** two tones made with Web Audio in the main window, for when the overlay can't show (true exclusive full screen).
+  - **Settings → Overlay** turns either off.
 
 ## Lifecycle
 
@@ -202,7 +207,8 @@ These hold in every milestone. Tests guard them from M2 on.
 - Virtual gamepads on Windows need the ViGEmBus 1.22.0 driver, which is archived but still the only redistributable option. It sits behind the `VirtualPad` trait so a user-mode driver can replace it.
 - **The host on a seat** needs HidHide (MIT; 1.5.230, May 2024), a driver installed once with administrator rights and a restart; M10's installer can offer it. Our virtual pads report a real Xbox 360 controller's ids, so a real Xbox 360 controller on the host can't be told from them and can't play a seat (Xbox One and later, PlayStation and Switch Pro controllers can).
 - **Injection limits.** Elevated game windows, UAC prompts, the lock screen and anti-cheat titles reject injected input. A virtual gamepad still reaches an elevated game, but the panic key's hook doesn't see keys while it is in front (measured in M6). Go live marks windows of programs running as administrator and warns when one is picked; Take back in the app still works.
-- **Exclusive fullscreen.** True exclusive-fullscreen games may not capture through Windows.Graphics.Capture; the Desktop Duplication fallback lands in M9.
+- **Exclusive fullscreen.** True exclusive-fullscreen games may not capture through Windows.Graphics.Capture; the Desktop Duplication fallback lands in M9. They also draw over the host overlay (M8); the chime and the answer keys still work.
+- **Older Windows.** Windows.Graphics.Capture grew its options over versions: hiding the yellow capture border needs Windows 11, and a minimum frame interval a newer Windows 11 still. Where one is missing, capture keeps Windows' default (the border shows around the window on the host's screen, not in the stream). Before this was handled, every stream from a Windows 10 host ended at its first viewer.
 - **macOS.** Planned as a viewer and keyboard/mouse host only. System-wide virtual gamepads need an Apple-restricted entitlement.
 
 ## Native dependencies and licensing

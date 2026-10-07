@@ -26,8 +26,11 @@ use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
 use couch_input::{
     HidUsage, InputError, KbmInjector, VirtualPad,
     local::{ControllerIds, LocalPads},
+    shortcuts::Shortcut,
 };
 use couch_media::{AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, clock::Clock};
+
+use crate::ScreenArea;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// A native window or screen handle (an `HWND` or `HMONITOR` on Windows).
@@ -232,14 +235,22 @@ pub trait Backend: Send + Sync + 'static {
         0
     }
 
-    /// Hooks the host's panic key, Ctrl+Alt+Shift+`key` (the panic row of
-    /// the user's `couch_input::shortcuts::Shortcuts`), until the returned
-    /// guard drops. Only physical presses count, never injected ones.
-    /// `on_press` runs on the hook's own thread and must return at once.
-    fn panic_key(
+    /// Where the host's overlay goes for `source`: the work area of the
+    /// monitor showing the window, or of the screen; the primary monitor's
+    /// otherwise. `None` where there is no desktop (tests, other platforms).
+    fn overlay_area(&self, _source: &Source) -> Option<ScreenArea> {
+        None
+    }
+
+    /// Hooks the host's keys, Ctrl+Alt+Shift plus each key (the host rows
+    /// of the user's `couch_input::shortcuts::Shortcuts`: the panic key,
+    /// Accept and Decline), until the returned guard drops. Only physical
+    /// presses count, never injected ones. `on_press` runs on the hook's own
+    /// thread and must return at once.
+    fn host_keys(
         &self,
-        key: HidUsage,
-        on_press: Box<dyn Fn() + Send>,
+        keys: &[(HidUsage, Shortcut)],
+        on_press: Box<dyn Fn(Shortcut) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError>;
 }
 
@@ -295,10 +306,10 @@ impl Backend for Unsupported {
     fn launch_viewer(&self, _: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
         Err(unsupported())
     }
-    fn panic_key(
+    fn host_keys(
         &self,
-        _: HidUsage,
-        _: Box<dyn Fn() + Send>,
+        _: &[(HidUsage, Shortcut)],
+        _: Box<dyn Fn(Shortcut) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError> {
         Err(unsupported())
     }

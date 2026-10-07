@@ -9,6 +9,7 @@ import { GoLiveDialog, Stage, busyIn } from "./sessions";
 import { SettingsDialog } from "./settings";
 import { Splash } from "./splash";
 import { Modal } from "./ui";
+import { useOverlay } from "./useOverlay";
 import "./App.css";
 
 type Dialog =
@@ -63,6 +64,8 @@ function App() {
   const [order, setOrder] = useState<string[]>(rememberedOrder);
   const rooms = ordered(lobby.rooms, order);
   const room = rooms.find((r) => r.id === selected) ?? rooms[0] ?? null;
+  // While we stream: requests and session notes over the game.
+  useOverlay(rooms);
 
   const move = (id: string, to: number) => {
     const ids = rooms.map((r) => r.id).filter((r) => r !== id);

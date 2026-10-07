@@ -6,10 +6,11 @@ import type { NetworkView } from "./bindings/NetworkView";
 import type { RelaySetting } from "./bindings/RelaySetting";
 import type { ShortcutView } from "./bindings/ShortcutView";
 import { errorText, request } from "./engine";
+import { overlaySettings, setOverlaySettings, type OverlaySettings } from "./overlaySettings";
 import type { Busy } from "./sessions";
 import { Modal } from "./ui";
 
-export type SettingsSection = "shortcuts" | "network";
+export type SettingsSection = "shortcuts" | "overlay" | "network";
 
 export function SettingsDialog(props: { section: SettingsSection; busy: Busy; onClose: () => void }) {
   const [section, setSection] = useState<SettingsSection>(props.section);
@@ -33,6 +34,7 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
         {(
           [
             ["shortcuts", "Shortcuts"],
+            ["overlay", "Overlay"],
             ["network", "Network"],
           ] as const
         ).map(([id, label]) => (
@@ -48,11 +50,9 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
           </button>
         ))}
       </div>
-      {section === "shortcuts" ? (
-        <ShortcutsSection onCapturing={setCapturing} />
-      ) : (
-        <NetworkSection busy={props.busy} onRestarting={setRestarting} />
-      )}
+      {section === "shortcuts" && <ShortcutsSection onCapturing={setCapturing} />}
+      {section === "overlay" && <OverlaySection />}
+      {section === "network" && <NetworkSection busy={props.busy} onRestarting={setRestarting} />}
       {restarting && <Restarting />}
     </Modal>
   );
@@ -208,6 +208,42 @@ function ShortcutsSection(props: { onCapturing: (capturing: boolean) => void }) 
         </button>
       </div>
     </>
+  );
+}
+
+// ---- Overlay ----
+
+function OverlaySection() {
+  const [settings, setSettings] = useState<OverlaySettings>(overlaySettings);
+  const change = (next: OverlaySettings) => {
+    setSettings(next);
+    setOverlaySettings(next);
+  };
+  return (
+    <div className="form">
+      <p className="hint">
+        While you stream, requests for a seat and what happens in the session show in a corner over your game. You
+        answer the oldest request with its keys (Shortcuts), without leaving the game. The overlay never takes the
+        focus, clicks go through it, and it never shows in your stream.
+      </p>
+      <label className="check">
+        <input type="checkbox" checked={settings.show} onChange={(e) => change({ ...settings, show: e.target.checked })} />
+        Show requests and events over the game
+      </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={settings.sound}
+          onChange={(e) => change({ ...settings, sound: e.target.checked })}
+        />
+        Play a sound when someone asks for a seat
+      </label>
+      <p className="hint">
+        Games in true exclusive full screen draw over everything, so the overlay can't show there; the sound and the
+        keys still work. While a game running as administrator is in front, the keys don't reach Couch Co-App: answer in
+        the app.
+      </p>
+    </div>
   );
 }
 

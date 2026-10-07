@@ -40,7 +40,8 @@ $run = @'
 rem Starts Couch Co-App with its log in desktop.log, next to this file.
 rem The stream window logs to viewer.log in %LOCALAPPDATA%\CouchCoApp\profiles\<profile>.
 set RUST_LOG=couch=debug,iroh=info
-"%~dp0couch-desktop.exe" %* 2>> "%~dp0desktop.log"
+rem The app logs to stdout (and panics to stderr): both go to the file.
+"%~dp0couch-desktop.exe" %* >> "%~dp0desktop.log" 2>&1
 '@
 Set-Content -Path (Join-Path $dir 'run.cmd') -Value $run -Encoding ascii
 

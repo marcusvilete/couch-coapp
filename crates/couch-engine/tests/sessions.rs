@@ -26,6 +26,7 @@ use couch_engine::{
 use couch_input::{
     HidUsage, InputError, KbmInjector, PadButtons, PadState, Rumble, VirtualPad, VirtualPadFactory,
     local::{ControllerIds, LOCAL_PAD_EVERY, LocalController, LocalPad, LocalPads},
+    shortcuts::Shortcut,
 };
 use couch_media::{
     AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder,
@@ -64,6 +65,10 @@ struct Fake {
     panic_key: PanicHook,
     /// The key the panic-key hook was last installed on.
     panic_key_on: Mutex<Option<HidUsage>>,
+    /// Every key the host-keys hook was last installed on.
+    host_keys_on: Mutex<Vec<(HidUsage, Shortcut)>>,
+    /// The hook refuses any set of keys beyond the panic key alone.
+    answer_keys_fail: AtomicBool,
     /// The game window isn't in front (another window took the focus).
     away: AtomicBool,
     /// The host's own controller.
@@ -339,18 +344,25 @@ impl Backend for Fake {
         Ok(process)
     }
 
-    fn panic_key(
+    fn host_keys(
         &self,
-        key: HidUsage,
-        on_press: Box<dyn Fn() + Send>,
+        keys: &[(HidUsage, Shortcut)],
+        on_press: Box<dyn Fn(Shortcut) + Send>,
     ) -> Result<Box<dyn std::any::Any + Send>, MediaError> {
+        if keys.len() > 1 && self.answer_keys_fail.load(Ordering::SeqCst) {
+            return Err(MediaError::Backend("an answer key has no scancode".into()));
+        }
         *self.panic_key.lock().unwrap() = Some(on_press);
-        *self.panic_key_on.lock().unwrap() = Some(key);
+        *self.host_keys_on.lock().unwrap() = keys.to_vec();
+        *self.panic_key_on.lock().unwrap() = keys
+            .iter()
+            .find(|(_, s)| *s == Shortcut::Panic)
+            .map(|(key, _)| *key);
         Ok(Box::new(Unhook(self.panic_key.clone())))
     }
 }
 
-type PanicHook = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
+type PanicHook = Arc<Mutex<Option<Box<dyn Fn(Shortcut) + Send>>>>;
 
 /// Removes the fake panic-key hook when the engine drops it.
 struct Unhook(PanicHook);
@@ -365,9 +377,14 @@ impl Fake {
     /// The host presses the panic key on its keyboard; `false` if no hook
     /// was in place to see it.
     fn press_panic_key(&self) -> bool {
+        self.press_host_key(Shortcut::Panic)
+    }
+
+    /// The host presses one of its keys (the hook reports which).
+    fn press_host_key(&self, key: Shortcut) -> bool {
         match &*self.panic_key.lock().unwrap() {
             Some(on_press) => {
-                on_press();
+                on_press(key);
                 true
             }
             None => false,
@@ -1049,6 +1066,110 @@ async fn a_declined_viewer_cannot_ask_again_at_once() {
     let requests = a.session(&room, &a).await.unwrap().requests;
     assert!(requests.is_empty(), "{requests:?}");
     assert!(!b_window.holding());
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// If the answer keys can't be hooked, the panic key still is, alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_panic_key_never_waits_on_the_answer_keys() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.answer_keys_fail.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    assert_eq!(
+        *a.fake.host_keys_on.lock().unwrap(),
+        [(HidUsage(0x2A), Shortcut::Panic)]
+    );
+    let view = a.session(&room, &a).await.unwrap();
+    assert_eq!(view.panic_key.as_deref(), Some("Ctrl+Alt+Shift+Backspace"));
+    assert_eq!(view.answer_keys, None, "the app answers in its window then");
+    assert!(a.fake.press_panic_key());
+    a.wait_session(&room, &a, "control paused", |s| {
+        s.is_some_and(|s| s.control_paused)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// The host answers from inside the game (M8): Accept and Decline answer
+/// the oldest request, but never one that just arrived.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosts_keys_answer_the_oldest_request() {
+    let (mut a, mut b, mut c, room) = three().await;
+    // Accept moved to K: the hook gets the moved key with the others.
+    a.ok(Command::SetShortcut {
+        id: "acceptRequest".into(),
+        code: "KeyK".into(),
+    })
+    .await;
+    a.go_live(&room, 4).await;
+    let keys = a.fake.host_keys_on.lock().unwrap().clone();
+    assert_eq!(
+        keys,
+        [
+            (HidUsage(0x2A), Shortcut::Panic),
+            (HidUsage(0x0E), Shortcut::AcceptRequest),
+            (HidUsage(0x11), Shortcut::DeclineRequest),
+        ]
+    );
+    let view = a.session(&room, &a).await.unwrap();
+    let answer = view.answer_keys.expect("the answer keys while live");
+    assert_eq!(
+        (answer.accept.as_str(), answer.decline.as_str()),
+        ("Ctrl+Alt+Shift+K", "Ctrl+Alt+Shift+N")
+    );
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+
+    // Nobody asks: nothing happens.
+    assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
+
+    // B asks, and the key comes at once: too new to have been seen.
+    b_window.action(UserAction::RequestControl(0));
+    a.event("B's request", |e| {
+        matches!(e, Event::ControlRequested { .. }).then_some(())
+    })
+    .await;
+    assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!b_window.holding(), "a request just in isn't answered");
+    c_window.action(UserAction::RequestControl(0));
+    a.wait_session(&room, &a, "both asking", |s| {
+        s.is_some_and(|s| s.requests.len() == 2)
+    })
+    .await;
+
+    // Once seen: Decline answers the oldest (B).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(a.fake.press_host_key(Shortcut::DeclineRequest));
+    b.wait_session(&room, &a, "B declined", |s| {
+        s.is_some_and(|s| s.role == SessionRole::Watching)
+    })
+    .await;
+    let requests = a.session(&room, &a).await.unwrap().requests;
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r.member.clone())
+            .collect::<Vec<_>>(),
+        [c.id()]
+    );
+    // C has asked for over a second, but is first only now: a key pressed
+    // for B a moment late doesn't take C instead.
+    assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !c_window.holding(),
+        "a request just moved to the front isn't answered"
+    );
+    // Once C has been first for a second, Accept answers C.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
+    wait("C on the seat", || c_window.holding()).await;
+    assert!(!b_window.holding());
+    a.wait_session(&room, &a, "C on seat 0, nobody asking", |s| {
+        s.is_some_and(|s| holder(s, 0) == Some(c.id()) && s.requests.is_empty())
+    })
+    .await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

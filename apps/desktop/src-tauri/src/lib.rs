@@ -6,7 +6,7 @@
 //! Windows runs one command per link scheme, without our environment.
 
 use couch_engine::{Command, Engine, EngineOptions, Profile, Response};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -124,12 +124,20 @@ pub fn run() {
         tauri::async_runtime::block_on(Engine::start(profile, options)).unwrap_or_else(|e| fail(e));
     app.manage(engine);
 
-    app.run(|app, event| {
+    app.run(|app, event| match event {
+        // The app is its main window: closing it while the host overlay is
+        // up (M8) must still end the app.
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Destroyed,
+            ..
+        } if label == MAIN_WINDOW => app.exit(0),
         // Tell the rooms we are going, so members don't wait for a timeout.
-        if let RunEvent::Exit = event {
+        RunEvent::Exit => {
             let engine = app.state::<Engine>();
             tauri::async_runtime::block_on(engine.shutdown());
         }
+        _ => {}
     });
 }
 

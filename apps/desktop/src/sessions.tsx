@@ -9,6 +9,7 @@ import type { RoomView } from "./bindings/RoomView";
 import type { SeatChoice } from "./bindings/SeatChoice";
 import type { SessionView } from "./bindings/SessionView";
 import type { SourceList } from "./bindings/SourceList";
+import { prepareChime } from "./chime";
 import { engineCommand, errorText, request } from "./engine";
 import { Avatar, MAX_NAME_BYTES, Modal, truncateBytes } from "./ui";
 
@@ -573,6 +574,8 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    // A click: the webview lets the request chime play from now on.
+    prepareChime();
     const problem =
       (picked == null ? "Pick a window or a screen." : null) ??
       (title.trim() === "" ? "Give the stream a title." : null) ??

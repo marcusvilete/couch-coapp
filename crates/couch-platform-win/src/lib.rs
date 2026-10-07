@@ -1,8 +1,8 @@
 //! Windows backends. Everything that calls Windows APIs lives here: the QPC
 //! clock, Windows.Graphics.Capture, WASAPI loopback audio, `SendInput` and
 //! ViGEm virtual pads, HidHide (hiding the host's own controller), DPAPI for
-//! secrets on disk, the host's panic-key hook, and watching the game's
-//! process.
+//! secrets on disk, the host's keys hook (the panic key, answering
+//! requests), and watching the game's process.
 //!
 //! Compiles to nothing on other platforms; their backends get sibling crates.
 
@@ -18,9 +18,10 @@ pub mod foreground;
 pub mod game;
 pub mod held_input;
 pub mod hidhide;
+pub mod host_keys;
 pub mod keymap;
 pub(crate) mod markers;
-pub mod panic_key;
+pub mod monitor;
 pub mod process;
 pub mod sendinput;
 pub mod timer;

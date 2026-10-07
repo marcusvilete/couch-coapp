@@ -1,5 +1,6 @@
 //! Windows.Graphics.Capture (through windows-capture) as a [`Capturer`]: one
-//! window or one monitor, BGRA, no yellow border.
+//! window or one monitor, BGRA, no yellow border where Windows allows hiding
+//! it (Windows 11; see `settings`).
 //!
 //! Frames are copied to CPU memory here. The zero-copy path that hands the
 //! D3D11 texture straight to the encoder is M9.
@@ -15,7 +16,7 @@ use windows::Win32::{
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
-    graphics_capture_api::InternalCaptureControl,
+    graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl},
     monitor::Monitor,
     settings::{
         ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
@@ -248,6 +249,16 @@ impl WgcCapturer {
     }
 }
 
+/// Our capture settings, each one only where this Windows supports it.
+/// Windows.Graphics.Capture grew its options over versions, and a capture
+/// that asks for one this Windows lacks fails to start: on a Windows 10 PC
+/// every stream ended at its first viewer ("Toggling the capture border is
+/// not supported"). Where an option is missing, Windows' default applies:
+/// - the yellow border around the captured window (Windows 11 lets us hide
+///   it; it is drawn on the host's screen, not in the stream);
+/// - frames as often as the screen changes, which the pipeline paces
+///   anyway (the minimum interval is newer still);
+/// - the cursor captured (choosing needs Windows 10 2004).
 fn settings<T>(
     item: T,
     cursor: CursorCaptureSettings,
@@ -257,10 +268,32 @@ fn settings<T>(
 where
     T: TryInto<windows_capture::settings::GraphicsCaptureItemType>,
 {
+    let can = |check: Result<bool, _>| check.unwrap_or(false);
+    let border = if can(GraphicsCaptureApi::is_border_settings_supported()) {
+        DrawBorderSettings::WithoutBorder
+    } else {
+        DrawBorderSettings::Default
+    };
+    let interval = if can(GraphicsCaptureApi::is_minimum_update_interval_supported()) {
+        interval
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
+    let cursor = if can(GraphicsCaptureApi::is_cursor_settings_supported()) {
+        cursor
+    } else {
+        CursorCaptureSettings::Default
+    };
+    tracing::debug!(
+        ?border,
+        ?interval,
+        ?cursor,
+        "capture settings this Windows supports"
+    );
     Settings::new(
         item,
         cursor,
-        DrawBorderSettings::WithoutBorder,
+        border,
         SecondaryWindowSettings::Default,
         interval,
         DirtyRegionSettings::Default,
