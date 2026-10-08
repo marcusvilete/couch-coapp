@@ -11,7 +11,8 @@
 //! - [`media`]: video framing and datagram tags.
 //! - [`input`]: input stream messages and input datagrams.
 //!
-//! Protocol rules (versioning, frozen payloads) are in `docs/protocol.md`.
+//! Protocol rules (the wire revision, changing payloads) are in
+//! `docs/protocol.md`.
 
 pub mod admission;
 mod bytes;
@@ -27,17 +28,16 @@ pub mod session;
 
 /// ALPN protocol id for connections between room members.
 ///
-/// Stays at `/0` until the first public release.
+/// Stays at `/0`: there is no public binary release (ADR 0009), and
+/// [`PROTOCOL_MINOR`] catches incompatible builds.
 pub const ALPN: &[u8] = b"couch-coapp/0";
 
 /// The wire revision announced in [`control::Hello`] (M10a).
 ///
-/// Until the first public release, payloads change in place, so builds
-/// talk only to builds of the same revision: a peer with another one is
-/// refused right after `Hello`, and the app says who needs to update.
-/// **Bump it with every change to what members exchange** (the
-/// `protocol-change` skill). After the release, it goes back to meaning a
-/// compatible revision, with differences advertised by feature bits.
+/// Payloads change in place (for good, ADR 0009), so builds talk only to
+/// builds of the same revision: a peer with another one is refused right
+/// after `Hello`, and the app says who needs to update. **Bump it with
+/// every change to what members exchange** (the `protocol-change` skill).
 ///
 /// 1: the first installer (0.8.0). Builds before it sent 0 and didn't check.
 pub const PROTOCOL_MINOR: u16 = 1;

@@ -168,7 +168,7 @@ The user has a second PC on their home network. Suggest a two-PC run after any c
   - Run the script without redirecting its stderr (`2>&1` or `*>&1` with `$ErrorActionPreference = 'Stop'` aborts on cargo's and Tauri's info lines).
   - Rebuild it after every change the other PC runs. Both sides must have the same wire revision (`PROTOCOL_MINOR`), or the member list says "Needs update" / "Update yours".
 - **On the other PC:**
-  - run the installer; SmartScreen warns (unsigned until M10b): More info → Run anyway. On an administrator account Windows asks for administrator rights as it opens; then it asks: just me (`%LOCALAPPDATA%\Programs\Couch Co-App`) or everyone (Program Files);
+  - run the installer; SmartScreen warns (unsigned for good, ADR 0009): More info → Run anyway. On an administrator account Windows asks for administrator rights as it opens; then it asks: just me (`%LOCALAPPDATA%\Programs\Couch Co-App`) or everyone (Program Files);
   - answer the driver questions (ViGEmBus is needed to host games for guests' controllers; HidHide to play a seat yourself); each runs its own setup with Windows' administrator prompt; HidHide needs a restart;
   - allow the app on private networks when the firewall asks;
   - invite links open the app (`couchco://` is registered); installing again replaces the app and keeps the profile's data.

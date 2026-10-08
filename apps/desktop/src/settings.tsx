@@ -1,10 +1,12 @@
-// Settings: the keyboard shortcuts (each can move to another key) and the
-// network (which relay to use, applied when the app restarts).
+// Settings: the keyboard shortcuts (each can move to another key), the
+// overlay, the network (which relay to use, applied when the app restarts),
+// the drivers, and About (the version, the licence and the notices).
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState, type FormEvent } from "react";
 import type { DriverName } from "./bindings/DriverName";
 import type { DriverState } from "./bindings/DriverState";
 import type { DriverView } from "./bindings/DriverView";
+import type { EngineInfo } from "./bindings/EngineInfo";
 import type { NetworkView } from "./bindings/NetworkView";
 import type { RelaySetting } from "./bindings/RelaySetting";
 import type { ShortcutView } from "./bindings/ShortcutView";
@@ -13,7 +15,7 @@ import { overlaySettings, setOverlaySettings, type OverlaySettings } from "./ove
 import type { Busy } from "./sessions";
 import { Modal } from "./ui";
 
-export type SettingsSection = "shortcuts" | "overlay" | "network" | "drivers";
+export type SettingsSection = "shortcuts" | "overlay" | "network" | "drivers" | "about";
 
 export function SettingsDialog(props: { section: SettingsSection; busy: Busy; onClose: () => void }) {
   const [section, setSection] = useState<SettingsSection>(props.section);
@@ -40,6 +42,7 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
             ["overlay", "Overlay"],
             ["network", "Network"],
             ["drivers", "Drivers"],
+            ["about", "About"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -58,6 +61,7 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
       {section === "overlay" && <OverlaySection />}
       {section === "network" && <NetworkSection busy={props.busy} onRestarting={setRestarting} />}
       {section === "drivers" && <DriversSection />}
+      {section === "about" && <AboutSection />}
       {restarting && <Restarting />}
     </Modal>
   );
@@ -272,6 +276,60 @@ const STATES: Record<DriverState, string> = {
   missing: "Not installed",
 };
 
+// ---- About ----
+
+/** The version, the licence, where the source is, and every bundled
+ * component's licence (THIRD-PARTY-NOTICES.txt, installed next to the app). */
+function AboutSection() {
+  const [info, setInfo] = useState<EngineInfo | null>(null);
+  const [notices, setNotices] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    request({ type: "getInfo" }, "info")
+      .then(setInfo)
+      .catch((e) => setError(errorText(e)));
+    request({ type: "getNotices" }, "notices")
+      .then((r) => setNotices(r.text))
+      .catch((e) => setError(errorText(e)));
+  }, []);
+
+  const source = info?.repository
+    ? info.commit && !info.commit.endsWith("-dirty")
+      ? `${info.repository}/tree/${info.commit}`
+      : info.repository
+    : null;
+
+  return (
+    <div className="form about">
+      {info && (
+        <p>
+          <strong>Couch Co-App {info.appVersion}</strong>{" "}
+          <span className="hint">{info.commit ? `(commit ${info.commit})` : "(a development build)"}</span>
+        </p>
+      )}
+      <p className="hint">
+        Free software under the GNU General Public License, version 3: you may use, study, share and change it. If you
+        share a changed version, it must stay under the same licence, with its source. It comes with no warranty. The
+        licence is the LICENSE file next to the app.
+      </p>
+      <p className="hint">
+        Its source code: {source ? <span className="mono selectable">{source}</span> : "ask whoever gave you the app."}
+        {" "}FFmpeg's source came with the installer, in the files beside it.
+      </p>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      <label className="about-notices">
+        Third-party licences
+        <textarea className="mono" readOnly spellCheck={false} value={notices ?? "Loading…"} rows={16} />
+      </label>
+    </div>
+  );
+}
+
 function DriversSection() {
   const [drivers, setDrivers] = useState<DriverView[] | null>(null);
   const [installing, setInstalling] = useState<DriverName | null>(null);
@@ -437,7 +495,7 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
           <input type="radio" name="relay" checked={mode === "builtin"} onChange={() => setMode("builtin")} />
           {view?.builtIn
             ? `Couch Co-App relay (${hostOf(view.builtIn)})`
-            : "This build's default: iroh's public relays (a development build has no relay of its own)"}
+            : "This build's default: iroh's public relays (this build has no relay of its own)"}
         </label>
         <label className="check">
           <input type="radio" name="relay" checked={mode === "public"} onChange={() => setMode("public")} />

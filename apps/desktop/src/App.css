@@ -1320,3 +1320,19 @@ kbd.waiting {
 .driver-state.needsRestart {
   color: var(--warn);
 }
+
+/* Settings → About: the source's address can be selected and copied, and
+   the notices scroll in a box of their own. */
+.about .selectable {
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
+.about-notices textarea {
+  width: 100%;
+  min-height: 260px;
+  font-size: 12px;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}

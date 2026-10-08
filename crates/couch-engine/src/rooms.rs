@@ -622,6 +622,7 @@ impl Actor {
             | Command::GetNetwork
             | Command::SetNetwork { .. }
             | Command::GetDrivers
+            | Command::GetNotices
             | Command::InstallDriver { .. }
             | Command::ListSources => Err(EngineError::Stopped),
             Command::GoLive {

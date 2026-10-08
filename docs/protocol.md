@@ -14,10 +14,10 @@ The wire protocol between room members, and the pipe between the main process an
 
 ## Versioning
 
-- ALPN `couch-coapp/0` until the first public release, then `/1`. Incompatible changes need a new ALPN.
+- ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 1). Until the first public release, payloads change in place, so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. After the first public release, minors interoperate again through `features`.
-- **Released payloads are frozen.** Extend the protocol by adding message types, never by changing an existing payload. Decoders reject trailing bytes, so an accidental change fails loudly.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 1). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
 
@@ -291,7 +291,7 @@ Each exchange must finish within 10 s. At most 32 incoming connections are being
 - **Per room:** 10 failures by non-members within an hour pause joining for 10 minutes, and the UI is told (`JoinsPaused`).
 - **Running checks count:** checks still running count as failures against that threshold, so a burst of parallel guesses can't get past it before the first result lands. After a pause, while the hour still holds 10 failures, newcomers get one check at a time, and a failure pauses again.
 
-**This composition is ours.** SPAKE2 comes from RustCrypto's `spake2` 0.5.0-pre.0; the way it is put together here needs an outside review before any public release.
+**This composition is ours.** SPAKE2 comes from RustCrypto's `spake2` 0.5.0-pre.0; the way it is put together here should get an outside review before strangers are encouraged to rely on the app (optional since ADR 0009).
 
 ## Invites
 

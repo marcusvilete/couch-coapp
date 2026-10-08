@@ -134,6 +134,9 @@ pub enum Command {
     },
     /// Whether ViGEmBus and HidHide are installed.
     GetDrivers,
+    /// The third-party licences installed next to the app
+    /// (`THIRD-PARTY-NOTICES.txt`, `cargo xtask notices`), for Settings → About.
+    GetNotices,
     /// Runs a driver's installer, shipped with the app, with Windows'
     /// administrator prompt; answers when it has finished, with every
     /// driver's state.
@@ -665,6 +668,7 @@ pub enum Response {
     Shortcuts { shortcuts: Vec<ShortcutView> },
     Network(NetworkView),
     Drivers { drivers: Vec<DriverView> },
+    Notices { text: String },
     Done,
 }
 
@@ -716,6 +720,7 @@ impl fmt::Debug for Command {
                 f.debug_struct("SetNetwork").field("relay", relay).finish()
             }
             Self::GetDrivers => f.write_str("GetDrivers"),
+            Self::GetNotices => f.write_str("GetNotices"),
             Self::InstallDriver { driver } => f
                 .debug_struct("InstallDriver")
                 .field("driver", driver)
@@ -799,6 +804,10 @@ impl fmt::Debug for Response {
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
+            Self::Notices { text } => f
+                .debug_struct("Notices")
+                .field("bytes", &text.len())
+                .finish(),
             Self::Done => f.write_str("Done"),
         }
     }
@@ -809,6 +818,12 @@ impl fmt::Debug for Response {
 #[ts(export)]
 pub struct EngineInfo {
     pub app_version: String,
+    /// The commit this build was made from (an installer's), or `None` for
+    /// a development build.
+    pub commit: Option<String>,
+    /// Where the app's source is published (`Cargo.toml`'s `repository`),
+    /// once it is.
+    pub repository: Option<String>,
     pub protocol: String,
     pub profile: String,
     pub data_dir: String,
@@ -1011,6 +1026,8 @@ pub enum EngineError {
     InvalidRelay(String),
     #[error("the driver wasn't installed: {0}")]
     DriverInstall(String),
+    #[error("the licence notices can't be read: {0}")]
+    Notices(String),
     /// The other side's Couch Co-App can't talk to ours (M10a).
     #[error("{}", other_version_text(app_version, *newer))]
     OtherVersion { app_version: String, newer: bool },
@@ -1128,6 +1145,22 @@ fn relay_in_use(relays: &RelayChoice, built_in: Option<&BuiltInRelay>) -> Option
         }
         RelayChoice::Disabled => None,
     }
+}
+
+/// The third-party licences, installed next to the app's exe
+/// (`cargo xtask notices`, then `stage-dlls`; the installer ships them).
+const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
+
+fn read_notices(path: &std::path::Path) -> Result<String, EngineError> {
+    std::fs::read(path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => EngineError::Notices(format!(
+                "{} is missing; run `cargo xtask notices`, then `cargo xtask stage-dlls`",
+                path.display()
+            )),
+            _ => EngineError::Notices(e.to_string()),
+        })
 }
 
 /// What runs when the saved setting doesn't apply in this build: the
@@ -1342,6 +1375,10 @@ impl Engine {
         match command {
             Command::GetInfo => Ok(Response::Info(EngineInfo {
                 app_version: env!("CARGO_PKG_VERSION").to_string(),
+                commit: build_config::commit().map(str::to_string),
+                repository: Some(env!("CARGO_PKG_REPOSITORY"))
+                    .filter(|r| !r.is_empty())
+                    .map(str::to_string),
                 protocol: String::from_utf8_lossy(couch_proto::ALPN).into_owned(),
                 profile: self.profile.name().to_string(),
                 data_dir: self.profile.data_dir().display().to_string(),
@@ -1476,6 +1513,12 @@ impl Engine {
                 }))
             }
             Command::GetDrivers => self.drivers().await,
+            Command::GetNotices => {
+                let path = std::env::current_exe()
+                    .map_err(|e| EngineError::Notices(e.to_string()))?
+                    .with_file_name(NOTICES_FILE);
+                read_notices(&path).map(|text| Response::Notices { text })
+            }
             Command::InstallDriver { driver } => {
                 // One setup at a time: a second, started from a reopened
                 // Settings, would fail in the driver's installer.
@@ -1946,6 +1989,22 @@ mod tests {
             EngineOptions::desktop(&profile).relays,
             RelayChoice::N0Public
         ));
+    }
+
+    #[test]
+    fn the_notices_are_read_and_a_missing_file_says_how_to_make_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(NOTICES_FILE);
+        let missing = read_notices(&path).unwrap_err().to_string();
+        assert!(missing.contains("cargo xtask notices"), "{missing}");
+        std::fs::write(&path, "Couch Co-App 0.9.0\nMIT License\n").unwrap();
+        assert_eq!(
+            read_notices(&path).unwrap(),
+            "Couch Co-App 0.9.0\nMIT License\n"
+        );
+        // Licence files aren't always UTF-8; the rest still reads.
+        std::fs::write(&path, b"Fran\xe7ois\n").unwrap();
+        assert!(read_notices(&path).unwrap().starts_with("Fran"));
     }
 
     #[test]

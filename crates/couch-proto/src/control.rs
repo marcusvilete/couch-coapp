@@ -1,8 +1,8 @@
 //! Typed control messages. Each has a fixed type id and a postcard payload.
 //!
-//! Released payloads are frozen: extend the protocol by adding message types,
-//! never by changing an existing payload (docs/protocol.md). Payloads with
-//! trailing bytes are rejected for the same reason.
+//! A payload may change in place, with the wire revision bumped
+//! ([`crate::PROTOCOL_MINOR`], docs/protocol.md). Payloads with trailing
+//! bytes are rejected, so a change that forgets the bump fails loudly.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;

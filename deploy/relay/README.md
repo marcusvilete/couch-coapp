@@ -1,6 +1,6 @@
-# Our relay
+# Your own relay
 
-Couch Co-App always tries a direct connection between two PCs first. A relay starts each connection, helps the two ends find each other, and carries the traffic when no direct path works (some home routers and most phone networks). Production builds use only our own relay. iroh's public relays are for development.
+Couch Co-App always tries a direct connection between two PCs first. A relay starts each connection, helps the two ends find each other, and carries the traffic when no direct path works (some home routers and most phone networks). There are no official installers or relay ([ADR 0009](../../docs/adr/0009-source-only-releases.md)): whoever builds installers for their friends runs a relay for them. iroh's public relays are for testing only.
 
 The relay is iroh's own server, `iroh-relay`, at the version the app's iroh pin names (`iroh = "=X.Y.Z"` in the root `Cargo.toml`; 1.3.0 now). It forwards encrypted traffic it can't read. Admission to rooms happens between the PCs, never at the relay.
 
@@ -15,7 +15,7 @@ The relay is iroh's own server, `iroh-relay`, at the version the app's iroh pin 
 - `install.sh`: builds and installs it on Debian or Ubuntu.
 - `dev.toml`: the same limits and access for running it on this PC (`scripts\relay.ps1`).
 
-None of it has run on a real server yet. Follow the first run below and check each step.
+It runs on Oracle Cloud's free tier for the maintainer's friends (October 2026). That setup is the worked example at the end.
 
 ## Choosing a server
 
@@ -61,7 +61,7 @@ Let's Encrypt needs a DNS name pointing at the server.
 
 ## The token
 
-- **Its job:** it keeps other iroh apps off our relay. It's inside every installer, so it isn't a secret; the rate limits and the bandwidth cap protect the server.
+- **Its job:** it keeps other iroh apps, and other people's Couch Co-App builds, off your relay. It's inside every installer, so it isn't a secret; the rate limits and the bandwidth cap protect the server.
 - **Where it lives:**
   - `release.toml` on your PC, outside the repository;
   - `/etc/iroh-relay/token.env` on the server (root only, mode 600);
@@ -88,3 +88,37 @@ Let's Encrypt needs a DNS name pointing at the server.
 - **Limits** (`[limits]` in the config):
   - each client may send 2 MB/s, bursting to 4 MB: a host relaying to 7 viewers needs about 1.75 MB/s;
   - new connections are limited to 20 a second, bursting to 100.
+- **The log has noise.** Within minutes of starting, scanners from all over probe any HTTPS server. They show up as harmless errors: handshakes cut short, or plain HTTP sent to 443. Without the token, they can't use the relay.
+- **If it goes away** (the VM stopped, a reboot), it comes back by itself once the VM runs again: the service starts at boot with its saved certificate. Running apps reconnect on their own. Meanwhile, Settings → Network says "Not connected to a relay yet", and copying an invite fails.
+
+## Worked example: Oracle Cloud's free tier
+
+This is how the maintainer's relay was set up (October 2026). Oracle's console changes often, so the names may differ slightly.
+
+1. **The account** (oracle.com/cloud/free):
+   - **Pick the home region carefully:** it can't be changed later, and free resources exist only there.
+   - **A card is needed** to verify you; the free trial doesn't charge it.
+   - **During the trial,** create only resources marked "Always Free-eligible", or they stop when it ends.
+2. **The network first.** The create-instance form often won't assign a public IP to a network it creates itself. So:
+   1. Go to Networking → Virtual cloud networks → **Start VCN Wizard → "Create VCN with Internet Connectivity"**, with the defaults.
+   2. In its **public subnet → Default Security List → Add Ingress Rules**, add three rules with source `0.0.0.0/0`:
+
+      | Protocol | Port | Description |
+      |---|---|---|
+      | TCP | 80 | iroh-relay: captive portal check (plain HTTP) |
+      | TCP | 443 | iroh-relay: relay over HTTPS, and Let's Encrypt certificate check |
+      | UDP | 7842 | iroh-relay: QUIC address discovery |
+3. **The VM** (Compute → Instances → Create):
+   - **Image:** Canonical Ubuntu 24.04.
+   - **Shape:** Ampere A1 Flex (1 OCPU, 6 GB) if available. Otherwise **VM.Standard.E2.1.Micro**, which is what this relay runs on. On the Micro, `install.sh` adds swap, and the build takes 30 to 60 minutes.
+   - **Network:** the existing VCN, its **public** subnet, and "Automatically assign public IPv4 address".
+   - **SSH key:** download the private key and keep it safe. Without it you can't get in.
+4. **A name:** a DuckDNS subdomain pointed at the VM's public IP. SSH to the name works too.
+5. **Install:** as in the first run above. Run it inside `tmux`, so a dropped SSH connection doesn't stop the long build:
+   ```powershell
+   scp -i <key> -r deploy/relay ubuntu@<name>:
+   ```
+   then, on the server, `tmux`, then `cd relay && chmod +x install.sh && sudo ./install.sh <name> <email>`. Oracle's Ubuntu images block every port but SSH with their own iptables rules; `install.sh` opens the three ports there too.
+6. **Oracle can reclaim idle free VMs:** they get stopped after about a week below 20% use, and a relay is mostly idle.
+   - **What to do:** press Start in the console. The VM kept its public IP through a stop and start, so DuckDNS needed no change.
+   - **To avoid it:** upgrade the account to Pay As You Go, where Always Free resources stay free and aren't reclaimed. Set a budget alert first, under Billing → Budgets.

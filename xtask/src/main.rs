@@ -9,11 +9,14 @@
 //! - `doctor`: check that this machine can build and run Couch Co-App;
 //! - `release-config`: create the private `release.toml` (outside the
 //!   repository) with a fresh relay token;
-//! - `relay-tool`: build the official relay server for testing here.
+//! - `relay-tool`: build the official relay server for testing here;
+//! - `notices`: write THIRD-PARTY-NOTICES.txt, the licences of everything
+//!   bundled with the app (needs cargo-about).
 
 mod deps;
 mod doctor;
 mod ffmpeg_bindings;
+mod notices;
 mod relay;
 
 use std::{
@@ -38,9 +41,10 @@ fn main() -> ExitCode {
         Some("doctor") => return doctor::run(&root),
         Some("release-config") => relay::release_config(&root),
         Some("relay-tool") => relay::relay_tool(&root),
+        Some("notices") => notices::generate(&root),
         _ => {
             eprintln!(
-                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | doctor | release-config | relay-tool>"
+                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | doctor | release-config | relay-tool | notices>"
             );
             return ExitCode::from(2);
         }

@@ -79,6 +79,82 @@ pub const DRIVERS: &[Driver] = &[
     },
 ];
 
+/// Source that must go with the installers (M10b): the LGPL asks for the
+/// exact source of the FFmpeg build we ship, and the scripts that built it.
+/// Pinned like the rest; `build-installer.ps1` puts them beside the setup
+/// file, with `SOURCES.txt`.
+pub struct Source {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    /// Its name in `third_party/sources/` and beside the installer.
+    pub file: &'static str,
+}
+
+/// Bump these with the FFmpeg pin: the commit is the one in its build's
+/// name (`n8.1.3-9-g29e619e767`), the scripts are BtbN's at its release tag.
+pub const SOURCES: &[Source] = &[
+    Source {
+        name: "FFmpeg source, commit 29e619e767 (the build's n8.1.3-9-g29e619e767)",
+        url: "https://github.com/FFmpeg/FFmpeg/archive/29e619e767cde9045a75c29bc9a8278ae7b3a98b.tar.gz",
+        sha256: "8e4699bcb6a311772e8f513cc72ce27328891b82a598b82e7cff3dfe580875a0",
+        file: "ffmpeg-n8.1.3-9-g29e619e767-source.tar.gz",
+    },
+    Source {
+        name: "FFmpeg build scripts (BtbN/FFmpeg-Builds, tag autobuild-2026-09-30-13-08)",
+        url: "https://github.com/BtbN/FFmpeg-Builds/archive/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b.tar.gz",
+        sha256: "81da4f7c878dc0f60e6b8d0049a112e32178e20f025d468fe4e99e77b2dfe0ec",
+        file: "ffmpeg-builds-autobuild-2026-09-30-13-08.tar.gz",
+    },
+];
+
+/// True when the source archive is downloaded at the pinned version.
+pub fn source_fetched(root: &Path, source: &Source) -> bool {
+    let path = third_party(root).join("sources").join(source.file);
+    path.exists() && sha256_file(&path).is_ok_and(|h| h == source.sha256)
+}
+
+fn fetch_sources(root: &Path) -> anyhow::Result<()> {
+    let dir = third_party(root).join("sources");
+    fs::create_dir_all(&dir)?;
+    for source in SOURCES {
+        if source_fetched(root, source) {
+            println!("{}: up to date", source.name);
+            continue;
+        }
+        download_pinned(
+            source.name,
+            source.url,
+            source.sha256,
+            &dir.join(source.file),
+        )?;
+    }
+    Ok(())
+}
+
+/// Downloads `url` to `path` and checks it against the pin, removing it on
+/// a mismatch.
+fn download_pinned(name: &str, url: &str, sha256: &str, path: &Path) -> anyhow::Result<()> {
+    println!("{name}: downloading {url}");
+    run(Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--output",
+        ])
+        .arg(path)
+        .arg(url))?;
+    let actual = sha256_file(path)?;
+    if actual != sha256 {
+        fs::remove_file(path)?;
+        bail!("{name}: SHA-256 mismatch (expected {sha256}, got {actual})");
+    }
+    println!("{name}: saved to {}", path.display());
+    Ok(())
+}
+
 /// Where the drivers' licence texts live in the repository.
 fn driver_licenses(root: &Path) -> PathBuf {
     root.join("apps/desktop/src-tauri/drivers")
@@ -98,28 +174,12 @@ fn fetch_drivers(root: &Path) -> anyhow::Result<()> {
             println!("{}: up to date", driver.name);
             continue;
         }
-        let path = dir.join(driver.staged_as);
-        println!("{}: downloading {}", driver.name, driver.url);
-        run(Command::new("curl")
-            .args([
-                "--fail",
-                "--location",
-                "--silent",
-                "--show-error",
-                "--output",
-            ])
-            .arg(&path)
-            .arg(driver.url))?;
-        let actual = sha256_file(&path)?;
-        if actual != driver.sha256 {
-            fs::remove_file(&path)?;
-            bail!(
-                "{}: SHA-256 mismatch (expected {}, got {actual})",
-                driver.name,
-                driver.sha256
-            );
-        }
-        println!("{}: saved to {}", driver.name, path.display());
+        download_pinned(
+            driver.name,
+            driver.url,
+            driver.sha256,
+            &dir.join(driver.staged_as),
+        )?;
     }
     Ok(())
 }
@@ -230,7 +290,8 @@ pub fn fetch(root: &Path) -> anyhow::Result<()> {
         }
         println!("{}: installed to {}", dep.name, dest.display());
     }
-    fetch_drivers(root)
+    fetch_drivers(root)?;
+    fetch_sources(root)
 }
 
 /// The runtime DLLs of every dependency.
@@ -290,7 +351,27 @@ pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
         target.display(),
         placed
     );
-    stage_drivers(root, &target)
+    stage_drivers(root, &target)?;
+    stage_notices(root, &target)
+}
+
+/// Puts `LICENSE` and the notices (`cargo xtask notices`) next to the built
+/// app, where the installer and Settings → About find them.
+fn stage_notices(root: &Path, target: &Path) -> anyhow::Result<()> {
+    let notices = crate::notices::output(root);
+    for profile in ["debug", "release"] {
+        let dir = target.join(profile);
+        fs::copy(root.join("LICENSE"), dir.join("LICENSE"))?;
+        if notices.exists() {
+            fs::copy(&notices, dir.join(crate::notices::FILE_NAME))?;
+        }
+    }
+    if notices.exists() {
+        println!("LICENSE and the notices staged");
+    } else {
+        println!("LICENSE staged; no notices yet (`cargo xtask notices` makes them)");
+    }
+    Ok(())
 }
 
 fn same_file_contents_likely(a: &Path, b: &Path) -> bool {

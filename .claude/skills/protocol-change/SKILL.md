@@ -6,7 +6,7 @@ description: Checklist for adding or changing anything on Couch Co-App's wire or
 # Protocol change checklist
 
 The wire format is in `docs/protocol.md`. Rules that hold everywhere:
-- **Released payloads are frozen.** Extend the protocol by adding a message type, never by changing a released payload. Until the first public release (ALPN `couch-coapp/0`) payloads may still change, but treat each as if it were released unless the user agrees otherwise.
+- **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), as long as the wire revision is bumped (step 5). Prefer adding a message type when that's just as simple.
 - **Decoders reject trailing bytes:** `control::payload`, `media::decode_payload`, `ipc::from_payload`. Use these helpers; never call `postcard::from_bytes` directly on peer data.
 - **Peer data is size-limited:** 64 KiB per control or input frame, 16 MiB per IPC frame, 8 MiB per video frame. Anything a peer sends that sizes an allocation must be checked against a limit.
 
@@ -47,7 +47,7 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
    - trailing bytes rejected;
    - for datagrams, a size check at extreme values, under 1100 bytes (as the receiver report and audio datagram tests do);
    - an unknown type is skipped or rejected according to its bit.
-5. **Wire revision:** until the first public release, bump `couch_proto::PROTOCOL_MINOR` (and its history line in `couch-proto/src/lib.rs`) with **every** change to what members exchange: a new or changed control, input, admission or room message, a datagram, a stream kind, a close code's meaning. Builds of different revisions refuse each other at `Hello` and the app says who needs to update; forgetting the bump makes mismatched installs fail in confusing ways. IPC alone doesn't need it (the viewer ships with the app).
+5. **Wire revision:** always (ADR 0009), bump `couch_proto::PROTOCOL_MINOR` (and its history line in `couch-proto/src/lib.rs`) with **every** change to what members exchange: a new or changed control, input, admission or room message, a datagram, a stream kind, a close code's meaning. Builds of different revisions refuse each other at `Hello` and the app says who needs to update; forgetting the bump makes mismatched installs fail in confusing ways. IPC alone doesn't need it (the viewer ships with the app).
 6. **IPC:** bump `ipc::IPC_VERSION` on any IPC payload change, and handle the new kind in both `couch-viewer/src/pipe.rs` and `couch-cli/src/view.rs`. Logs and anything else go to stderr, never the viewer's stdout.
 7. **Docs:** update `docs/protocol.md` in the same change: the type table, the channel table or the IPC table, plus any rule the receiver enforces.
 8. **Verify:**

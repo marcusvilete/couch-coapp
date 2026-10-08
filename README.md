@@ -2,9 +2,14 @@
 
 Remote "same couch" gaming. Create a password-protected room, invite friends with a link, stream your game to them, and pass them the controller.
 
-Connections are peer-to-peer (iroh QUIC). A relay starts each connection and carries it when no direct path exists. That relay is our own `iroh-relay` in production, and iroh's public relays in development.
+Connections are peer-to-peer (iroh QUIC). A relay starts each connection and carries it when no direct path exists: your own `iroh-relay` server, or iroh's public relays for testing.
 
 **Status:** in development, Windows only for now. [docs/architecture.md](docs/architecture.md) has the design and the milestone table.
+
+**There are no official downloads.** Couch Co-App is shared as source code ([ADR 0009](docs/adr/0009-source-only-releases.md)). To use it with your friends:
+1. build it, following the steps below;
+2. run your own relay, a small server ([Your own relay](#your-own-relay));
+3. build an installer that uses your relay, and give it to your friends.
 
 ## Setup (Windows 11)
 
@@ -13,14 +18,15 @@ Connections are peer-to-peer (iroh QUIC). A relay starts each connection and car
    - the Visual Studio C++ build tools;
    - Node.js;
    - CMake (`winget install Kitware.CMake`; libopus builds with it);
-   - `cargo install cargo-deny --locked`.
+   - `cargo install cargo-deny --locked`;
+   - `cargo install --locked cargo-about --features cli` (it gathers the licences that every installer must carry).
 
    LLVM is needed only to regenerate the FFmpeg bindings.
 2. **Open a terminal in the repository** and load the environment. Do this in every new terminal: it puts cargo and the native DLLs on PATH.
    ```powershell
    . .\scripts\dev.ps1
    ```
-3. **Fetch the pinned native dependencies** (FFmpeg's LGPL build, SDL3, and the two drivers' installers), and stage them next to the build output:
+3. **Fetch the pinned native dependencies** (FFmpeg's LGPL build and its source, SDL3, and the two drivers' installers), and stage them next to the build output:
    ```powershell
    cargo xtask fetch-deps
    cargo xtask stage-dlls
@@ -54,25 +60,31 @@ cargo build --release -p couch-cli -p couch-viewer
 .\target\release\couch-cli.exe latency-probe --secs 30 --relay none   # end-to-end latency on this PC
 ```
 
-**The installer** (for your other PC, or friends):
+**A test installer** (iroh's public relays; for trying it on another PC):
 ```powershell
-.\scripts\build-installer.ps1 -TestRelay      # iroh's public relays; target\installer\...-test-setup.exe
+.\scripts\build-installer.ps1 -TestRelay      # target\installer\...-test-setup.exe
 npx --yes http-server target\installer -p 8000
 ```
-- **A release installer** (no `-TestRelay`) uses our relay. Its address and token come from a private `release.toml` that never goes in git:
-  - `cargo xtask release-config` creates it in `%USERPROFILE%\.couch-coapp\`;
-  - [deploy/release.example.toml](deploy/release.example.toml) explains it.
-- **The version** must be the same in `Cargo.toml`, `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json`; bump it for each installer you hand out.
 
-**Our relay:**
-- **On this PC, for testing:**
-  ```powershell
-  cargo xtask relay-tool        # once: builds the official iroh-relay into target\tools
-  .\scripts\relay.ps1           # http://localhost:3340, with the token from release.toml (-Lan, -Open)
-  ```
-- **On a server:** [deploy/relay/README.md](deploy/relay/README.md) covers choosing one, the first run, and the token.
+## Your own relay
 
-**The invite page:** a static page that makes invite links clickable in chat apps. To try it on this PC, run `npx --yes http-server deploy/invite-page -p 8080`. [deploy/invite-page/README.md](deploy/invite-page/README.md) covers the rest.
+iroh's public relays are for testing only. For regular use, run the same server we do, `iroh-relay`, on a small VPS. A free tier works: Oracle Cloud's is the worked example.
+
+1. **Create your private release configuration:** `cargo xtask release-config`. It makes `%USERPROFILE%\.couch-coapp\release.toml` with a fresh access token. It's outside the repository and must stay out of git; [deploy/release.example.toml](deploy/release.example.toml) explains it.
+2. **Set up the server:** follow [deploy/relay/README.md](deploy/relay/README.md):
+   - a server and a name;
+   - the firewall;
+   - `install.sh`, which asks for your token.
+3. **Put the relay's address in `release.toml`** (`relay_url = "https://your-relay.example.com"`).
+4. **Build the installer for your friends**, now without `-TestRelay`: `.\scripts\build-installer.ps1`. It refuses a tree with uncommitted changes: the installer's notices link to the source of that exact commit, so commit and push first.
+   - **Hand out everything in `target\installer\`:** the setup file, FFmpeg's source archives and `SOURCES.txt`. The licences require that whoever gets the app can get its source, and FFmpeg's.
+   - **Bump the version** for each installer you hand out: it must be the same in `Cargo.toml`, `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json`.
+
+Everyone in a room should use installers from the same build. Different builds refuse each other with "update needed", and other people's builds can't use your relay without your token.
+
+To try the relay on your PC first: `cargo xtask relay-tool` (once), then `.\scripts\relay.ps1`, which serves `http://localhost:3340` with the token from `release.toml`.
+
+**The invite page** (optional): a static page that makes invite links clickable in chat apps. [deploy/invite-page/README.md](deploy/invite-page/README.md) covers hosting it.
 
 ## Tests and checks
 
@@ -100,8 +112,10 @@ The end-to-end scenarios run with the tests:
 Couch Co-App is free software under the **GNU General Public License, version 3** (GPL-3.0-only): see [LICENSE](LICENSE). You may use, study, share and change it. If you distribute a modified version, it must stay under the same licence, with its source available.
 
 Bundled components keep their own licences:
-- FFmpeg: LGPL, dynamically linked;
+- FFmpeg: LGPL v3, dynamically linked;
 - SDL3: zlib;
 - ViGEmBus: BSD-3-Clause;
 - HidHide: MIT;
-- the Rust crates: mostly MIT and Apache-2.0, checked by `cargo deny`.
+- the Rust crates and the front end's packages: mostly MIT and Apache-2.0, checked by `cargo deny`.
+
+`cargo xtask notices` gathers them all into `THIRD-PARTY-NOTICES.txt`. Every installer carries it, and the app shows it in Settings → About.

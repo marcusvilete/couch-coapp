@@ -41,6 +41,15 @@ pub fn invite_page() -> Option<&'static str> {
         })
 }
 
+/// The commit an installer was built from (`build-installer.ps1`, ending in
+/// `-dirty` for a test build with uncommitted changes); `None` in
+/// development builds.
+pub fn commit() -> Option<&'static str> {
+    option_env!("COUCH_BUILD_COMMIT")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+}
+
 /// A development build, or an installer built for testing
 /// (`build-installer.ps1 -TestRelay`, or a `release.toml` with `test`):
 /// plain http relays on the LAN are allowed.

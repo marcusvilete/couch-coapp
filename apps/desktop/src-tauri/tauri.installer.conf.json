@@ -7,7 +7,9 @@
     "resources": {
       "../../../target/release/couch-viewer.exe": "couch-viewer.exe",
       "../../../target/release/*.dll": ".",
-      "../../../target/release/drivers/*": "drivers"
+      "../../../target/release/drivers/*": "drivers",
+      "../../../target/release/LICENSE": "LICENSE",
+      "../../../target/release/THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
     },
     "windows": {
       "nsis": {

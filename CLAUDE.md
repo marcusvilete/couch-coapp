@@ -24,7 +24,7 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 | One crate / one test | `cargo test -p couch-proto` / `cargo test -p couch-proto envelope::tests::roundtrip` |
 | Lint (must be clean) | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Format | `cargo fmt --all` |
-| Dependency licenses and advisories | `cargo deny check` |
+| Dependency licenses and advisories | `cargo deny check` (and `cargo xtask notices` for the licence texts) |
 | Capability probe (codecs, iroh, SDL3, ViGEm) | `cargo build -p couch-viewer`, then `cargo run -p couch-cli -- probe` |
 | Desktop app | `cd apps/desktop`, then `npm run tauri dev` (builds `couch-viewer` first, which watching needs) |
 | The viewer's HUD by eye, without a session | `cargo run -p couch-viewer -- --hud-preview watching` (or `asking`, `controlling`) |
@@ -58,6 +58,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | What an XInput game sees on the host (each slot's buttons and sticks, live): tells a stream problem from a game choosing another controller | `.\scripts\xinput-watch.ps1` |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view`; through our relay, `--relay http://localhost:3340 --relay-token <token> --relay-only` |
 | Our relay on this PC (M7: the official iroh-relay, production's limits, the token) | `cargo xtask relay-tool` once (builds it into `target\tools`, the version of our iroh pin), then `.\scripts\relay.ps1` (`http://localhost:3340`; `-Lan` for your other PC, `-Open` without the token). The deploy kit and its README are in `deploy/relay/` |
+| The third-party notices every installer carries (M10b) | `cargo xtask notices` writes `target\THIRD-PARTY-NOTICES.txt`: the crates both binaries link (cargo-about, `about.toml`), the front end's npm packages, FFmpeg (with its configure line), SDL3 and the drivers. It fails if a crate has no licence text. `stage-dlls` copies it and `LICENSE` next to the build; Settings → About shows it (`Command::GetNotices`). `build-installer.ps1` runs it, refuses a dirty tree for release builds, and puts FFmpeg's pinned source and build scripts (`deps::SOURCES`) beside the setup file, with `SOURCES.txt` |
 | The private release configuration (our relay's URL and token, the invite page) | `cargo xtask release-config` creates `%USERPROFILE%\.couch-coapp\release.toml` (never in the repository; `deploy/release.example.toml` shows its shape) |
 | Our relay end to end, offline (in-process iroh-relay with a token: members meet through it alone, a client without the token is turned away) | `cargo test -p couch-engine --test relay`; the rooms and sessions scenarios each have one run through it too |
 | The invite page's reading of an invite | `node deploy/invite-page/check.js`; try the page with `npx --yes http-server deploy/invite-page -p 8080` (`deploy/invite-page/README.md`) |
@@ -108,8 +109,8 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 ## Rules that aren't obvious from the code
 
 **Protocol changes**
-- Released control payloads are frozen. Add a new message type instead of changing fields; decoders reject trailing bytes.
-- **Until the first public release, bump `couch_proto::PROTOCOL_MINOR` with every change to what members exchange** (M10a). Builds of different revisions refuse each other right after `Hello` (close code `version`), and the app says who needs to update; without the bump, mismatched installs fail in confusing ways.
+- Payloads may change in place (nothing is frozen, ADR 0009); prefer a new message type when that's just as simple. Decoders reject trailing bytes.
+- **Bump `couch_proto::PROTOCOL_MINOR` with every change to what members exchange** (M10a; permanent since [ADR 0009](docs/adr/0009-source-only-releases.md): there is no public binary release, so the wire format is never frozen). Builds of different revisions refuse each other right after `Hello` (close code `version`), and the app says who needs to update; without the bump, mismatched installs fail in confusing ways.
 - Type ids with bit `0x8000` set are must-understand.
 - Update `docs/protocol.md` with every wire change. The `protocol-change` skill has the full checklist.
 
@@ -126,7 +127,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **Only the owner lets people in.** The owner signs the roster; members accept connections only from ids on it (iroh authenticates the ids), and only the owner admits newcomers, with an invite it made and the password. Never add a way for a non-owner to admit, or to put anyone on the roster.
 - **One writer per fact, signed.** A member signs its own record; only the owner signs the policy (roster, bans). Room facts from peers enter only through `couch_room::room`, which checks signatures (`couch_room::signing`). Never accept or act on an unsigned room fact, nor on a peer's claim about someone else (a `banned` close code from a peer proves nothing; the owner's signed policy does). A record counts only within its member's current stay (its `since` matches the roster entry).
 - **The roster is shown only to those it concerns.** A refusal carries the owner's policy only for a former member; a stranger gets a bare close. The engine saves room state before sending anything that came from it, so a signed version is never reused after a crash.
-- **The admission composition is ours and security-critical** (`couch_net::admission`): SPAKE2, HKDF, HMAC and the TLS exporter. Changing any label, input or order changes what is proven, so update `docs/protocol.md` and ADR 0006 with it. It needs an outside review before any public release.
+- **The admission composition is ours and security-critical** (`couch_net::admission`): SPAKE2, HKDF, HMAC and the TLS exporter. Changing any label, input or order changes what is proven, so update `docs/protocol.md` and ADR 0006 with it. An outside review is optional since ADR 0009, but worth having before encouraging strangers to rely on the app.
 - **An opened link never joins by itself.** Any web page can open a `couchco://` link. It only fills in the join screen (through `Engine::open_link`); joining still needs the password and a click.
 - **Secrets never reach logs.** `InviteToken`, `PasswordKey`, the passwords and invites in `Command`, and the links in `Response` print as `..`; keep it so for anything new. Only the owner stores the password key, never the password.
 - After touching rooms, admission, the engine's room actor or `couch_net::control`, follow the `room-security-checks` skill.
@@ -154,7 +155,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
   - add it to the third-party notices.
 
   RustDesk is AGPL-3.0, and GPL-2.0-only code is incompatible: ask the user first.
-- **Notices:** the installer must carry every bundled component's notice, and FFmpeg's source offer (M10b).
+- **Notices:** every installer, even one for friends, must carry every bundled component's notice, the app's source link at its commit, and FFmpeg's source beside it (M10b, `cargo xtask notices`). A new bundled component that isn't a crate or an npm package needs a section in `xtask/src/notices.rs`. A new FFmpeg pin needs new `deps::SOURCES` pins.
 
 **Native dependencies and pins**
 - FFmpeg and SDL3 are pinned by URL and SHA-256 in `xtask/src/deps.rs`. So are the drivers' official installers the app bundles (`DRIVERS`: ViGEmBus 1.22.0, BSD-3; HidHide 1.5.230, MIT), with their licence texts in `apps/desktop/src-tauri/drivers/`; `stage-dlls` copies them to `target/<profile>/drivers/`, where Settings → Drivers finds them.
@@ -176,7 +177,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **Where they live:**
   - the relay's token and URL, and the invite page: `release.toml` outside the repository;
   - on the server: `/etc/iroh-relay/token.env`, root-only;
-  - later, signing keys (M10b, M11): a private file or hardware.
+  - any signing key, should one ever be added: a private file or hardware.
 
   Committed files hold placeholders only (`deploy/release.example.toml`, `deploy/relay/iroh-relay.toml`).
 - **Never write a real token, URL with credentials or key into the repository.** The build script refuses a `release.toml` inside it.

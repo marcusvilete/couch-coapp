@@ -65,6 +65,21 @@ pub fn run(root: &Path) -> ExitCode {
             result,
         );
     }
+    for source in deps::SOURCES {
+        let result = if deps::source_fetched(root, source) {
+            Ok(format!("third_party/sources/{}", source.file))
+        } else {
+            Err("missing; run `cargo xtask fetch-deps` (installers ship it)".into())
+        };
+        checks.recommend("FFmpeg source", result);
+    }
+    checks.recommend(
+        "cargo-about",
+        output_of("cargo", &["about", "--version"]).map_err(|_| {
+            "not installed; `cargo install --locked cargo-about --features cli` (for `xtask notices`)"
+                .to_string()
+        }),
+    );
     checks.recommend("Relay tool", relay::relay_tool_version(root));
     checks.recommend("Release config", release_config());
     checks.require("FFmpeg license", ffmpeg_license(root));
