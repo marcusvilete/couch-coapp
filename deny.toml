@@ -1,8 +1,10 @@
 # cargo-deny policy. Run `cargo deny check` before adding or bumping dependencies.
 #
-# The app's own license is undecided, so dependencies must keep every option
-# open: permissive licenses only. FFmpeg (LGPL) is not a crate; it is linked
-# dynamically from third_party/ and covered by its own notice.
+# The app is GPL-3.0-only (LICENSE, 2026-10-08). Dependencies stay permissive
+# by policy anyway: it keeps the notices simple and the code reusable. A
+# GPL-3.0-compatible copyleft crate is allowed only as a recorded exception.
+# FFmpeg (LGPL) is not a crate; it is linked dynamically from third_party/ and
+# covered by its own notice.
 
 [graph]
 # Windows first. Add Linux and macOS triples when their backends land.
@@ -43,7 +45,8 @@ exceptions = [
 ]
 
 [licenses.private]
-# Our own crates are `publish = false` and unlicensed until the license is chosen.
+# Our own crates are `publish = false`, GPL-3.0-only like the app; the allow
+# list above is for dependencies.
 ignore = true
 
 [bans]

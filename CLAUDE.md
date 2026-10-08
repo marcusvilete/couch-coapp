@@ -144,10 +144,17 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **The host overlay never takes the focus** (M8; `apps/desktop/src/useOverlay.ts`). Keyboard and mouse reach the game only while it is in front, and some games pause without it. The overlay window is created unfocused and unfocusable, closed when empty rather than hidden (showing a hidden window again may activate it), click-through, and excluded from capture. The answer keys answer only a request pending for at least 1 s (`rooms::sessions::ANSWER_AFTER`), so a key meant for one request never answers another that just arrived.
 - After touching sessions or the pipelines, follow both the `room-security-checks` and the `input-safety-checks` skills; after touching the host pipeline's video path, the `rate-control-gates` skill too.
 
-**Licensing.** The app's license is undecided.
-- Only permissive crates are allowed (`deny.toml`).
+**Licensing.** The app is **GPL-3.0-only** (`LICENSE`; [ADR 0008](docs/adr/0008-gpl-3.0.md)). Every crate inherits it (`license.workspace = true`).
+- Dependencies stay permissive by policy (`deny.toml`). A copyleft crate needs a recorded exception, and must be GPL-3.0-compatible.
 - FFmpeg must stay the LGPL build, dynamically linked.
-- Sunshine, Moonlight and RustDesk are GPL/AGPL: read them for ideas, never copy code.
+- **Code from other projects** is allowed only under a GPL-3.0-compatible licence: permissive, LGPL, GPL-2.0-or-later, or GPL-3.0. Sunshine and Moonlight are GPL-3.0, so their code may be reused, never silently:
+  - check that project's exact licence first;
+  - keep its copyright notice;
+  - name the source (project, file, commit) in a comment where it's used;
+  - add it to the third-party notices.
+
+  RustDesk is AGPL-3.0, and GPL-2.0-only code is incompatible: ask the user first.
+- **Notices:** the installer must carry every bundled component's notice, and FFmpeg's source offer (M10b).
 
 **Native dependencies and pins**
 - FFmpeg and SDL3 are pinned by URL and SHA-256 in `xtask/src/deps.rs`. So are the drivers' official installers the app bundles (`DRIVERS`: ViGEmBus 1.22.0, BSD-3; HidHide 1.5.230, MIT), with their licence texts in `apps/desktop/src-tauri/drivers/`; `stage-dlls` copies them to `target/<profile>/drivers/`, where Settings → Drivers finds them.

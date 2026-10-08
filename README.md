@@ -97,4 +97,11 @@ The end-to-end scenarios run with the tests:
 
 ## Licence
 
-Not decided yet. Dependencies are kept permissive (or LGPL, dynamically linked, for FFmpeg). `cargo deny` checks them.
+Couch Co-App is free software under the **GNU General Public License, version 3** (GPL-3.0-only): see [LICENSE](LICENSE). You may use, study, share and change it. If you distribute a modified version, it must stay under the same licence, with its source available.
+
+Bundled components keep their own licences:
+- FFmpeg: LGPL, dynamically linked;
+- SDL3: zlib;
+- ViGEmBus: BSD-3-Clause;
+- HidHide: MIT;
+- the Rust crates: mostly MIT and Apache-2.0, checked by `cargo deny`.

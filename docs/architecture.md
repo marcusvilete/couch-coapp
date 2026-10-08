@@ -231,5 +231,7 @@ These hold in every milestone. Tests guard them from M2 on.
 - **FFmpeg bindings.** Its Rust bindings are generated once and committed (`cargo xtask gen-ffmpeg-bindings`, [ADR 0004](adr/0004-ffmpeg-via-rsmpeg.md)), so builds need no LLVM.
 - **SDL3.** 3.4.16, Zlib license, prebuilt Visual C++ package.
 - **libopus.** 1.6, BSD-3-Clause, compiled from source by the `opus` crate with CMake and linked statically. FFmpeg's build includes libopus too, but its wrapper can't ask for loss concealment.
-- **Crates.** Permissive licenses only, enforced by `cargo deny check` (`deny.toml`). The app's own license is undecided, so nothing may narrow it.
-- **GPL projects.** Sunshine, Moonlight and RustDesk are GPL/AGPL. Read them for ideas; never copy their code.
+- **The app** is GPL-3.0-only ([ADR 0008](adr/0008-gpl-3.0.md), `LICENSE`).
+- **Crates.** Permissive licenses by policy, enforced by `cargo deny check` (`deny.toml`); a GPL-3.0-compatible copyleft crate needs a recorded exception.
+- **FFmpeg stays the LGPL build** even though a GPL build would now be allowed: it ships unmodified and replaceable with fewer obligations. Switching (for x264, say) would be a deliberate decision.
+- **GPL projects.** Sunshine and Moonlight are GPL-3.0, so their code may be reused, with its copyright notice kept, the source named where it's used, and a third-party notice. RustDesk is AGPL-3.0: ask first.
