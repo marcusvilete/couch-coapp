@@ -11,6 +11,8 @@ bytes.workspace = true
 couch-input.workspace = true
 couch-media.workspace = true
 couch-proto.workspace = true
+# The relay server we deploy (M7), run in-process by relay tests.
+iroh-relay = { workspace = true, features = ["server"] }
 
 [lints]
 workspace = true

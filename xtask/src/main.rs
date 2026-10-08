@@ -6,11 +6,15 @@
 //!   run without PATH changes;
 //! - `gen-ffmpeg-bindings`: regenerate the committed FFmpeg FFI bindings
 //!   (after bumping FFmpeg; needs LLVM);
-//! - `doctor`: check that this machine can build and run Couch Co-App.
+//! - `doctor`: check that this machine can build and run Couch Co-App;
+//! - `release-config`: create the private `release.toml` (outside the
+//!   repository) with a fresh relay token;
+//! - `relay-tool`: build the official relay server for testing here.
 
 mod deps;
 mod doctor;
 mod ffmpeg_bindings;
+mod relay;
 
 use std::{
     path::{Path, PathBuf},
@@ -32,9 +36,11 @@ fn main() -> ExitCode {
         Some("stage-dlls") => deps::stage_dlls(&root),
         Some("gen-ffmpeg-bindings") => ffmpeg_bindings::generate(&root),
         Some("doctor") => return doctor::run(&root),
+        Some("release-config") => relay::release_config(&root),
+        Some("relay-tool") => relay::relay_tool(&root),
         _ => {
             eprintln!(
-                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | doctor>"
+                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | doctor | release-config | relay-tool>"
             );
             return ExitCode::from(2);
         }

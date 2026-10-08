@@ -54,9 +54,13 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
 | Rate-control gates G1, G3–G5 and G7 (one viewer's bad path leaves another's stream alone), run and judged | `couch-cli gates --quick` (6 min) or `couch-cli gates` (14 min). `latency-probe --viewers 2 --impair-first "rate=5mbit"` runs G7's setup by hand. The `rate-control-gates` skill covers traces and reading a failure. |
 | Many viewers of one host on this PC (fps, latency, bitrate and encode time per viewer) | `.\scripts\viewers.ps1` (4) or `.\scripts\viewers.ps1 -Viewers 7`, after the release build |
-| The installer, for this PC or another (M10a: the app, stream window, DLLs and the two drivers, offered after install; for just you or everyone, as the installer asks) | `.\scripts\build-installer.ps1` (run it without redirecting its stderr), then `npx --yes http-server target\installer -p 8000`. It fetches and stages the pinned dependencies and driver installers, checks the version is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`, and builds with `tauri.installer.conf.json` (the bundled files and the driver hooks, `installer-hooks.nsh`), kept out of `tauri.conf.json` so development builds aren't touched. Bump the version with each installer handed out. An installed app logs to `desktop.log` in the profile folder |
+| The installer, for this PC or another (M10a: the app, stream window, DLLs and the two drivers, offered after install; for just you or everyone, as the installer asks) | `.\scripts\build-installer.ps1 -TestRelay` (iroh's public relays; a `-test` installer) until our relay is deployed; without `-TestRelay` it reads the private `release.toml` (M7, below) for our relay. Run it without redirecting its stderr, then `npx --yes http-server target\installer -p 8000`. It fetches and stages the pinned dependencies and driver installers, checks the version is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`, and builds with `tauri.installer.conf.json` (the bundled files and the driver hooks, `installer-hooks.nsh`), kept out of `tauri.conf.json` so development builds aren't touched. Bump the version with each installer handed out. An installed app logs to `desktop.log` in the profile folder |
 | What an XInput game sees on the host (each slot's buttons and sticks, live): tells a stream problem from a game choosing another controller | `.\scripts\xinput-watch.ps1` |
-| Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
+| Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view`; through our relay, `--relay http://localhost:3340 --relay-token <token> --relay-only` |
+| Our relay on this PC (M7: the official iroh-relay, production's limits, the token) | `cargo xtask relay-tool` once (builds it into `target\tools`, the version of our iroh pin), then `.\scripts\relay.ps1` (`http://localhost:3340`; `-Lan` for your other PC, `-Open` without the token). The deploy kit and its README are in `deploy/relay/` |
+| The private release configuration (our relay's URL and token, the invite page) | `cargo xtask release-config` creates `%USERPROFILE%\.couch-coapp\release.toml` (never in the repository; `deploy/release.example.toml` shows its shape) |
+| Our relay end to end, offline (in-process iroh-relay with a token: members meet through it alone, a client without the token is turned away) | `cargo test -p couch-engine --test relay`; the rooms and sessions scenarios each have one run through it too |
+| The invite page's reading of an invite | `node deploy/invite-page/check.js`; try the page with `npx --yes http-server deploy/invite-page -p 8080` (`deploy/invite-page/README.md`) |
 | Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine. `host --pads N` (up to 4) plugs a pad per seat and gives each viewer the next free seat as it connects (only the first gets kbm) |
 | Virtual pad (needs ViGEmBus) | `couch-cli pad-test` (`--count N` for several: pad N presses its buttons N steps ahead, and it prints how many game controllers Windows lists), then watch it in `joy.cpl`. Without `--real-pad-ids` it uses made-up ids (1209:0001), and games and Steam treat it as a generic joystick (only the D-pad works); the app always uses the real Xbox 360 ids. While a host on this PC has a pad plugged in, viewers here skip every Xbox 360 pad (`couch_platform_win::virtual_pads`) |
 | The host's own controller on a seat (P2; hiding needs HidHide installed) | `couch-cli host-pad` lists this PC's controllers (never ours) and HidHide's state; `host-pad --feed N` hides controller N and drives a virtual pad from it (`--no-hide` to skip hiding). `couch-cli host --host-pad N` plays seat 0 with it (`--show-host-pad` to skip hiding). After hiding, reconnect the controller once: programs that had it open keep it until then |
@@ -151,7 +155,25 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - The FFmpeg FFI bindings in `crates/couch-codec-ffmpeg/bindings/` are generated and committed. rusty_ffmpeg's build-time bindgen 0.71 produces fieldless structs with libclang 22 or later. Regenerate the bindings whenever the FFmpeg pin changes; `doctor` flags stale ones.
 - Exact pins: `iroh` and `sdl3` (`=`). `windows` stays on 0.62 to match `windows-capture`'s COM types.
 
-**Relays.** `RelayChoice::N0Public` (iroh's public relays) is for development only. Production uses only our own iroh-relay (`RelayChoice::Custom`). Tests use `RelayChoice::Disabled`. The desktop app starts with `EngineOptions::desktop`, which reads the profile's Settings → Network choice (`network.json`: public, or a relay URL) and applies it from the next start (`restart_app`).
+**Relays** ([ADR 0007](docs/adr/0007-our-relay-and-release-configuration.md))
+- **Which relays run where.**
+  - Development: `RelayChoice::N0Public` (iroh's public relays). A release build runs them only when the user picks them in Settings ("for testing"); a saved setting the build can't take falls back to the build's own relay, never to them.
+  - Production: only our own iroh-relay (`RelayChoice::Custom { urls, token }`).
+  - Tests: `RelayChoice::Disabled`, or `couch_testkit::relay::TestRelay`, an in-process iroh-relay with a token.
+- **Our relay admits only clients with its token.** iroh sends it only to relays in our own list; it never goes in invites, member records or logs (`RelayToken` prints `..`).
+- **A release build carries the relay's URL and token,** and the invite page's address (`couch_engine::build_config`, `COUCH_BUILD_*` at build time, set by `build-installer.ps1` from `release.toml`).
+- **Settings → Network** (`network.json`): the default, `builtin`, is that relay, or iroh's in a build without one; or `public`; or a URL. `EngineOptions::desktop` reads it, and it applies from the next start (`restart_app`). Plain http relays are allowed on this PC, and at private LAN addresses in development and test builds only.
+- **Versions.** The relay server's version follows the iroh pin: bump `RELAY_VERSION` in `deploy/relay/install.sh` with it. `cargo xtask doctor` compares the local relay tool.
+
+**Secrets and release values never go in git.**
+- **Where they live:**
+  - the relay's token and URL, and the invite page: `release.toml` outside the repository;
+  - on the server: `/etc/iroh-relay/token.env`, root-only;
+  - later, signing keys (M10b, M11): a private file or hardware.
+
+  Committed files hold placeholders only (`deploy/release.example.toml`, `deploy/relay/iroh-relay.toml`).
+- **Never write a real token, URL with credentials or key into the repository.** The build script refuses a `release.toml` inside it.
+- **Builds get them through `COUCH_BUILD_*` for that build only.** The script unsets them afterwards.
 
 **Congestion control lives in the rate controller** (`couch_media::ratecontrol`, ADR 0005). QUIC runs `couch_net::congestion::MediaCongestion`, which deliberately ignores isolated losses. A change to either can collapse the bitrate under random loss or stall recovery after an outage. Run `couch-cli gates` after touching them, or the video transport or encoder bitrate handling (the `rate-control-gates` skill has the procedure); `docs/m1-results.md` has the reference numbers.
 

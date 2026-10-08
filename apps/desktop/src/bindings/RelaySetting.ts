@@ -4,4 +4,4 @@
  * Which relay server the app uses to start connections and to carry them
  * when a direct path fails. Saved per profile; applies at the next start.
  */
-export type RelaySetting = "public" | { "custom": string };
+export type RelaySetting = "builtin" | "public" | { "custom": string };

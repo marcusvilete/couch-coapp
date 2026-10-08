@@ -15,7 +15,8 @@ description: Check that Couch Co-App's rooms still keep strangers out after a ch
 . .\scripts\dev.ps1
 cargo test -p couch-proto -p couch-room -p couch-net   # types, simulator, property test, admission over loopback
 cargo test -p couch-engine --test rooms                 # three engines, ~20 s
-cargo test -p couch-engine --test sessions              # sessions over the same rooms, ~2 s
+cargo test -p couch-engine --test sessions              # sessions over the same rooms, ~4 s
+cargo test -p couch-engine --test relay                 # our relay (in-process, with a token), ~4 s
 ```
 
 - Run the engine scenarios **three times** after touching the actor, timings or dialing. They use real iroh on loopback, and a flaky pass hides races.
@@ -47,7 +48,9 @@ cargo test -p couch-engine --test sessions              # sessions over the same
 | A ban, a departure or a lost connection ends watching and releases the viewer's input | `session_closed`, `end_room_sessions` | engine `a_ban_while_watching_ends_it`, `a_host_leaving_the_room_ends_its_stream` |
 | Window titles stay out of logs | `Debug` of `GoLive` and `Sources` | `window_titles_stay_out_of_debug` |
 | Builds of another wire revision are refused right after `Hello`, before admission: the refusal says only "version" (close code) and each side's `app_version`, nothing about any room; the acceptor waits at most 2 s for the dialer to close; the peer's `app_version` is cleaned and capped (`control::shown_version`); only a member of a room we share is remembered (`Actor::other_version`), so strangers can't grow memory or the log (M10a) | `couch_net::control::{open, accept}` (`compatible`), `admission::connect`, `rooms::accept_one`, `Actor::other_version` | couch-net `versions` (both directions, the cleaning); engine rooms `another_version_is_shown_for_a_member_until_it_updates` (a stranger leaves nothing) |
-| The relay is the user's choice (P3): public or one https URL (http only for localhost), applied at start; with relays configured, invites still carry the relay alone, never an IP | `RelaySetting::choice`, `EngineOptions::desktop`, `Actor::invite` (`allow_ips`) | engine `the_relay_setting_is_checked_saved_and_applies_at_start`; the `--ignored` relay test after touching the endpoint |
+| The relay is the user's choice (P3, M7): the build's own (the default), public, or one https URL (http on this PC; at private LAN addresses only in development and test builds), applied at start; with relays configured, invites still carry the relay alone, never an IP | `RelaySetting::choice_in`, `EngineOptions::desktop`, `Actor::invite` (`allow_ips`) | engine `the_relay_setting_is_checked_saved_and_applies_at_start`, `the_default_follows_the_build`, `plain_http_relays_on_the_lan_only_in_test_builds`; the `--ignored` relay test after touching the endpoint |
+| Our relay's token (M7) goes only to our relays, never into invites, member records or logs; the relay turns away clients without it | `RelayChoice::mode` (per-URL `with_auth_token`), `RelayToken`'s `Debug`, `build_config` | couch-net `a_relay_token_never_prints`, `the_token_goes_to_our_relays_only_and_plain_http_skips_quic`; engine `relay` tests, and rooms `a_room_works_through_our_relay_alone` (the invite names only the relay) |
+| An https invite link carries the invite only after `#` (never sent to the page's server), and opening it still stops at the join screen; the page makes no requests | `rooms::invite_link`, `deploy/invite-page` (CSP, no-referrer) | engine `invites_go_on_the_invite_page_when_the_build_has_one`; `node deploy/invite-page/check.js`; read the page's diff |
 
 ## Review the diff for
 
@@ -60,14 +63,15 @@ cargo test -p couch-engine --test sessions              # sessions over the same
 - **A new effect order in `apply`**: Save before any Send; Removed and Departed only after the last word is queued.
 - **A new field or type in a signed body**: it changes the signed bytes, so it needs the `protocol-change` skill. A change to `SavedRoom` needs a new `ROOM_MAGIC` in `store.rs`.
 - **Anything in `couch_net::admission`**: labels, inputs and order change what is proven. Update `docs/protocol.md` and ADR 0006 together, and keep the outside-review follow-up.
-- **New `Debug`, `tracing` or error text** near passwords, password keys, invite tokens or links.
+- **New `Debug`, `tracing` or error text** near passwords, password keys, invite tokens, links or the relay token.
+- **A real token, relay URL with credentials or key in a committed file.** Release values live in `release.toml` outside the repository; committed configs hold placeholders (ADR 0007).
 - **Waits and timeouts in the accept path**: a timeout must never drop an answer the actor already acted on.
 - **Liveness** (`Alive`, `couch_net::control`): a peer is timed out only after it has sent `Alive` once, so older builds keep working; `TimedOut` closes with `timed_out`, never with a code that blames the peer. A reconnecting viewer resumes only on the same session id from the same host, on its current connection, and never gets its seat back.
 
 ## What isn't covered automatically
 
 - **Several profiles on one machine**: `npm run tauri dev` in `apps\desktop`, then `.\scripts\profiles.ps1` (alice, bob, carol). Ask the user to join, ban, leave and close a room with one of them closed meanwhile, and to open an invite link from a browser. `docs/m4b-results.md` has the full list.
-- **Across networks and NATs**: a second machine on another network, through iroh's public relays (or a relay set in Settings → Network); our own relay comes in M7. Members on different relay settings must still meet (iroh dials a relay outside its own list).
+- **Across networks and NATs**: a second machine on another network, through iroh's public relays, or our relay (`scripts\relay.ps1 -Lan` for a LAN test; deployed, once there's a server). Members on different relay settings meet only if one can reach the other's relay: ours refuses clients without its token.
 - **The admission composition itself**: needs an outside review before any public release.
 
 ## After the checks

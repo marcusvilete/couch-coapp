@@ -10,8 +10,20 @@ export type NetworkView = {
  */
 saved: RelaySetting, 
 /**
+ * The relay this build was made with (its URL), shown for
+ * [`RelaySetting::Builtin`]; `None` in development builds, where that
+ * choice means iroh's public relays.
+ */
+builtIn: string | null, 
+/**
+ * Plain http relays at private (LAN) addresses are allowed: a
+ * development or test build.
+ */
+testBuild: boolean, 
+/**
  * What this run uses; `None` without relays (tests). A saved setting
- * that no longer parses runs as public, so the two can differ.
+ * this build doesn't take runs as the build's own, so the two can
+ * differ.
  */
 inUse: RelaySetting | null, 
 /**

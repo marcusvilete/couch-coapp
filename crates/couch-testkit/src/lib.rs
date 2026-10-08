@@ -1,5 +1,7 @@
 //! Fakes for tests. Only ever a dev-dependency.
 
+pub mod relay;
+
 use std::{
     sync::{
         Arc, Mutex,

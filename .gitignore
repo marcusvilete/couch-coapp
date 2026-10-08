@@ -10,3 +10,7 @@
 .idea/
 
 *.log
+
+# The private release configuration lives outside the repository
+# (%USERPROFILE%\.couch-coapp\release.toml); this only catches a stray copy.
+release.toml

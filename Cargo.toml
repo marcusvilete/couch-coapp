@@ -27,6 +27,8 @@ couch-testkit = { path = "crates/couch-testkit" }
 
 # Networking. iroh is pinned exactly: the media framing depends on its stream and path APIs.
 iroh = "=1.3.0"
+# The relay server we deploy (M7): always iroh's own release.
+iroh-relay = "=1.3.0"
 iroh-tickets = "1.0"
 
 # Media and platform. sdl3 is pinned exactly because its releases churn.

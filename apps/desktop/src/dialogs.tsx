@@ -185,7 +185,7 @@ export function JoinRoomDialog(props: {
             value={invite}
             disabled={busy}
             onChange={(e) => setInvite(e.target.value)}
-            placeholder="couchco://join#…"
+            placeholder="couchco://join#… or https://…/j/#…"
           />
         </label>
         {inviteError && <p className="error">{inviteError}</p>}

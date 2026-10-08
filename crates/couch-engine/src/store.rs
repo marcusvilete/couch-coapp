@@ -412,6 +412,9 @@ mod tests {
     #[test]
     fn network_settings_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
+        assert_eq!(network(dir.path()).relay, RelaySetting::Builtin);
+        // A choice saved before M7 keeps applying.
+        fs::write(dir.path().join(NETWORK_FILE), br#"{"relay": "public"}"#).unwrap();
         assert_eq!(network(dir.path()).relay, RelaySetting::Public);
         let custom = NetworkSettings {
             relay: RelaySetting::Custom("https://relay.example.com".into()),

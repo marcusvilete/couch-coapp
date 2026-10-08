@@ -105,5 +105,5 @@ Failure patterns seen in M1:
 - **Other checks aren't part of this command.** Run them when their area changes; commands are in `docs/m1-results.md` under "Reproduce":
   - G1b: on-screen latency, `latency-probe --screen`;
   - G2: a 30-minute soak with relays on;
-  - G6: relay only, which needs internet;
+  - G6: relay only, through iroh's public relays (needs internet), or through our relay on this PC (M7, no internet): `cargo xtask relay-tool` once, `.\scripts\relay.ps1`, then `latency-probe --relay http://localhost:3340 --relay-token <release.toml's relay_token> --relay-only`. On loopback it shows the path and the app's relay bitrate cap work, not real-network latency;
   - the audio-datagram timing test.

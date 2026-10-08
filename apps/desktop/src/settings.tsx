@@ -357,7 +357,7 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
   const [error, setError] = useState<string | null>(null);
   /** The last poll failed; the next good one clears it. */
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"public" | "custom">("public");
+  const [mode, setMode] = useState<"builtin" | "public" | "custom">("builtin");
   const [url, setUrl] = useState("");
   const [saving, setSaving] = useState(false);
   /** Restarting would end a stream: asked once more first. */
@@ -377,7 +377,10 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
 
   useEffect(() => {
     load().then((v) => {
-      if (v && v.saved !== "public") {
+      if (!v) return;
+      if (v.saved === "builtin" || v.saved === "public") {
+        setMode(v.saved);
+      } else {
         setMode("custom");
         setUrl(v.saved.custom);
       }
@@ -387,7 +390,7 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
     return () => window.clearInterval(timer);
   }, []);
 
-  const wanted: RelaySetting = mode === "public" ? "public" : { custom: url.trim() };
+  const wanted: RelaySetting = mode === "custom" ? { custom: url.trim() } : mode;
   const changed = view != null && !same(wanted, view.saved);
   // The engine compares them as iroh reads URLs, not as typed.
   const pending = view?.restartNeeded ?? false;
@@ -431,6 +434,12 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
       <fieldset className="input-setup">
         <legend>Relay</legend>
         <label className="check">
+          <input type="radio" name="relay" checked={mode === "builtin"} onChange={() => setMode("builtin")} />
+          {view?.builtIn
+            ? `Couch Co-App relay (${hostOf(view.builtIn)})`
+            : "This build's default: iroh's public relays (a development build has no relay of its own)"}
+        </label>
+        <label className="check">
           <input type="radio" name="relay" checked={mode === "public"} onChange={() => setMode("public")} />
           iroh's public relays (for testing)
         </label>
@@ -441,7 +450,9 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
         {mode === "custom" && (
           <input
             type="url"
-            placeholder="https://relay.example.com"
+            placeholder={
+              view?.testBuild ? "https://relay.example.com, or http://192.168.x.x:3340 on your LAN" : "https://relay.example.com"
+            }
             spellCheck={false}
             value={url}
             autoFocus
@@ -450,10 +461,15 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
           />
         )}
       </fieldset>
+      <p className="hint">
+        Everyone in a room should use the same choice here: between members on different relays, a connection that
+        can't go direct may not get through.
+      </p>
       {view && (
         <p className="hint">
           {view.homeRelay ? `Connected through ${hostOf(view.homeRelay)}.` : "Not connected to a relay yet."}
-          {view.inUse && view.inUse !== "public" && ` In use: your relay, ${hostOf(view.inUse.custom)}.`}
+          {view.inUse === "builtin" && " In use: the Couch Co-App relay."}
+          {view.inUse && typeof view.inUse === "object" && ` In use: your relay, ${hostOf(view.inUse.custom)}.`}
         </p>
       )}
       {(error ?? loadError) && (

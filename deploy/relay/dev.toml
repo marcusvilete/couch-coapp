@@ -1,0 +1,25 @@
+# Our relay on this PC, for testing (scripts/relay.ps1 runs it with `--dev`:
+# plain HTTP, no certificates). The limits and access are production's
+# (iroh-relay.toml). relay.ps1 swaps the bind address for -Lan and the
+# access line for -Open.
+
+http_bind_addr = "127.0.0.1:3340"
+
+# The token comes from IROH_RELAY_ACCESS_TOKEN (release.toml's relay_token),
+# which replaces this list. Empty on purpose: without the variable the relay
+# refuses to start, rather than admitting a token anyone can read here.
+access.shared_token = [""]
+
+enable_metrics = true
+metrics_bind_addr = "127.0.0.1:9090"
+
+[limits]
+# New connections per second across all clients, and the burst allowed.
+accept_conn_limit = 20.0
+accept_conn_burst = 100
+
+# What one client may send through the relay. A host relaying to 7 viewers
+# at the app's 2 Mbit/s relay cap sends about 14 Mbit/s; 2 MB/s leaves room.
+[limits.client.rx]
+bytes_per_second = 2000000
+max_burst_bytes = 4000000

@@ -33,14 +33,16 @@ use couch_media::{
     audio::ToneSource,
     clock::{Clock, ProcessClock},
 };
-use couch_net::endpoint::RelayChoice;
+use couch_net::endpoint::{RelayChoice, RelayToken};
 use couch_proto::{
     input::PadSnapshot,
     ipc::{HudState, LocalInput, SeatState, ShortcutKeys, UserAction, VideoFrameHeader},
     session::SeatKind,
 };
 use couch_room::{limits::LimitConfig, room::Timings};
-use couch_testkit::{FakeCapturer, FakeEncoder, RecordingInjector, RecordingPadFactory};
+use couch_testkit::{
+    FakeCapturer, FakeEncoder, RecordingInjector, RecordingPadFactory, relay::TestRelay,
+};
 use tempfile::TempDir;
 use tokio::sync::{broadcast, mpsc};
 
@@ -558,6 +560,7 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
         join_wait: Duration::from_secs(5),
         replace_grace: Duration::from_millis(500),
         reconnect_wait: Duration::from_secs(5),
+        relay_only: false,
     }
 }
 
@@ -571,13 +574,18 @@ struct Member {
 
 impl Member {
     async fn new(name: &'static str) -> Self {
+        Self::with(name, |options| options).await
+    }
+
+    /// A member whose options `tweak` changes.
+    async fn with(name: &'static str, tweak: impl FnOnce(EngineOptions) -> EngineOptions) -> Self {
         let _ = tracing_subscriber::fmt()
             .with_test_writer()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .try_init();
         let dir = tempfile::tempdir().unwrap();
         let fake = Arc::new(Fake::default());
-        let engine = start(dir.path(), options(free_port(), fake.clone())).await;
+        let engine = start(dir.path(), tweak(options(free_port(), fake.clone()))).await;
         engine
             .handle(Command::SetDisplayName { name: name.into() })
             .await
@@ -914,6 +922,66 @@ async fn two_viewers_each_get_a_stream_of_their_own() {
     let hud = b_window.hud.lock().unwrap().clone().unwrap();
     assert_eq!((hud.title.as_str(), hud.host.as_str()), ("Celeste", "Ana"));
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// Our relay (M7), with its token, carrying everything: neither member has
+/// a direct path, yet B watches A's stream and gets the seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn watching_and_playing_through_our_relay_alone() {
+    const TOKEN: &str = "couch-test-token";
+    let relay = TestRelay::start(Some(TOKEN)).await;
+    let through = |options: EngineOptions| EngineOptions {
+        relays: RelayChoice::Custom {
+            urls: vec![relay.url.parse().unwrap()],
+            token: RelayToken::new(TOKEN),
+        },
+        relay_only: true,
+        ..options
+    };
+    let mut a = Member::with("Ana", through).await;
+    let mut b = Member::with("Bia", through).await;
+    let Response::Room(room) = a
+        .handle(Command::CreateRoom {
+            name: "Sofá".into(),
+            password: PASSWORD.into(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("a room");
+    };
+    let room = room.id;
+    let Response::Invite { link } = a
+        .handle(Command::GetInvite { room: room.clone() })
+        .await
+        .unwrap()
+    else {
+        panic!("an invite");
+    };
+    b.ok(Command::JoinRoom {
+        invite: link,
+        password: PASSWORD.into(),
+    })
+    .await;
+    let bid = b.id();
+    let deadline = Instant::now() + WAIT;
+    while !a
+        .room(&room)
+        .await
+        .unwrap()
+        .members
+        .iter()
+        .any(|m| m.id == bid && matches!(m.link, MemberLink::Relay))
+    {
+        assert!(Instant::now() < deadline, "no relayed link to B");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &window).await;
+    assert_eq!(relay.refused(), 0);
+    stop_all(&mut [&mut a, &mut b]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

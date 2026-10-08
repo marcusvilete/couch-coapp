@@ -110,7 +110,18 @@ Needs HidHide installed on the host (administrator, then a restart; installed on
 - **The splash** ("Player 2 joins") plays at every start for about 3 s: two controllers slide in, land on a couch, the name types out, the picture holds a second, then fades. A click or a key skips it. It animates even with Windows' animation effects off (the user's choice; their PC has them off). It covers the lobby's first load only; the engine is already running.
 - **⚙ Settings** in the user panel, two tabs:
   - **Shortcuts:** Change waits for a key (Esc cancels; Ctrl, Alt and Shift needn't be held, and are ignored). A refused key says why under its row ("Ctrl+Alt+Shift+P already does this: …", "that key can't be used", "only F1 to F12 (but F4)"). Default and Reset all put keys back. Saved in the profile's `shortcuts.json`. The panic key changes from the next Go live (the host panel's reminder names the key in use); the stream window's keys from the next window opened (its bar's hint names them).
-  - **Network:** iroh's public relays (the default) or My relay with a URL (https; `http://localhost…` for a local `iroh-relay --dev`). Saved in `network.json`; "Applies when the app restarts" with Restart now (asks once more while streaming or watching). The line under it says which relay we're connected through. A typo in the URL is refused at Save. To try the production endpoint shape on one PC, give a profile iroh's own relay as "My relay" (the host shown in the status line, as `https://…`): it then runs without iroh's address lookup, and must still meet the others.
+  - **Network** (M7):
+    - **The choices:**
+      - the build's default: "Couch Co-App relay (host)" in a build with our relay built in; in a development build, iroh's public relays;
+      - iroh's public relays (for testing);
+      - My relay with a URL: https; `http://localhost…` for `scripts\relay.ps1`; `http://192.168.x.x…` too in development and test builds.
+    - **Saving and restarting:** saved in `network.json`; "Applies when the app restarts", with Restart now (it asks once more while streaming or watching).
+    - **Status:** the line under it says which relay we're connected through. A typo in the URL is refused at Save.
+    - **The token:** "My relay" sends no token, so pointing it at our relay running with its token (`relay.ps1` without `-Open`) never connects. Use `-Open` for that, or a build with the relay built in.
+- **Our relay on this PC** (M7). Build it once with `cargo xtask relay-tool`, then run `.\scripts\relay.ps1`: plain HTTP on `localhost:3340`, production's limits, the token from `release.toml`. Ctrl+C stops it.
+  - **A development build with it built in:** in the terminal, before `npm run tauri dev`, set `$env:COUCH_BUILD_RELAY_URL='http://localhost:3340'` and `$env:COUCH_BUILD_RELAY_TOKEN='<relay_token>'`. Settings → Network then shows "Couch Co-App relay (localhost:3340)". `profiles.ps1`'s profiles share that build.
+  - **Unset them afterwards,** or every later build in that terminal has them.
+  - **The relay's own log** is in its window. With `$env:RUST_LOG='iroh_relay=debug'` it shows each connection, and "denied our authentication" for a client without the token.
 - **Keys are checked within one profile only.** On one PC, a viewer profile's chord set to the hosting profile's panic key is swallowed by the host's hook and presses the panic key. Not a bug (on two PCs they never meet); keep them apart when testing.
 - **Restart now** shows a "Restarting Couch Co-App…" screen with a spinner, goes through the normal exit (the rooms hear we go; a second or two), then starts the same profile again, which opens with the splash; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the installed app): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`import.meta.env.DEV`). Pressing it under `tauri dev` once ended both, leaving no app running.
 
@@ -149,7 +160,11 @@ The user has a second PC on their home network. Suggest a two-PC run after any c
 
 - **Roles.** Usually this PC runs the dev build (`npm run tauri dev`) and the other PC the installed app; either may host.
 - **The installer** (M10a; it replaced the zipped guest package).
-  - `.\scripts\build-installer.ps1` builds it into `target\installer\` (the name carries the version and commit, `-dirty` with uncommitted changes); `npx --yes http-server target\installer -p 8000` serves it.
+  - `.\scripts\build-installer.ps1 -TestRelay` builds it into `target\installer\`. The name carries the version and commit, `-dirty` with uncommitted changes, and `-test`. `npx --yes http-server target\installer -p 8000` serves it.
+  - Without `-TestRelay` it needs `release.toml` (M7) with our relay's URL, which only exists once the relay is deployed.
+  - **For a LAN test of our relay**, use a copy of `release.toml` with `test = true` and `relay_url = "http://<this PC's LAN address>:3340"`. Build with `-Config <that copy>`, and run `.\scripts\relay.ps1 -Lan` here (Windows Firewall asks once).
+    - **Both PCs need the same URL,** the LAN one, never `localhost`: invites and member records carry it, and the other PC must be able to dial it.
+    - This PC gets it through `COUCH_BUILD_*`, as above, or by installing the same build.
   - Run the script without redirecting its stderr (`2>&1` or `*>&1` with `$ErrorActionPreference = 'Stop'` aborts on cargo's and Tauri's info lines).
   - Rebuild it after every change the other PC runs. Both sides must have the same wire revision (`PROTOCOL_MINOR`), or the member list says "Needs update" / "Update yours".
 - **On the other PC:**

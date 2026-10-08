@@ -23,10 +23,10 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | P3 | Settings: the shortcut editor (each shortcut to another key) and the relay (Settings → Network); the splash screen | done, one-PC run and Restart now in a release build included ([results](p3-results.md)) |
 | Polish | The full-screen re-check, with the internet test with friends | done: two PCs over the internet, a direct link; full screen worked, switched to remotely too ([M8 results](m8-results.md)) |
 | M8 | Host overlay: requests and session notes over the game, answered with keys; a chime | done, your one-PC run included; also a fix for hosting on Windows 10 ([results](m8-results.md)) |
-| M9 | Zero-copy GPU paths, HEVC, higher frame rates | |
-| M7 | Own relay, the https invite page, the production relay setup | moved to just before M10: until then, iroh's public relays serve development and real-network tests |
+| M9 | Zero-copy GPU paths, HEVC, higher frame rates | later: friends found the latency great, so it is headroom (more viewers, 120 fps) |
 | M10a | An installer for testing with friends: the app, its stream window and libraries; ViGEmBus and HidHide offered, each optional; Settings → Drivers; "update needed" between builds that can't talk; a log file | done, your runs on both PCs included ([results](m10a-results.md)) |
-| M10b | The public release: code signing, licence notices and the source offer, the fallback encoder, our own relay (M7) | after M9 and M7 |
+| M7 | Own relay (iroh-relay with an access token), the relay built into release builds, the https invite page, the deploy kit | built and tested on this PC; deploying it waits for a server and a name ([results](m7-results.md)) |
+| M10b | The public release: code signing, licence notices and the source offer, the fallback encoder, our relay deployed (M7's kit) | after M9 and M7 |
 | M11 | Updates: Tauri's updater, with the releases on GitHub (a public releases-only repository; the code can stay private) and an update signing key | very low priority; until then, new versions are installed by hand |
 
 ## Processes
@@ -129,8 +129,11 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
 - **Congestion control.** The per-viewer rate controller does it. It is delay-based, much like WebRTC's GCC. QUIC runs our `MediaCongestion` controller, which ignores isolated losses and probes quickly after an outage ([ADR 0005](adr/0005-media-congestion-control.md)). Stock Cubic and BBR v3 cut the bitrate to a tenth under 1% random loss.
 - **Relays** (`couch_net::endpoint::RelayChoice`):
   - Development: iroh's public relays (`N0Public`), whose terms cover hobby use only.
-  - Production: only our own `iroh-relay` on a small VPS, with no third-party address lookup (`Custom`).
-  - Tests: no relays (`Disabled`).
+  - Production: only our own `iroh-relay` on a small VPS, with no third-party address lookup (`Custom`) (M7, [ADR 0007](adr/0007-our-relay-and-release-configuration.md)).
+    - **The token.** The relay admits only clients with its token (`access.shared_token`). iroh sends the token only to the relays in our own list, never to another member's.
+    - **Built in.** A release build carries the relay's URL and token (`couch_engine::build_config`, from the private `release.toml` that `build-installer.ps1` reads). Settings → Network's default choice (`RelaySetting::Builtin`) uses it, and is iroh's public relays in a build without one.
+    - **The deploy kit** is in `deploy/relay/`. `scripts\relay.ps1` runs the same server on this PC.
+  - Tests: no relays (`Disabled`), or an in-process `iroh-relay` with a token (`couch_testkit::relay`).
 - **Joining a room.** Only the room's owner admits newcomers. An invite link carries the room's owner and nonce (which make its id), the invite's own token and the owner's relay (or addresses on a LAN). The newcomer and the owner check the room password with SPAKE2; it never leaves either machine.
 
 ## Rooms
@@ -210,6 +213,7 @@ These hold in every milestone. Tests guard them from M2 on.
 - **The drivers are optional.** After the app installs, `installer-hooks.nsh` asks about each missing one (ViGEmBus, HidHide; found by their registered service), saying what won't work without it. A Yes runs the driver's own official setup, which asks for administrator rights. Their installers are pinned by SHA-256 in `xtask/src/deps.rs` and their licences ship beside them (`apps/desktop/src-tauri/drivers/`). Settings → Drivers shows their state and runs the same installers later (`couch_platform_win::drivers`). Uninstalling the app leaves them.
 - **Builds that can't talk say so.** `PROTOCOL_MINOR` is the wire revision until the first public release; a peer with another one is refused at `Hello`, and the member list says who needs to update.
 - **Logs:** an installed (release) app logs to `desktop.log` in the profile folder, beside `viewer.log`; one older log is kept as `desktop.old.log`.
+- **Release configuration** (M7): `build-installer.ps1` reads the private `release.toml` (outside the repository; `deploy/release.example.toml` shows its shape). It holds the relay's URL and token and the invite page, and the script passes them to the build as `COUCH_BUILD_*` variables. Without the file it builds only with `-TestRelay`: iroh's public relays, and plain http relays on the LAN allowed. Such installers are named `-test`.
 - **The version** (0.8.0 for the first installer) is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`; the build script checks. Updates are installed by hand (M11, the updater, is very low priority).
 
 ## Platform limits

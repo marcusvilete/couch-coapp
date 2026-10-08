@@ -1,0 +1,43 @@
+# Our relay in production: iroh-relay, the version our iroh pin names
+# (README.md). Copied to /etc/iroh-relay/iroh-relay.toml by install.sh.
+# Untested until there's a server: check it with the README's first run.
+
+# HTTP on port 80: Let's Encrypt's HTTP challenge and the captive-portal
+# check. Everything else is HTTPS.
+http_bind_addr = "[::]:80"
+
+# QUIC address discovery (UDP 7842): helps both ends find their public
+# address for direct connections. Needs TLS.
+enable_quic_addr_discovery = true
+
+# Only Couch Co-App: clients must present the token. The real one comes from
+# IROH_RELAY_ACCESS_TOKEN in /etc/iroh-relay/token.env, which replaces this
+# list; never write it into this file in the repository. Empty on purpose:
+# without the variable the relay refuses to start (fails closed). To rotate,
+# see the README.
+access.shared_token = [""]
+
+# Metrics (Prometheus text) on this machine only; read them over SSH.
+enable_metrics = true
+metrics_bind_addr = "127.0.0.1:9090"
+
+[tls]
+https_bind_addr = "[::]:443"
+cert_mode = "LetsEncrypt"
+# Your relay's name, e.g. "relay.example.com" or "yourname.duckdns.org".
+hostname = "RELAY_HOSTNAME"
+# Let's Encrypt writes to this address about expiring certificates.
+contact = "CONTACT_EMAIL"
+cert_dir = "/var/lib/iroh-relay/certs"
+prod_tls = true
+
+[limits]
+# New connections per second across all clients, and the burst allowed.
+accept_conn_limit = 20.0
+accept_conn_burst = 100
+
+# What one client may send through the relay. A host relaying to 7 viewers
+# at the app's 2 Mbit/s relay cap sends about 14 Mbit/s; 2 MB/s leaves room.
+[limits.client.rx]
+bytes_per_second = 2000000
+max_burst_bytes = 4000000

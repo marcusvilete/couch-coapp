@@ -9,6 +9,7 @@
 //! iroh. Identity and remembered rooms live in the profile's folder
 //! ([`store`]), sealed with DPAPI on Windows ([`secrets`]).
 
+pub mod build_config;
 pub mod pipeline;
 mod profile;
 mod rooms;
@@ -24,6 +25,7 @@ use std::{
     time::Duration,
 };
 
+use build_config::BuiltInRelay;
 use couch_input::shortcuts::{ShortcutError, Shortcuts};
 use couch_net::endpoint::RelayChoice;
 use couch_proto::{invite::InviteError, session::SeatKind};
@@ -238,19 +240,41 @@ pub enum ShortcutScope {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum RelaySetting {
-    /// iroh's public relays: for testing only (their terms cover hobby use).
+    /// The relay this build was made with (ours, with its token), or
+    /// iroh's public relays in a build without one (development). The
+    /// default, so a profile that never chose follows the build.
     #[default]
+    Builtin,
+    /// iroh's public relays: for testing only (their terms cover hobby use).
     Public,
-    /// One relay server by URL, such as our own (`iroh-relay`). No
-    /// third-party address lookup.
+    /// One relay server by URL, such as your own (`iroh-relay`). No
+    /// third-party address lookup, and no token.
     Custom(String),
 }
 
 impl RelaySetting {
-    /// What the endpoint binds with. A custom URL must be https, or http
-    /// on this PC for testing.
+    /// What the endpoint binds with, in this build.
     pub fn choice(&self) -> Result<RelayChoice, EngineError> {
+        self.choice_in(build_config::relay().as_ref(), build_config::test_build())
+    }
+
+    /// What the endpoint binds with in a build with `built_in` as its relay.
+    /// A custom URL must be https; a test build also takes http on this PC
+    /// or a private (LAN) address, and any build takes http on this PC.
+    fn choice_in(
+        &self,
+        built_in: Option<&BuiltInRelay>,
+        test_build: bool,
+    ) -> Result<RelayChoice, EngineError> {
         match self {
+            Self::Builtin => {
+                Ok(
+                    built_in.map_or(RelayChoice::N0Public, |relay| RelayChoice::Custom {
+                        urls: vec![relay.url.clone()],
+                        token: relay.token.clone(),
+                    }),
+                )
+            }
             Self::Public => Ok(RelayChoice::N0Public),
             Self::Custom(url) => {
                 let invalid = |why: &str| EngineError::InvalidRelay(why.to_string());
@@ -258,10 +282,14 @@ impl RelaySetting {
                     .trim()
                     .parse()
                     .map_err(|_| invalid("that isn't a web address"))?;
-                let local = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
+                let host = parsed.host_str().unwrap_or_default();
+                let local = matches!(host, "localhost" | "127.0.0.1");
+                let lan = host
+                    .parse::<std::net::Ipv4Addr>()
+                    .is_ok_and(|ip| ip.is_private());
                 match parsed.scheme() {
                     "https" => {}
-                    "http" if local => {}
+                    "http" if local || (lan && test_build) => {}
                     _ => return Err(invalid("it must start with https://")),
                 }
                 if parsed.host_str().is_none_or(str::is_empty) {
@@ -271,7 +299,7 @@ impl RelaySetting {
                 if !parsed.username().is_empty() || parsed.password().is_some() {
                     return Err(invalid("it can't carry a user name or password"));
                 }
-                Ok(RelayChoice::Custom(vec![parsed]))
+                Ok(RelayChoice::custom(vec![parsed]))
             }
         }
     }
@@ -284,8 +312,16 @@ impl RelaySetting {
 pub struct NetworkView {
     /// What applies at the next start.
     pub saved: RelaySetting,
+    /// The relay this build was made with (its URL), shown for
+    /// [`RelaySetting::Builtin`]; `None` in development builds, where that
+    /// choice means iroh's public relays.
+    pub built_in: Option<String>,
+    /// Plain http relays at private (LAN) addresses are allowed: a
+    /// development or test build.
+    pub test_build: bool,
     /// What this run uses; `None` without relays (tests). A saved setting
-    /// that no longer parses runs as public, so the two can differ.
+    /// this build doesn't take runs as the build's own, so the two can
+    /// differ.
     pub in_use: Option<RelaySetting>,
     /// The relay we are reachable through now; `None` until connected.
     pub home_relay: Option<String>,
@@ -1024,11 +1060,14 @@ pub struct EngineOptions {
     pub replace_grace: Duration,
     /// How long watching waits for the host's connection to come back.
     pub reconnect_wait: Duration,
+    /// Use only the relay, no direct paths: tests proving traffic goes
+    /// through it.
+    pub relay_only: bool,
 }
 
 impl EngineOptions {
-    /// The desktop app until our own relay exists (M7): iroh's public relays,
-    /// which are for development only.
+    /// The desktop app with iroh's public relays, which are for development
+    /// only.
     pub fn development() -> Self {
         Self {
             relays: RelayChoice::N0Public,
@@ -1043,18 +1082,29 @@ impl EngineOptions {
             join_wait: Duration::from_secs(10),
             replace_grace: pipeline::source::REPLACE_GRACE,
             reconnect_wait: Duration::from_secs(30),
+            relay_only: false,
         }
     }
 
     /// The desktop app: [`Self::development`] with the profile's saved relay
-    /// setting (Settings → Network). A saved setting that no longer parses
-    /// is logged and the public relays are used; Settings shows both.
+    /// setting (Settings → Network), by default the relay this build was
+    /// made with ([`build_config`]). A saved setting this build doesn't take
+    /// (a typo, or a LAN http relay saved by a test build) is logged and the
+    /// build's own relay is used; Settings shows both.
     pub fn desktop(profile: &Profile) -> Self {
         let saved = store::network(profile.data_dir()).relay;
-        let relays = saved.choice().unwrap_or_else(|e| {
-            tracing::warn!("the saved relay setting: {e}; using iroh's public relays");
-            RelayChoice::N0Public
-        });
+        if let Some(url) = build_config::unreadable_relay() {
+            tracing::error!(
+                "this build's relay URL {url:?} doesn't parse; it has no relay of its own"
+            );
+        }
+        let built_in = build_config::relay();
+        let relays = saved
+            .choice_in(built_in.as_ref(), build_config::test_build())
+            .unwrap_or_else(|e| {
+                tracing::warn!("the saved relay setting: {e}; using this build's own");
+                fallback_relays(built_in.as_ref())
+            });
         Self {
             relays,
             ..Self::development()
@@ -1062,24 +1112,47 @@ impl EngineOptions {
     }
 }
 
-/// What a running endpoint uses, as a setting.
-fn relay_in_use(relays: &RelayChoice) -> Option<RelaySetting> {
+/// What a running endpoint uses, as a setting. The built-in relay is told
+/// from the same URL typed as your own by its token.
+fn relay_in_use(relays: &RelayChoice, built_in: Option<&BuiltInRelay>) -> Option<RelaySetting> {
     match relays {
         RelayChoice::N0Public => Some(RelaySetting::Public),
-        RelayChoice::Custom(urls) => urls.first().map(|u| RelaySetting::Custom(u.to_string())),
+        RelayChoice::Custom { urls, token } => {
+            let url = urls.first()?;
+            let ours = built_in.is_some_and(|b| b.url == *url && b.token == *token);
+            Some(if ours {
+                RelaySetting::Builtin
+            } else {
+                RelaySetting::Custom(url.to_string())
+            })
+        }
         RelayChoice::Disabled => None,
     }
 }
 
-/// Whether `saved` would start differently from what runs: both as iroh
-/// reads them, so a URL typed without iroh's trailing slash still
-/// matches. A saved setting that doesn't parse runs as public
-/// ([`EngineOptions::desktop`]), so a restart wouldn't change that.
-fn restart_needed(saved: &RelaySetting, in_use: &Option<RelaySetting>) -> bool {
+/// What runs when the saved setting doesn't apply in this build: the
+/// build's own relay, never iroh's public ones in a build that has one.
+fn fallback_relays(built_in: Option<&BuiltInRelay>) -> RelayChoice {
+    RelaySetting::Builtin
+        .choice_in(built_in, false)
+        .expect("the built-in choice always applies")
+}
+
+/// Whether `saved` would start differently from what runs, in a build
+/// with `built_in` as its relay: both as iroh reads them, so a URL typed
+/// without iroh's trailing slash still matches. A saved setting this build
+/// doesn't take runs as the build's own ([`EngineOptions::desktop`]), so a
+/// restart wouldn't change that.
+fn restart_needed(
+    saved: &RelaySetting,
+    in_use: &Option<RelaySetting>,
+    built_in: Option<&BuiltInRelay>,
+    test_build: bool,
+) -> bool {
     let applies_as = saved
-        .choice()
-        .map_or(Some(RelaySetting::Public), |c| relay_in_use(&c));
-    applies_as != *in_use
+        .choice_in(built_in, test_build)
+        .unwrap_or_else(|_| fallback_relays(built_in));
+    relay_in_use(&applies_as, built_in) != *in_use
 }
 
 /// Takes the profile's lock file, waiting up to `wait` for another engine
@@ -1149,7 +1222,7 @@ impl Engine {
         }
         let (events, _) = broadcast::channel(256);
         let panic = Arc::new(Mutex::new(None));
-        let relay_in_use = relay_in_use(&options.relays);
+        let relay_in_use = relay_in_use(&options.relays, build_config::relay().as_ref());
         let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
         Ok(Self {
             profile,
@@ -1307,9 +1380,18 @@ impl Engine {
                     .await
                     .map_err(|_| EngineError::Stopped)?;
                 let saved = store::network(self.profile.data_dir()).relay;
+                let built_in = build_config::relay();
+                let test_build = build_config::test_build();
                 Ok(Response::Network(NetworkView {
-                    restart_needed: restart_needed(&saved, &self.relay_in_use),
+                    restart_needed: restart_needed(
+                        &saved,
+                        &self.relay_in_use,
+                        built_in.as_ref(),
+                        test_build,
+                    ),
                     saved,
+                    built_in: built_in.map(|relay| relay.url.to_string()),
+                    test_build,
                     in_use: self.relay_in_use.clone(),
                     home_relay: home.await.map_err(|_| EngineError::Stopped)?,
                 }))
@@ -1320,7 +1402,7 @@ impl Engine {
                 relay.choice()?;
                 let relay = match relay {
                     RelaySetting::Custom(url) => RelaySetting::Custom(url.trim().to_string()),
-                    public => public,
+                    other => other,
                 };
                 let dir = self.profile.data_dir();
                 store::save_network(dir, &store::NetworkSettings { relay })?;
@@ -1680,23 +1762,119 @@ mod tests {
 
     #[test]
     fn a_relay_url_in_use_matches_it_as_typed() {
+        let restart = |saved: &RelaySetting, in_use: &Option<RelaySetting>| {
+            restart_needed(saved, in_use, None, false)
+        };
         let typed = RelaySetting::Custom("https://relay.example.com".into());
-        let running = relay_in_use(&typed.choice().unwrap());
+        let running = relay_in_use(&typed.choice_in(None, false).unwrap(), None);
         assert_eq!(
             running,
             Some(RelaySetting::Custom("https://relay.example.com/".into())),
             "iroh's own form"
         );
-        assert!(!restart_needed(&typed, &running));
-        assert!(restart_needed(&RelaySetting::Public, &running));
-        assert!(restart_needed(&typed, &Some(RelaySetting::Public)));
-        assert!(!restart_needed(
-            &RelaySetting::Public,
-            &Some(RelaySetting::Public)
-        ));
+        assert!(!restart(&typed, &running));
+        assert!(restart(&RelaySetting::Public, &running));
+        assert!(restart(&typed, &Some(RelaySetting::Public)));
+        assert!(!restart(&RelaySetting::Public, &Some(RelaySetting::Public)));
         // Broken: it runs as public, and restarting changes nothing.
         let broken = RelaySetting::Custom("nonsense".into());
-        assert!(!restart_needed(&broken, &Some(RelaySetting::Public)));
+        assert!(!restart(&broken, &Some(RelaySetting::Public)));
+    }
+
+    fn ours() -> BuiltInRelay {
+        BuiltInRelay {
+            url: "https://relay.couch.example".parse().unwrap(),
+            token: couch_net::endpoint::RelayToken::new("t"),
+        }
+    }
+
+    #[test]
+    fn the_default_follows_the_build() {
+        // A development build has no relay: the default is iroh's.
+        let dev = RelaySetting::Builtin.choice_in(None, true).unwrap();
+        assert!(matches!(dev, RelayChoice::N0Public));
+        assert_eq!(relay_in_use(&dev, None), Some(RelaySetting::Public));
+        assert!(!restart_needed(
+            &RelaySetting::Builtin,
+            &Some(RelaySetting::Public),
+            None,
+            true
+        ));
+
+        // A release build: ours, with its token.
+        let built_in = ours();
+        let release = RelaySetting::Builtin
+            .choice_in(Some(&built_in), false)
+            .unwrap();
+        let RelayChoice::Custom { urls, token } = &release else {
+            panic!("expected our relay");
+        };
+        assert_eq!(urls, std::slice::from_ref(&built_in.url));
+        assert_eq!(token, &built_in.token);
+        let running = relay_in_use(&release, Some(&built_in));
+        assert_eq!(running, Some(RelaySetting::Builtin));
+        assert!(!restart_needed(
+            &RelaySetting::Builtin,
+            &running,
+            Some(&built_in),
+            false
+        ));
+
+        // Choices saved before keep applying.
+        assert!(matches!(
+            RelaySetting::Public.choice_in(Some(&built_in), false),
+            Ok(RelayChoice::N0Public)
+        ));
+        assert!(restart_needed(
+            &RelaySetting::Public,
+            &running,
+            Some(&built_in),
+            false
+        ));
+        // A LAN relay a test build saved doesn't apply in a release build:
+        // it runs on ours, never on iroh's, and restarting changes nothing.
+        let lan = RelaySetting::Custom("http://192.168.1.10:3340".into());
+        assert!(lan.choice_in(Some(&built_in), false).is_err());
+        assert!(matches!(
+            fallback_relays(Some(&built_in)),
+            RelayChoice::Custom { .. }
+        ));
+        assert!(!restart_needed(&lan, &running, Some(&built_in), false));
+
+        // Our URL typed as your own carries no token, so it isn't ours.
+        let typed = RelaySetting::Custom(built_in.url.to_string());
+        let typed = typed.choice_in(Some(&built_in), false).unwrap();
+        assert!(matches!(
+            relay_in_use(&typed, Some(&built_in)),
+            Some(RelaySetting::Custom(_))
+        ));
+    }
+
+    #[test]
+    fn plain_http_relays_on_the_lan_only_in_test_builds() {
+        let at = |url: &str, test_build| {
+            RelaySetting::Custom(url.into())
+                .choice_in(None, test_build)
+                .is_ok()
+        };
+        for lan in [
+            "http://192.168.1.10:3340",
+            "http://10.0.0.5:3340",
+            "http://172.20.1.1:3340",
+        ] {
+            assert!(at(lan, true), "{lan}");
+            assert!(!at(lan, false), "{lan}");
+        }
+        for anywhere in ["http://localhost:3340", "http://127.0.0.1:3340"] {
+            assert!(at(anywhere, false), "{anywhere}");
+        }
+        for never in [
+            "http://8.8.8.8:3340",
+            "http://172.32.0.1:3340",
+            "http://relay.example.com",
+        ] {
+            assert!(!at(never, true), "{never}");
+        }
     }
 
     #[tokio::test]
@@ -1710,7 +1888,9 @@ mod tests {
             view
         };
         let first = network().await;
-        assert_eq!(first.saved, RelaySetting::Public);
+        assert_eq!(first.saved, RelaySetting::Builtin);
+        assert_eq!(first.built_in, None, "a development build");
+        assert!(first.test_build);
         assert_eq!(first.in_use, None, "the tests run without relays");
         assert_eq!(first.home_relay, None);
 
@@ -1731,7 +1911,12 @@ mod tests {
                 "{bad}"
             );
         }
-        for good in [" https://relay.example.com ", "http://localhost:3340"] {
+        // The last one is checked at the next start, below.
+        for good in [
+            " https://relay.example.com ",
+            "http://192.168.1.10:3340",
+            "http://localhost:3340",
+        ] {
             engine
                 .handle(Command::SetNetwork {
                     relay: RelaySetting::Custom(good.into()),
@@ -1747,7 +1932,7 @@ mod tests {
 
         // The next start binds with it.
         let profile = Profile::new("test", dir.path()).unwrap();
-        let RelayChoice::Custom(urls) = EngineOptions::desktop(&profile).relays else {
+        let RelayChoice::Custom { urls, .. } = EngineOptions::desktop(&profile).relays else {
             panic!("expected our relay");
         };
         assert_eq!(urls[0].host_str(), Some("localhost"));
@@ -1761,6 +1946,35 @@ mod tests {
             EngineOptions::desktop(&profile).relays,
             RelayChoice::N0Public
         ));
+    }
+
+    #[test]
+    fn invites_go_on_the_invite_page_when_the_build_has_one() {
+        use couch_proto::{
+            ids::{InviteToken, MemberId, RoomNonce},
+            invite::{Invite, LINK_PREFIX},
+            room::PeerAddr,
+        };
+        let invite = Invite {
+            owner: MemberId([1; 32]),
+            nonce: RoomNonce([2; 16]),
+            name: "Couch".into(),
+            token: InviteToken([4; 32]),
+            expires: 1_800_000_000,
+            addr: PeerAddr {
+                relay: Some("https://relay.example.com./".into()),
+                ips: vec![],
+            },
+        };
+        let plain = rooms::invite_link(&invite, None);
+        assert!(plain.starts_with(LINK_PREFIX));
+        let page = rooms::invite_link(&invite, Some("https://couch.example/j/"));
+        assert_eq!(
+            page,
+            format!("https://couch.example/j/#{}", invite.payload())
+        );
+        // The app's Join box and the page read the same link.
+        assert_eq!(Invite::parse(&page), Ok(invite));
     }
 
     #[test]

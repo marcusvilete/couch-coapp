@@ -295,16 +295,24 @@ Each exchange must finish within 10 s. At most 32 incoming connections are being
 
 ## Invites
 
-`couchco://join#<payload>`. The payload is unpadded lowercase base32 of:
+`couchco://join#<payload>`, or, in a build with an invite page (M7), `https://<page>/j/#<payload>`: chat apps make https links clickable. The page (`deploy/invite-page`) reads the payload in the browser and offers the `couchco://` link and a copy button. The payload after `#` never reaches the page's server. The payload is unpadded lowercase base32 of:
 - the magic bytes `CC`, which keep other base32 text from passing as an invite;
 - a version byte, now 1;
 - postcard `{owner, nonce [16], name, token [32], expires u64, addr {relay?, ips}}`.
+
+The layout is pinned by `couch_proto::invite`'s `the_layout_is_pinned` test. The invite page reads the room's name from it (`node deploy/invite-page/check.js`).
 
 **Rules**
 - **Only the owner makes invites**, and each has its own random token, which the owner keeps.
 - **Lifetime.** An invite works for 7 days (`expires`, seconds since 1970, also shown to the joiner) and for anyone who has it and the password. It stops working on expiry, on the owner's "revoke invites", on a ban, or after 5 wrong passwords. At most 32 are kept; making another drops the one closest to expiring.
 - **The address is the owner's own.** With relays configured that is its relay alone, never an IP address, so an invite posted in a chat publishes nobody's address. If the relay isn't known yet (just after startup), making the invite waits up to 10 s for it, then fails with "not connected to the relay yet". Without relays (a LAN, the tests), direct addresses are all there is.
-- **Each member names its own relay.** Settings → Network (P3) chooses iroh's public relays or one relay by URL (https; http only on this PC, for testing), per profile, from the next start. Invites and member records carry each member's own relay, and iroh dials a relay outside its own list, so members on different relays still meet (iroh's own `endpoint_relay_map_change` test covers that). With either choice iroh tries a direct path first; the relay starts the connection and carries it when no direct path is found.
+- **Each member names its own relay.** Settings → Network (P3, M7) chooses one of these, per profile, from the next start:
+  - the build's own relay, which is the default;
+  - iroh's public relays;
+  - one relay by URL: https, or http on this PC; a development or test build also takes http at a private LAN address.
+
+  Invites and member records carry each member's own relay, and iroh dials a relay outside its own list (iroh's own `endpoint_relay_map_change` test covers that). With any choice, iroh tries a direct path first; the relay starts the connection and carries it when no direct path is found.
+- **Our relay asks for a token** (M7): the relay URL and token are built into release builds. iroh sends the token only to relays in its own list, and **invites and member records never carry it**. A member whose setting is another relay can still dial ours, but ours refuses them. Without a direct path they don't connect, which is why Settings asks everyone in a room to use the same choice.
 - **Parsing** accepts the bare payload or anything ending in `#<payload>`, in any case, with whitespace ignored, up to 4096 characters.
 - **Joining needs the owner online.** Nobody else admits newcomers, so a join while the owner's app is closed fails with "the room's owner isn't online".
 - **Opening a link only fills in the join screen.** Any web page can open a `couchco://` link, so the app previews the invite (the room's name, which only the invite claims, and whether it expired) and sends nothing until the user types the password and clicks Join. Links open in the default profile, since Windows runs one command per link scheme.

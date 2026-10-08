@@ -271,6 +271,16 @@ fn random<const N: usize>() -> Result<[u8; N], EngineError> {
     Ok(bytes)
 }
 
+/// An invite as shared: on our invite page when the build has one, which
+/// chat apps make clickable (the payload stays after `#`, which browsers
+/// never send to the page's server), or as a `couchco://` link.
+pub(crate) fn invite_link(invite: &Invite, page: Option<&str>) -> String {
+    match page {
+        Some(page) => format!("{}#{}", page.trim_end_matches('#'), invite.payload()),
+        None => invite.to_link(),
+    }
+}
+
 /// Wall-clock seconds, for invite expiry.
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -315,6 +325,7 @@ pub(crate) async fn start(
     let mut endpoint_options = EndpointOptions::new(secret_key, options.relays.clone());
     endpoint_options.gate = Some(gate);
     endpoint_options.port = options.port;
+    endpoint_options.relay_only = options.relay_only;
     let endpoint = endpoint::bind(endpoint_options)
         .await
         .map_err(|e| EngineError::Net(e.to_string()))?;
@@ -792,7 +803,7 @@ impl Actor {
             .create_invite(token, unix_now(), valid_for, allow_ips)?;
         self.apply(room, fx, now);
         Ok(Response::Invite {
-            link: invite.to_link(),
+            link: invite_link(&invite, crate::build_config::invite_page()),
         })
     }
 

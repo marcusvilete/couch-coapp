@@ -1,40 +1,100 @@
 # Couch Co-App
 
-Remote "same couch" gaming. Create a password-protected room, invite friends with a link, stream your game to them, and pass them the controller. Connections are peer-to-peer (iroh), with a self-hosted relay as fallback.
+Remote "same couch" gaming. Create a password-protected room, invite friends with a link, stream your game to them, and pass them the controller.
 
-**Status:** early development, Windows first. See [docs/architecture.md](docs/architecture.md) for the design and milestone plan.
+Connections are peer-to-peer (iroh QUIC). A relay starts each connection and carries it when no direct path exists. That relay is our own `iroh-relay` in production, and iroh's public relays in development.
+
+**Status:** in development, Windows only for now. [docs/architecture.md](docs/architecture.md) has the design and the milestone table.
 
 ## Setup (Windows 11)
 
-1. Install Rust: `winget install --id Rustlang.Rustup -e`. Also install Node.js and the Visual Studio C++ build tools.
-2. Fetch the pinned native dependencies (FFmpeg LGPL build, SDL3) and put their DLLs next to the build output:
+1. **Install the tools:**
+   - Rust: `winget install --id Rustlang.Rustup -e` (the version is pinned in `rust-toolchain.toml`);
+   - the Visual Studio C++ build tools;
+   - Node.js;
+   - CMake (`winget install Kitware.CMake`; libopus builds with it);
+   - `cargo install cargo-deny --locked`.
+
+   LLVM is needed only to regenerate the FFmpeg bindings.
+2. **Open a terminal in the repository** and load the environment. Do this in every new terminal: it puts cargo and the native DLLs on PATH.
+   ```powershell
+   . .\scripts\dev.ps1
+   ```
+3. **Fetch the pinned native dependencies** (FFmpeg's LGPL build, SDL3, and the two drivers' installers), and stage them next to the build output:
    ```powershell
    cargo xtask fetch-deps
    cargo xtask stage-dlls
    ```
-3. Install the front-end packages: `cd apps/desktop; npm install`.
-4. Check everything: `cargo xtask doctor`.
-5. From M2 on, virtual gamepads need ViGEmBus 1.22.0: `winget install --id ViGEm.ViGEmBus -e --version 1.22.0` (admin).
+4. **Install the front end's packages:** `cd apps\desktop; npm install`.
+5. **Check the machine:** `cargo xtask doctor`.
 
-In a new terminal, run `. .\scripts\dev.ps1` first. It puts cargo and the native DLLs on PATH.
+**Drivers are optional for development:**
+- [ViGEmBus](https://github.com/nefarius/ViGEmBus) lets guests' controllers reach games you host;
+- [HidHide](https://github.com/nefarius/HidHide) lets your own controller play through a seat.
 
-## Everyday commands
+The app's Settings → Drivers installs either.
 
+Keep the repository at a short path such as `C:\dev\couch-coapp`: libopus's build fails past Windows' 260-character path limit.
+
+## Building and running each part
+
+**The desktop app** (Tauri 2: Rust engine, React UI):
 ```powershell
-cargo test --workspace                       # all tests; no GPU or drivers needed
-cargo run -p couch-cli -- probe              # what this machine can do (build couch-viewer first)
-cd apps/desktop; npm run tauri dev           # the desktop app
-
-# Streaming spike (M1): build both binaries, then measure end-to-end latency on this machine
-cargo build --release -p couch-cli -p couch-viewer
-.\target\release\couch-cli.exe latency-probe --secs 30 --relay none
+cd apps\desktop
+npm run tauri dev          # builds the stream window first, then runs the app (the default profile)
+```
+To try rooms on one PC, start more profiles from that build (alice, bob and carol, each with its own identity), from the repository root:
+```powershell
+.\scripts\profiles.ps1
 ```
 
-More are in [CLAUDE.md](CLAUDE.md#commands).
+**The stream window and the developer CLI:** `couch-viewer` is the window that shows a stream. `couch-cli` runs hosts, viewers and the measurements without the app.
+```powershell
+cargo build --release -p couch-cli -p couch-viewer
+.\target\release\couch-cli.exe latency-probe --secs 30 --relay none   # end-to-end latency on this PC
+```
+
+**The installer** (for your other PC, or friends):
+```powershell
+.\scripts\build-installer.ps1 -TestRelay      # iroh's public relays; target\installer\...-test-setup.exe
+npx --yes http-server target\installer -p 8000
+```
+- **A release installer** (no `-TestRelay`) uses our relay. Its address and token come from a private `release.toml` that never goes in git:
+  - `cargo xtask release-config` creates it in `%USERPROFILE%\.couch-coapp\`;
+  - [deploy/release.example.toml](deploy/release.example.toml) explains it.
+- **The version** must be the same in `Cargo.toml`, `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json`; bump it for each installer you hand out.
+
+**Our relay:**
+- **On this PC, for testing:**
+  ```powershell
+  cargo xtask relay-tool        # once: builds the official iroh-relay into target\tools
+  .\scripts\relay.ps1           # http://localhost:3340, with the token from release.toml (-Lan, -Open)
+  ```
+- **On a server:** [deploy/relay/README.md](deploy/relay/README.md) covers choosing one, the first run, and the token.
+
+**The invite page:** a static page that makes invite links clickable in chat apps. To try it on this PC, run `npx --yes http-server deploy/invite-page -p 8080`. [deploy/invite-page/README.md](deploy/invite-page/README.md) covers the rest.
+
+## Tests and checks
+
+```powershell
+cargo test --workspace                                  # no GPU, gamepad driver or internet needed
+cargo clippy --workspace --all-targets -- -D warnings   # must be clean
+cargo fmt --all
+cargo deny check                                        # licences and advisories
+cd apps\desktop; npx tsc --noEmit                       # the front end's types
+```
+The end-to-end scenarios run with the tests:
+- several engines over real iroh on loopback (`couch-engine`'s `rooms`, `sessions` and `relay` tests);
+- the streaming gates: `couch-cli gates --quick`, which takes 6 minutes and uses the screen.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md): processes, crates, data paths, safety rules
-- [Protocol](docs/protocol.md): wire format and viewer IPC
-- [M1 results](docs/m1-results.md): the streaming latency and network gates
-- [Decision records](docs/adr/)
+- [CLAUDE.md](CLAUDE.md): the full command list, the crate boundaries and the rules that aren't obvious from the code (safety, protocol, secrets).
+- [Architecture](docs/architecture.md): processes, crates, data paths, milestones.
+- [Protocol](docs/protocol.md): the wire format and the stream window's IPC.
+- [Decision records](docs/adr/).
+- Each milestone's results: `docs/m*-results.md` and `docs/p*-results.md`, with what was measured and what was tried by hand.
+
+## Licence
+
+Not decided yet. Dependencies are kept permissive (or LGPL, dynamically linked, for FFmpeg). `cargo deny` checks them.

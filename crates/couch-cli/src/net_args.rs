@@ -6,7 +6,7 @@ use anyhow::{Context, bail};
 use clap::{Args, ValueEnum};
 use couch_net::{
     EndpointAddr, SecretKey,
-    endpoint::{Congestion, EndpointOptions, RelayChoice},
+    endpoint::{Congestion, EndpointOptions, RelayChoice, RelayToken},
     netem::{NetemConfig, NetemTransport},
 };
 
@@ -24,6 +24,11 @@ pub struct NetArgs {
     /// Relays: `n0` (iroh's public relays, development only), `none`, or a relay URL.
     #[arg(long, default_value = "n0")]
     pub relay: String,
+    /// The access token our relay asks for (`release.toml`'s `relay_token`),
+    /// sent only to the `--relay` URL. Other users of this PC can see a
+    /// command line, and `latency-probe` passes it on to its children.
+    #[arg(long, value_parser = parse_token)]
+    pub relay_token: Option<RelayToken>,
     /// Use only the relay, no direct paths (the G6 test).
     #[arg(long)]
     pub relay_only: bool,
@@ -44,8 +49,14 @@ impl NetArgs {
         let relays = match self.relay.as_str() {
             "n0" => RelayChoice::N0Public,
             "none" => RelayChoice::Disabled,
-            url => RelayChoice::Custom(vec![url.parse().context("relay URL")?]),
+            url => RelayChoice::Custom {
+                urls: vec![url.parse().context("relay URL")?],
+                token: self.relay_token.clone(),
+            },
         };
+        if self.relay_token.is_some() && !matches!(relays, RelayChoice::Custom { .. }) {
+            bail!("--relay-token goes with a relay URL in --relay");
+        }
         let mut options = EndpointOptions::new(SecretKey::generate(), relays);
         options.relay_only = self.relay_only;
         options.port = self.port;
@@ -74,6 +85,10 @@ impl NetArgs {
     /// The flags to pass on to a child `host` or `view` process.
     pub fn to_args(&self) -> Vec<String> {
         let mut args = vec!["--relay".into(), self.relay.clone()];
+        if let Some(token) = &self.relay_token {
+            args.push("--relay-token".into());
+            args.push(token.reveal().into());
+        }
         if self.relay_only {
             args.push("--relay-only".into());
         }
@@ -89,6 +104,10 @@ impl NetArgs {
         }
         args
     }
+}
+
+fn parse_token(text: &str) -> Result<RelayToken, String> {
+    RelayToken::new(text).ok_or_else(|| "the relay token is empty".into())
 }
 
 /// The address viewers should dial to reach this endpoint.

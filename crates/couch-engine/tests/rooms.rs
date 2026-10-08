@@ -12,9 +12,10 @@ use couch_engine::{
     Command, Engine, EngineError, EngineOptions, Event, InvitePreview, InviteStatus, MemberLink,
     Profile, Response, RoomGone, RoomView, secrets::Unprotected,
 };
-use couch_net::endpoint::RelayChoice;
+use couch_net::endpoint::{RelayChoice, RelayToken};
 use couch_proto::invite::Invite;
 use couch_room::{limits::LimitConfig, room::Timings};
+use couch_testkit::relay::TestRelay;
 use tempfile::TempDir;
 
 const PASSWORD: &str = "pizza night";
@@ -778,6 +779,54 @@ async fn revoked_and_expired_invites_stop_working() {
     stop_all(&mut [&mut a, &mut b]).await;
 }
 
+/// Our relay (M7), with its token, as the only path: the invite names it
+/// and nothing else, the member joins through it, and finds the owner
+/// again through it after a restart.
+#[tokio::test]
+async fn a_room_works_through_our_relay_alone() {
+    const TOKEN: &str = "couch-test-token";
+    let relay = TestRelay::start(Some(TOKEN)).await;
+    let through = |port| EngineOptions {
+        relays: RelayChoice::Custom {
+            urls: vec![relay.url.parse().unwrap()],
+            token: RelayToken::new(TOKEN),
+        },
+        relay_only: true,
+        ..options(port)
+    };
+    let mut a = Member::with_options("Ana", through(free_port())).await;
+    let mut b = Member::with_options("Bia", through(free_port())).await;
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+    let parsed = Invite::parse(&invite).unwrap();
+    assert!(parsed.addr.ips.is_empty(), "{parsed:?}");
+    assert!(
+        parsed
+            .addr
+            .relay
+            .as_deref()
+            .is_some_and(|url| url.starts_with(&relay.url)),
+        "{parsed:?}"
+    );
+    b.join(&invite, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+    let bid = b.id();
+    a.wait_for(&room, "a relayed link", |v| {
+        v.is_some_and(|v| {
+            v.members
+                .iter()
+                .any(|m| m.id == bid && matches!(m.link, MemberLink::Relay))
+        })
+    })
+    .await;
+
+    b.stop().await;
+    b.engine = Some(start_with(b.dir.path(), b.name, through(b.port)).await);
+    full_mesh(&room, &[&a, &b]).await;
+    assert_eq!(relay.refused(), 0);
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
 /// With relays configured, an invite never carries IP addresses, even right
 /// after startup before the relay is known. (The relay here doesn't exist,
 /// so the invite either names it or isn't made at all.)
@@ -785,7 +834,7 @@ async fn revoked_and_expired_invites_stop_working() {
 async fn invites_carry_no_ip_addresses_when_relays_are_configured() {
     let dir = tempfile::tempdir().unwrap();
     let options = EngineOptions {
-        relays: RelayChoice::Custom(vec!["https://relay.invalid./".parse().unwrap()]),
+        relays: RelayChoice::custom(vec!["https://relay.invalid./".parse().unwrap()]),
         ..options(free_port())
     };
     let engine = Engine::start(Profile::new("test", dir.path()).unwrap(), options)

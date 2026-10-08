@@ -190,6 +190,17 @@ mod tests {
         );
     }
 
+    /// The invite page (`deploy/invite-page/j/invite.js`) reads the room's
+    /// name out of this layout, and released invites must keep parsing:
+    /// a change here breaks both. `node deploy/invite-page/check.js` reads
+    /// this same payload.
+    #[test]
+    fn the_layout_is_pinned() {
+        assert_eq!(invite().payload(), PINNED_PAYLOAD);
+    }
+
+    const PINNED_PAYLOAD: &str = "inbqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayarw2duoryhgorpf5zgk3dbpexgk6dbnvygyzjomnxw2lrpaa";
+
     #[test]
     fn a_typical_invite_stays_short() {
         assert!(invite().to_link().len() < 250, "{}", invite().to_link());

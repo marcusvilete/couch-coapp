@@ -2,7 +2,7 @@
 
 use std::{path::Path, process::Command, process::ExitCode};
 
-use crate::{deps, ffmpeg_bindings};
+use crate::{deps, ffmpeg_bindings, relay};
 
 #[derive(Default)]
 struct Checks {
@@ -65,6 +65,8 @@ pub fn run(root: &Path) -> ExitCode {
             result,
         );
     }
+    checks.recommend("Relay tool", relay::relay_tool_version(root));
+    checks.recommend("Release config", release_config());
     checks.require("FFmpeg license", ffmpeg_license(root));
     checks.recommend("Staged DLLs", staged_dlls(root));
     checks.require("cargo-deny", output_of("cargo", &["deny", "--version"]));
@@ -173,6 +175,16 @@ fn staged_dlls(root: &Path) -> Result<String, String> {
             "{} DLL(s) missing from target/debug; run `cargo xtask stage-dlls`",
             missing.len()
         ))
+    }
+}
+
+/// Only release installers need it, so its absence is fine.
+fn release_config() -> Result<String, String> {
+    let path = relay::release_config_path().map_err(|e| e.to_string())?;
+    if path.exists() {
+        Ok(path.display().to_string())
+    } else {
+        Ok("none (release installers need it: `cargo xtask release-config`)".into())
     }
 }
 

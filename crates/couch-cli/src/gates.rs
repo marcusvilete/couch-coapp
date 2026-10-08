@@ -199,6 +199,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             log: Some(file(".log")),
             net: NetArgs {
                 relay: "none".into(),
+                relay_token: None,
                 relay_only: false,
                 port: None,
                 congestion: args.congestion,
@@ -289,6 +290,7 @@ async fn run_g7(spec: &Spec, args: &Args) -> anyhow::Result<Report> {
             log: Some(file(".log")),
             net: NetArgs {
                 relay: "none".into(),
+                relay_token: None,
                 relay_only: false,
                 port: None,
                 congestion: args.congestion,

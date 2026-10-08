@@ -1,0 +1,28 @@
+# The shape of release.toml, Couch Co-App's private release configuration (M7).
+#
+# The real file is NOT kept in the repository. `cargo xtask release-config` creates it at
+# %USERPROFILE%\.couch-coapp\release.toml with a fresh token (COUCH_RELEASE_CONFIG points
+# elsewhere), and scripts\build-installer.ps1 refuses one inside the repository.
+#
+# What is in it isn't a secret the way a password is: the token ships inside every
+# installer, where anyone determined can find it. It keeps other apps off our relay; the
+# relay's rate limits and the provider's bandwidth cap are what protect it. It stays out of
+# git anyway, so the repository can be made public and the token rotated on our terms.
+#
+# The format is deliberately flat: `key = "text"` or `key = true|false`, one per line.
+
+# Our relay's address (deploy/relay/README.md). https:// only, unless `test` is true.
+relay_url = "https://relay.example.com"
+
+# The token our relay asks for: also IROH_RELAY_ACCESS_TOKEN in the server's
+# /etc/iroh-relay/token.env. A long random string (release-config makes 64 hex digits).
+relay_token = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# Where invites link to: the page in deploy/invite-page, ending in "/j/". Empty for
+# couchco:// links.
+invite_page = "https://couch.example.com/j/"
+
+# true only for a copy used to test on your LAN: it allows http:// in relay_url and
+# invite_page (such as http://192.168.1.10:3340 for scripts\relay.ps1 -Lan), lets the app
+# take plain http relays at private addresses in Settings, and names the installer "-test".
+test = false
