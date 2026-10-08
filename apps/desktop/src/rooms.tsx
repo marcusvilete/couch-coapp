@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { EngineInfo } from "./bindings/EngineInfo";
 import type { MemberLink } from "./bindings/MemberLink";
 import type { MemberView } from "./bindings/MemberView";
+import type { OtherVersion } from "./bindings/OtherVersion";
 import type { ProfileView } from "./bindings/ProfileView";
 import type { RoomView } from "./bindings/RoomView";
 import { playersOf } from "./sessions";
@@ -216,6 +217,13 @@ function PausedBanner(props: { until: number }) {
   );
 }
 
+/** Why two members can't talk: their Couch Co-App versions differ (M10a). */
+function otherVersionText(name: string, other: OtherVersion): string {
+  return other.newer
+    ? `${name} has Couch Co-App ${other.appVersion}, newer than yours: install the new version to play together.`
+    : `${name} has Couch Co-App ${other.appVersion}, older than yours: they need to install the new version to play together.`;
+}
+
 function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void }) {
   const { room } = props;
   return (
@@ -252,9 +260,15 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
                   LIVE
                 </span>
               )}
-              <span className="link-label" title={link.title}>
-                {link.label}
-              </span>
+              {m.otherVersion ? (
+                <span className="link-label version" title={otherVersionText(m.name, m.otherVersion)}>
+                  {m.otherVersion.newer ? "Update yours" : "Needs update"}
+                </span>
+              ) : (
+                <span className="link-label" title={link.title}>
+                  {link.label}
+                </span>
+              )}
               {room.isOwner && m.link !== "me" && (
                 <button className="ban" title={`Ban ${m.name}`} aria-label={`Ban ${m.name}`} onClick={() => props.onBan(m)}>
                   Ban

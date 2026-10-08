@@ -18,6 +18,7 @@ use couch_platform_win::{
     audio::{LoopbackCapture, LoopbackTarget},
     capture::{self, CaptureOptions, CaptureSource, MonitorId, WgcCapturer},
     clock::QpcClock,
+    drivers,
     foreground::{self, WindowId},
     game, held_input, hidhide,
     host_keys::HostKeys,
@@ -30,7 +31,14 @@ use super::{
     AudioKind, Backend, Focus, GameProcess, Hiding, NativeId, ScreenSource, Source, Sources,
     ViewerOptions, ViewerProcess, WindowSource,
 };
-use crate::ScreenArea;
+use crate::{DriverName, DriverState, ScreenArea};
+
+fn platform_driver(name: DriverName) -> drivers::Driver {
+    match name {
+        DriverName::Vigembus => drivers::Driver::ViGEmBus,
+        DriverName::Hidhide => drivers::Driver::HidHide,
+    }
+}
 
 /// The viewer, next to our own exe.
 const VIEWER_EXE: &str = "couch-viewer.exe";
@@ -233,6 +241,30 @@ impl Backend for WindowsBackend {
             stdout: Box::pin(stdout),
             guard: Box::new(child),
         })
+    }
+
+    fn drivers(&self) -> Vec<(DriverName, DriverState, bool)> {
+        [DriverName::Vigembus, DriverName::Hidhide]
+            .into_iter()
+            .map(|name| {
+                let driver = platform_driver(name);
+                let state = match drivers::state(driver) {
+                    drivers::State::Ready => DriverState::Ready,
+                    drivers::State::NeedsRestart => DriverState::NeedsRestart,
+                    drivers::State::Busy => DriverState::Busy,
+                    drivers::State::Missing => DriverState::Missing,
+                };
+                (name, state, drivers::installer(driver).is_some())
+            })
+            .collect()
+    }
+
+    fn virtual_pads(&self) -> bool {
+        couch_platform_win::vigem::probe().is_ok()
+    }
+
+    fn install_driver(&self, driver: DriverName) -> Result<(), String> {
+        drivers::install(platform_driver(driver))
     }
 
     fn overlay_area(&self, source: &Source) -> Option<ScreenArea> {

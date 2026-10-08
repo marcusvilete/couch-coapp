@@ -94,6 +94,10 @@ pub enum AdmissionError {
     Protocol(String),
     #[error("connection: {0}")]
     Connection(String),
+    /// The other member's build has another wire revision: one of the two
+    /// needs to update (`couch_proto::PROTOCOL_MINOR`).
+    #[error("the other member runs Couch Co-App {app_version}, which can't talk to this one")]
+    Incompatible { minor: u16, app_version: String },
 }
 
 /// A close code's name, for messages.
@@ -357,6 +361,10 @@ pub async fn connect(
         };
     match tokio::time::timeout(TIMEOUT, crate::control::open(&conn)).await {
         Ok(Ok((tx, rx, _hello))) => Ok((conn, tx, rx)),
+        Ok(Err(crate::NetError::Incompatible { minor, app_version })) => {
+            close(&conn, close_code::VERSION);
+            Err(AdmissionError::Incompatible { minor, app_version })
+        }
         Ok(Err(_)) => Err(closed(&conn)),
         Err(_) => {
             close(&conn, close_code::NORMAL);

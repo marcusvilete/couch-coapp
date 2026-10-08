@@ -818,7 +818,7 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
               </label>
               <p className="hint">
                 {sources.hiding === "notInstalled"
-                  ? "To play on a seat with your controller, install HidHide (it needs administrator rights, then a restart): github.com/nefarius/HidHide/releases."
+                  ? "To play on a seat with your controller, install HidHide: Settings → Drivers (it needs administrator rights, then a restart)."
                   : sources.hiding === "busy"
                     ? "HidHide is busy right now. If its configuration window is open, close it; then refresh the list above."
                     : controller
@@ -826,6 +826,12 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
                       : "You play outside the seats, as the game sees your controller."}
               </p>
             </>
+          )}
+          {sources && !sources.virtualPads && padSeat && (
+            <p className="banner warn" role="status">
+              Guests' controllers won't reach the game: ViGEmBus, which makes the virtual controllers, isn't installed.
+              Install it in Settings → Drivers. Watching, and a keyboard-and-mouse seat, still work.
+            </p>
           )}
           <p className="hint">
             Guests ask for a seat and you decide. The setup is remembered for this program

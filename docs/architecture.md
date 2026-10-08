@@ -25,7 +25,9 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M8 | Host overlay: requests and session notes over the game, answered with keys; a chime | done, your one-PC run included; also a fix for hosting on Windows 10 ([results](m8-results.md)) |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | |
 | M7 | Own relay, the https invite page, the production relay setup | moved to just before M10: until then, iroh's public relays serve development and real-network tests |
-| M10 | Packaging | |
+| M10a | An installer for testing with friends: the app, its stream window and libraries; ViGEmBus and HidHide offered, each optional; Settings → Drivers; "update needed" between builds that can't talk; a log file | done, your runs on both PCs included ([results](m10a-results.md)) |
+| M10b | The public release: code signing, licence notices and the source offer, the fallback encoder, our own relay (M7) | after M9 and M7 |
+| M11 | Updates: Tauri's updater, with the releases on GitHub (a public releases-only repository; the code can stay private) and an update signing key | very low priority; until then, new versions are installed by hand |
 
 ## Processes
 
@@ -201,6 +203,14 @@ These hold in every milestone. Tests guard them from M2 on.
 - Remote input reaches the injectors only through the seat router (`couch_input::router`), which enforces the rules above and the 300 ms dead-man release. So does the host's own controller when it plays a seat (P2).
 - A controller the app hides from games is shown again when the session ends, and at the next start after a crash.
 - Data from peers is size-limited and parsed defensively. Envelope frames are capped at 64 KiB and IPC frames at 16 MiB.
+
+## Installing (M10a)
+
+- **The installer** is Tauri's NSIS bundle, built by `scripts\build-installer.ps1` with the installer's own settings (`apps/desktop/src-tauri/tauri.installer.conf.json`, kept apart because Tauri's build copies bundled files next to the app it builds, which would overwrite development binaries). It asks whether to install for the current user (`%LOCALAPPDATA%\Programs\Couch Co-App\`) or for everyone (`Program Files`); on an administrator account Windows asks for administrator rights as it opens (NSIS's multi-user support). The app goes in that folder, with `couch-viewer.exe`, the FFmpeg and SDL3 DLLs and `drivers\` next to it, where the engine finds them. It registers `couchco://` links and adds a Start menu entry. Unsigned until M10b, so SmartScreen warns.
+- **The drivers are optional.** After the app installs, `installer-hooks.nsh` asks about each missing one (ViGEmBus, HidHide; found by their registered service), saying what won't work without it. A Yes runs the driver's own official setup, which asks for administrator rights. Their installers are pinned by SHA-256 in `xtask/src/deps.rs` and their licences ship beside them (`apps/desktop/src-tauri/drivers/`). Settings → Drivers shows their state and runs the same installers later (`couch_platform_win::drivers`). Uninstalling the app leaves them.
+- **Builds that can't talk say so.** `PROTOCOL_MINOR` is the wire revision until the first public release; a peer with another one is refused at `Hello`, and the member list says who needs to update.
+- **Logs:** an installed (release) app logs to `desktop.log` in the profile folder, beside `viewer.log`; one older log is kept as `desktop.old.log`.
+- **The version** (0.8.0 for the first installer) is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`; the build script checks. Updates are installed by hand (M11, the updater, is very low priority).
 
 ## Platform limits
 

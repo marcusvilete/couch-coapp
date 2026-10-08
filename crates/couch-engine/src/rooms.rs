@@ -54,7 +54,7 @@ use tokio::{
 
 use crate::{
     Command, EngineError, EngineOptions, Event, InvitePreview, InviteStatus, MemberLink,
-    MemberView, Profile, ProfileView, Response, RoomGone, RoomView,
+    MemberView, OtherVersion, Profile, ProfileView, Response, RoomGone, RoomView,
     pipeline::{
         Backend,
         host::{HostEvent, HostStream, PanicHandle},
@@ -110,6 +110,13 @@ pub(crate) enum Input {
         reply: oneshot::Sender<MemberDecision>,
     },
     Admitted(Box<Admitted>),
+    /// A member's build has another wire revision (`PROTOCOL_MINOR`): we
+    /// can't talk until one of us updates. Seen when it dialed us.
+    OtherVersion {
+        member: MemberId,
+        minor: u16,
+        app_version: String,
+    },
     DialFailed {
         room: RoomId,
         peer: MemberId,
@@ -249,6 +256,9 @@ struct Actor {
     /// Shared with the engine, for the panic key.
     panic: Arc<Mutex<Option<PanicHandle>>>,
     sessions: sessions::Sessions,
+    /// Members whose build we can't talk to: their wire revision and app
+    /// version, until a connection with them works again.
+    other_versions: BTreeMap<MemberId, (u16, String)>,
 }
 
 fn lock(limits: &Mutex<AdmissionLimits>) -> MutexGuard<'_, AdmissionLimits> {
@@ -338,6 +348,7 @@ pub(crate) async fn start(
         data_dir: profile.data_dir().to_path_buf(),
         panic,
         sessions: sessions::Sessions::default(),
+        other_versions: BTreeMap::new(),
     };
     actor.restore_rooms(now);
     tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
@@ -475,8 +486,16 @@ impl Actor {
                 let _ = reply.send(decision);
             }
             Input::Admitted(admitted) => self.admitted(*admitted, now),
+            Input::OtherVersion {
+                member,
+                minor,
+                app_version,
+            } => self.other_version(member, minor, app_version, now),
             Input::DialFailed { room, peer, error } => {
                 tracing::debug!(room = ?room, peer = ?peer, "dial failed: {error}");
+                if let AdmissionError::Incompatible { minor, app_version } = &error {
+                    self.other_version(peer, *minor, app_version.clone(), now);
+                }
                 let Some(entry) = self.rooms.get_mut(&room) else {
                     return;
                 };
@@ -591,6 +610,8 @@ impl Actor {
             | Command::ResetShortcuts { .. }
             | Command::GetNetwork
             | Command::SetNetwork { .. }
+            | Command::GetDrivers
+            | Command::InstallDriver { .. }
             | Command::ListSources => Err(EngineError::Stopped),
             Command::GoLive {
                 room,
@@ -1027,6 +1048,8 @@ impl Actor {
             newcomer,
             snapshot,
         } = admitted;
+        // We talk again: whatever version it ran, it matches ours now.
+        self.other_versions.remove(&peer);
         if newcomer.is_some() {
             // The password was right, whatever happens next.
             lock(&self.limits).end(peer, room, true, now);
@@ -1243,6 +1266,31 @@ impl Actor {
         }
     }
 
+    /// `member` runs a build we can't talk to: remembered until a
+    /// connection with it works again, and shown in every room we share.
+    /// Anyone can dial us with any version, so only a member of a room we
+    /// share is remembered: a stranger leaves nothing behind.
+    fn other_version(&mut self, member: MemberId, minor: u16, app_version: String, now: Instant) {
+        let shared: Vec<RoomId> = self
+            .rooms
+            .iter()
+            .filter(|(_, e)| e.room.status().members.iter().any(|m| m.id == member))
+            .map(|(id, _)| *id)
+            .collect();
+        if shared.is_empty() {
+            return;
+        }
+        let seen = (minor, app_version);
+        if self.other_versions.get(&member) == Some(&seen) {
+            return;
+        }
+        tracing::info!(member = ?member, "a member runs Couch Co-App {}, wire revision {minor}: we can't talk", seen.1);
+        self.other_versions.insert(member, seen);
+        for room in shared {
+            self.announce(room, now);
+        }
+    }
+
     fn announce(&self, room: RoomId, now: Instant) {
         if let Some(view) = self.view(room, now) {
             let _ = self.events.send(Event::RoomChanged { room: view });
@@ -1282,6 +1330,15 @@ impl Actor {
                     LinkState::Online => MemberLink::Online,
                     LinkState::Offline => MemberLink::Offline,
                 },
+                // Only while we can't talk: a working connection proves the
+                // versions match again.
+                other_version: (m.link != LinkState::Connected)
+                    .then(|| self.other_versions.get(&m.id))
+                    .flatten()
+                    .map(|(minor, app_version)| OtherVersion {
+                        app_version: app_version.clone(),
+                        newer: *minor > couch_proto::PROTOCOL_MINOR,
+                    }),
             })
             .collect();
         let paused = lock(&self.limits)
@@ -1464,6 +1521,15 @@ impl JoinJob {
             AdmissionError::Refused(close_code::UNKNOWN_ROOM) => {
                 EngineError::Refused("the owner has closed this room")
             }
+            AdmissionError::Incompatible { minor, app_version } => EngineError::OtherVersion {
+                app_version,
+                newer: minor > couch_proto::PROTOCOL_MINOR,
+            },
+            // Closed for its version before we read the owner's `Hello`
+            // (a slow path): which side is newer is unknown.
+            AdmissionError::Refused(close_code::VERSION) => EngineError::Refused(
+                "the room's owner runs another version of Couch Co-App; one of you needs to install the newer one",
+            ),
             _ => EngineError::OwnerOffline,
         }
     }
@@ -1496,15 +1562,32 @@ async fn accept_one(incoming: Incoming, inbox: mpsc::Sender<Input>, me: MemberId
     // What the dialer wants, within the admission timeout. The actor is
     // asked outside it, so an answer is never lost to the timeout.
     let request = tokio::time::timeout(admission::TIMEOUT, async {
-        let (tx, mut rx, _hello) = control::accept(&conn)
-            .await
-            .map_err(|e| AdmissionError::Connection(e.to_string()))?;
+        let (tx, mut rx, _hello) = control::accept(&conn).await.map_err(|e| match e {
+            NetError::Incompatible { minor, app_version } => {
+                admission::close(&conn, close_code::VERSION);
+                AdmissionError::Incompatible { minor, app_version }
+            }
+            other => AdmissionError::Connection(other.to_string()),
+        })?;
         let request = admission::read_request(&conn, &mut rx).await?;
         Ok::<_, AdmissionError>((tx, rx, request))
     })
     .await;
     let (mut tx, mut rx, request) = match request {
         Ok(Ok(request)) => request,
+        // Before anything about any room: only who called, and their version.
+        Ok(Err(AdmissionError::Incompatible { minor, app_version })) => {
+            // Debug: anyone can dial; a member is logged when remembered.
+            tracing::debug!(dialer = ?dialer, "refused: Couch Co-App {app_version}, wire revision {minor}");
+            let _ = inbox
+                .send(Input::OtherVersion {
+                    member: dialer,
+                    minor,
+                    app_version,
+                })
+                .await;
+            return;
+        }
         Ok(Err(e)) => {
             tracing::debug!(dialer = ?dialer, "not admitted: {e}");
             return;
@@ -1641,7 +1724,7 @@ async fn reader(
                 Some(close_code::TIMED_OUT)
             }
             // A message we must understand and don't: the peer is newer.
-            Err(NetError::Version(_)) => Some(close_code::VERSION),
+            Err(NetError::Version(_) | NetError::Incompatible { .. }) => Some(close_code::VERSION),
             Err(NetError::Protocol(_)) => Some(close_code::PROTOCOL),
         };
         if let (Some(code), Some(conn)) = (code, conn.upgrade()) {

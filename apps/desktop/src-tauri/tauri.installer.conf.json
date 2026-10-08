@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "cargo build --release -p couch-viewer && npm run build"
+  },
+  "bundle": {
+    "resources": {
+      "../../../target/release/couch-viewer.exe": "couch-viewer.exe",
+      "../../../target/release/*.dll": ".",
+      "../../../target/release/drivers/*": "drivers"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "installerHooks": "installer-hooks.nsh"
+      }
+    }
+  }
+}

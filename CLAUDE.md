@@ -54,7 +54,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
 | Rate-control gates G1, G3–G5 and G7 (one viewer's bad path leaves another's stream alone), run and judged | `couch-cli gates --quick` (6 min) or `couch-cli gates` (14 min). `latency-probe --viewers 2 --impair-first "rate=5mbit"` runs G7's setup by hand. The `rate-control-gates` skill covers traces and reading a failure. |
 | Many viewers of one host on this PC (fps, latency, bitrate and encode time per viewer) | `.\scripts\viewers.ps1` (4) or `.\scripts\viewers.ps1 -Viewers 7`, after the release build |
-| The app for a second PC (release build, stream window and DLLs zipped into `target\guest`) | `.\scripts\pack-guest.ps1`, then `npx --yes http-server target\guest -p 8000` |
+| The installer, for this PC or another (M10a: the app, stream window, DLLs and the two drivers, offered after install; for just you or everyone, as the installer asks) | `.\scripts\build-installer.ps1` (run it without redirecting its stderr), then `npx --yes http-server target\installer -p 8000`. It fetches and stages the pinned dependencies and driver installers, checks the version is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`, and builds with `tauri.installer.conf.json` (the bundled files and the driver hooks, `installer-hooks.nsh`), kept out of `tauri.conf.json` so development builds aren't touched. Bump the version with each installer handed out. An installed app logs to `desktop.log` in the profile folder |
 | What an XInput game sees on the host (each slot's buttons and sticks, live): tells a stream problem from a game choosing another controller | `.\scripts\xinput-watch.ps1` |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view` |
 | Input: viewer may use keyboard and mouse | `host --allow-kbm` (the default is gamepad only); kbm reaches the game only while the captured window is in front, so testing it end to end needs a second machine. `host --pads N` (up to 4) plugs a pad per seat and gives each viewer the next free seat as it connects (only the first gets kbm) |
@@ -105,6 +105,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 
 **Protocol changes**
 - Released control payloads are frozen. Add a new message type instead of changing fields; decoders reject trailing bytes.
+- **Until the first public release, bump `couch_proto::PROTOCOL_MINOR` with every change to what members exchange** (M10a). Builds of different revisions refuse each other right after `Hello` (close code `version`), and the app says who needs to update; without the bump, mismatched installs fail in confusing ways.
 - Type ids with bit `0x8000` set are must-understand.
 - Update `docs/protocol.md` with every wire change. The `protocol-change` skill has the full checklist.
 
@@ -145,7 +146,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - Sunshine, Moonlight and RustDesk are GPL/AGPL: read them for ideas, never copy code.
 
 **Native dependencies and pins**
-- FFmpeg and SDL3 are pinned by URL and SHA-256 in `xtask/src/deps.rs`.
+- FFmpeg and SDL3 are pinned by URL and SHA-256 in `xtask/src/deps.rs`. So are the drivers' official installers the app bundles (`DRIVERS`: ViGEmBus 1.22.0, BSD-3; HidHide 1.5.230, MIT), with their licence texts in `apps/desktop/src-tauri/drivers/`; `stage-dlls` copies them to `target/<profile>/drivers/`, where Settings → Drivers finds them.
 - libopus is compiled from source by the `opus` crate, which needs CMake (`doctor` checks). Its CMake build fails past Windows' 260-character path limit, so keep `target/` at a short path.
 - The FFmpeg FFI bindings in `crates/couch-codec-ffmpeg/bindings/` are generated and committed. rusty_ffmpeg's build-time bindgen 0.71 produces fieldless structs with libclang 22 or later. Regenerate the bindings whenever the FFmpeg pin changes; `doctor` flags stale ones.
 - Exact pins: `iroh` and `sdl3` (`=`). `windows` stays on 0.62 to match `windows-capture`'s COM types.

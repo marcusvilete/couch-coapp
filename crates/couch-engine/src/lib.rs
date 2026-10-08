@@ -17,7 +17,10 @@ mod store;
 
 use std::{
     fmt,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -126,6 +129,14 @@ pub enum Command {
     /// Saves the relay setting; it applies when the app starts again.
     SetNetwork {
         relay: RelaySetting,
+    },
+    /// Whether ViGEmBus and HidHide are installed.
+    GetDrivers,
+    /// Runs a driver's installer, shipped with the app, with Windows'
+    /// administrator prompt; answers when it has finished, with every
+    /// driver's state.
+    InstallDriver {
+        driver: DriverName,
     },
     /// Windows and screens that could be streamed. Nothing is sent anywhere.
     ListSources,
@@ -307,6 +318,9 @@ pub struct SourceList {
     pub host_controllers: Vec<HostController>,
     /// Whether a controller can be hidden from games (HidHide).
     pub hiding: HidingView,
+    /// Whether virtual controllers can be plugged in (ViGEmBus). Without
+    /// them, guests' controllers can't reach the game: Go live warns.
+    pub virtual_pads: bool,
 }
 
 /// One of the host's own controllers.
@@ -491,6 +505,42 @@ pub struct SessionView {
     pub host_controller_problem: Option<String>,
 }
 
+/// A driver the app relies on (M10a; Settings → Drivers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum DriverName {
+    /// Virtual controllers: guests' controllers reach the host's game.
+    Vigembus,
+    /// Hides the host's own controller from games, so it can play a seat.
+    Hidhide,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum DriverState {
+    /// Installed and working.
+    Ready,
+    /// Installed, but not working yet: Windows needs a restart.
+    NeedsRestart,
+    /// HidHide's configuration window holds it.
+    Busy,
+    #[default]
+    Missing,
+}
+
+/// One driver in [`Command::GetDrivers`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DriverView {
+    pub driver: DriverName,
+    pub state: DriverState,
+    /// Its installer ships with this build (Install can run it).
+    pub installer: bool,
+}
+
 /// The host's keys for answering requests from inside a game (M8), such as
 /// "Ctrl+Alt+Shift+Y".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -578,6 +628,7 @@ pub enum Response {
     Sources(SourceList),
     Shortcuts { shortcuts: Vec<ShortcutView> },
     Network(NetworkView),
+    Drivers { drivers: Vec<DriverView> },
     Done,
 }
 
@@ -628,6 +679,11 @@ impl fmt::Debug for Command {
             Self::SetNetwork { relay } => {
                 f.debug_struct("SetNetwork").field("relay", relay).finish()
             }
+            Self::GetDrivers => f.write_str("GetDrivers"),
+            Self::InstallDriver { driver } => f
+                .debug_struct("InstallDriver")
+                .field("driver", driver)
+                .finish(),
             Self::ListSources => f.write_str("ListSources"),
             Self::GoLive {
                 room,
@@ -704,6 +760,9 @@ impl fmt::Debug for Response {
                 .field("shortcuts", &shortcuts.len())
                 .finish(),
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
+            Self::Drivers { drivers } => {
+                f.debug_struct("Drivers").field("drivers", drivers).finish()
+            }
             Self::Done => f.write_str("Done"),
         }
     }
@@ -753,6 +812,20 @@ pub struct MemberView {
     pub name: String,
     pub is_owner: bool,
     pub link: MemberLink,
+    /// Their Couch Co-App can't talk to ours (another wire revision): one
+    /// of us needs to update. `None` once we talk again.
+    pub other_version: Option<OtherVersion>,
+}
+
+/// Another member's build, when it can't talk to ours (M10a).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OtherVersion {
+    /// Such as "0.9.0".
+    pub app_version: String,
+    /// Theirs is the newer one, so we need to update; otherwise they do.
+    pub newer: bool,
 }
 
 /// What an invite leads to. Anyone can make up an invite, so its name is
@@ -900,9 +973,27 @@ pub enum EngineError {
     Shortcut(#[from] ShortcutError),
     #[error("that relay address won't work: {0}")]
     InvalidRelay(String),
+    #[error("the driver wasn't installed: {0}")]
+    DriverInstall(String),
+    /// The other side's Couch Co-App can't talk to ours (M10a).
+    #[error("{}", other_version_text(app_version, *newer))]
+    OtherVersion { app_version: String, newer: bool },
     /// Capture, encoding or the viewer window failed; the text says how.
     #[error("{0}")]
     Media(String),
+}
+
+fn other_version_text(app_version: &str, newer: bool) -> String {
+    let ours = env!("CARGO_PKG_VERSION");
+    if newer {
+        format!(
+            "the room's owner runs Couch Co-App {app_version}, newer than yours ({ours}); install the new version to join"
+        )
+    } else {
+        format!(
+            "the room's owner runs Couch Co-App {app_version}, older than yours ({ours}); they need to install the new version first"
+        )
+    }
 }
 
 /// How the engine runs. Tests shorten the timings and turn relays off.
@@ -1039,6 +1130,8 @@ pub struct Engine {
     /// Held while the shortcut keys are read, changed and written, so two
     /// changes at once can't lose one.
     shortcuts_edit: Mutex<()>,
+    /// A driver's setup is running ([`Command::InstallDriver`]).
+    installing_driver: AtomicBool,
     /// Held while this engine runs; see [`lock_profile`].
     _lock: std::fs::File,
 }
@@ -1068,7 +1161,27 @@ impl Engine {
             panic,
             relay_in_use,
             shortcuts_edit: Mutex::new(()),
+            installing_driver: AtomicBool::new(false),
             _lock: lock,
+        })
+    }
+
+    /// Every driver's state, read off the async runtime (HidHide's may wait
+    /// up to a second for its control device).
+    async fn drivers(&self) -> Result<Response, EngineError> {
+        let backend = self.backend.clone();
+        let drivers = tokio::task::spawn_blocking(move || backend.drivers())
+            .await
+            .map_err(|_| EngineError::Stopped)?;
+        Ok(Response::Drivers {
+            drivers: drivers
+                .into_iter()
+                .map(|(driver, state, installer)| DriverView {
+                    driver,
+                    state,
+                    installer,
+                })
+                .collect(),
         })
     }
 
@@ -1215,8 +1328,11 @@ impl Engine {
             }
             Command::ListSources => {
                 let backend = self.backend.clone();
-                let (sources, controllers, host_controllers, hiding) =
+                let (sources, controllers, host_controllers, hiding, virtual_pads) =
                     tokio::task::spawn_blocking(move || {
+                        // ViGEmBus only: HidHide's state is read below, and
+                        // reading it twice could wait twice.
+                        let virtual_pads = backend.virtual_pads();
                         let host_controllers = match backend.local_pads().map(|p| p.list()) {
                             Some(Ok(list)) => list,
                             Some(Err(e)) => {
@@ -1230,6 +1346,7 @@ impl Engine {
                             backend.controllers(),
                             host_controllers,
                             backend.hiding(),
+                            virtual_pads,
                         )
                     })
                     .await
@@ -1273,7 +1390,29 @@ impl Engine {
                         pipeline::Hiding::Ready => HidingView::Ready,
                         pipeline::Hiding::Busy => HidingView::Busy,
                     },
+                    virtual_pads,
                 }))
+            }
+            Command::GetDrivers => self.drivers().await,
+            Command::InstallDriver { driver } => {
+                // One setup at a time: a second, started from a reopened
+                // Settings, would fail in the driver's installer.
+                if self.installing_driver.swap(true, Ordering::SeqCst) {
+                    return Err(EngineError::Refused(
+                        "a driver's setup is already running; finish it first",
+                    ));
+                }
+                let backend = self.backend.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || backend.install_driver(driver)).await;
+                self.installing_driver.store(false, Ordering::SeqCst);
+                let result = result.map_err(|_| EngineError::Stopped)?;
+                if let Err(why) = result {
+                    tracing::warn!(?driver, "installing a driver: {why}");
+                    return Err(EngineError::DriverInstall(why));
+                }
+                tracing::info!(?driver, "a driver's installer finished");
+                self.drivers().await
             }
             Command::GoLive {
                 source: SourceChoice::Window { ref id },
@@ -1402,6 +1541,7 @@ mod tests {
                 controllers: 0,
                 host_controllers: Vec::new(),
                 hiding: HidingView::NotInstalled,
+                virtual_pads: true,
             })
         );
         assert!(!list.contains("Bank"), "{list}");
@@ -1518,6 +1658,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store::shortcuts(&data), Shortcuts::default());
+        engine.shutdown().await;
+    }
+
+    /// Reads the drivers' states on this machine; installs nothing.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn both_drivers_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(dir.path()).await;
+        let Response::Drivers { drivers } = engine.handle(Command::GetDrivers).await.unwrap()
+        else {
+            panic!("expected the drivers");
+        };
+        assert_eq!(
+            drivers.iter().map(|d| d.driver).collect::<Vec<_>>(),
+            [DriverName::Vigembus, DriverName::Hidhide]
+        );
         engine.shutdown().await;
     }
 

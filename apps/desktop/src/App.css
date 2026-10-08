@@ -1290,3 +1290,33 @@ kbd.waiting {
 .settings-row .hint {
   flex: 1;
 }
+
+/* A member whose Couch Co-App can't talk to ours (M10a). */
+.member .link-label.version {
+  color: var(--warn);
+}
+
+/* Settings → Drivers. */
+.driver {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-quiet);
+}
+
+.driver > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.driver-state.ready {
+  color: var(--link-direct);
+}
+
+.driver-state.missing,
+.driver-state.needsRestart {
+  color: var(--warn);
+}

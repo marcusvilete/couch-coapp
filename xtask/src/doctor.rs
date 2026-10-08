@@ -51,6 +51,20 @@ pub fn run(root: &Path) -> ExitCode {
         };
         checks.require(dep.name.split(' ').next().unwrap_or(dep.name), result);
     }
+    for driver in deps::DRIVERS {
+        let result = if deps::driver_fetched(root, driver) {
+            Ok(format!("third_party/drivers/{}", driver.staged_as))
+        } else {
+            Err("missing or not the pinned version; run `cargo xtask fetch-deps` (the installer bundles it)".into())
+        };
+        checks.recommend(
+            &format!(
+                "{} installer",
+                driver.name.split(' ').next().unwrap_or(driver.name)
+            ),
+            result,
+        );
+    }
     checks.require("FFmpeg license", ffmpeg_license(root));
     checks.recommend("Staged DLLs", staged_dlls(root));
     checks.require("cargo-deny", output_of("cargo", &["deny", "--version"]));

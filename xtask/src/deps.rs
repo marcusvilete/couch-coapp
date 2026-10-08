@@ -48,6 +48,113 @@ pub const DEPS: &[Dep] = &[
     },
 ];
 
+/// A driver the installer offers (M10a): its official installer, pinned like
+/// the archives above but used as it is, not extracted.
+pub struct Driver {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    /// Its name in `third_party/drivers/` and next to the app (`drivers/`),
+    /// where the engine and the installer's hooks look for it.
+    pub staged_as: &'static str,
+    /// Its licence text, kept in the repository (`apps/desktop/src-tauri/
+    /// drivers/`), shipped beside it.
+    pub license: &'static str,
+}
+
+pub const DRIVERS: &[Driver] = &[
+    Driver {
+        name: "ViGEmBus 1.22.0 (BSD-3-Clause)",
+        url: "https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe",
+        sha256: "89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a",
+        staged_as: "vigembus-setup.exe",
+        license: "ViGEmBus-LICENSE.txt",
+    },
+    Driver {
+        name: "HidHide 1.5.230 (MIT)",
+        url: "https://github.com/nefarius/HidHide/releases/download/v1.5.230.0/HidHide_1.5.230_x64.exe",
+        sha256: "f4bbbcb82e6258641b887c74bc81c4c5f66e4aa811808dfc304347687b7605f6",
+        staged_as: "hidhide-setup.exe",
+        license: "HidHide-LICENSE.txt",
+    },
+];
+
+/// Where the drivers' licence texts live in the repository.
+fn driver_licenses(root: &Path) -> PathBuf {
+    root.join("apps/desktop/src-tauri/drivers")
+}
+
+/// True when the driver's installer is downloaded at the pinned version.
+pub fn driver_fetched(root: &Path, driver: &Driver) -> bool {
+    let path = third_party(root).join("drivers").join(driver.staged_as);
+    path.exists() && sha256_file(&path).is_ok_and(|h| h == driver.sha256)
+}
+
+fn fetch_drivers(root: &Path) -> anyhow::Result<()> {
+    let dir = third_party(root).join("drivers");
+    fs::create_dir_all(&dir)?;
+    for driver in DRIVERS {
+        if driver_fetched(root, driver) {
+            println!("{}: up to date", driver.name);
+            continue;
+        }
+        let path = dir.join(driver.staged_as);
+        println!("{}: downloading {}", driver.name, driver.url);
+        run(Command::new("curl")
+            .args([
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--output",
+            ])
+            .arg(&path)
+            .arg(driver.url))?;
+        let actual = sha256_file(&path)?;
+        if actual != driver.sha256 {
+            fs::remove_file(&path)?;
+            bail!(
+                "{}: SHA-256 mismatch (expected {}, got {actual})",
+                driver.name,
+                driver.sha256
+            );
+        }
+        println!("{}: saved to {}", driver.name, path.display());
+    }
+    Ok(())
+}
+
+/// Copies the drivers' installers and licences next to the built app
+/// (`target/<profile>/drivers/`), where Settings → Drivers and the installer
+/// find them.
+fn stage_drivers(root: &Path, target: &Path) -> anyhow::Result<()> {
+    if !DRIVERS.iter().all(|d| driver_fetched(root, d)) {
+        bail!("driver installers are missing; run `cargo xtask fetch-deps` first");
+    }
+    for profile in ["debug", "release"] {
+        let dir = target.join(profile).join("drivers");
+        fs::create_dir_all(&dir)?;
+        for driver in DRIVERS {
+            for (from, name) in [
+                (
+                    third_party(root).join("drivers").join(driver.staged_as),
+                    driver.staged_as,
+                ),
+                (driver_licenses(root).join(driver.license), driver.license),
+            ] {
+                let dest = dir.join(name);
+                if same_file_contents_likely(&from, &dest) {
+                    continue;
+                }
+                fs::copy(&from, &dest)
+                    .with_context(|| format!("copying {} to {}", from.display(), dest.display()))?;
+            }
+        }
+    }
+    println!("{} driver installer(s) staged", DRIVERS.len());
+    Ok(())
+}
+
 const PIN_FILE: &str = ".couch-pin";
 
 pub fn third_party(root: &Path) -> PathBuf {
@@ -123,7 +230,7 @@ pub fn fetch(root: &Path) -> anyhow::Result<()> {
         }
         println!("{}: installed to {}", dep.name, dest.display());
     }
-    Ok(())
+    fetch_drivers(root)
 }
 
 /// The runtime DLLs of every dependency.
@@ -183,7 +290,7 @@ pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
         target.display(),
         placed
     );
-    Ok(())
+    stage_drivers(root, &target)
 }
 
 fn same_file_contents_likely(a: &Path, b: &Path) -> bool {

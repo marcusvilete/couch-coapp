@@ -39,4 +39,8 @@ pub enum NetError {
     /// A peer that sends `Alive` went silent for the silent limit.
     #[error("the peer went silent")]
     TimedOut,
+    /// The peer's wire revision (`Hello::proto_minor`) isn't ours: builds
+    /// of different revisions can't talk ([`couch_proto::PROTOCOL_MINOR`]).
+    #[error("the peer runs Couch Co-App {app_version} (wire revision {minor})")]
+    Incompatible { minor: u16, app_version: String },
 }

@@ -16,6 +16,7 @@ The wire protocol between room members, and the pipe between the main process an
 
 - ALPN `couch-coapp/0` until the first public release, then `/1`. Incompatible changes need a new ALPN.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 1). Until the first public release, payloads change in place, so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. After the first public release, minors interoperate again through `features`.
 - **Released payloads are frozen.** Extend the protocol by adding message types, never by changing an existing payload. Decoders reject trailing bytes, so an accidental change fails loudly.
 
 ## Control-stream envelope
@@ -393,7 +394,7 @@ While nobody watches (no capture runs), the host checks once a second.
 | 1 | `admission_failed` | Wrong password, or the check didn't finish |
 | 2 | `banned` | The owner banned this member |
 | 3 | `duplicate` | Another connection between the same pair and room is kept |
-| 4 | `version` | An unknown must-understand message |
+| 4 | `version` | An unknown must-understand message, or another wire revision in `Hello` (M10a) |
 | 5 | `rate_limited` | Too many failed checks; try later |
 | 6 | `room_full` | The room has 12 members |
 | 7 | `left_room` | The sender left the room |

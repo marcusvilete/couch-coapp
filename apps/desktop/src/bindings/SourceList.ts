@@ -18,4 +18,9 @@ hostControllers: Array<HostController>,
 /**
  * Whether a controller can be hidden from games (HidHide).
  */
-hiding: HidingView, };
+hiding: HidingView, 
+/**
+ * Whether virtual controllers can be plugged in (ViGEmBus). Without
+ * them, guests' controllers can't reach the game: Go live warns.
+ */
+virtualPads: boolean, };

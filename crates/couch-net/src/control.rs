@@ -148,8 +148,42 @@ pub async fn open(conn: &Connection) -> Result<(ControlSender, ControlReceiver, 
     let mut receiver = ControlReceiver::new(recv);
     sender.send(&hello()).await?;
     let theirs = expect_hello(&mut receiver).await?;
+    compatible(&theirs)?;
     Ok((sender, receiver, theirs))
 }
+
+/// Builds of different wire revisions can't talk (until the first public
+/// release, payloads change in place). The caller closes the connection
+/// with `close_code::VERSION`.
+fn compatible(theirs: &Hello) -> Result<(), NetError> {
+    if theirs.proto_minor == PROTOCOL_MINOR {
+        return Ok(());
+    }
+    Err(NetError::Incompatible {
+        minor: theirs.proto_minor,
+        app_version: shown_version(&theirs.app_version),
+    })
+}
+
+/// A peer's `app_version`, fit to log and show: anyone can dial us and
+/// send any text up to a frame's size, so only what a version looks like
+/// is kept (letters, digits, `.`, `+`, `-`), at most 32 of them.
+pub fn shown_version(raw: &str) -> String {
+    let clean: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+        .take(32)
+        .collect();
+    if clean.is_empty() {
+        "an unknown version".into()
+    } else {
+        clean
+    }
+}
+
+/// How long an acceptor that found the dialer's revision different waits
+/// for it to read our `Hello` and close: then both sides know who is newer.
+const MISMATCH_LINGER: Duration = Duration::from_secs(2);
 
 /// Acceptor side: accepts the control stream and exchanges Hello.
 pub async fn accept(
@@ -167,5 +201,12 @@ pub async fn accept(
     let mut receiver = ControlReceiver::new(recv);
     let theirs = expect_hello(&mut receiver).await?;
     sender.send(&hello()).await?;
+    if let Err(e) = compatible(&theirs) {
+        // Ours reaches the dialer, which closes on reading it; an older
+        // build that doesn't check is closed when the wait ends.
+        let _ = sender.stream.finish();
+        let _ = tokio::time::timeout(MISMATCH_LINGER, conn.closed()).await;
+        return Err(e);
+    }
     Ok((sender, receiver, theirs))
 }

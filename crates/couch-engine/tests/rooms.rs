@@ -294,6 +294,111 @@ async fn three_members_join_and_see_each_other() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// A member's identity key, as its profile keeps it (the tests' secret
+/// store doesn't seal it).
+fn secret_key(m: &Member) -> couch_net::SecretKey {
+    let bytes = std::fs::read(m.dir.path().join("profiles/test/identity.key")).unwrap();
+    couch_net::SecretKey::from_bytes(&bytes.try_into().expect("32 bytes"))
+}
+
+/// Dials `to` as `key` with another wire revision (an older or newer
+/// build), reads its `Hello` and closes, as such a build would.
+async fn dial_with_another_revision(
+    key: couch_net::SecretKey,
+    to: &Member,
+    to_key: couch_net::SecretKey,
+) {
+    use couch_proto::control::{ControlMessage, Decoded, Hello};
+
+    let endpoint = couch_net::endpoint::bind(couch_net::endpoint::EndpointOptions::new(
+        key,
+        RelayChoice::Disabled,
+    ))
+    .await
+    .unwrap();
+    let target = couch_net::EndpointAddr::new(to_key.public())
+        .with_ip_addr(std::net::SocketAddr::from(([127, 0, 0, 1], to.port)));
+    let conn = endpoint.connect(target, couch_proto::ALPN).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    let mut hello = Vec::new();
+    ControlMessage::Hello(Hello {
+        proto_minor: couch_proto::PROTOCOL_MINOR + 1,
+        app_version: "9.9.9\n[forged]".into(),
+        features: 0,
+    })
+    .encode(&mut hello)
+    .unwrap();
+    send.write_all(&hello).await.unwrap();
+    let mut buf = Vec::new();
+    loop {
+        if let Some((frame, _)) = couch_proto::envelope::decode(&buf).unwrap() {
+            assert!(matches!(
+                ControlMessage::from_frame(&frame).unwrap(),
+                Decoded::Message(ControlMessage::Hello(_))
+            ));
+            break;
+        }
+        let chunk = recv
+            .read_chunk(64 * 1024)
+            .await
+            .unwrap()
+            .expect("its Hello");
+        buf.extend_from_slice(&chunk);
+    }
+    conn.close(4u32.into(), b"version");
+    endpoint.close().await;
+}
+
+/// M10a: a member whose build has another wire revision is refused at
+/// `Hello`, and the others' member list says so until a connection with
+/// it works again. A stranger doing the same leaves nothing.
+#[tokio::test]
+async fn another_version_is_shown_for_a_member_until_it_updates() {
+    let mut a = Member::new("Ana").await;
+    let mut b = Member::new("Bia").await;
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+    b.join(&invite, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+    let (a_key, b_key) = (secret_key(&a), secret_key(&b));
+
+    // A stranger with another version: refused, and nothing to show.
+    dial_with_another_revision(couch_net::SecretKey::generate(), &a, a_key.clone()).await;
+
+    // Bia's old install dials Ana.
+    b.stop().await;
+    dial_with_another_revision(b_key, &a, a_key).await;
+    a.wait_for(&room, "Bia shown with another version", |v| {
+        v.is_some_and(|v| {
+            v.members.iter().any(|m| {
+                m.name == "Bia"
+                    && m.other_version.as_ref().is_some_and(|o| {
+                        // Cleaned: only what a version looks like.
+                        o.newer && o.app_version == "9.9.9forged"
+                    })
+            })
+        })
+    })
+    .await;
+    let view = a.room(&room).await.unwrap();
+    assert_eq!(view.members.len(), 2, "the stranger is nowhere");
+    assert!(
+        view.members
+            .iter()
+            .filter(|m| m.name != "Bia")
+            .all(|m| m.other_version.is_none())
+    );
+
+    // Bia updates (her real app comes back): the line goes.
+    b.restart().await;
+    a.wait_connected(&room, &[&b], Some(2)).await;
+    a.wait_for(&room, "the line gone", |v| {
+        v.is_some_and(|v| v.members.iter().all(|m| m.other_version.is_none()))
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
 #[tokio::test]
 async fn only_the_owner_makes_invites() {
     let (mut a, mut b, mut c, room) = three().await;

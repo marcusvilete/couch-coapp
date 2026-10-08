@@ -1,6 +1,6 @@
 ---
 name: app-manual-run
-description: Set up and read a manual test of the Couch Co-App desktop app, on one PC with several profiles (the default profile plus alice, bob and carol) or on two PCs with the guest package: starting them, where every log is, what one PC can and can't show (games grab the guest's physical controller; keyboard and mouse never reach the game), how to tell a stream problem from a game's choice with xinput-watch.ps1, checking the viewer's HUD without a session, two-PC setup, checklists per area and traps already met, and what to ask the user to try. Use when asking the user to try the app (going live, watching, passing control, the panic key, games, two PCs), when the user reports something from such a run, or when reading its logs.
+description: Set up and read a manual test of the Couch Co-App desktop app, on one PC with several profiles (the default profile plus alice, bob and carol) or on two PCs with the installer (scripts/build-installer.ps1): starting them, where every log is, what one PC can and can't show (games grab the guest's physical controller; keyboard and mouse never reach the game), how to tell a stream problem from a game's choice with xinput-watch.ps1, checking the viewer's HUD without a session, two-PC setup, checklists per area and traps already met, and what to ask the user to try. Use when asking the user to try the app (going live, watching, passing control, the panic key, games, two PCs), when the user reports something from such a run, or when reading its logs.
 ---
 
 # A manual run of the app on one PC
@@ -112,7 +112,7 @@ Needs HidHide installed on the host (administrator, then a restart; installed on
   - **Shortcuts:** Change waits for a key (Esc cancels; Ctrl, Alt and Shift needn't be held, and are ignored). A refused key says why under its row ("Ctrl+Alt+Shift+P already does this: …", "that key can't be used", "only F1 to F12 (but F4)"). Default and Reset all put keys back. Saved in the profile's `shortcuts.json`. The panic key changes from the next Go live (the host panel's reminder names the key in use); the stream window's keys from the next window opened (its bar's hint names them).
   - **Network:** iroh's public relays (the default) or My relay with a URL (https; `http://localhost…` for a local `iroh-relay --dev`). Saved in `network.json`; "Applies when the app restarts" with Restart now (asks once more while streaming or watching). The line under it says which relay we're connected through. A typo in the URL is refused at Save. To try the production endpoint shape on one PC, give a profile iroh's own relay as "My relay" (the host shown in the status line, as `https://…`): it then runs without iroh's address lookup, and must still meet the others.
 - **Keys are checked within one profile only.** On one PC, a viewer profile's chord set to the hosting profile's panic key is swallowed by the host's hook and presses the panic key. Not a bug (on two PCs they never meet); keep them apart when testing.
-- **Restart now** shows a "Restarting Couch Co-App…" screen with a spinner, goes through the normal exit (the rooms hear we go; a second or two), then starts the same profile again, which opens with the splash; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the guest package): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`import.meta.env.DEV`). Pressing it under `tauri dev` once ended both, leaving no app running.
+- **Restart now** shows a "Restarting Couch Co-App…" screen with a spinner, goes through the normal exit (the rooms hear we go; a second or two), then starts the same profile again, which opens with the splash; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the installed app): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`import.meta.env.DEV`). Pressing it under `tauri dev` once ended both, leaving no app running.
 
 ## The host overlay (M8): what to expect
 
@@ -147,16 +147,18 @@ The user has a second PC on their home network. Suggest a two-PC run after any c
 
 ### Setup
 
-- **Roles.** This PC hosts: it has ViGEmBus, the games and the dev build (`npm run tauri dev`). The other PC is the guest and runs the release package.
-- **The package.**
-  - `.\scripts\pack-guest.ps1` builds the release app and zips it with the stream window and the DLLs into `target\guest\couch-coapp.zip`; `npx --yes http-server target\guest -p 8000` serves it.
-  - Run the script without redirecting its stderr (`2>&1` or `*>&1` with `$ErrorActionPreference = 'Stop'` aborts on Tauri's info lines).
-  - Rebuild it after every change the guest side runs (viewer, engine, UI). `BUILD.txt` names the commit; both sides must match.
-- **On the guest PC** (the script's header has the list):
-  - unblock the zip before extracting;
+- **Roles.** Usually this PC runs the dev build (`npm run tauri dev`) and the other PC the installed app; either may host.
+- **The installer** (M10a; it replaced the zipped guest package).
+  - `.\scripts\build-installer.ps1` builds it into `target\installer\` (the name carries the version and commit, `-dirty` with uncommitted changes); `npx --yes http-server target\installer -p 8000` serves it.
+  - Run the script without redirecting its stderr (`2>&1` or `*>&1` with `$ErrorActionPreference = 'Stop'` aborts on cargo's and Tauri's info lines).
+  - Rebuild it after every change the other PC runs. Both sides must have the same wire revision (`PROTOCOL_MINOR`), or the member list says "Needs update" / "Update yours".
+- **On the other PC:**
+  - run the installer; SmartScreen warns (unsigned until M10b): More info → Run anyway. On an administrator account Windows asks for administrator rights as it opens; then it asks: just me (`%LOCALAPPDATA%\Programs\Couch Co-App`) or everyone (Program Files);
+  - answer the driver questions (ViGEmBus is needed to host games for guests' controllers; HidHide to play a seat yourself); each runs its own setup with Windows' administrator prompt; HidHide needs a restart;
   - allow the app on private networks when the firewall asks;
-  - start `run.cmd`;
-  - paste the invite into the Join box (release builds don't register `couchco://`).
+  - invite links open the app (`couchco://` is registered); installing again replaces the app and keeps the profile's data.
+- **Its logs:** `desktop.log` (and `viewer.log`) in `%LOCALAPPDATA%\CouchCoApp\profiles\<profile>`. The app itself lives where the installer put it: `%LOCALAPPDATA%\Programs\Couch Co-App\` for just that user, `Program Files\Couch Co-App\` for everyone. Each Windows user keeps their own profiles either way.
+- **The dev build and the installed app share `couchco://`:** the dev build registers it for itself at each start, the installer for the installed app; links open whichever registered last.
 - **Controllers.** The guest's controller goes on the guest PC. On the host, for co-op games, either choose the host's controller in Go live (P2: hidden, it plays Controller 1, and the host reconnects it once) or keep none plugged in: otherwise the game sees it directly, gives it a player, and a guest's pad may not work (seen in Fling to the Finish in P1). Single-player games took the guest's pad either way.
 - **The link.** The stream window's HUD should say "Direct". "Relay" means the firewall or the network blocked the direct path.
 
@@ -183,7 +185,7 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
 ### Reading the results
 
 - **Logs.**
-  - The guest's app log is `desktop.log` next to `run.cmd`; its stream window's is `viewer.log` in `%LOCALAPPDATA%\CouchCoApp\profiles\<profile>` on that PC.
+  - The installed app's log is `desktop.log`, and its stream window's `viewer.log`, in `%LOCALAPPDATA%\CouchCoApp\profiles\<profile>` on that PC.
   - The host's (default profile) is the `npm run tauri dev` terminal.
   - Ask for the lines around the moment, naming what to look for (`seat status=`, `lost the host's connection`, `the stream window crashed`, `the peer went silent`).
 - **Traps already met** (not bugs):
@@ -196,5 +198,5 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
   - Seat order isn't XInput slot order: Windows numbers the slots itself. Tell seats apart by moving one pad at a time in `xinput-watch`.
   - A full-screen game ignoring the guest once (M5b): not seen since. On two PCs over the internet (M8) full screen worked, switched to from the guest too. If it comes back, run `xinput-watch.ps1` on the host to tell a game ignoring the pad from input not arriving.
   - A yellow border around the streamed window on a Windows 10 host: Windows draws it while capturing, and only Windows 11 lets us hide it. It isn't in the stream. (Before M8's fix, a Windows 10 host's every stream ended at its first viewer: "Toggling the capture border is not supported".)
-  - A guest package's empty `desktop.log`: an old `run.cmd` that saved only stderr; repack, or end its last line with `>> "%~dp0desktop.log" 2>&1`.
+  - "Needs update" / "Update yours" instead of a link in the member list: the two builds have different wire revisions (`PROTOCOL_MINOR`); install the same build on both.
 - **Record** each run in the milestone's results file ("Your run" row), and new observations the user wants kept in the polish backlog memory.

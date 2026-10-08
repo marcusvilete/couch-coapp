@@ -2,6 +2,9 @@
 // network (which relay to use, applied when the app restarts).
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState, type FormEvent } from "react";
+import type { DriverName } from "./bindings/DriverName";
+import type { DriverState } from "./bindings/DriverState";
+import type { DriverView } from "./bindings/DriverView";
 import type { NetworkView } from "./bindings/NetworkView";
 import type { RelaySetting } from "./bindings/RelaySetting";
 import type { ShortcutView } from "./bindings/ShortcutView";
@@ -10,7 +13,7 @@ import { overlaySettings, setOverlaySettings, type OverlaySettings } from "./ove
 import type { Busy } from "./sessions";
 import { Modal } from "./ui";
 
-export type SettingsSection = "shortcuts" | "overlay" | "network";
+export type SettingsSection = "shortcuts" | "overlay" | "network" | "drivers";
 
 export function SettingsDialog(props: { section: SettingsSection; busy: Busy; onClose: () => void }) {
   const [section, setSection] = useState<SettingsSection>(props.section);
@@ -36,6 +39,7 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
             ["shortcuts", "Shortcuts"],
             ["overlay", "Overlay"],
             ["network", "Network"],
+            ["drivers", "Drivers"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -53,6 +57,7 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
       {section === "shortcuts" && <ShortcutsSection onCapturing={setCapturing} />}
       {section === "overlay" && <OverlaySection />}
       {section === "network" && <NetworkSection busy={props.busy} onRestarting={setRestarting} />}
+      {section === "drivers" && <DriversSection />}
       {restarting && <Restarting />}
     </Modal>
   );
@@ -243,6 +248,86 @@ function OverlaySection() {
         keys still work. While a game running as administrator is in front, the keys don't reach Couch Co-App: answer in
         the app.
       </p>
+    </div>
+  );
+}
+
+// ---- Drivers ----
+
+const DRIVERS: Record<DriverName, { title: string; why: string }> = {
+  vigembus: {
+    title: "ViGEmBus: virtual controllers",
+    why: "Guests' controllers reach the games you host through it. Without it, guests can watch, and play only with keyboard and mouse.",
+  },
+  hidhide: {
+    title: "HidHide: hides your controller",
+    why: "Hides your own controller from games while you stream, so it plays through a seat and never takes a guest's place in co-op games. Without it you play outside the seats.",
+  },
+};
+
+const STATES: Record<DriverState, string> = {
+  ready: "Installed",
+  needsRestart: "Installed: restart Windows to finish",
+  busy: "Installed (its configuration window is open)",
+  missing: "Not installed",
+};
+
+function DriversSection() {
+  const [drivers, setDrivers] = useState<DriverView[] | null>(null);
+  const [installing, setInstalling] = useState<DriverName | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    request({ type: "getDrivers" }, "drivers")
+      .then((r) => setDrivers(r.drivers))
+      .catch((e) => setError(errorText(e)));
+  }, []);
+
+  const install = async (driver: DriverName) => {
+    setInstalling(driver);
+    setError(null);
+    try {
+      setDrivers((await request({ type: "installDriver", driver }, "drivers")).drivers);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setInstalling(null);
+    }
+  };
+
+  return (
+    <div className="form">
+      <p className="hint">
+        Two drivers make the most of Couch Co-App. Both are optional, free and open source; each installs with its own
+        setup and Windows asks for administrator rights.
+      </p>
+      {drivers?.map((d) => (
+        <div key={d.driver} className="driver">
+          <div>
+            <strong>{DRIVERS[d.driver].title}</strong>
+            <span className={`hint driver-state ${d.state}`}>{STATES[d.state]}</span>
+            <span className="hint">{DRIVERS[d.driver].why}</span>
+          </div>
+          {d.state === "missing" &&
+            (d.installer ? (
+              <button className="primary" disabled={installing != null} onClick={() => void install(d.driver)}>
+                {installing === d.driver ? "Installing…" : "Install"}
+              </button>
+            ) : (
+              <span className="hint">Its installer isn't in this build (cargo xtask stage-dlls).</span>
+            ))}
+        </div>
+      ))}
+      {installing && (
+        <p className="hint warn-text" role="status">
+          Its setup is open: follow it, and accept Windows' administrator prompt.
+        </p>
+      )}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

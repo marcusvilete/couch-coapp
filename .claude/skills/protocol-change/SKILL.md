@@ -47,9 +47,10 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
    - trailing bytes rejected;
    - for datagrams, a size check at extreme values, under 1100 bytes (as the receiver report and audio datagram tests do);
    - an unknown type is skipped or rejected according to its bit.
-5. **IPC:** bump `ipc::IPC_VERSION` on any IPC payload change, and handle the new kind in both `couch-viewer/src/pipe.rs` and `couch-cli/src/view.rs`. Logs and anything else go to stderr, never the viewer's stdout.
-6. **Docs:** update `docs/protocol.md` in the same change: the type table, the channel table or the IPC table, plus any rule the receiver enforces.
-7. **Verify:**
+5. **Wire revision:** until the first public release, bump `couch_proto::PROTOCOL_MINOR` (and its history line in `couch-proto/src/lib.rs`) with **every** change to what members exchange: a new or changed control, input, admission or room message, a datagram, a stream kind, a close code's meaning. Builds of different revisions refuse each other at `Hello` and the app says who needs to update; forgetting the bump makes mismatched installs fail in confusing ways. IPC alone doesn't need it (the viewer ships with the app).
+6. **IPC:** bump `ipc::IPC_VERSION` on any IPC payload change, and handle the new kind in both `couch-viewer/src/pipe.rs` and `couch-cli/src/view.rs`. Logs and anything else go to stderr, never the viewer's stdout.
+7. **Docs:** update `docs/protocol.md` in the same change: the type table, the channel table or the IPC table, plus any rule the receiver enforces.
+8. **Verify:**
    - `cargo test -p couch-proto -p couch-net`, plus clippy.
    - **Input:** run the `input-safety-checks` skill.
    - **Video or reports:** run the `rate-control-gates` skill.

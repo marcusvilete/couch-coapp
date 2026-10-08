@@ -30,7 +30,7 @@ use couch_input::{
 };
 use couch_media::{AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, clock::Clock};
 
-use crate::ScreenArea;
+use crate::{DriverName, DriverState, ScreenArea};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// A native window or screen handle (an `HWND` or `HMONITOR` on Windows).
@@ -233,6 +233,23 @@ pub trait Backend: Send + Sync + 'static {
     /// of what it holds. Returns how many keys and buttons were left held.
     fn release_left_input(&self) -> usize {
         0
+    }
+
+    /// Each driver's state (Settings → Drivers, Go live's warnings), and
+    /// whether its installer ships with this build. Elsewhere: none.
+    fn drivers(&self) -> Vec<(DriverName, DriverState, bool)> {
+        Vec::new()
+    }
+
+    /// Whether virtual controllers can be plugged in (ViGEmBus answers).
+    fn virtual_pads(&self) -> bool {
+        false
+    }
+
+    /// Runs `driver`'s shipped installer with Windows' administrator
+    /// prompt and waits for it. Blocks: call it off the async runtime.
+    fn install_driver(&self, _driver: DriverName) -> Result<(), String> {
+        Err("drivers can't be installed on this platform".into())
     }
 
     /// Where the host's overlay goes for `source`: the work area of the

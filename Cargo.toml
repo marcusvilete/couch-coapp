@@ -3,7 +3,10 @@ resolver = "3"
 members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+# The app's version, shown in the installer and to other members. Bump it
+# with each installer handed out, together with tauri.conf.json's and
+# apps/desktop/package.json's (scripts/build-installer.ps1 checks).
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false

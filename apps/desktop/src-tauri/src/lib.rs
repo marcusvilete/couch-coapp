@@ -32,13 +32,13 @@ fn restart_app(app: AppHandle) {
 }
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        // Plain text when logging to a file (scripts/profiles.ps1).
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let profile = Profile::from_env().unwrap_or_else(|e| fail(e));
+    // To the console at once in development. The release log file waits
+    // until we are the profile's only instance (below): a second launch, a
+    // clicked invite link, must not set aside the running one's log.
+    if cfg!(debug_assertions) {
+        start_logging(&profile);
+    }
     let mut context = tauri::generate_context!();
     if !profile.is_default() {
         // The single-instance lock is named after the identifier, so this
@@ -117,6 +117,9 @@ pub fn run() {
         .expect("error while building Couch Co-App");
 
     // Past `build`, we are this profile's only instance.
+    if !cfg!(debug_assertions) {
+        start_logging(&profile);
+    }
     tracing::info!(profile = profile.name(), data_dir = %profile.data_dir().display(), "starting");
     // With the relay chosen in Settings → Network.
     let options = EngineOptions::desktop(&profile);
@@ -140,6 +143,49 @@ pub fn run() {
         _ => {}
     });
 }
+
+/// The log: in development, the console (or the file `profiles.ps1` sends
+/// it to); in a release build, which has no console (an installed app),
+/// `desktop.log` in the profile's folder, beside the stream window's
+/// `viewer.log`. `RUST_LOG` overrides the level.
+fn start_logging(profile: &Profile) {
+    use tracing_subscriber::EnvFilter;
+
+    if cfg!(debug_assertions) {
+        tracing_subscriber::fmt()
+            // Plain text when logging to a file (scripts/profiles.ps1).
+            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+            .with_env_filter(EnvFilter::from_default_env())
+            .init();
+        return;
+    }
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("couch=info,iroh=warn"));
+    let dir = profile.data_dir();
+    let path = dir.join("desktop.log");
+    // One older log kept, so the file never grows without end.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_LIMIT) {
+        let _ = std::fs::rename(&path, dir.join("desktop.old.log"));
+    }
+    let file = std::fs::create_dir_all(dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+    });
+    match file {
+        Ok(file) => tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter(filter)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        // Without a log file, the app still runs.
+        Err(_) => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
+}
+
+/// `desktop.log` is set aside as `desktop.old.log` at start past this size.
+const LOG_LIMIT: u64 = 10 * 1024 * 1024;
 
 /// Hands invite links to the engine, which keeps them for the UI. Never
 /// logged: an invite is half of what lets someone in.

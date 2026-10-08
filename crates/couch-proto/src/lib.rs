@@ -30,6 +30,14 @@ pub mod session;
 /// Stays at `/0` until the first public release.
 pub const ALPN: &[u8] = b"couch-coapp/0";
 
-/// Minor protocol revision announced in [`control::Hello`]. Peers sharing the
-/// ALPN interoperate across minors by advertising features.
-pub const PROTOCOL_MINOR: u16 = 0;
+/// The wire revision announced in [`control::Hello`] (M10a).
+///
+/// Until the first public release, payloads change in place, so builds
+/// talk only to builds of the same revision: a peer with another one is
+/// refused right after `Hello`, and the app says who needs to update.
+/// **Bump it with every change to what members exchange** (the
+/// `protocol-change` skill). After the release, it goes back to meaning a
+/// compatible revision, with differences advertised by feature bits.
+///
+/// 1: the first installer (0.8.0). Builds before it sent 0 and didn't check.
+pub const PROTOCOL_MINOR: u16 = 1;
