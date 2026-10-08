@@ -1077,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "couch-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "couch-codec-ffmpeg"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "couch-media",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "couch-codec-opus"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "couch-media",
  "couch-proto",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "couch-desktop"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "couch-engine",
  "serde",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "couch-engine"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "couch-codec-ffmpeg",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "couch-gamepad"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "couch-input",
  "couch-proto",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "couch-input"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bitflags 2.13.2",
  "couch-proto",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "couch-media"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "couch-net"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "couch-platform-win"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "couch-proto"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bitflags 2.13.2",
  "data-encoding",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "couch-room"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "couch-proto",
  "ed25519-dalek",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "couch-testkit"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1267,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "couch-viewer"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "couch-codec-ffmpeg",
@@ -8567,7 +8567,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "bindgen 0.73.2",

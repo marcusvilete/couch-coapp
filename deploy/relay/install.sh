@@ -76,15 +76,23 @@ if [[ ! -s /etc/iroh-relay/token.env ]]; then
 fi
 chmod 600 /etc/iroh-relay/token.env
 
-echo "== Service"
-install -m 644 "$HERE/iroh-relay.service" /etc/systemd/system/iroh-relay.service
-systemctl daemon-reload
-systemctl enable iroh-relay
-systemctl restart iroh-relay
-sleep 3
-systemctl --no-pager status iroh-relay || true
-
+# Before the service starts: it asks Let's Encrypt for a certificate at once,
+# which checks back on port 443.
 echo "== Firewall"
+# Oracle Cloud's Ubuntu images reject everything but SSH with iptables rules
+# (no ufw): open our ports just before their REJECT rule, and keep them
+# across reboots.
+if command -v netfilter-persistent >/dev/null && iptables -S INPUT | grep -q -- '-j REJECT'; then
+    for rule in "-p tcp --dport 80" "-p tcp --dport 443" "-p udp --dport 7842"; do
+        # shellcheck disable=SC2086
+        if ! iptables -C INPUT $rule -m state --state NEW -j ACCEPT 2>/dev/null; then
+            at=$(iptables -L INPUT --line-numbers | awk '/REJECT/ {print $1; exit}')
+            # shellcheck disable=SC2086
+            iptables -I INPUT "$at" $rule -m state --state NEW -j ACCEPT
+        fi
+    done
+    netfilter-persistent save
+fi
 if command -v ufw >/dev/null; then
     # Rules only: turning ufw on is left to you, so SSH can't be locked out by accident.
     ufw allow 22/tcp
@@ -93,5 +101,13 @@ if command -v ufw >/dev/null; then
     ufw allow 7842/udp
 fi
 echo "Open TCP 80 and 443 and UDP 7842 in your provider's firewall too (README.md)."
+
+echo "== Service"
+install -m 644 "$HERE/iroh-relay.service" /etc/systemd/system/iroh-relay.service
+systemctl daemon-reload
+systemctl enable iroh-relay
+systemctl restart iroh-relay
+sleep 3
+systemctl --no-pager status iroh-relay || true
 echo
 echo "Done. Check https://$HOSTNAME_/ in a browser, then README.md's first run."

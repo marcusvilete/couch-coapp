@@ -56,6 +56,32 @@ Your question before the plan: how do secrets stay out of git? The design is in 
 - **The app** shares `<invite_page>#<payload>` when the build has a page; otherwise `couchco://` links, as before. The Join box already took both.
 - **Hosting** is for later, on GitHub Pages or the server (its README).
 
+## Deployed (2026-10-08)
+
+**The server:**
+- **Where:** Oracle Cloud's free tier, a VM.Standard.E2.1.Micro (1 GB; Ampere A1 had no capacity), Ubuntu 24.04, named `couchrelay.duckdns.org` through DuckDNS.
+- **Installed with `install.sh`.** The build took a while on 1 GB, with swap.
+- **Certificate:** issued by Let's Encrypt on the first start (TLS-ALPN on 443), and reused after a restart.
+- **Listening on:** 80 (the captive-portal check), 443 (the relay) and 7842/UDP (QUIC address discovery).
+- **Noise in the log:** internet scanners show up within minutes as harmless errors (handshakes cut short, plain HTTP on 443).
+
+**Fixes found while deploying:**
+- `install.sh` opens Oracle's iptables rules, which reject everything but SSH and have no ufw.
+- It opens the firewall before the service starts, which asks for its certificate at once.
+- Port 80 is the captive-portal check only: certificates are checked on 443. The kit's comments said otherwise.
+
+**From this PC, relay-only, through the deployed relay** (`latency-probe --relay https://couchrelay.duckdns.org --relay-token … --relay-only`, 20 s):
+
+| | Result |
+|---|---|
+| Path | Relayed throughout; round trip to the server and back about 14 ms |
+| Video | 1176 frames at 60 fps, 2.0 Mbit/s (the app's relay cap); no lost packets or decode errors |
+| Clock to screen | p50 22.2 ms, p95 26.7 ms, max 217.6 ms (a single spike) |
+| Audio | 11 packets concealed, no underruns |
+| Without the token | The viewer never connected (timed out) |
+
+**The relay going away and coming back** (your test, with the 0.9.0 release build installed): you stopped the VM in Oracle's console, then started it again. The relay came back by itself at boot, with its saved certificate. The app's Settings → Network showed it connected again without restarting the app. The VM kept its public IP through the stop and start, so DuckDNS needed no update.
+
 ## Review
 
 A review subagent read the change. It found nothing high-severity. Each finding was checked against the code:

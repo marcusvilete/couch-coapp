@@ -25,7 +25,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M8 | Host overlay: requests and session notes over the game, answered with keys; a chime | done, your one-PC run included; also a fix for hosting on Windows 10 ([results](m8-results.md)) |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | later: friends found the latency great, so it is headroom (more viewers, 120 fps) |
 | M10a | An installer for testing with friends: the app, its stream window and libraries; ViGEmBus and HidHide offered, each optional; Settings → Drivers; "update needed" between builds that can't talk; a log file | done, your runs on both PCs included ([results](m10a-results.md)) |
-| M7 | Own relay (iroh-relay with an access token), the relay built into release builds, the https invite page, the deploy kit | built and tested on this PC; deploying it waits for a server and a name ([results](m7-results.md)) |
+| M7 | Own relay (iroh-relay with an access token), the relay built into release builds, the https invite page, the deploy kit | done: deployed on Oracle Cloud's free tier (`couchrelay.duckdns.org`), checked relay-only from this PC; release installers with it come next ([results](m7-results.md)) |
 | M10b | The public release: code signing, licence notices and the source offer, the fallback encoder, our relay deployed (M7's kit) | after M9 and M7 |
 | M11 | Updates: Tauri's updater, with the releases on GitHub (a public releases-only repository; the code can stay private) and an update signing key | very low priority; until then, new versions are installed by hand |
 

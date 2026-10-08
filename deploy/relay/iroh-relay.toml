@@ -2,8 +2,9 @@
 # (README.md). Copied to /etc/iroh-relay/iroh-relay.toml by install.sh.
 # Untested until there's a server: check it with the README's first run.
 
-# HTTP on port 80: Let's Encrypt's HTTP challenge and the captive-portal
-# check. Everything else is HTTPS.
+# HTTP on port 80: only the captive-portal check, which must be plain HTTP.
+# Everything else is HTTPS on 443, where Let's Encrypt also checks the name
+# (TLS-ALPN) before issuing the certificate.
 http_bind_addr = "[::]:80"
 
 # QUIC address discovery (UDP 7842): helps both ends find their public

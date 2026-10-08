@@ -45,8 +45,8 @@ Let's Encrypt needs a DNS name pointing at the server.
 
 1. **Prepare the server.** Create the VM with Debian 12 or Ubuntu 24.04, point the name at it, and wait until `ping <name>` answers from the server's address.
 2. **Open the ports** in the provider's firewall (its security list or group):
-   - TCP 80: Let's Encrypt and the captive-portal check;
-   - TCP 443: the relay;
+   - TCP 80: the captive-portal check (plain HTTP);
+   - TCP 443: the relay, and Let's Encrypt's certificate check (TLS-ALPN);
    - UDP 7842: QUIC address discovery.
 
    Keep SSH (TCP 22) open.
