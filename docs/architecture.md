@@ -23,7 +23,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | P3 | Settings: the shortcut editor (each shortcut to another key) and the relay (Settings → Network); the splash screen | done, one-PC run and Restart now in a release build included ([results](p3-results.md)) |
 | Polish | The full-screen re-check, with the internet test with friends | done: two PCs over the internet, a direct link; full screen worked, switched to remotely too ([M8 results](m8-results.md)) |
 | M8 | Host overlay: requests and session notes over the game, answered with keys; a chime | done, your one-PC run included; also a fix for hosting on Windows 10 ([results](m8-results.md)) |
-| M9 | Performance, in the order of the [Sunshine and Moonlight research](research/sunshine-moonlight.md): **M9a** the cheap fixes; **M9b** zero-copy on the host; **M9c** zero-copy on the viewer; **M9d** 120 fps and pacing | M9a done ([results](m9a-results.md)): AMD and Intel encoder options with fallbacks, a crash on any failed encoder open fixed, Wi-Fi media streaming mode, the decoder failing fast; the gates unchanged. M9b to M9d next |
+| M9 | Performance, in the order of the [Sunshine and Moonlight research](research/sunshine-moonlight.md): **M9a** the cheap fixes; **M9b** zero-copy on the host; **M9c** zero-copy on the viewer; **M9d** 120 fps and pacing | M9a done ([results](m9a-results.md)): AMD and Intel encoder options with fallbacks, a crash on any failed encoder open fixed, Wi-Fi media streaming mode, the decoder failing fast; the gates unchanged. M9b done ([results](m9b-results.md)): captured frames stay on the GPU into NVENC; seven viewers on this PC went from 40 to 58 fps and from 70 to 14 ms. M9c and M9d next |
 | M10a | An installer for testing with friends: the app, its stream window and libraries; ViGEmBus and HidHide offered, each optional; Settings → Drivers; "update needed" between builds that can't talk; a log file | done, your runs on both PCs included ([results](m10a-results.md)) |
 | M7 | Own relay (iroh-relay with an access token), the relay built into release builds, the https invite page, the deploy kit | done: deployed on Oracle Cloud's free tier (`couchrelay.duckdns.org`), checked relay-only from this PC; release installers (0.9.0) use it ([results](m7-results.md)) |
 | M10b | The public source release ([ADR 0009](adr/0009-source-only-releases.md)): the repository public; licence notices and FFmpeg's source with friends' installers; a guide to build the app and host your own relay. Optional: the fallback encoder, an outside review of the admission composition | done: the licence (GPL-3.0-only), the notices and FFmpeg's source with installers, Settings → About, the self-build and relay guides; public at [github.com/marcusvilete/couch-coapp](https://github.com/marcusvilete/couch-coapp), `main` protected (pull requests only) ([results](m10b-results.md)). The optional items remain open |
@@ -79,8 +79,8 @@ Rules that keep this layering useful:
 ## Data paths
 
 **Host, per frame.**
-1. A `Capturer` (Windows.Graphics.Capture) delivers a BGRA frame stamped with QPC time.
-2. Each viewer's `VideoEncoder` (through FFmpeg: NVIDIA's NVENC first, then AMD's AMF, Intel's Quick Sync or Windows' Media Foundation; one encoder per viewer) produces an H.264 access unit.
+1. A `Capturer` (Windows.Graphics.Capture) delivers a BGRA frame stamped with QPC time. Since M9b it stays on the GPU: copied, GPU to GPU, into a texture pool on the capture's D3D11 device (`couch_platform_win::gpu_frames`) and handed on as a `GpuFrame`, which every viewer's mailbox shares.
+2. Each viewer's `VideoEncoder` (through FFmpeg: NVIDIA's NVENC first, then AMD's AMF, Intel's Quick Sync or Windows' Media Foundation; one encoder per viewer) produces an H.264 access unit. NVENC reads the texture itself (`AV_PIX_FMT_D3D11` frames on the capture's device). When the encoder can't read them (another vendor's, or NVENC on another GPU than the capture's), the capture switches to frames in memory for the rest of the stream, as before M9b. An encoder reading GPU frames reopens when the pool changes (a new device or size), and keeps its pool's textures alive until it closes.
 3. That viewer's `VideoSender` writes it to the current epoch stream.
 4. A rate controller per viewer adjusts its encoder's bitrate from the transport-neutral `FeedbackSnapshot`.
 
@@ -103,7 +103,7 @@ Rules that keep this layering useful:
 4. On the host, `couch_input::router` lets input through only from the seat's holder, with the current seat epoch and permissions, and keyboard and mouse only while the game is in front.
 5. Accepted input drives the ViGEm pad or `SendInput`. Rumble goes back as a datagram.
 
-The first versions copy frames through CPU memory on both ends. Zero-copy GPU paths arrive in M9 behind the same traits, which is why `EncoderInput` and `DecodedFrame` are non-exhaustive enums.
+The host keeps frames on the GPU since M9b (`EncoderInput::Gpu`); the viewer still copies decoded frames through CPU memory until M9c (`DecodedFrame` is non-exhaustive for that).
 
 ## Measuring latency
 

@@ -9,6 +9,11 @@ use crate::{
 pub trait Capturer: Send {
     /// Waits up to `timeout` for the next event. `Ok(None)` means the timeout passed.
     fn next_event(&mut self, timeout: Duration) -> Result<Option<CaptureEvent>, MediaError>;
+
+    /// From now on, deliver frames in memory: no encoder reads them on the
+    /// GPU, so keeping them there only adds a copy back (M9b). A capturer
+    /// whose frames are in memory already ignores it.
+    fn frames_in_memory(&mut self) {}
 }
 
 pub trait VideoEncoder: Send {

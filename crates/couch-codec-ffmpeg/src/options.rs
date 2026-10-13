@@ -83,7 +83,7 @@ fn unused_keys(dict: *const ffi::AVDictionary) -> Vec<String> {
 }
 
 /// FFmpeg's description of an error code.
-fn av_error(code: i32) -> String {
+pub(crate) fn av_error(code: i32) -> String {
     let mut buf = [0 as c_char; 128];
     // SAFETY: the buffer and its length match.
     unsafe { ffi::av_strerror(code, buf.as_mut_ptr(), buf.len()) };

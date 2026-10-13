@@ -16,7 +16,7 @@ use couch_media::{
     VideoEncoder, barcode, clock::LATENCY_CLOCK_TITLE,
 };
 use couch_platform_win::{
-    capture::{CaptureOptions, CaptureSource, WgcCapturer},
+    capture::{CaptureOptions, CaptureSource, FrameOutput, WgcCapturer},
     clock,
 };
 
@@ -42,12 +42,13 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         CaptureOptions {
             min_interval: Duration::from_secs(1) / args.fps,
             cursor: false,
+            output: FrameOutput::Cpu,
         },
     )
     .with_context(|| format!("starting capture of {source:?}"))?;
 
     let first = match capturer.next_event(Duration::from_secs(5))? {
-        Some(CaptureEvent::Frame(frame)) => frame.cropped_to_even(),
+        Some(CaptureEvent::Frame(frame)) => frame.cpu()?.cropped_to_even(),
         Some(CaptureEvent::SourceClosed) => bail!("the source closed"),
         None => bail!("no frame within 5 s (is the window visible and changing?)"),
     };
@@ -87,7 +88,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         let frame = match pending.take() {
             Some(frame) => frame,
             None => match capturer.next_event(Duration::from_millis(100))? {
-                Some(CaptureEvent::Frame(frame)) => frame.cropped_to_even(),
+                Some(CaptureEvent::Frame(frame)) => frame.cpu()?.cropped_to_even(),
                 Some(CaptureEvent::SourceClosed) => {
                     println!("source closed");
                     break;

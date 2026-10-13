@@ -2,14 +2,18 @@
 # control keeps each viewer's stream up (docs/m5a-results.md, "Viewers on this PC").
 #   .\scripts\viewers.ps1                 # 4 viewers, 20 s
 #   .\scripts\viewers.ps1 -Viewers 7      # the most a session takes
+#   .\scripts\viewers.ps1 -Screen         # capture the primary screen instead (M9b: GPU frames)
+#   .\scripts\viewers.ps1 -Screen -CopyThroughMemory   # the same, frames through memory as before M9b
 # Streams a 1080p60 test pattern with `couch-cli host` and starts that many `couch-cli view`
 # windows (small, in a grid), then prints each viewer's fps, capture-to-present latency and
 # received bitrate, and the host's last per-viewer line (bitrate, target, slowest encode).
+# The test pattern is made in memory, so only -Screen measures the capture's GPU path; the
+# viewer windows on that screen keep it changing every frame.
 # On one PC the GPU also decodes every stream, so this overstates a real host's load.
 # Needs the release build: cargo build --release -p couch-cli -p couch-viewer
 # Logs go to %TEMP%\couch-viewers-<N>. Leave the machine alone while it runs.
 
-param([int]$Viewers = 4, [int]$Secs = 20)
+param([int]$Viewers = 4, [int]$Secs = 20, [switch]$Screen, [switch]$CopyThroughMemory)
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path .\target\release\couch-cli.exe)) {
     throw 'No release build: run cargo build --release -p couch-cli -p couch-viewer from the repo root.'
@@ -29,7 +33,11 @@ function Start-Hidden($argline, $out) {
 }
 
 $hostOut = Join-Path $dir 'host.txt'
-$h = Start-Hidden "host --source testpattern --pattern-size 1920 1080 --fps 60 --relay none --max-viewers 7 --audio off" $hostOut
+$source = if ($Screen) { '--source monitor' } else { '--source testpattern --pattern-size 1920 1080' }
+# The host inherits this process's environment.
+$env:COUCH_HOST_ZERO_COPY = if ($CopyThroughMemory) { '0' } else { $null }
+$h = Start-Hidden "host $source --fps 60 --relay none --max-viewers 7 --audio off" $hostOut
+$env:COUCH_HOST_ZERO_COPY = $null
 $ticket = $null
 for ($i = 0; $i -lt 100 -and -not $ticket; $i++) {
     Start-Sleep -Milliseconds 200

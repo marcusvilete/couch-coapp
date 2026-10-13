@@ -3,9 +3,10 @@
 pub mod relay;
 
 use std::{
+    ffi::c_void,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -15,9 +16,44 @@ use couch_input::{
     HidUsage, InputError, KbmInjector, MouseButton, PadState, Rumble, VirtualPad, VirtualPadFactory,
 };
 use couch_media::{
-    BgraFrame, CaptureEvent, Capturer, EncodedFrame, EncoderCaps, EncoderInput, MediaError,
-    VideoEncoder, clock::Clock,
+    BgraFrame, CaptureEvent, Capturer, EncodedFrame, EncoderCaps, EncoderInput, GpuFrame,
+    GpuTexture, MediaError, VideoEncoder, VideoFrame, clock::Clock,
 };
+
+/// What a [`FakeCapturer`] making GPU frames shares with the test.
+#[derive(Debug, Clone, Default)]
+pub struct FakeGpu {
+    /// The texture pool frames come from; changing it is a new capture device.
+    pub source: Arc<AtomicU64>,
+    /// How many frames were copied to memory, by any encoder.
+    pub downloads: Arc<AtomicU32>,
+}
+
+/// A "GPU" texture that is really memory, counting its downloads.
+struct FakeGpuTexture {
+    pixels: Bytes,
+    stride: u32,
+    downloads: Arc<AtomicU32>,
+}
+
+impl GpuTexture for FakeGpuTexture {
+    fn d3d11_texture(&self) -> *mut c_void {
+        std::ptr::null_mut()
+    }
+
+    fn d3d11_device_owned(&self) -> *mut c_void {
+        std::ptr::null_mut()
+    }
+
+    fn download(&self) -> Result<(u32, Bytes), MediaError> {
+        self.downloads.fetch_add(1, Ordering::SeqCst);
+        Ok((self.stride, self.pixels.clone()))
+    }
+
+    fn keep_alive(&self) -> Arc<dyn std::any::Any + Send + Sync> {
+        Arc::new(())
+    }
+}
 
 /// Plain gray frames at a steady rate, until told the source closed.
 pub struct FakeCapturer {
@@ -28,6 +64,7 @@ pub struct FakeCapturer {
     clock: Arc<dyn Clock>,
     closed: Arc<AtomicBool>,
     reported: bool,
+    gpu: Option<FakeGpu>,
 }
 
 impl FakeCapturer {
@@ -48,7 +85,14 @@ impl FakeCapturer {
             clock,
             closed,
             reported: false,
+            gpu: None,
         }
+    }
+
+    /// Frames "on the GPU", from the pool `gpu.source` names at each frame.
+    pub fn on_gpu(mut self, gpu: FakeGpu) -> Self {
+        self.gpu = Some(gpu);
+        self
     }
 }
 
@@ -72,13 +116,33 @@ impl Capturer for FakeCapturer {
         }
         self.next_due = Instant::now() + self.interval;
         let stride = self.width * 4;
-        Ok(Some(CaptureEvent::Frame(BgraFrame {
-            width: self.width,
-            height: self.height,
-            stride,
-            data: Bytes::from(vec![128; (stride * self.height) as usize]),
-            captured_at: self.clock.now(),
-        })))
+        let pixels = Bytes::from(vec![128; (stride * self.height) as usize]);
+        let captured_at = self.clock.now();
+        let frame = match &self.gpu {
+            None => VideoFrame::Cpu(BgraFrame {
+                width: self.width,
+                height: self.height,
+                stride,
+                data: pixels,
+                captured_at,
+            }),
+            Some(gpu) => VideoFrame::Gpu(GpuFrame::new(
+                Arc::new(FakeGpuTexture {
+                    pixels,
+                    stride,
+                    downloads: gpu.downloads.clone(),
+                }),
+                self.width,
+                self.height,
+                captured_at,
+                gpu.source.load(Ordering::SeqCst),
+            )),
+        };
+        Ok(Some(CaptureEvent::Frame(frame)))
+    }
+
+    fn frames_in_memory(&mut self) {
+        self.gpu = None;
     }
 }
 
@@ -87,6 +151,8 @@ impl Capturer for FakeCapturer {
 pub struct FakeEncoder {
     caps: EncoderCaps,
     started: bool,
+    /// With GPU input: encoding fails while set.
+    fail: Arc<AtomicBool>,
 }
 
 impl Default for FakeEncoder {
@@ -96,10 +162,23 @@ impl Default for FakeEncoder {
                 name: "fake".into(),
                 options: "fake".into(),
                 hardware: false,
+                gpu_input: false,
                 bitrate_change_costs_keyframe: false,
             },
             started: false,
+            fail: Arc::default(),
         }
+    }
+}
+
+impl FakeEncoder {
+    /// An encoder taking GPU frames only, as NVENC opened on the capture's
+    /// device does. Every encode fails while `fail` is set.
+    pub fn gpu(fail: Arc<AtomicBool>) -> Self {
+        let mut encoder = Self::default();
+        encoder.caps.gpu_input = true;
+        encoder.fail = fail;
+        encoder
     }
 }
 
@@ -113,15 +192,23 @@ impl VideoEncoder for FakeEncoder {
         input: EncoderInput<'_>,
         force_keyframe: bool,
     ) -> Result<Vec<EncodedFrame>, MediaError> {
-        let EncoderInput::Cpu(frame) = input else {
-            return Err(MediaError::Unsupported("only CPU frames".into()));
+        // Like the real one: an encoder takes the input it was opened for.
+        let captured_at = match (input, self.caps.gpu_input) {
+            (EncoderInput::Cpu(frame), false) => frame.captured_at,
+            (EncoderInput::Gpu(frame), true) => {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(MediaError::Backend("the fake GPU encode failed".into()));
+                }
+                frame.captured_at
+            }
+            _ => return Err(MediaError::Unsupported("the wrong kind of frame".into())),
         };
         let keyframe = force_keyframe || !self.started;
         self.started = true;
         Ok(vec![EncodedFrame {
             data: Bytes::from(vec![u8::from(keyframe); 200]),
             keyframe,
-            captured_at: frame.captured_at,
+            captured_at,
             encode_time_us: 100,
         }])
     }

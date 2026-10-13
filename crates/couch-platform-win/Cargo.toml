@@ -19,7 +19,10 @@ tracing.workspace = true
 vigem-rust.workspace = true
 windows = { workspace = true, features = [
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Media",
     "Win32_Media_Audio",

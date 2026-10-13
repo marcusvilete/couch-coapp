@@ -4,19 +4,19 @@
 
 use std::{any::Any, process::Stdio, sync::Arc, time::Duration};
 
-use couch_codec_ffmpeg::FfmpegEncoder;
+use couch_codec_ffmpeg::{FfmpegEncoder, encoder::GPU_INPUT_ENCODER};
 use couch_input::{
     DEV_PAD_IDS, HidUsage, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
     local::{ControllerIds, LocalPads},
     shortcuts::Shortcut,
 };
 use couch_media::{
-    AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, audio::ToneSource,
+    AudioSource, Capturer, EncoderConfig, GpuFrame, MediaError, VideoEncoder, audio::ToneSource,
     clock::Clock, testpattern::TestPattern,
 };
 use couch_platform_win::{
     audio::{LoopbackCapture, LoopbackTarget},
-    capture::{self, CaptureOptions, CaptureSource, MonitorId, WgcCapturer},
+    capture::{self, CaptureOptions, CaptureSource, FrameOutput, MonitorId, WgcCapturer},
     clock::QpcClock,
     drivers,
     foreground::{self, WindowId},
@@ -62,6 +62,12 @@ impl GameProcess for WatchedGame {
 
 type Capture = (Box<dyn Capturer>, Option<NativeId>);
 
+/// Captured frames stay on the GPU (M9b) unless `COUCH_HOST_ZERO_COPY=0`, a
+/// switch for measuring against the copy through memory from before.
+fn zero_copy() -> bool {
+    std::env::var("COUCH_HOST_ZERO_COPY").map_or(true, |v| v.trim() != "0")
+}
+
 fn wgc(source: CaptureSource, options: CaptureOptions) -> Result<Capture, MediaError> {
     let capturer = WgcCapturer::start(&source, options)?;
     let window = capturer.window().map(|w| w.0);
@@ -103,6 +109,11 @@ impl Backend for WindowsBackend {
         let options = CaptureOptions {
             min_interval: Duration::from_secs(1) / fps.max(1),
             cursor: true,
+            output: if zero_copy() {
+                FrameOutput::Gpu
+            } else {
+                FrameOutput::Cpu
+            },
         };
         match source {
             Source::Window(id) => wgc(CaptureSource::Window(WindowId(*id)), options),
@@ -116,7 +127,22 @@ impl Backend for WindowsBackend {
         }
     }
 
-    fn encoder(&self, config: EncoderConfig) -> Result<Box<dyn VideoEncoder>, MediaError> {
+    fn encoder(
+        &self,
+        config: EncoderConfig,
+        gpu: Option<&GpuFrame>,
+    ) -> Result<Box<dyn VideoEncoder>, MediaError> {
+        if let Some(frame) = gpu {
+            match FfmpegEncoder::open_gpu(config, frame) {
+                Ok(encoder) => return Ok(Box::new(encoder)),
+                // Not NVIDIA, or the capture runs on another GPU (a laptop's
+                // integrated graphics): frames go through memory, as before M9b.
+                Err(e) => tracing::info!(
+                    "{GPU_INPUT_ENCODER} can't read the captured frames on the GPU ({e}); \
+                     copying them to memory"
+                ),
+            }
+        }
         Ok(Box::new(FfmpegEncoder::open_best(config)?))
     }
 

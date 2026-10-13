@@ -41,8 +41,8 @@ use couch_input::{
     router::{self, Effect, Input, SeatRouter, SeatStatus},
 };
 use couch_media::{
-    AudioSource, BgraFrame, CaptureEvent, Codec, EncoderConfig, EncoderInput, FeedbackSnapshot,
-    MediaError, Micros, VideoEncoder, VideoParams, VideoSender,
+    AudioSource, CaptureEvent, Codec, EncoderConfig, EncoderInput, FeedbackSnapshot, MediaError,
+    Micros, VideoEncoder, VideoFrame, VideoParams, VideoSender,
     audio::Framer,
     clock::Clock,
     mailbox::Mailbox,
@@ -256,6 +256,11 @@ struct Shared {
     /// Set by the panic key: grants are refused until the host allows
     /// control again.
     grants_paused: Arc<AtomicBool>,
+    /// No encoder reads GPU frames in this stream (M9b): one opened for a
+    /// GPU frame couldn't take it (not NVIDIA, or another GPU than the
+    /// capture's), or one reading them failed. Encoders opened from then on
+    /// take frames in memory, and the capture is told to deliver them so.
+    gpu_input_off: AtomicBool,
 }
 
 /// The game's windows other than its new one ([`Shared::remember_windows`]).
@@ -290,7 +295,7 @@ struct Viewer {
 
 /// What the capture thread and a viewer's encoder thread share.
 struct Feed {
-    frames: Mailbox<BgraFrame>,
+    frames: Mailbox<VideoFrame>,
     keyframe: AtomicBool,
     stop: AtomicBool,
     /// How its epoch stream ends: `VIEWER_REMOVED` or `SESSION_END`.
@@ -524,6 +529,7 @@ impl HostStream {
             audio_to: Mutex::default(),
             audio_sent: AtomicU64::new(0),
             grants_paused: Arc::new(AtomicBool::new(false)),
+            gpu_input_off: AtomicBool::new(false),
         });
         // By seat: a seat without a pad (a keyboard seat, or one whose pad
         // failed) drops gamepad input.
@@ -992,6 +998,12 @@ fn capture_frames(
     while !stop.load(Ordering::SeqCst) {
         match capturer.next_event(Duration::from_millis(10)) {
             Ok(Some(CaptureEvent::Frame(frame))) => {
+                if matches!(frame, VideoFrame::Gpu(_))
+                    && shared.gpu_input_off.load(Ordering::SeqCst)
+                {
+                    capturer.frames_in_memory();
+                }
+                // (A GPU frame is already even, and the copies share it.)
                 let frame = frame.cropped_to_even();
                 for feed in lock(&shared.feeds).iter() {
                     feed.frames.put(frame.clone());
@@ -1141,6 +1153,8 @@ fn encode(
     let mut encoder: Option<Box<dyn VideoEncoder>> = None;
     let mut controller: Option<RateController> = None;
     let mut params: Option<VideoParams> = None;
+    // The texture pool the encoder reads GPU frames from, if it does.
+    let mut gpu_pool: Option<u64> = None;
     let mut force_keyframe = true;
     let mut last_tick = Instant::now();
     let mut stats = PeriodStats::new();
@@ -1197,9 +1211,19 @@ fn encode(
             continue;
         }
 
+        // A GPU frame goes to the encoder as it is, unless GPU input failed.
+        let gpu = match &frame {
+            VideoFrame::Gpu(f) if !shared.gpu_input_off.load(Ordering::SeqCst) => Some(f),
+            _ => None,
+        };
         let size_changed =
-            params.is_none_or(|p| (p.width, p.height) != (frame.width, frame.height));
-        if size_changed {
+            params.is_none_or(|p| (p.width, p.height) != (frame.width(), frame.height()));
+        // An encoder reading GPU frames stays with the texture pool it was
+        // opened for: a new capture device or size makes a new pool, whose
+        // textures it must not mistake for the old ones it remembers.
+        let pool_changed = encoder.as_ref().is_some_and(|e| e.caps().gpu_input)
+            && gpu.map(|f| f.source) != gpu_pool;
+        if size_changed || pool_changed {
             let r = options.rates;
             let share = feed.share();
             let start = controller
@@ -1215,19 +1239,34 @@ fn encode(
             };
             // The encoder must start where the controller does.
             let start = rate.clamped_start();
-            let enc = shared.backend.encoder(EncoderConfig {
-                codec: Codec::H264,
-                width: frame.width,
-                height: frame.height,
-                fps: options.fps,
-                bitrate_bps: start,
-            })?;
+            let (width, height) = (frame.width(), frame.height());
+            // Closed first: it holds its pool's textures and an NVENC session.
+            drop(encoder.take());
+            let enc = shared.backend.encoder(
+                EncoderConfig {
+                    codec: Codec::H264,
+                    width,
+                    height,
+                    fps: options.fps,
+                    bitrate_bps: start,
+                },
+                gpu,
+            )?;
+            gpu_pool = gpu.filter(|_| enc.caps().gpu_input).map(|f| f.source);
+            if gpu.is_some() && !enc.caps().gpu_input {
+                // This machine's encoder can't read them: copying each frame
+                // back from the GPU would cost more than capturing to memory.
+                shared.gpu_input_off.store(true, Ordering::SeqCst);
+            }
             shared.note(format!(
-                "encoding {}x{} with {} (options: {}) at {:.1} Mbit/s",
-                frame.width,
-                frame.height,
+                "encoding {width}x{height} with {} (options: {}, {}) at {:.1} Mbit/s",
                 enc.caps().name,
                 enc.caps().options,
+                if enc.caps().gpu_input {
+                    "GPU frames"
+                } else {
+                    "frames in memory"
+                },
                 f64::from(start) / 1e6
             ));
             rate.keyframe_costly = enc.caps().bitrate_change_costs_keyframe;
@@ -1236,8 +1275,8 @@ fn encode(
             controller = Some(c);
             let p = VideoParams {
                 codec: Codec::H264,
-                width: frame.width,
-                height: frame.height,
+                width,
+                height,
                 fps: options.fps,
             };
             video.start_epoch(&p)?;
@@ -1248,7 +1287,26 @@ fn encode(
 
         let enc = encoder.as_mut().expect("opened above");
         let key = std::mem::take(&mut force_keyframe) | feed.keyframe.swap(false, Ordering::SeqCst);
-        for unit in enc.encode(EncoderInput::Cpu(&frame), key)? {
+        let encoded = match gpu {
+            Some(f) if enc.caps().gpu_input => enc.encode(EncoderInput::Gpu(f), key),
+            // Copied to memory once per frame, for every viewer that needs it.
+            _ => frame
+                .cpu()
+                .and_then(|cpu| enc.encode(EncoderInput::Cpu(&cpu), key)),
+        };
+        let units = match encoded {
+            Ok(units) => units,
+            // Rather than lose the viewer: frames in memory from now on, for
+            // every encoder opened in this stream. The reopen sends a keyframe.
+            Err(e) if enc.caps().gpu_input => {
+                tracing::warn!("encoding GPU frames failed ({e}); copying frames to memory");
+                shared.gpu_input_off.store(true, Ordering::SeqCst);
+                params = None;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        for unit in units {
             stats.bytes += unit.data.len() as u64;
             stats.keyframes += u32::from(unit.keyframe);
             stats.encode_us_max = stats.encode_us_max.max(unit.encode_time_us);

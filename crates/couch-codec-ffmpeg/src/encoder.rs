@@ -6,7 +6,7 @@ use std::{ffi::CString, time::Instant};
 
 use bytes::Bytes;
 use couch_media::{
-    BgraFrame, Codec, EncodedFrame, EncoderCaps, EncoderConfig, EncoderInput, MediaError,
+    BgraFrame, Codec, EncodedFrame, EncoderCaps, EncoderConfig, EncoderInput, GpuFrame, MediaError,
     VideoEncoder,
 };
 use rsmpeg::{
@@ -18,16 +18,21 @@ use rsmpeg::{
 };
 
 use crate::{
+    d3d11::D3d11Frames,
     options::{OptionSet, option_sets},
     probe::H264_ENCODERS,
 };
 
+/// The one encoder that takes GPU frames (M9b): NVENC reads the capture's
+/// BGRA textures and converts them to YUV itself, as it does with BGRA from
+/// memory. AMD and Intel would need testing on their hardware first.
+pub const GPU_INPUT_ENCODER: &str = "h264_nvenc";
+
 pub struct FfmpegEncoder {
+    // Field order is drop order: the codec context (NVENC's session, which
+    // unregisters its textures) goes before `input`, which keeps them alive.
     ctx: AVCodecContext,
-    /// Input frame in the encoder's pixel format, reused every frame.
-    frame: AVFrame,
-    /// BGRA-to-encoder-format conversion, for encoders that don't take BGRA.
-    scaler: Option<SwsContext>,
+    input: Input,
     caps: EncoderCaps,
     config: EncoderConfig,
     last_pts: i64,
@@ -37,10 +42,37 @@ pub struct FfmpegEncoder {
     option_set: usize,
 }
 
-// The codec context is only ever used from the thread that owns the encoder.
+/// How frames reach the encoder.
+enum Input {
+    /// Copied into a frame in the encoder's pixel format, reused every frame.
+    Cpu {
+        frame: AVFrame,
+        /// BGRA-to-encoder-format conversion, for encoders that don't take BGRA.
+        scaler: Option<SwsContext>,
+    },
+    /// D3D11 textures on the capture's device.
+    Gpu(D3d11Frames),
+}
+
+// The codec context is only ever used from the thread that owns the encoder;
+// the D3D11 contexts are FFmpeg's reference-counted buffers.
 unsafe impl Send for FfmpegEncoder {}
 
 impl FfmpegEncoder {
+    /// Opens [`GPU_INPUT_ENCODER`] for GPU frames like `frame`: on its device,
+    /// at its size. Fails where NVENC can't use that device (another GPU's,
+    /// such as a laptop's integrated graphics), so the caller can open an
+    /// encoder for frames in memory instead.
+    pub fn open_gpu(config: EncoderConfig, frame: &GpuFrame) -> Result<Self, MediaError> {
+        if (frame.width, frame.height) != (config.width, config.height) {
+            return Err(MediaError::Backend(format!(
+                "a {}x{} frame for a {}x{} encoder",
+                frame.width, frame.height, config.width, config.height
+            )));
+        }
+        Self::open_from(GPU_INPUT_ENCODER, config, 0, Some(frame))
+    }
+
     /// Opens the best H.264 encoder that works on this machine, hardware first.
     pub fn open_best(config: EncoderConfig) -> Result<Self, MediaError> {
         let mut errors = Vec::new();
@@ -60,15 +92,21 @@ impl FfmpegEncoder {
     /// (`options::option_sets`; the last is always the settings from before
     /// M9a).
     pub fn open(name: &str, config: EncoderConfig) -> Result<Self, MediaError> {
-        Self::open_from(name, config, 0)
+        Self::open_from(name, config, 0, None)
     }
 
-    /// Like [`Self::open`], trying the option sets from `first` on.
-    fn open_from(name: &str, config: EncoderConfig, first: usize) -> Result<Self, MediaError> {
+    /// Like [`Self::open`], trying the option sets from `first` on, for GPU
+    /// frames like `gpu` if given.
+    fn open_from(
+        name: &str,
+        config: EncoderConfig,
+        first: usize,
+        gpu: Option<&GpuFrame>,
+    ) -> Result<Self, MediaError> {
         let sets = option_sets(name);
         let mut errors = Vec::new();
         for (index, set) in sets.iter().enumerate().skip(first) {
-            match Self::open_with(name, config, index, set) {
+            match Self::open_with(name, config, index, set, gpu) {
                 Ok(encoder) => {
                     if !errors.is_empty() {
                         tracing::info!(
@@ -95,6 +133,7 @@ impl FfmpegEncoder {
         config: EncoderConfig,
         index: usize,
         set: &OptionSet,
+        gpu: Option<&GpuFrame>,
     ) -> Result<Self, MediaError> {
         let Codec::H264 = config.codec else {
             return Err(MediaError::Unsupported(format!("{:?}", config.codec)));
@@ -103,12 +142,22 @@ impl FfmpegEncoder {
         let codec = AVCodec::find_encoder_by_name(&cname).ok_or_else(|| {
             MediaError::Unsupported(format!("{name} is not in this FFmpeg build"))
         })?;
-        let pix_fmt = input_format(&codec)?;
+        let backend = |e: String| MediaError::Backend(format!("{name}: {e}"));
+        let gpu = gpu.map(D3d11Frames::new).transpose().map_err(backend)?;
+        let pix_fmt = match gpu {
+            Some(_) => ffi::AV_PIX_FMT_D3D11,
+            None => input_format(&codec)?,
+        };
 
         let mut ctx = AVCodecContext::new(&codec);
         ctx.set_width(config.width as i32);
         ctx.set_height(config.height as i32);
         ctx.set_pix_fmt(pix_fmt);
+        if let Some(frames) = &gpu {
+            let frames = frames.frames_ref().map_err(backend)?;
+            // SAFETY: the context takes the new reference and frees it.
+            unsafe { (*ctx.as_mut_ptr()).hw_frames_ctx = frames };
+        }
         // Timestamps are capture times in microseconds.
         ctx.set_time_base(ffi::AVRational {
             num: 1,
@@ -138,31 +187,36 @@ impl FfmpegEncoder {
             tracing::warn!("{name} ignored options {unused:?} (\"{}\")", set.label);
         }
 
-        let mut frame = AVFrame::new();
-        frame.set_width(config.width as i32);
-        frame.set_height(config.height as i32);
-        frame.set_format(pix_fmt);
-        frame
-            .alloc_buffer()
-            .map_err(|e| MediaError::Backend(e.to_string()))?;
-
-        let scaler = if pix_fmt == ffi::AV_PIX_FMT_BGRA {
-            None
-        } else {
-            Some(bgra_converter(config, pix_fmt)?)
+        let input = match gpu {
+            Some(frames) => Input::Gpu(frames),
+            None => {
+                let mut frame = AVFrame::new();
+                frame.set_width(config.width as i32);
+                frame.set_height(config.height as i32);
+                frame.set_format(pix_fmt);
+                frame
+                    .alloc_buffer()
+                    .map_err(|e| MediaError::Backend(e.to_string()))?;
+                let scaler = if pix_fmt == ffi::AV_PIX_FMT_BGRA {
+                    None
+                } else {
+                    Some(bgra_converter(config, pix_fmt)?)
+                };
+                Input::Cpu { frame, scaler }
+            }
         };
 
         Ok(Self {
             ctx,
-            frame,
-            scaler,
             caps: EncoderCaps {
                 name: name.to_string(),
                 options: set.label.to_string(),
                 hardware: name != "libopenh264",
+                gpu_input: matches!(input, Input::Gpu(_)),
                 // NVENC resets with an IDR; the others are reopened (`encode`).
                 bitrate_change_costs_keyframe: true,
             },
+            input,
             config,
             last_pts: i64::MIN,
             pending_bitrate: None,
@@ -173,41 +227,46 @@ impl FfmpegEncoder {
     pub fn config(&self) -> EncoderConfig {
         self.config
     }
+}
 
-    fn fill_frame(&mut self, src: &BgraFrame) -> Result<(), MediaError> {
-        self.frame
-            .make_writable()
-            .map_err(|e| MediaError::Backend(e.to_string()))?;
-        match &mut self.scaler {
-            None => {
-                let dst_stride = self.frame.linesize[0] as usize;
-                let dst = self.frame.data[0];
-                let row = (src.width * 4) as usize;
-                for y in 0..src.height as usize {
-                    let from = &src.data[y * src.stride as usize..][..row];
-                    // SAFETY: the frame owns `height` rows of `dst_stride >= row` bytes.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(from.as_ptr(), dst.add(y * dst_stride), row)
-                    };
-                }
-            }
-            Some(scaler) => {
-                // Describe the caller's buffer without copying it; it outlives the call.
-                let mut view = AVFrame::new();
-                view.set_width(src.width as i32);
-                view.set_height(src.height as i32);
-                view.set_format(ffi::AV_PIX_FMT_BGRA);
-                view.data_mut()[0] = src.data.as_ptr() as *mut u8;
-                view.linesize_mut()[0] = src.stride as i32;
-                scaler
-                    .scale_frame(&view, 0, src.height as i32, &mut self.frame)
-                    .map_err(|e| MediaError::Backend(e.to_string()))?;
-                // `view` doesn't own its data; make sure FFmpeg won't try to free it.
-                view.data_mut()[0] = std::ptr::null_mut();
+/// Copies `src` into `frame`, converting if the encoder doesn't take BGRA.
+fn fill_frame(
+    frame: &mut AVFrame,
+    scaler: &mut Option<SwsContext>,
+    src: &BgraFrame,
+) -> Result<(), MediaError> {
+    frame
+        .make_writable()
+        .map_err(|e| MediaError::Backend(e.to_string()))?;
+    match scaler {
+        None => {
+            let dst_stride = frame.linesize[0] as usize;
+            let dst = frame.data[0];
+            let row = (src.width * 4) as usize;
+            for y in 0..src.height as usize {
+                let from = &src.data[y * src.stride as usize..][..row];
+                // SAFETY: the frame owns `height` rows of `dst_stride >= row` bytes.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(from.as_ptr(), dst.add(y * dst_stride), row)
+                };
             }
         }
-        Ok(())
+        Some(scaler) => {
+            // Describe the caller's buffer without copying it; it outlives the call.
+            let mut view = AVFrame::new();
+            view.set_width(src.width as i32);
+            view.set_height(src.height as i32);
+            view.set_format(ffi::AV_PIX_FMT_BGRA);
+            view.data_mut()[0] = src.data.as_ptr() as *mut u8;
+            view.linesize_mut()[0] = src.stride as i32;
+            scaler
+                .scale_frame(&view, 0, src.height as i32, frame)
+                .map_err(|e| MediaError::Backend(e.to_string()))?;
+            // `view` doesn't own its data; make sure FFmpeg won't try to free it.
+            view.data_mut()[0] = std::ptr::null_mut();
+        }
     }
+    Ok(())
 }
 
 impl VideoEncoder for FfmpegEncoder {
@@ -220,13 +279,15 @@ impl VideoEncoder for FfmpegEncoder {
         input: EncoderInput<'_>,
         force_keyframe: bool,
     ) -> Result<Vec<EncodedFrame>, MediaError> {
-        let EncoderInput::Cpu(src) = input else {
-            return Err(MediaError::Unsupported("GPU input".into()));
+        let (width, height, captured_at) = match input {
+            EncoderInput::Cpu(f) => (f.width, f.height, f.captured_at),
+            EncoderInput::Gpu(f) => (f.width, f.height, f.captured_at),
+            _ => return Err(MediaError::Unsupported("this input".into())),
         };
-        if (src.width, src.height) != (self.config.width, self.config.height) {
+        if (width, height) != (self.config.width, self.config.height) {
             return Err(MediaError::Backend(format!(
-                "frame is {}x{}, encoder was opened for {}x{}",
-                src.width, src.height, self.config.width, self.config.height
+                "frame is {width}x{height}, encoder was opened for {}x{}",
+                self.config.width, self.config.height
             )));
         }
         if let Some(bps) = self.pending_bitrate.take() {
@@ -238,7 +299,8 @@ impl VideoEncoder for FfmpegEncoder {
                 // The other wrappers (libopenh264, Media Foundation, and AMF
                 // and Quick Sync as far as we can tell without the hardware)
                 // read the rate only when they open. A fresh encoder starts
-                // with a keyframe, the same price NVENC pays.
+                // with a keyframe, the same price NVENC pays. (Only NVENC
+                // takes GPU input, so this one reads frames from memory.)
                 let name = self.caps.name.clone();
                 *self = Self::open_from(
                     &name,
@@ -247,24 +309,44 @@ impl VideoEncoder for FfmpegEncoder {
                         ..self.config
                     },
                     self.option_set,
+                    None,
                 )?;
             }
         }
 
-        self.fill_frame(src)?;
-        let pts = (src.captured_at.0 as i64).max(self.last_pts.saturating_add(1));
+        let pts = (captured_at.0 as i64).max(self.last_pts.saturating_add(1));
         self.last_pts = pts;
-        self.frame.set_pts(pts);
-        self.frame.set_pict_type(if force_keyframe {
+        let pict_type = if force_keyframe {
             ffi::AV_PICTURE_TYPE_I
         } else {
             ffi::AV_PICTURE_TYPE_NONE
-        });
-
+        };
         let started = Instant::now();
-        self.ctx
-            .send_frame(Some(&self.frame))
-            .map_err(|e| MediaError::Backend(e.to_string()))?;
+        let sent = match (&mut self.input, input) {
+            (Input::Cpu { frame, scaler }, EncoderInput::Cpu(src)) => {
+                fill_frame(frame, scaler, src)?;
+                frame.set_pts(pts);
+                frame.set_pict_type(pict_type);
+                self.ctx.send_frame(Some(frame))
+            }
+            (Input::Gpu(frames), EncoderInput::Gpu(src)) => {
+                let mut frame = frames.wrap(src).map_err(MediaError::Backend)?;
+                frame.set_pts(pts);
+                frame.set_pict_type(pict_type);
+                self.ctx.send_frame(Some(&frame))
+            }
+            (Input::Cpu { .. }, _) => {
+                return Err(MediaError::Unsupported(
+                    "a GPU frame for an encoder opened for frames in memory".into(),
+                ));
+            }
+            (Input::Gpu(_), _) => {
+                return Err(MediaError::Unsupported(
+                    "a frame in memory for an encoder opened for GPU frames".into(),
+                ));
+            }
+        };
+        sent.map_err(|e| MediaError::Backend(e.to_string()))?;
         let mut out = Vec::new();
         loop {
             match self.ctx.receive_packet() {
@@ -275,7 +357,7 @@ impl VideoEncoder for FfmpegEncoder {
                     out.push(EncodedFrame {
                         data: Bytes::copy_from_slice(data),
                         keyframe: packet.flags & ffi::AV_PKT_FLAG_KEY as i32 != 0,
-                        captured_at: src.captured_at,
+                        captured_at,
                         encode_time_us: started.elapsed().as_micros() as u32,
                     });
                 }
