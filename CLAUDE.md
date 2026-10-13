@@ -7,9 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Couch Co-App is a Windows-first desktop app for remote "same couch" gaming. A member of a password-protected room streams a game; the others watch, and the host hands control to one of them.
 
 It is a Rust workspace with a Tauri 2 shell (React + TypeScript). Where to read more:
-- `docs/architecture.md`: start here. It has the milestone table (M0 to M10).
+- `docs/architecture.md`: start here. It has the milestone table (M0 to M11, with P1 to P3).
 - `docs/protocol.md`: the wire format.
 - `docs/adr/`: the decisions behind the big choices.
+- `docs/development.md` (setting up, running, testing) and `docs/self-hosting.md` (an installer and a relay for your friends): the human guides, which the README links. Keep them in step with the commands here. The README's top is the author's own note; leave it to them.
 
 ## Commands
 
@@ -34,7 +35,7 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 
 To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`; lowercased, as Windows folder names ignore case). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`: `identity.key` and `rooms\*.room` (sealed with DPAPI), `settings.json` (the name), `input-setups.json`, `shortcuts.json` and `network.json` (written by the engine, not the room actor), and `webview\` (the UI's own storage, such as the room order).
 
-The desktop app with several profiles: start `npm run tauri dev` (the default profile), then `.\scripts\profiles.ps1` starts alice, bob and carol from the same debug build, logging to `desktop.log` in their profile folders. Each profile runs once: a second launch hands its arguments to the running one and exits before going online, and `Engine::start` also holds `engine.lock` in the profile folder (never run two engines on one identity). `couchco://` invite links open in the default profile. Debug builds register the scheme for the current Windows user, pointing at the debug exe; the installer will do it in M10. The `app-manual-run` skill covers a manual run: where each profile's logs are, what one PC can't show (games and keyboard and mouse), and what to ask the user to try.
+The desktop app with several profiles: start `npm run tauri dev` (the default profile), then `.\scripts\profiles.ps1` starts alice, bob and carol from the same debug build, logging to `desktop.log` in their profile folders. Each profile runs once: a second launch hands its arguments to the running one and exits before going online, and `Engine::start` also holds `engine.lock` in the profile folder (never run two engines on one identity). `couchco://` invite links open in the default profile. Debug builds register the scheme for the current Windows user, pointing at the debug exe; the installer registers it for the installed app (M10a), and whichever registered last gets the links. The `app-manual-run` skill covers a manual run: where each profile's logs are, what one PC can't show (games and keyboard and mouse), and what to ask the user to try.
 
 **Rooms.**
 
@@ -54,7 +55,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
 | Rate-control gates G1, G3–G5 and G7 (one viewer's bad path leaves another's stream alone), run and judged | `couch-cli gates --quick` (6 min) or `couch-cli gates` (14 min). `latency-probe --viewers 2 --impair-first "rate=5mbit"` runs G7's setup by hand. The `rate-control-gates` skill covers traces and reading a failure. |
 | Many viewers of one host on this PC (fps, latency, bitrate and encode time per viewer) | `.\scripts\viewers.ps1` (4) or `.\scripts\viewers.ps1 -Viewers 7`, after the release build |
-| The installer, for this PC or another (M10a: the app, stream window, DLLs and the two drivers, offered after install; for just you or everyone, as the installer asks) | `.\scripts\build-installer.ps1 -TestRelay` (iroh's public relays; a `-test` installer) until our relay is deployed; without `-TestRelay` it reads the private `release.toml` (M7, below) for our relay. Run it without redirecting its stderr, then `npx --yes http-server target\installer -p 8000`. It fetches and stages the pinned dependencies and driver installers, checks the version is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`, and builds with `tauri.installer.conf.json` (the bundled files and the driver hooks, `installer-hooks.nsh`), kept out of `tauri.conf.json` so development builds aren't touched. Bump the version with each installer handed out. An installed app logs to `desktop.log` in the profile folder |
+| The installer, for this PC or another (M10a: the app, stream window, DLLs and the two drivers, offered after install; for just you or everyone, as the installer asks) | `.\scripts\build-installer.ps1` builds a release installer with the relay in the private `release.toml` (M7, below); it needs a clean, committed tree. `-TestRelay` builds a `-test` installer on iroh's public relays instead, from any tree. Installers go to friends only (ADR 0009). Run it without redirecting its stderr, then `npx --yes http-server target\installer -p 8000`. It fetches and stages the pinned dependencies and driver installers, checks the version is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`, and builds with `tauri.installer.conf.json` (the bundled files and the driver hooks, `installer-hooks.nsh`), kept out of `tauri.conf.json` so development builds aren't touched. Bump the version with each installer handed out. An installed app logs to `desktop.log` in the profile folder |
 | What an XInput game sees on the host (each slot's buttons and sticks, live): tells a stream problem from a game choosing another controller | `.\scripts\xinput-watch.ps1` |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view`; through our relay, `--relay http://localhost:3340 --relay-token <token> --relay-only` |
 | Our relay on this PC (M7: the official iroh-relay, production's limits, the token) | `cargo xtask relay-tool` once (builds it into `target\tools`, the version of our iroh pin), then `.\scripts\relay.ps1` (`http://localhost:3340`; `-Lan` for your other PC, `-Open` without the token). The deploy kit and its README are in `deploy/relay/` |
@@ -166,7 +167,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 **Relays** ([ADR 0007](docs/adr/0007-our-relay-and-release-configuration.md))
 - **Which relays run where.**
   - Development: `RelayChoice::N0Public` (iroh's public relays). A release build runs them only when the user picks them in Settings ("for testing"); a saved setting the build can't take falls back to the build's own relay, never to them.
-  - Production: only our own iroh-relay (`RelayChoice::Custom { urls, token }`).
+  - Release builds: only the builder's own iroh-relay (`RelayChoice::Custom { urls, token }`); the maintainer's runs at `couchrelay.duckdns.org` for their friends.
   - Tests: `RelayChoice::Disabled`, or `couch_testkit::relay::TestRelay`, an in-process iroh-relay with a token.
 - **Our relay admits only clients with its token.** iroh sends it only to relays in our own list; it never goes in invites, member records or logs (`RelayToken` prints `..`).
 - **A release build carries the relay's URL and token,** and the invite page's address (`couch_engine::build_config`, `COUCH_BUILD_*` at build time, set by `build-installer.ps1` from `release.toml`).

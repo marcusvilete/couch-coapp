@@ -159,9 +159,10 @@ The user has a second PC on their home network. Suggest a two-PC run after any c
 ### Setup
 
 - **Roles.** Usually this PC runs the dev build (`npm run tauri dev`) and the other PC the installed app; either may host.
-- **The installer** (M10a; it replaced the zipped guest package).
-  - `.\scripts\build-installer.ps1 -TestRelay` builds it into `target\installer\`. The name carries the version and commit, `-dirty` with uncommitted changes, and `-test`. `npx --yes http-server target\installer -p 8000` serves it.
-  - Without `-TestRelay` it needs `release.toml` (M7) with our relay's URL, which only exists once the relay is deployed.
+- **The installer** (M10a), built into `target\installer\` with FFmpeg's sources and `SOURCES.txt` (M10b). `npx --yes http-server target\installer -p 8000` serves the whole folder; hand out all of it.
+  - `.\scripts\build-installer.ps1` is the release installer, on the user's relay (`couchrelay.duckdns.org`, from `release.toml`). It needs a clean, committed tree. The name carries the version and commit.
+  - `-TestRelay` builds a test installer on iroh's public relays, from any tree. The name adds `-dirty` with uncommitted changes, and `-test`. Its Settings → Network says "this build has no relay of its own".
+  - **Mixed builds:** a test installer can't use the user's relay (it has no token), though a release build can still reach the test build through iroh's public relays. Keep both PCs on the same kind of build; a failed connection between mixed builds proves nothing.
   - **For a LAN test of our relay**, use a copy of `release.toml` with `test = true` and `relay_url = "http://<this PC's LAN address>:3340"`. Build with `-Config <that copy>`, and run `.\scripts\relay.ps1 -Lan` here (Windows Firewall asks once).
     - **Both PCs need the same URL,** the LAN one, never `localhost`: invites and member records carry it, and the other PC must be able to dial it.
     - This PC gets it through `COUCH_BUILD_*`, as above, or by installing the same build.

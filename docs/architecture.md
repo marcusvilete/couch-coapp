@@ -25,7 +25,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | M8 | Host overlay: requests and session notes over the game, answered with keys; a chime | done, your one-PC run included; also a fix for hosting on Windows 10 ([results](m8-results.md)) |
 | M9 | Zero-copy GPU paths, HEVC, higher frame rates | later: friends found the latency great, so it is headroom (more viewers, 120 fps) |
 | M10a | An installer for testing with friends: the app, its stream window and libraries; ViGEmBus and HidHide offered, each optional; Settings → Drivers; "update needed" between builds that can't talk; a log file | done, your runs on both PCs included ([results](m10a-results.md)) |
-| M7 | Own relay (iroh-relay with an access token), the relay built into release builds, the https invite page, the deploy kit | done: deployed on Oracle Cloud's free tier (`couchrelay.duckdns.org`), checked relay-only from this PC; release installers with it come next ([results](m7-results.md)) |
+| M7 | Own relay (iroh-relay with an access token), the relay built into release builds, the https invite page, the deploy kit | done: deployed on Oracle Cloud's free tier (`couchrelay.duckdns.org`), checked relay-only from this PC; release installers (0.9.0) use it ([results](m7-results.md)) |
 | M10b | The public source release ([ADR 0009](adr/0009-source-only-releases.md)): the repository public; licence notices and FFmpeg's source with friends' installers; a guide to build the app and host your own relay. Optional: the fallback encoder, an outside review of the admission composition | in progress: the licence (GPL-3.0-only), the notices and FFmpeg's source with installers, Settings → About, the self-build and relay guides done ([results](m10b-results.md)); going public next |
 | M11 | ~~Updates through Tauri's updater~~ | dropped (ADR 0009): installers go to friends only, by hand |
 
@@ -65,9 +65,9 @@ Host machine                                    Viewer machine
 | `couch-gamepad` | Physical gamepads through SDL3: a pad's state in XInput's terms (shared with the viewer), and the host's own controller, read on an SDL thread of its own | `couch-input`, `couch-proto` |
 | `couch-engine` | UI-agnostic facade: `Command`s in, `Event`s out. Runs the rooms and their sessions over iroh; keeps the identity and remembered rooms (DPAPI-sealed) in the profile folder. Its `pipeline` (host and viewer side of a stream, behind a `Backend` trait) is shared with `couch-cli` | everything above |
 | `couch-viewer` | The viewer binary | `couch-proto`, `couch-input`, media and codec crates |
-| `couch-cli` | Developer harness on the engine's pipeline: `probe`, `host`, `view`, `latency-probe`, `gates`, `pad-test`, `input-sink`, `release-check`, `capture-test`, `screen-scan` | anything |
-| `couch-testkit` | Fakes (recording injector and pad, test pattern helpers); dev-dependency only | trait crates |
-| `xtask` | `fetch-deps`, `stage-dlls`, `doctor` | none |
+| `couch-cli` | Developer harness on the engine's pipeline: `probe`, `windows`, `capture-test`, `host`, `view`, `host-pad`, `screen-scan`, `latency-probe`, `gates`, `pad-test`, `input-sink`, `release-check`, `fake-game`, `lifecycle-check` | anything |
+| `couch-testkit` | Fakes (recording injector and pad, test pattern helpers) and an in-process `iroh-relay` with a token; dev-dependency only | trait crates |
+| `xtask` | `fetch-deps`, `stage-dlls`, `doctor`, `gen-ffmpeg-bindings`, `release-config`, `relay-tool`, `notices` | none |
 | `apps/desktop/src-tauri` | Thin Tauri adapter over `couch-engine` | `couch-engine` |
 
 Rules that keep this layering useful:
@@ -80,7 +80,7 @@ Rules that keep this layering useful:
 
 **Host, per frame.**
 1. A `Capturer` (Windows.Graphics.Capture) delivers a BGRA frame stamped with QPC time.
-2. Each viewer's `VideoEncoder` (NVENC through FFmpeg, one encoder per viewer) produces an H.264 access unit.
+2. Each viewer's `VideoEncoder` (through FFmpeg: NVIDIA's NVENC first, then AMD's AMF, Intel's Quick Sync or Windows' Media Foundation; one encoder per viewer) produces an H.264 access unit.
 3. That viewer's `VideoSender` writes it to the current epoch stream.
 4. A rate controller per viewer adjusts its encoder's bitrate from the transport-neutral `FeedbackSnapshot`.
 
@@ -129,7 +129,7 @@ All timestamps are QPC microseconds, so on one machine the host's and the viewer
 - **Congestion control.** The per-viewer rate controller does it. It is delay-based, much like WebRTC's GCC. QUIC runs our `MediaCongestion` controller, which ignores isolated losses and probes quickly after an outage ([ADR 0005](adr/0005-media-congestion-control.md)). Stock Cubic and BBR v3 cut the bitrate to a tenth under 1% random loss.
 - **Relays** (`couch_net::endpoint::RelayChoice`):
   - Development: iroh's public relays (`N0Public`), whose terms cover hobby use only.
-  - Production: only our own `iroh-relay` on a small VPS, with no third-party address lookup (`Custom`) (M7, [ADR 0007](adr/0007-our-relay-and-release-configuration.md)).
+  - Release builds: only the builder's own `iroh-relay` on a small VPS, with no third-party address lookup (`Custom`) (M7, [ADR 0007](adr/0007-our-relay-and-release-configuration.md); there are no official builds or relay, [ADR 0009](adr/0009-source-only-releases.md)).
     - **The token.** The relay admits only clients with its token (`access.shared_token`). iroh sends the token only to the relays in our own list, never to another member's.
     - **Built in.** A release build carries the relay's URL and token (`couch_engine::build_config`, from the private `release.toml` that `build-installer.ps1` reads). Settings → Network's default choice (`RelaySetting::Builtin`) uses it, and is iroh's public relays in a build without one.
     - **The deploy kit** is in `deploy/relay/`. `scripts\relay.ps1` runs the same server on this PC.
@@ -198,10 +198,10 @@ How sessions survive things going wrong, or end clearly (M6):
 
 These hold in every milestone. Tests guard them from M2 on.
 
-- Guests get gamepad permission only. Keyboard and mouse are an explicit per-member grant.
+- Guests get gamepad permission only. Keyboard and mouse come only with a keyboard seat the host chose to set up and passed to them (P1).
 - Keyboard and mouse are injected only while the captured game window is in the foreground.
 - Remote members can't send the Windows key combinations, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4 (a guest quits through the game's menu), or the gamepad Guide button.
-- A host panic key revokes all control; it ignores injected keystrokes.
+- A host panic key takes every seat back from the viewers and pauses control; it ignores injected keystrokes. The host's own controller keeps playing (P2).
 - Every handoff, disconnect and teardown releases held keys and sends a neutral pad state first.
 - Remote input reaches the injectors only through the seat router (`couch_input::router`), which enforces the rules above and the 300 ms dead-man release. So does the host's own controller when it plays a seat (P2).
 - A controller the app hides from games is shown again when the session ends, and at the next start after a crash.
@@ -213,13 +213,15 @@ These hold in every milestone. Tests guard them from M2 on.
 - **The drivers are optional.** After the app installs, `installer-hooks.nsh` asks about each missing one (ViGEmBus, HidHide; found by their registered service), saying what won't work without it. A Yes runs the driver's own official setup, which asks for administrator rights. Their installers are pinned by SHA-256 in `xtask/src/deps.rs` and their licences ship beside them (`apps/desktop/src-tauri/drivers/`). Settings → Drivers shows their state and runs the same installers later (`couch_platform_win::drivers`). Uninstalling the app leaves them.
 - **Builds that can't talk say so.** `PROTOCOL_MINOR` is the wire revision, for good (ADR 0009); a peer with another one is refused at `Hello`, and the member list says who needs to update.
 - **Logs:** an installed (release) app logs to `desktop.log` in the profile folder, beside `viewer.log`; one older log is kept as `desktop.old.log`.
+- **Licences** (M10b): the installer puts `LICENSE` and `THIRD-PARTY-NOTICES.txt` (`cargo xtask notices`) next to the app; Settings → About shows them. FFmpeg's pinned source and build scripts go beside the setup file, with `SOURCES.txt`. A release installer must come from a clean, committed tree, since its notices link to that commit's source.
+- **Uninstalling** removes the app but not the profiles in `%LOCALAPPDATA%\CouchCoApp` (identity, rooms, settings): Tauri's "delete the application data" box only knows its own folder, `com.couchcoapp.desktop`. Left that way for now.
 - **Release configuration** (M7): `build-installer.ps1` reads the private `release.toml` (outside the repository; `deploy/release.example.toml` shows its shape). It holds the relay's URL and token and the invite page, and the script passes them to the build as `COUCH_BUILD_*` variables. Without the file it builds only with `-TestRelay`: iroh's public relays, and plain http relays on the LAN allowed. Such installers are named `-test`.
-- **The version** (0.8.0 for the first installer) is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`; the build script checks. Updates are a new installer, installed by hand (no updater: ADR 0009).
+- **The version** (0.8.0 for the first installer, 0.9.0 now) is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`; the build script checks. Updates are a new installer, installed by hand (no updater: ADR 0009).
 
 ## Platform limits
 
 - Virtual gamepads on Windows need the ViGEmBus 1.22.0 driver, which is archived but still the only redistributable option. It sits behind the `VirtualPad` trait so a user-mode driver can replace it.
-- **The host on a seat** needs HidHide (MIT; 1.5.230, May 2024), a driver installed once with administrator rights and a restart; M10's installer can offer it. Our virtual pads report a real Xbox 360 controller's ids, so a real Xbox 360 controller on the host can't be told from them and can't play a seat (Xbox One and later, PlayStation and Switch Pro controllers can).
+- **The host on a seat** needs HidHide (MIT; 1.5.230, May 2024), a driver installed once with administrator rights and a restart; the installer offers it, and Settings → Drivers installs it later (M10a). Our virtual pads report a real Xbox 360 controller's ids, so a real Xbox 360 controller on the host can't be told from them and can't play a seat (Xbox One and later, PlayStation and Switch Pro controllers can).
 - **Injection limits.** Elevated game windows, UAC prompts, the lock screen and anti-cheat titles reject injected input. A virtual gamepad still reaches an elevated game, but the panic key's hook doesn't see keys while it is in front (measured in M6). Go live marks windows of programs running as administrator and warns when one is picked; Take back in the app still works.
 - **Exclusive fullscreen.** True exclusive-fullscreen games may not capture through Windows.Graphics.Capture; the Desktop Duplication fallback lands in M9. They also draw over the host overlay (M8); the chime and the answer keys still work.
 - **Older Windows.** Windows.Graphics.Capture grew its options over versions: hiding the yellow capture border needs Windows 11, and a minimum frame interval a newer Windows 11 still. Where one is missing, capture keeps Windows' default (the border shows around the window on the host's screen, not in the stream). Before this was handled, every stream from a Windows 10 host ended at its first viewer.

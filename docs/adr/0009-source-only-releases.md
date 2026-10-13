@@ -36,6 +36,6 @@ The app is GPL-3.0-only ([ADR 0008](0008-gpl-3.0.md)). The source can be public 
 
 - **SmartScreen keeps warning** on friends' installers ("More info", then "Run anyway").
 - **Updates are a new installer,** handed out by the maintainer. The "update needed" message tells friends when they need it.
-- **Self-builders need the full toolchain:** Visual Studio's C++ tools, Rust, Node.js and CMake. The README lists it.
+- **Self-builders need the full toolchain:** Visual Studio's C++ tools, Rust, Node.js and CMake. [docs/self-hosting.md](../self-hosting.md) lists it, step by step.
 - **The ALPN stays `couch-coapp/0`.** There is no public release to move it to `/1`.
 - **Reversible.** Signing and an updater can still be added later, in a new ADR.
