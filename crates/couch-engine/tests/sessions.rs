@@ -29,7 +29,7 @@ use couch_input::{
     shortcuts::Shortcut,
 };
 use couch_media::{
-    AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder,
+    AudioSource, Capturer, EncoderConfig, GpuFrame, MediaError, VideoEncoder,
     audio::ToneSource,
     clock::{Clock, ProcessClock},
 };
@@ -41,7 +41,7 @@ use couch_proto::{
 };
 use couch_room::{limits::LimitConfig, room::Timings};
 use couch_testkit::{
-    FakeCapturer, FakeEncoder, RecordingInjector, RecordingPadFactory, relay::TestRelay,
+    FakeCapturer, FakeEncoder, FakeGpu, RecordingInjector, RecordingPadFactory, relay::TestRelay,
 };
 use tempfile::TempDir;
 use tokio::sync::{broadcast, mpsc};
@@ -79,6 +79,25 @@ struct Fake {
     hidden: Arc<AtomicBool>,
     /// Hiding it fails (HidHide busy).
     hide_fails: AtomicBool,
+    /// Frames on the GPU (M9b).
+    gpu: FakeGpuSide,
+}
+
+/// GPU frames on the fake machine: off unless a scenario turns them on.
+#[derive(Default)]
+struct FakeGpuSide {
+    /// The capture makes GPU frames.
+    capture_on_gpu: AtomicBool,
+    /// Their pool, and how often they were copied to memory.
+    frames: FakeGpu,
+    /// Encoders opened for a GPU frame read it (as NVENC on the capture's
+    /// device); otherwise they take frames in memory (another GPU's encoder).
+    encoders_take_it: AtomicBool,
+    /// Encoders reading GPU frames fail while set.
+    fail: Arc<AtomicBool>,
+    /// Every encoder opened: the pool it reads GPU frames from, or `None`
+    /// for one taking frames in memory.
+    opened: Mutex<Vec<Option<u64>>>,
 }
 
 /// The host's own controller: a DualSense, followed by a thread that reports
@@ -288,11 +307,30 @@ impl Backend for Fake {
         let closed = Arc::new(AtomicBool::new(false));
         *self.capture_closed.lock().unwrap() = closed.clone();
         let capturer = FakeCapturer::new(64, 36, fps, self.clock.clone(), closed);
+        let capturer = if self.gpu.capture_on_gpu.load(Ordering::SeqCst) {
+            capturer.on_gpu(self.gpu.frames.clone())
+        } else {
+            capturer
+        };
         Ok((Box::new(capturer), window))
     }
 
-    fn encoder(&self, _config: EncoderConfig) -> Result<Box<dyn VideoEncoder>, MediaError> {
-        Ok(Box::new(FakeEncoder::default()))
+    fn encoder(
+        &self,
+        _config: EncoderConfig,
+        gpu: Option<&GpuFrame>,
+    ) -> Result<Box<dyn VideoEncoder>, MediaError> {
+        let gpu_input = gpu.is_some() && self.gpu.encoders_take_it.load(Ordering::SeqCst);
+        self.gpu
+            .opened
+            .lock()
+            .unwrap()
+            .push(gpu.filter(|_| gpu_input).map(|f| f.source));
+        Ok(Box::new(if gpu_input {
+            FakeEncoder::gpu(self.gpu.fail.clone())
+        } else {
+            FakeEncoder::default()
+        }))
     }
 
     fn audio(&self, _kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
@@ -407,6 +445,7 @@ type Said = mpsc::UnboundedSender<(u8, Vec<u8>)>;
 #[derive(Clone, Default)]
 struct FakeViewer {
     frames: Arc<AtomicU64>,
+    keyframes: Arc<AtomicU64>,
     first_was_key: Arc<Mutex<Option<bool>>>,
     seat: Arc<Mutex<Option<SeatState>>>,
     hud: Arc<Mutex<Option<HudState>>>,
@@ -447,6 +486,7 @@ impl FakeViewer {
                                 if let Some((header, _)) = VideoFrameHeader::read(&frame.payload) {
                                     v.first_was_key.lock().unwrap().get_or_insert(header.keyframe);
                                     v.frames.fetch_add(1, Ordering::SeqCst);
+                                    v.keyframes.fetch_add(u64::from(header.keyframe), Ordering::SeqCst);
                                 }
                             }
                             couch_proto::ipc::kinds::SEAT => {
@@ -532,6 +572,10 @@ impl FakeViewer {
 
     fn frames(&self) -> u64 {
         self.frames.load(Ordering::SeqCst)
+    }
+
+    fn keyframes(&self) -> u64 {
+        self.keyframes.load(Ordering::SeqCst)
     }
 
     fn holding(&self) -> bool {
@@ -1458,6 +1502,108 @@ async fn a_game_swapping_its_window_keeps_streaming() {
         })
         .await;
     assert_eq!(reason, SessionEnd::GameExited);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M9b: GPU frames reach encoders that read them as they are, and a new
+/// texture pool (the game's window swapped: a new capture device) reopens
+/// those encoders, with a keyframe.
+#[tokio::test(flavor = "multi_thread")]
+async fn gpu_frames_reach_the_encoders_and_a_new_pool_reopens_them() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let gpu = &a.fake.gpu;
+    gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    gpu.encoders_take_it.store(true, Ordering::SeqCst);
+    gpu.frames.source.store(1, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    assert_eq!(*gpu.opened.lock().unwrap(), [Some(1), Some(1)]);
+
+    let keyframes = b_window.keyframes();
+    gpu.frames.source.store(2, Ordering::SeqCst);
+    wait("both encoders reopened on the new pool", || {
+        gpu.opened.lock().unwrap()[2..] == [Some(2), Some(2)]
+    })
+    .await;
+    wait("a keyframe from the reopened encoder", || {
+        b_window.keyframes() > keyframes
+    })
+    .await;
+    let (b_frames, c_frames) = (b_window.frames(), c_window.frames());
+    wait("frames keep coming", || {
+        b_window.frames() > b_frames + 5 && c_window.frames() > c_frames + 5
+    })
+    .await;
+    assert_eq!(
+        gpu.opened.lock().unwrap().len(),
+        4,
+        "no reopening without a new pool"
+    );
+    assert_eq!(
+        gpu.frames.downloads.load(Ordering::SeqCst),
+        0,
+        "nothing copied to memory"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M9b: when the encoder can't read GPU frames (not NVIDIA, or another GPU
+/// than the capture's), the capture is told to deliver frames in memory, so
+/// they aren't copied back from the GPU frame after frame.
+#[tokio::test(flavor = "multi_thread")]
+async fn encoders_that_cant_read_gpu_frames_turn_the_capture_to_memory() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let gpu = &a.fake.gpu;
+    gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    // B's encoder was offered a GPU frame and couldn't take it; by the time
+    // C came, frames were in memory.
+    assert_eq!(*gpu.opened.lock().unwrap(), [None, None]);
+    let downloads = gpu.frames.downloads.load(Ordering::SeqCst);
+    let (b_frames, c_frames) = (b_window.frames(), c_window.frames());
+    wait("frames to both", || {
+        b_window.frames() > b_frames + 20 && c_window.frames() > c_frames + 20
+    })
+    .await;
+    assert_eq!(
+        gpu.frames.downloads.load(Ordering::SeqCst),
+        downloads,
+        "no more copies back from the GPU"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M9b: an encoder reading GPU frames that fails is reopened for frames in
+/// memory, with a keyframe, and the viewer keeps watching.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_gpu_encoder_falls_back_to_frames_in_memory() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let gpu = &a.fake.gpu;
+    gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    gpu.encoders_take_it.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    let keyframes = window.keyframes();
+    gpu.fail.store(true, Ordering::SeqCst);
+    wait("reopened for frames in memory", || {
+        gpu.opened.lock().unwrap().last() == Some(&None)
+    })
+    .await;
+    wait("a keyframe after the fallback", || {
+        window.keyframes() > keyframes
+    })
+    .await;
+    let frames = window.frames();
+    wait("frames keep coming", || window.frames() > frames + 5).await;
+    assert!(gpu.frames.downloads.load(Ordering::SeqCst) > 0);
+    // Later encoders in this stream take frames in memory too.
+    let c_window = watching(&room, &a, &c).await;
+    assert_eq!(gpu.opened.lock().unwrap().last(), Some(&None));
+    assert!(c_window.frames() >= 5);
+    assert!(a.session(&room, &a).await.is_some(), "still live");
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

@@ -7,7 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{BgraFrame, CaptureEvent, Capturer, MediaError, Micros, barcode, clock::Clock};
+use crate::{
+    BgraFrame, CaptureEvent, Capturer, MediaError, Micros, VideoFrame, barcode, clock::Clock,
+};
 
 /// Barcode position and cell size used by the test pattern.
 pub const BARCODE_X: u32 = 16;
@@ -107,7 +109,7 @@ impl Capturer for TestPattern {
         let now = Instant::now();
         let floor = now.checked_sub(self.frame_interval).unwrap_or(now);
         self.next_due = self.next_due.max(floor) + self.frame_interval;
-        Ok(Some(CaptureEvent::Frame(self.render())))
+        Ok(Some(CaptureEvent::Frame(VideoFrame::Cpu(self.render()))))
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 name: windows-ffi-pitfalls
-description: Checklist for writing or reviewing unsafe Windows, COM and SDL3 code in Couch Co-App with the `windows` 0.62 crate, `windows-core` and `sdl3` 0.20 — hidden Drop impls, packed structs, COM threading, callbacks on foreign threads, teardown order. Use when adding or changing code in crates/couch-platform-win (WASAPI, Windows.Graphics.Capture, SendInput, ViGEm, process and window APIs, and later hooks, Job Objects, DPAPI, overlays), any `unsafe` block that calls Windows or SDL, or an SDL callback in couch-viewer.
+description: Checklist for writing or reviewing unsafe Windows, COM, D3D11 and SDL3 code in Couch Co-App with the `windows` 0.62 crate, `windows-core` and `sdl3` 0.20 — hidden Drop impls, packed structs, COM threading, callbacks on foreign threads, teardown order, COM references handed to FFmpeg and textures NVENC has registered. Use when adding or changing code in crates/couch-platform-win (WASAPI, Windows.Graphics.Capture and the GPU texture pool, SendInput, ViGEm, HidHide, low-level hooks, DPAPI, WLAN, process and window APIs), FFmpeg hardware contexts in couch-codec-ffmpeg (d3d11.rs, the decoder's D3D11VA), any `unsafe` block that calls Windows or SDL, or an SDL callback in couch-viewer.
 ---
 
 # Windows and SDL FFI pitfalls
@@ -37,6 +37,15 @@ Each item below cost time or nearly caused undefined behaviour in M1–M3. Check
 - **`#[implement]`** expands to paths in `windows_core`, so the crate needs `windows-core` as a direct dependency (it is in the workspace). A plain `#[implement(IActivateAudioInterfaceCompletionHandler)]` object was accepted as `ActivateAudioInterfaceAsync`'s handler, which must be agile.
 - **Callbacks arrive on other threads.** Keep their state `Send + Sync` (channels or atomics), and never block them for long.
 - **Event handles** (`CreateEventW`) are closed in `Drop`, including on the error paths partway through setup.
+
+## D3D11 and FFmpeg (M9b)
+
+- **COM references handed to FFmpeg become FFmpeg's.** `AVD3D11VADeviceContext.device` is released by FFmpeg when the device context is freed, including after a failed `av_hwdevice_ctx_init`. Hand it a reference of its own (`device.clone().into_raw()`), never `as_raw()` of one you keep.
+- **A device several threads use must be multithread-protected** (`ID3D11Multithread::SetMultithreadProtected(true)`). FFmpeg turns it on only for devices it creates; windows-capture never does. Without it, the capture thread's copies and NVENC on encoder threads race on the immediate context.
+- **Windows.Graphics.Capture reuses its frame texture** once the callback returns (windows-capture's pool holds one). Copy it out (`CopySubresourceRegion`, then `Flush`) inside the callback; never keep `as_raw_texture()`.
+- **NVENC caches every texture it registers by address**, and unregisters them only when it closes. A texture destroyed while the encoder is open leaves a registration on a dead resource, and its address can be reused by a new texture that NVENC then takes for the old one. Keep every texture an encoder may have seen alive until it closes (`GpuTexture::keep_alive`, the `source` rule in CLAUDE.md).
+- **Reading a texture back (`Map`) holds a multithread-protected device's lock while it waits for the GPU,** blocking every other thread on that device (the capture's copies). Don't read GPU frames back per frame on a hot path; capture to memory instead when nothing reads them on the GPU.
+- **FFmpeg's D3D11 structs aren't in our generated bindings.** Mirror them from the pinned header (`third_party/ffmpeg/include/libavutil/hwcontext_d3d11va.h`) with a size test, and check them again after an FFmpeg bump.
 
 ## Low-level hooks
 

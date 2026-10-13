@@ -13,7 +13,7 @@ use std::{
 };
 
 use couch_media::{BgraFrame, CaptureEvent, Capturer, barcode, clock::LATENCY_CLOCK_CELL};
-use couch_platform_win::capture::{CaptureOptions, CaptureSource, WgcCapturer};
+use couch_platform_win::capture::{CaptureOptions, CaptureSource, FrameOutput, WgcCapturer};
 
 use crate::stats::Samples;
 
@@ -30,6 +30,7 @@ impl ScreenProbe {
             CaptureOptions {
                 min_interval: Duration::from_secs(1) / 60,
                 cursor: false,
+                output: FrameOutput::Cpu,
             },
         )?;
         let samples = Arc::new(Mutex::new(Samples::default()));
@@ -46,6 +47,7 @@ impl ScreenProbe {
                         else {
                             continue;
                         };
+                        let Ok(frame) = frame.cpu() else { continue };
                         if let Some(ms) = measure(&frame, &mut found) {
                             samples.lock().unwrap().push(ms);
                         }
@@ -101,10 +103,11 @@ pub fn scan_once(out: Option<&std::path::Path>) -> anyhow::Result<()> {
         CaptureOptions {
             min_interval: Duration::from_millis(1),
             cursor: false,
+            output: FrameOutput::Cpu,
         },
     )?;
     let frame = match capturer.next_event(Duration::from_secs(3))? {
-        Some(CaptureEvent::Frame(frame)) => frame,
+        Some(CaptureEvent::Frame(frame)) => frame.cpu()?,
         Some(CaptureEvent::SourceClosed) => anyhow::bail!("monitor capture closed"),
         None => anyhow::bail!("no screen frame within 3 s"),
     };

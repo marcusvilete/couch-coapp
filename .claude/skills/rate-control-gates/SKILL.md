@@ -58,9 +58,12 @@ G5's worst frame varies most between runs. Repeat a borderline gate with `--only
 
 ## Many viewers on one PC
 
-The gates use one or two viewers. After changing the host pipeline, encoding or rate control (and in M9's zero-copy work), also run `.\scripts\viewers.ps1` (4 viewers) and `.\scripts\viewers.ps1 -Viewers 7`. Reference from M5a (`docs/m5a-results.md`):
-- **4 viewers:** 60 fps each, capture to present p50 about 22 ms and p95 about 30 ms, 20 Mbit/s each, slowest encode 11 to 12 ms.
-- **7 viewers:** the PC is the limit, at about 36 fps each and p50 about 61 ms, but every rate controller should stay at its 20 Mbit/s target.
+The gates use one or two viewers. After changing the host pipeline, encoding or rate control, also run `.\scripts\viewers.ps1 -Screen` with 4 viewers and with `-Viewers 7`. `-Screen` captures the primary screen, so frames take the GPU path (M9b); the test pattern (without `-Screen`) is made in memory and doesn't. Reference from M9b (`docs/m9b-results.md`):
+- **4 viewers:** about 60 fps each, capture to present p50 about 11 ms and p95 about 16 ms, 18.7 Mbit/s each, slowest encode 9 to 10 ms.
+- **7 viewers:** about 58 fps each, p50 about 14 ms and p95 about 21 ms, 18.6 Mbit/s each, slowest encode 11 to 13 ms.
+- **Through memory** (`-CopyThroughMemory`, as before M9b): 7 viewers fall to about 40 fps and p50 about 70 ms. A GPU-path run near those numbers means frames are going through memory again: check the host's "GPU frames" log line.
+
+Every rate controller should stay near its 20 Mbit/s target.
 
 A controller falling to the 1.5 Mbit/s floor with many viewers means host load is being read as congestion again (`SendDelays`).
 

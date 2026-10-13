@@ -17,6 +17,7 @@ pub mod drivers;
 pub mod fake_game;
 pub mod foreground;
 pub mod game;
+pub mod gpu_frames;
 pub mod held_input;
 pub mod hidhide;
 pub mod host_keys;

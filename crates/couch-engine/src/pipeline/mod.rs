@@ -28,7 +28,9 @@ use couch_input::{
     local::{ControllerIds, LocalPads},
     shortcuts::Shortcut,
 };
-use couch_media::{AudioSource, Capturer, EncoderConfig, MediaError, VideoEncoder, clock::Clock};
+use couch_media::{
+    AudioSource, Capturer, EncoderConfig, GpuFrame, MediaError, VideoEncoder, clock::Clock,
+};
 
 use crate::{DriverName, DriverState, ScreenArea};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -172,14 +174,21 @@ pub trait Backend: Send + Sync + 'static {
     fn sources(&self) -> Result<Sources, MediaError>;
 
     /// Starts capturing at up to `fps`. Also returns the captured window,
-    /// if the source is one.
+    /// if the source is one. Frames may come in memory or on the GPU.
     fn capture(
         &self,
         source: &Source,
         fps: u32,
     ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError>;
 
-    fn encoder(&self, config: EncoderConfig) -> Result<Box<dyn VideoEncoder>, MediaError>;
+    /// An encoder. With `gpu` (a frame like the ones to come), one that reads
+    /// GPU frames where it can (`caps().gpu_input`); otherwise one that takes
+    /// frames in memory, which GPU frames are copied to.
+    fn encoder(
+        &self,
+        config: EncoderConfig,
+        gpu: Option<&GpuFrame>,
+    ) -> Result<Box<dyn VideoEncoder>, MediaError>;
 
     fn audio(&self, kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError>;
 
@@ -309,7 +318,11 @@ impl Backend for Unsupported {
     ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError> {
         Err(unsupported())
     }
-    fn encoder(&self, _: EncoderConfig) -> Result<Box<dyn VideoEncoder>, MediaError> {
+    fn encoder(
+        &self,
+        _: EncoderConfig,
+        _: Option<&GpuFrame>,
+    ) -> Result<Box<dyn VideoEncoder>, MediaError> {
         Err(unsupported())
     }
     fn audio(&self, _: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {

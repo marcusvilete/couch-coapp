@@ -71,7 +71,7 @@ cargo test -p couch-engine --test relay                 # our relay (in-process,
 ## What isn't covered automatically
 
 - **Several profiles on one machine**: `npm run tauri dev` in `apps\desktop`, then `.\scripts\profiles.ps1` (alice, bob, carol). Ask the user to join, ban, leave and close a room with one of them closed meanwhile, and to open an invite link from a browser. `docs/m4b-results.md` has the full list.
-- **Across networks and NATs**: a second machine on another network, through iroh's public relays, or our relay (`scripts\relay.ps1 -Lan` for a LAN test; deployed, once there's a server). Members on different relay settings meet only if one can reach the other's relay: ours refuses clients without its token.
+- **Across networks and NATs**: a second machine on another network, through iroh's public relays, or our relay (`scripts\relay.ps1 -Lan` for a LAN test; deployed at the address in `release.toml` since M7, reached by release installers). Members on different relay settings meet only if one can reach the other's relay: ours refuses clients without its token.
 - **The admission composition itself**: an outside review is optional (ADR 0009) but worth having before strangers are encouraged to rely on the app.
 
 ## After the checks

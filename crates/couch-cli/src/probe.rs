@@ -89,6 +89,59 @@ async fn probe_ffmpeg(report: &mut Report) {
         Ok(()) => report.line(Status::Ok, "D3D11VA decode", "device created"),
         Err(e) => report.line(Status::Fail, "D3D11VA decode", e),
     }
+    #[cfg(windows)]
+    match tokio::task::spawn_blocking(probe_gpu_frames)
+        .await
+        .expect("GPU frames probe panicked")
+    {
+        Ok(()) => report.line(
+            Status::Ok,
+            "GPU frames (M9b)",
+            "h264_nvenc encodes captured frames on the GPU",
+        ),
+        Err(e) => report.line(
+            Status::Info,
+            "GPU frames (M9b)",
+            format!("frames go through memory: {e}"),
+        ),
+    }
+}
+
+/// Whether NVENC takes a frame from a texture on a D3D11 device made as the
+/// capture makes its own (M9b), at 1080p.
+#[cfg(windows)]
+fn probe_gpu_frames() -> Result<(), String> {
+    use couch_media::{BgraFrame, Codec, EncoderConfig, EncoderInput, Micros, VideoEncoder};
+    let (width, height) = (1920, 1080);
+    let mut uploader =
+        couch_platform_win::gpu_frames::Uploader::new(width, height).map_err(|e| e.to_string())?;
+    let frame = BgraFrame {
+        width,
+        height,
+        stride: width * 4,
+        data: vec![64u8; (width * height * 4) as usize].into(),
+        captured_at: Micros(1),
+    };
+    let gpu = uploader
+        .upload(&frame)
+        .map_err(|e| e.to_string())?
+        .ok_or("no free texture")?;
+    let config = EncoderConfig {
+        codec: Codec::H264,
+        width,
+        height,
+        fps: 60,
+        bitrate_bps: 20_000_000,
+    };
+    let mut encoder =
+        couch_codec_ffmpeg::FfmpegEncoder::open_gpu(config, &gpu).map_err(|e| e.to_string())?;
+    let units = encoder
+        .encode(EncoderInput::Gpu(&gpu), true)
+        .map_err(|e| e.to_string())?;
+    match units.first() {
+        Some(unit) if unit.keyframe => Ok(()),
+        _ => Err("no keyframe came out".into()),
+    }
 }
 
 async fn probe_network(report: &mut Report, timeout: Duration) {

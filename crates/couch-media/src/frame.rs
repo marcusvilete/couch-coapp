@@ -1,4 +1,12 @@
+use std::{
+    any::Any,
+    ffi::c_void,
+    sync::{Arc, Mutex, PoisonError},
+};
+
 use bytes::Bytes;
+
+use crate::MediaError;
 
 /// Microseconds on a clock that is comparable across processes on one machine
 /// (QPC on Windows; see [`crate::clock`]). Frames are stamped with it at
@@ -65,11 +73,171 @@ pub struct Nv12Frame {
     pub captured_at: Micros,
 }
 
-/// What an encoder consumes. A GPU-texture variant arrives with the zero-copy
-/// work in M9; the enum is non-exhaustive so that is not a breaking change.
+/// A BGRA texture in GPU memory that a [`GpuFrame`] points at (M9b). The
+/// platform crate implements it; on Windows it is a D3D11 texture on the
+/// capture's device. Pointers are raw so this crate stays free of OS types.
+pub trait GpuTexture: Send + Sync {
+    /// The `ID3D11Texture2D`, valid while this lives. No reference is added.
+    fn d3d11_texture(&self) -> *mut c_void;
+
+    /// The texture's `ID3D11Device`, with one reference added that the caller
+    /// now owns (FFmpeg's D3D11 device context releases it when freed).
+    fn d3d11_device_owned(&self) -> *mut c_void;
+
+    /// Copies the pixels to memory: the row stride and the rows.
+    fn download(&self) -> Result<(u32, Bytes), MediaError>;
+
+    /// Keeps every texture of this one's pool alive while held, those made
+    /// later included. An encoder that registers textures (NVENC) holds it
+    /// until it closes, so none is destroyed while still registered.
+    fn keep_alive(&self) -> Arc<dyn Any + Send + Sync>;
+}
+
+/// A captured frame that stays on the GPU (M9b): an encoder that takes GPU
+/// input reads the texture itself; any other gets [`GpuFrame::cpu`], copied
+/// to memory once per frame however many encoders ask.
+#[derive(Clone)]
+pub struct GpuFrame {
+    /// Always even: the pool copies frames cropped to even size.
+    pub width: u32,
+    pub height: u32,
+    pub captured_at: Micros,
+    /// The texture pool the frame came from, new for every capture device and
+    /// size. An encoder with GPU input reopens when it changes: NVENC caches
+    /// each texture it saw by address, and only a pool's own textures are
+    /// guaranteed to outlive the encoder that registered them.
+    pub source: u64,
+    inner: Arc<GpuInner>,
+}
+
+struct GpuInner {
+    texture: Arc<dyn GpuTexture>,
+    cpu: Mutex<Option<BgraFrame>>,
+}
+
+impl GpuFrame {
+    pub fn new(
+        texture: Arc<dyn GpuTexture>,
+        width: u32,
+        height: u32,
+        captured_at: Micros,
+        source: u64,
+    ) -> Self {
+        debug_assert!(
+            width.is_multiple_of(2) && height.is_multiple_of(2),
+            "{width}x{height}"
+        );
+        Self {
+            width,
+            height,
+            captured_at,
+            source,
+            inner: Arc::new(GpuInner {
+                texture,
+                cpu: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub fn texture(&self) -> &dyn GpuTexture {
+        &*self.inner.texture
+    }
+
+    /// The frame in memory, copied from the GPU on the first call and shared
+    /// by every later one.
+    pub fn cpu(&self) -> Result<BgraFrame, MediaError> {
+        let mut cpu = self
+            .inner
+            .cpu
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(frame) = &*cpu {
+            return Ok(frame.clone());
+        }
+        let (stride, data) = self.inner.texture.download()?;
+        let frame = BgraFrame {
+            width: self.width,
+            height: self.height,
+            stride,
+            data,
+            captured_at: self.captured_at,
+        };
+        *cpu = Some(frame.clone());
+        Ok(frame)
+    }
+}
+
+impl std::fmt::Debug for GpuFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuFrame")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("captured_at", &self.captured_at)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A captured frame, in memory or on the GPU.
+#[derive(Debug, Clone)]
+pub enum VideoFrame {
+    Cpu(BgraFrame),
+    Gpu(GpuFrame),
+}
+
+impl VideoFrame {
+    pub fn width(&self) -> u32 {
+        match self {
+            Self::Cpu(f) => f.width,
+            Self::Gpu(f) => f.width,
+        }
+    }
+
+    pub fn height(&self) -> u32 {
+        match self {
+            Self::Cpu(f) => f.height,
+            Self::Gpu(f) => f.height,
+        }
+    }
+
+    pub fn captured_at(&self) -> Micros {
+        match self {
+            Self::Cpu(f) => f.captured_at,
+            Self::Gpu(f) => f.captured_at,
+        }
+    }
+
+    /// The GPU frame's texture pool, or `None` for a frame in memory.
+    pub fn gpu_source(&self) -> Option<u64> {
+        match self {
+            Self::Cpu(_) => None,
+            Self::Gpu(f) => Some(f.source),
+        }
+    }
+
+    /// Even width and height, as 4:2:0 encoders need. A GPU frame already is.
+    pub fn cropped_to_even(&self) -> VideoFrame {
+        match self {
+            Self::Cpu(f) => Self::Cpu(f.cropped_to_even()),
+            Self::Gpu(f) => Self::Gpu(f.clone()),
+        }
+    }
+
+    /// The frame in memory: itself, or the GPU frame copied once.
+    pub fn cpu(&self) -> Result<BgraFrame, MediaError> {
+        match self {
+            Self::Cpu(f) => Ok(f.clone()),
+            Self::Gpu(f) => f.cpu(),
+        }
+    }
+}
+
+/// What an encoder consumes: a frame in memory, or a GPU frame for an encoder
+/// whose caps say it takes GPU input ([`EncoderCaps::gpu_input`]).
 #[non_exhaustive]
 pub enum EncoderInput<'a> {
     Cpu(&'a BgraFrame),
+    Gpu(&'a GpuFrame),
 }
 
 /// What a decoder produces. A GPU-texture variant arrives in M9.
@@ -111,6 +279,9 @@ pub struct EncoderCaps {
     /// fell back.
     pub options: String,
     pub hardware: bool,
+    /// Takes [`EncoderInput::Gpu`] (M9b: NVENC opened on the capture's
+    /// device); otherwise frames reach it in memory.
+    pub gpu_input: bool,
     /// Changing the bitrate forces a keyframe. FFmpeg's NVENC wrapper resets
     /// the encoder on every bitrate change, so rate control batches increases.
     pub bitrate_change_costs_keyframe: bool,
@@ -128,7 +299,7 @@ pub struct AudioChunk {
 /// What a [`crate::Capturer`] reports.
 #[derive(Debug)]
 pub enum CaptureEvent {
-    Frame(BgraFrame),
+    Frame(VideoFrame),
     /// The captured window or display went away (for example, the game exited).
     SourceClosed,
 }
@@ -180,4 +351,66 @@ pub struct FeedbackSnapshot {
     pub relayed: bool,
     /// Time since the last receiver report.
     pub report_age_ms: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    /// A "GPU" texture in memory that counts its downloads.
+    struct Counted {
+        pixels: Bytes,
+        downloads: AtomicU32,
+    }
+
+    impl GpuTexture for Counted {
+        fn d3d11_texture(&self) -> *mut c_void {
+            std::ptr::null_mut()
+        }
+        fn d3d11_device_owned(&self) -> *mut c_void {
+            std::ptr::null_mut()
+        }
+        fn download(&self) -> Result<(u32, Bytes), MediaError> {
+            self.downloads.fetch_add(1, Ordering::SeqCst);
+            Ok((8, self.pixels.clone()))
+        }
+        fn keep_alive(&self) -> Arc<dyn Any + Send + Sync> {
+            Arc::new(())
+        }
+    }
+
+    #[test]
+    fn a_gpu_frame_is_downloaded_once_for_every_encoder() {
+        let texture = Arc::new(Counted {
+            pixels: Bytes::from(vec![7u8; 8 * 2]),
+            downloads: AtomicU32::new(0),
+        });
+        let frame = VideoFrame::Gpu(GpuFrame::new(texture.clone(), 2, 2, Micros(5), 1));
+        let copies = [frame.clone(), frame.clone(), frame];
+        for copy in &copies {
+            let cpu = copy.cpu().unwrap();
+            assert_eq!((cpu.width, cpu.height, cpu.stride), (2, 2, 8));
+            assert_eq!(cpu.captured_at, Micros(5));
+            assert_eq!(cpu.pixel(1, 1), [7; 4]);
+        }
+        assert_eq!(texture.downloads.load(Ordering::SeqCst), 1);
+        assert_eq!(copies[0].gpu_source(), Some(1));
+        assert_eq!(copies[0].cropped_to_even().width(), 2);
+    }
+
+    #[test]
+    fn a_frame_in_memory_is_cropped_and_has_no_gpu_source() {
+        let frame = VideoFrame::Cpu(BgraFrame {
+            width: 3,
+            height: 5,
+            stride: 12,
+            data: Bytes::from(vec![0u8; 60]),
+            captured_at: Micros(1),
+        });
+        assert_eq!(frame.gpu_source(), None);
+        let even = frame.cropped_to_even();
+        assert_eq!((even.width(), even.height()), (2, 4));
+    }
 }

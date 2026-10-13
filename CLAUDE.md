@@ -55,7 +55,9 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 | Stream the test pattern | `couch-cli host --source testpattern --pattern-size 1280 720 --fps 30` |
 | End-to-end latency on one machine (G1; `--screen` adds G1b) | `couch-cli latency-probe --secs 30 --relay none` |
 | Rate-control gates G1, G3–G5 and G7 (one viewer's bad path leaves another's stream alone), run and judged | `couch-cli gates --quick` (6 min) or `couch-cli gates` (14 min). `latency-probe --viewers 2 --impair-first "rate=5mbit"` runs G7's setup by hand. The `rate-control-gates` skill covers traces and reading a failure. |
-| Many viewers of one host on this PC (fps, latency, bitrate and encode time per viewer) | `.\scripts\viewers.ps1` (4) or `.\scripts\viewers.ps1 -Viewers 7`, after the release build |
+| Many viewers of one host on this PC (fps, latency, bitrate and encode time per viewer) | `.\scripts\viewers.ps1` (4) or `.\scripts\viewers.ps1 -Viewers 7`, after the release build. The test pattern is made in memory; `-Screen` captures the primary screen instead, so frames take the GPU path (M9b), and `-Screen -CopyThroughMemory` the path from before, to compare |
+| Frames through memory on the host, as before M9b (for measuring) | `$env:COUCH_HOST_ZERO_COPY = 0` before `host`, `latency-probe` or the app |
+| NVENC fed D3D11 textures against frames from memory (needs NVIDIA) | `cargo test -p couch-codec-ffmpeg --features gpu-tests --test gpu_input`; the texture pool alone: `cargo test -p couch-platform-win gpu_frames -- --ignored` |
 | The installer, for this PC or another (M10a: the app, stream window, DLLs and the two drivers, offered after install; for just you or everyone, as the installer asks) | `.\scripts\build-installer.ps1` builds a release installer with the relay in the private `release.toml` (M7, below); it needs a clean, committed tree. `-TestRelay` builds a `-test` installer on iroh's public relays instead, from any tree. Installers go to friends only (ADR 0009). Run it without redirecting its stderr, then `npx --yes http-server target\installer -p 8000`. It fetches and stages the pinned dependencies and driver installers, checks the version is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`, and builds with `tauri.installer.conf.json` (the bundled files and the driver hooks, `installer-hooks.nsh`), kept out of `tauri.conf.json` so development builds aren't touched. Bump the version with each installer handed out. An installed app logs to `desktop.log` in the profile folder |
 | What an XInput game sees on the host (each slot's buttons and sticks, live): tells a stream problem from a game choosing another controller | `.\scripts\xinput-watch.ps1` |
 | Relay only (G6) | add `--relay n0 --relay-only` to both `host` and `view`; through our relay, `--relay http://localhost:3340 --relay-token <token> --relay-only` |
@@ -162,6 +164,17 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 **Opening encoders** (M9a)
 - **Never call rsmpeg's `AVCodecContext::open` with options.** When the open fails, rsmpeg 0.18 double-frees the dictionary and crashes the process. Open through `couch_codec_ffmpeg::options::OptionSet::open`, which calls `avcodec_open2` itself.
 - **Each encoder's options are an ordered list of sets** (`options::option_sets`). The last one is always the settings that worked before; add new sets before it, never replace it. `tests/open.rs` (every encoder, twice, no crash) must keep passing on any machine.
+
+**Frames on the GPU** (M9b; `couch_platform_win::gpu_frames`, `couch_codec_ffmpeg::d3d11`)
+- **NVENC remembers every texture it registers, by address.** So:
+  - a pool is replaced only under a new `GpuFrame::source`, and an encoder reading GPU frames reopens when `source` changes (the encode loop in `pipeline/host.rs`; `D3d11Frames::wrap` refuses another pool's frame);
+  - an encoder keeps its pool's textures alive until it closes (`GpuTexture::keep_alive`, held by `D3d11Frames`; the codec context drops first);
+  - never free, swap or resize a pool's textures in place.
+- **When no encoder reads GPU frames** (one couldn't take them, or failed), the stream sets `gpu_input_off` and the capture switches to memory (`Capturer::frames_in_memory`): reading every frame back from the GPU costs more than capturing to memory.
+- **The capture's device is multithread-protected** (`TexturePool::new`): the capture thread and the encoder threads share it. Keep that for any new user of the device.
+- **FFmpeg owns one device reference per encoder** (`GpuTexture::d3d11_device_owned`) and releases it; a wrapped frame owns a `GpuFrame` clone, freed by the buffer's callback. Never hand FFmpeg a borrowed COM pointer as its own.
+- **Measure a performance change against itself turned off** (its switch, e.g. `COUCH_HOST_ZERO_COPY=0`), on the same build: the `performance-checks` skill has the procedure, the known artifacts and the reference numbers. Give each new performance change such a switch.
+- **Only `GPU_INPUT_ENCODER` (NVENC) takes GPU frames.** Another encoder gets them from `GpuFrame::cpu()`, copied once per frame. Turning on AMD or Intel GPU input needs testing on their hardware first, and Quick Sync needs NV12 (a conversion shader).
 
 **Native dependencies and pins**
 - FFmpeg and SDL3 are pinned by URL and SHA-256 in `xtask/src/deps.rs`. So are the drivers' official installers the app bundles (`DRIVERS`: ViGEmBus 1.22.0, BSD-3; HidHide 1.5.230, MIT), with their licence texts in `apps/desktop/src-tauri/drivers/`; `stage-dlls` copies them to `target/<profile>/drivers/`, where Settings → Drivers finds them.

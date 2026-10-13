@@ -2,16 +2,29 @@
 //! window or one monitor, BGRA, no yellow border where Windows allows hiding
 //! it (Windows 11; see `settings`).
 //!
-//! Frames are copied to CPU memory here. The zero-copy path that hands the
-//! D3D11 texture straight to the encoder is M9.
+//! Frames come out on the GPU ([`FrameOutput::Gpu`], M9b: copied into a
+//! [`TexturePool`] for an encoder that reads textures) or in memory
+//! ([`FrameOutput::Cpu`], for tools that read pixels).
 
-use std::{ffi::c_void, sync::Arc, time::Duration};
+use std::{
+    ffi::c_void,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
-use couch_media::{BgraFrame, CaptureEvent, Capturer, MediaError, mailbox::Mailbox};
+use couch_media::{
+    BgraFrame, CaptureEvent, Capturer, MediaError, Micros, VideoFrame, mailbox::Mailbox,
+};
 use windows::Win32::{
     Foundation::HWND,
-    Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
+    Graphics::{
+        Direct3D11::D3D11_TEXTURE2D_DESC,
+        Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
+    },
 };
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
@@ -25,7 +38,7 @@ use windows_capture::{
     window::Window,
 };
 
-use crate::{clock, foreground::WindowId};
+use crate::{clock, foreground::WindowId, gpu_frames::TexturePool};
 
 /// A monitor, by its handle value, as [`list_monitors`] found it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,6 +62,17 @@ pub struct CaptureOptions {
     /// the content changed, so this is a cap, not a rate.
     pub min_interval: Duration,
     pub cursor: bool,
+    pub output: FrameOutput,
+}
+
+/// Where captured frames go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameOutput {
+    /// Copied to memory ([`VideoFrame::Cpu`]).
+    Cpu,
+    /// Kept on the capture's GPU ([`VideoFrame::Gpu`]). If that fails, the
+    /// capture logs why and copies to memory from then on.
+    Gpu,
 }
 
 /// A visible top-level window that can be captured.
@@ -139,11 +163,44 @@ pub fn list_monitors() -> Result<Vec<MonitorInfo>, MediaError> {
 }
 
 struct Shared {
-    frames: Mailbox<BgraFrame>,
+    frames: Mailbox<VideoFrame>,
+    output: FrameOutput,
+    /// [`Capturer::frames_in_memory`] was called: GPU output switches to memory.
+    to_memory: AtomicBool,
 }
 
 struct Handler {
     shared: Arc<Shared>,
+    output: FrameOutput,
+    pool: Option<TexturePool>,
+}
+
+impl Handler {
+    /// The frame copied into the pool, which is replaced first if the device,
+    /// format or size changed. `None`: every texture is still in use.
+    fn on_gpu(
+        &mut self,
+        frame: &Frame,
+        captured_at: Micros,
+    ) -> Result<Option<VideoFrame>, MediaError> {
+        let texture = frame.as_raw_texture();
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: fills a local description of the live frame texture.
+        unsafe { texture.GetDesc(&mut desc) };
+        // 4:2:0 encoders need even sizes; the copy drops an odd last row or column.
+        let (width, height) = (frame.width() & !1, frame.height() & !1);
+        if width == 0 || height == 0 {
+            // A window a pixel wide (minimized, or mid-resize): nothing to send.
+            return Ok(None);
+        }
+        let device = frame.device();
+        let pool = match self.pool.take() {
+            Some(pool) if pool.fits(device, desc.Format, width, height) => pool,
+            _ => TexturePool::new(device, desc.Format, width, height)?,
+        };
+        let pool = self.pool.insert(pool);
+        Ok(pool.copy(texture, captured_at)?.map(VideoFrame::Gpu))
+    }
 }
 
 impl GraphicsCaptureApiHandler for Handler {
@@ -151,7 +208,11 @@ impl GraphicsCaptureApiHandler for Handler {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { shared: ctx.flags })
+        Ok(Self {
+            output: ctx.flags.output,
+            shared: ctx.flags,
+            pool: None,
+        })
     }
 
     fn on_frame_arrived(
@@ -163,17 +224,41 @@ impl GraphicsCaptureApiHandler for Handler {
             .timestamp()
             .map(|t| clock::from_system_relative_time(t.Duration))
             .unwrap_or_else(|_| clock::now());
+        if self.output == FrameOutput::Gpu && self.shared.to_memory.load(Ordering::Relaxed) {
+            tracing::info!("no encoder reads frames on the GPU; copying them to memory");
+            self.output = FrameOutput::Cpu;
+            self.pool = None;
+        }
+        if self.output == FrameOutput::Gpu {
+            match self.on_gpu(frame, captured_at) {
+                Ok(Some(frame)) => {
+                    self.shared.frames.put(frame);
+                }
+                // Every texture in use: dropped, as a full mailbox would.
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "keeping frames on the GPU failed ({e}); copying them to memory"
+                    );
+                    self.output = FrameOutput::Cpu;
+                    self.pool = None;
+                }
+            }
+            if self.output == FrameOutput::Gpu {
+                return Ok(());
+            }
+        }
         let (width, height) = (frame.width(), frame.height());
         let mut buffer = frame.buffer()?;
         let stride = buffer.row_pitch();
         let data = Bytes::copy_from_slice(buffer.as_raw_buffer());
-        self.shared.frames.put(BgraFrame {
+        self.shared.frames.put(VideoFrame::Cpu(BgraFrame {
             width,
             height,
             stride,
             data,
             captured_at,
-        });
+        }));
         Ok(())
     }
 
@@ -195,6 +280,8 @@ impl WgcCapturer {
     pub fn start(source: &CaptureSource, options: CaptureOptions) -> Result<Self, MediaError> {
         let shared = Arc::new(Shared {
             frames: Mailbox::new(),
+            output: options.output,
+            to_memory: AtomicBool::new(false),
         });
         let cursor = if options.cursor {
             CursorCaptureSettings::WithCursor
@@ -313,6 +400,10 @@ impl Capturer for WgcCapturer {
             }
             Err(_closed) => Err(MediaError::Closed),
         }
+    }
+
+    fn frames_in_memory(&mut self) {
+        self.shared.to_memory.store(true, Ordering::Relaxed);
     }
 }
 
