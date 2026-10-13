@@ -321,7 +321,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
             shown.unwrap_or((0, 0)),
             &decoder_name.lock().unwrap(),
             &gpu.adapter_name,
-            gpu.present_mode(),
+            &format!("{:?} (latency {})", gpu.present_mode(), gpu.frame_latency()),
             decoded.replaced_count(),
             *net.lock().unwrap(),
         );
@@ -625,7 +625,7 @@ impl Stats {
         (width, height): (u32, u32),
         decoder: &str,
         adapter: &str,
-        present_mode: wgpu::PresentMode,
+        presentation: &str,
         dropped: u64,
         net: Option<NetStats>,
     ) -> Vec<String> {
@@ -650,7 +650,7 @@ impl Stats {
                 fmt(median(&self.clock_to_present_ms))
             ),
             format!("arrive -> decoded   {}", fmt(median(&self.decode_ms))),
-            format!("decoder {decoder}, {present_mode:?}, {dropped} skipped"),
+            format!("decoder {decoder}, {presentation}, {dropped} skipped"),
             format!("GPU {adapter}   (Ctrl+Alt+Shift+H hides this)"),
         ]
     }

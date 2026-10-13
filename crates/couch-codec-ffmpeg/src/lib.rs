@@ -6,6 +6,7 @@
 
 pub mod decoder;
 pub mod encoder;
+pub mod options;
 pub mod probe;
 
 pub use decoder::FfmpegDecoder;

@@ -106,6 +106,10 @@ pub struct EncoderConfig {
 pub struct EncoderCaps {
     /// Backend name, e.g. `h264_nvenc`.
     pub name: String,
+    /// Which of the backend's option sets opened (e.g. `ultralowlatency`,
+    /// `today's`), for the logs: tells a friend's tuned encoder from one that
+    /// fell back.
+    pub options: String,
     pub hardware: bool,
     /// Changing the bitrate forces a keyframe. FFmpeg's NVENC wrapper resets
     /// the encoder on every bitrate change, so rate control batches increases.

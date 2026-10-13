@@ -168,6 +168,11 @@ impl Backend for WindowsBackend {
             .map_err(|e| e.to_string())
     }
 
+    fn low_latency_network(&self) -> Option<Box<dyn Any + Send>> {
+        couch_platform_win::wifi::MediaStreaming::enable()
+            .map(|mode| Box::new(mode) as Box<dyn Any + Send>)
+    }
+
     fn focus(&self, window: NativeId) -> Focus {
         let window = WindowId(window);
         Focus {

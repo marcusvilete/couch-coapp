@@ -1,12 +1,9 @@
 //! Checks which encoders and hardware decoders work on this machine.
 
-use std::ffi::{CStr, CString};
+use couch_media::{Codec, EncoderConfig, VideoEncoder};
+use rsmpeg::{avutil::AVHWDeviceContext, ffi};
 
-use rsmpeg::{
-    avcodec::{AVCodec, AVCodecContext},
-    avutil::{AVDictionary, AVHWDeviceContext},
-    ffi,
-};
+use crate::encoder::FfmpegEncoder;
 
 /// H.264 encoders worth trying, best first. Only the ones present in the
 /// FFmpeg build and supported by this machine's GPU will open.
@@ -22,8 +19,9 @@ pub const H264_ENCODERS: &[&str] = &[
 pub struct EncoderProbe {
     pub name: &'static str,
     pub hardware: bool,
-    /// `Ok` if the encoder opened at 1080p60 with low-latency settings.
-    pub result: Result<(), String>,
+    /// The option set it opened with at 1080p60, as a stream would open it
+    /// (`options`), or why it didn't.
+    pub result: Result<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,46 +69,17 @@ pub fn probe() -> FfmpegProbe {
     }
 }
 
-fn try_open_encoder(name: &str) -> Result<(), String> {
-    let cname = CString::new(name).expect("encoder names have no NUL");
-    let codec = AVCodec::find_encoder_by_name(&cname)
-        .ok_or_else(|| "not included in this FFmpeg build".to_string())?;
-    let pix_fmt = preferred_pixel_format(&codec)?;
-
-    let mut ctx = AVCodecContext::new(&codec);
-    ctx.set_width(1920);
-    ctx.set_height(1080);
-    ctx.set_pix_fmt(pix_fmt);
-    ctx.set_time_base(ffi::AVRational { num: 1, den: 60 });
-    ctx.set_framerate(ffi::AVRational { num: 60, den: 1 });
-    ctx.set_bit_rate(20_000_000);
-    ctx.set_max_b_frames(0);
-
-    let options = (name == "h264_nvenc").then(|| {
-        AVDictionary::new(c"preset", c"p1", 0)
-            .set(c"tune", c"ull", 0)
-            .set(c"rc", c"cbr", 0)
-            .set(c"zerolatency", c"1", 0)
-            .set(c"delay", c"0", 0)
-    });
-    ctx.open(options).map(|_| ()).map_err(|e| e.to_string())
-}
-
-/// BGRA when the encoder takes it directly (NVENC does), else NV12, else YUV 4:2:0.
-fn preferred_pixel_format(codec: &AVCodec) -> Result<i32, String> {
-    let supported = codec.pix_fmts().unwrap_or_default();
-    [
-        ffi::AV_PIX_FMT_BGRA,
-        ffi::AV_PIX_FMT_NV12,
-        ffi::AV_PIX_FMT_YUV420P,
-    ]
-    .into_iter()
-    .find(|f| supported.contains(f))
-    .ok_or_else(|| {
-        let name: &CStr = codec.name();
-        format!(
-            "{} accepts none of BGRA, NV12, YUV420P",
-            name.to_string_lossy()
-        )
-    })
+/// Opens `name` exactly as a stream would (`FfmpegEncoder::open`, with its
+/// option sets) at 1080p60, and says which option set it took.
+fn try_open_encoder(name: &str) -> Result<String, String> {
+    let config = EncoderConfig {
+        codec: Codec::H264,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        bitrate_bps: 20_000_000,
+    };
+    FfmpegEncoder::open(name, config)
+        .map(|encoder| encoder.caps().options.clone())
+        .map_err(|e| e.to_string())
 }

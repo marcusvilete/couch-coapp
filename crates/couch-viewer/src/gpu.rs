@@ -49,7 +49,16 @@ impl Gpu {
             .into_iter()
             .find(|m| caps.present_modes.contains(m))
             .unwrap_or(wgpu::PresentMode::Fifo);
-        config.desired_maximum_frame_latency = 1;
+        // Moonlight warns that a maximum frame latency of 1 makes
+        // non-blocking presents wait on the compositor. Measured in M9a on
+        // NVIDIA: 1, 2 and 3 give the same latency at 60 and 120 fps, so 1
+        // stays. COUCH_VIEWER_FRAME_LATENCY (1 to 3) overrides it, for
+        // measuring on other GPUs (Moonlight saw AMD behave differently).
+        config.desired_maximum_frame_latency = std::env::var("COUCH_VIEWER_FRAME_LATENCY")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| (1..=3).contains(v))
+            .unwrap_or(1);
         surface.configure(&device, &config);
 
         Ok(Self {
@@ -79,6 +88,11 @@ impl Gpu {
 
     pub fn present_mode(&self) -> wgpu::PresentMode {
         self.config.present_mode
+    }
+
+    /// The surface's maximum frame latency, for the stats line.
+    pub fn frame_latency(&self) -> u32 {
+        self.config.desired_maximum_frame_latency
     }
 }
 

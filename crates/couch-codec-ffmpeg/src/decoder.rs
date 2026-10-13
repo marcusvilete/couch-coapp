@@ -27,7 +27,15 @@ impl FfmpegDecoder {
         })?;
         let mut ctx = AVCodecContext::new(&codec);
         ctx.set_flags(ctx.flags | ffi::AV_CODEC_FLAG_LOW_DELAY as i32);
-        unsafe { (*ctx.as_mut_ptr()).thread_count = 1 };
+        // SAFETY: the context is ours and not yet opened.
+        unsafe {
+            let raw = ctx.as_mut_ptr();
+            (*raw).thread_count = 1;
+            // Corrupt input is an error at once, not concealed: the viewer
+            // then asks for a keyframe instead of showing smeared frames
+            // until the next one (as Moonlight does, M9a).
+            (*raw).err_recognition = ffi::AV_EF_EXPLODE as i32;
+        }
 
         let mut hardware = false;
         if prefer_hardware {

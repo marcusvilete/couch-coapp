@@ -151,16 +151,18 @@ pub fn run() {
 fn start_logging(profile: &Profile) {
     use tracing_subscriber::EnvFilter;
 
+    // Without RUST_LOG (a terminal that didn't run scripts/dev.ps1), the same
+    // level as an installed app, rather than errors only.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("couch=info,iroh=warn"));
     if cfg!(debug_assertions) {
         tracing_subscriber::fmt()
             // Plain text when logging to a file (scripts/profiles.ps1).
             .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-            .with_env_filter(EnvFilter::from_default_env())
+            .with_env_filter(filter)
             .init();
         return;
     }
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("couch=info,iroh=warn"));
     let dir = profile.data_dir();
     let path = dir.join("desktop.log");
     // One older log kept, so the file never grows without end.
