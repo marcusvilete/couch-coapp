@@ -11,6 +11,9 @@ edition = "2024"
 rust-version = "1.95"
 publish = false
 license = "GPL-3.0-only"
+# Where the source is published: the notices and Settings → About link to it
+# at the commit an installer was built from. A fork points this at its own.
+repository = "https://github.com/marcusvilete/couch-coapp"
 
 [workspace.dependencies]
 # Internal crates

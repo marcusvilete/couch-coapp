@@ -86,12 +86,19 @@ The licence came first: **GPL-3.0-only** ([ADR 0008](adr/0008-gpl-3.0.md)).
    - The notices box starts with the header, then FFmpeg; scroll to the crates. They come from `target\debug`, where `stage-dlls` put them.
 2. **Optional: the test installer,** `target\installer\…-test-setup.exe`. After installing, the install folder has `LICENSE` and `THIRD-PARTY-NOTICES.txt`, and About shows "(commit 696d7a2c69-dirty)".
 
-## Left in M10b
+## Going public (2026-10-13)
 
-- **Going public:**
-  - create the GitHub repository;
-  - set `repository` in `Cargo.toml`, so the notices and About link to it;
-  - the secrets scan again;
-  - push;
-  - build friends' installers from the pushed commit.
-- **Optional:** the fallback encoder, the crypto review package, the invite page online.
+- **Before publishing:**
+  - **the secrets scan, over all 25 commits:** no relay token, server IP, Gmail address, keys or credentials, in any file or commit message;
+  - **a pass for anything else public:** only test or documentation IP addresses, placeholder emails, no local paths.
+
+  What becomes public by choice: the relay's name, the author's first name in the screenshots, and light test-setup details in the results files.
+- **Published** with GitHub Desktop at [github.com/marcusvilete/couch-coapp](https://github.com/marcusvilete/couch-coapp). The repository is public, GitHub detects GPL-3.0, and the commits carry the author's noreply address.
+- **`main` is protected by a ruleset:** no deletion, no force pushes, changes only through pull requests.
+- **`repository`** in `Cargo.toml` (inherited by every crate) is the repository's address. The notices and Settings → About now link to `…/tree/<commit>` for a clean build. It went in through the first pull request.
+
+## Left, all optional
+
+- the fallback encoder;
+- the crypto review package;
+- the invite page online.
