@@ -1,10 +1,32 @@
 # Couch Co-App
 
-Remote "same couch" gaming. Create a password-protected room, invite friends with a link, stream your game to them, and pass them the controller.
+### What is it?
+
+This is an app to emulate the feeling of "same couch" gaming, just like we used to do in the past, but remotely. Create a password-protected room, invite friends with a link, stream your game to them, and pass them the controllers.
+
+### Why?
+
+I miss the times when we sat on a couch and played games with our friends (especially single-player games, where we could pass the controller when we died or whatever).
+
+### How?
+
+This is a little experiment of mine to see how far we can go by just "vibecoding" something non-trivial (maybe I'm late to this party, but yeah). So for this project, I purposely turned on Claude's "auto mode" and never looked at any code. It wrote the code, ran builds and tests, and committed the work, while I described features and tried things out.
+
+If you are curious, Claude did [document the journey](docs/architecture.md#status).
+
+### About trust and safety
+
+By "Going live", you can let others in the room control your PC's controllers, and possibly keyboard and mouse. You should only use it with people you trust!
+
+### A note on contributing
+
+I believe no one wants to contribute to a "vibecoded" repository, but feel free to send issues with bug reports, games that worked or didn't, or ideas.
+
+> **FINAL DISCLAIMER: THIS IS WHERE WE END THE HUMAN-MADE SECTION OF THE REPO AND CLAUDE TAKES OVER (AT LEAST FOR NOW).**
+
+---
 
 **Status:** in development, Windows only for now.
-
-<!-- From the author: your own notes go here (why this exists, how it was made, anything else). -->
 
 <table align="center">
   <tr>
