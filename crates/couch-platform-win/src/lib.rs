@@ -28,3 +28,4 @@ pub mod sendinput;
 pub mod timer;
 pub mod vigem;
 pub mod virtual_pads;
+pub mod wifi;

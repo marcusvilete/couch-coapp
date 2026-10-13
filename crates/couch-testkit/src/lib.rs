@@ -94,6 +94,7 @@ impl Default for FakeEncoder {
         Self {
             caps: EncoderCaps {
                 name: "fake".into(),
+                options: "fake".into(),
                 hardware: false,
                 bitrate_change_costs_keyframe: false,
             },

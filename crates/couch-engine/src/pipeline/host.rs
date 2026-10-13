@@ -230,6 +230,9 @@ pub struct HostStream {
     housekeeping: AbortHandle,
     /// Whether the host's controller plays through a seat, or why not.
     local: Option<Result<(), String>>,
+    /// The network tuned for streaming while live (Wi-Fi media streaming
+    /// mode, M9a); undone when this drops.
+    _network: Option<Box<dyn std::any::Any + Send>>,
 }
 
 struct Shared {
@@ -576,6 +579,7 @@ impl HostStream {
         let (input, cmds) = mpsc::unbounded_channel();
         let input_task = tokio::spawn(input_loop(shared.clone(), pads, local, hidden, cmds));
         let housekeeping = tokio::spawn(housekeeping(Arc::downgrade(&shared))).abort_handle();
+        let network = shared.backend.low_latency_network();
         (
             Self {
                 shared,
@@ -583,6 +587,7 @@ impl HostStream {
                 input_task: Some(input_task),
                 housekeeping,
                 local: local_status,
+                _network: network,
             },
             events_rx,
         )
@@ -1218,10 +1223,11 @@ fn encode(
                 bitrate_bps: start,
             })?;
             shared.note(format!(
-                "encoding {}x{} with {} at {:.1} Mbit/s",
+                "encoding {}x{} with {} (options: {}) at {:.1} Mbit/s",
                 frame.width,
                 frame.height,
                 enc.caps().name,
+                enc.caps().options,
                 f64::from(start) / 1e6
             ));
             rate.keyframe_costly = enc.caps().bitrate_change_costs_keyframe;

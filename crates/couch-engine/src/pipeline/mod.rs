@@ -214,6 +214,13 @@ pub trait Backend: Send + Sync + 'static {
         Err("hiding controllers isn't available here".into())
     }
 
+    /// Tunes this PC's network for streaming until the returned guard drops
+    /// (Wi-Fi media streaming mode on Windows, M9a). `None` when there is
+    /// nothing to tune; never an error, since a stream runs fine without it.
+    fn low_latency_network(&self) -> Option<Box<dyn Any + Send>> {
+        None
+    }
+
     fn focus(&self, window: NativeId) -> Focus;
 
     fn window_exists(&self, window: NativeId) -> bool;

@@ -29,6 +29,7 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 | Capability probe (codecs, iroh, SDL3, ViGEm) | `cargo build -p couch-viewer`, then `cargo run -p couch-cli -- probe` |
 | Desktop app | `cd apps/desktop`, then `npm run tauri dev` (builds `couch-viewer` first, which watching needs) |
 | The viewer's HUD by eye, without a session | `cargo run -p couch-viewer -- --hud-preview watching` (or `asking`, `controlling`) |
+| The viewer's maximum frame latency, for measuring on another GPU (M9a kept 1; NVIDIA showed no difference) | `$env:COUCH_VIEWER_FRAME_LATENCY = 2` (1 to 3) before `latency-probe` or the app; the stats line shows the value |
 | Front-end type check | `cd apps/desktop`, then `npx tsc --noEmit` |
 | Regenerate TypeScript bindings | `cargo test -p couch-engine` (writes `apps/desktop/src/bindings/`) |
 | Regenerate FFmpeg FFI bindings (after an FFmpeg bump; needs LLVM) | `cargo xtask gen-ffmpeg-bindings` |
@@ -157,6 +158,10 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 
   RustDesk is AGPL-3.0, and GPL-2.0-only code is incompatible: ask the user first.
 - **Notices:** every installer, even one for friends, must carry every bundled component's notice, the app's source link at its commit, and FFmpeg's source beside it (M10b, `cargo xtask notices`). A new bundled component that isn't a crate or an npm package needs a section in `xtask/src/notices.rs`. A new FFmpeg pin needs new `deps::SOURCES` pins.
+
+**Opening encoders** (M9a)
+- **Never call rsmpeg's `AVCodecContext::open` with options.** When the open fails, rsmpeg 0.18 double-frees the dictionary and crashes the process. Open through `couch_codec_ffmpeg::options::OptionSet::open`, which calls `avcodec_open2` itself.
+- **Each encoder's options are an ordered list of sets** (`options::option_sets`). The last one is always the settings that worked before; add new sets before it, never replace it. `tests/open.rs` (every encoder, twice, no crash) must keep passing on any machine.
 
 **Native dependencies and pins**
 - FFmpeg and SDL3 are pinned by URL and SHA-256 in `xtask/src/deps.rs`. So are the drivers' official installers the app bundles (`DRIVERS`: ViGEmBus 1.22.0, BSD-3; HidHide 1.5.230, MIT), with their licence texts in `apps/desktop/src-tauri/drivers/`; `stage-dlls` copies them to `target/<profile>/drivers/`, where Settings → Drivers finds them.

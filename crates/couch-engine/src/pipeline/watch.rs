@@ -118,6 +118,9 @@ pub struct Watch {
     session: Option<u64>,
     /// The number of the latest connection handed over.
     links: AtomicU32,
+    /// The network tuned for streaming while watching (Wi-Fi media
+    /// streaming mode, M9a); undone when this drops.
+    _network: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl Watch {
@@ -133,6 +136,7 @@ impl Watch {
         options: WatchOptions,
     ) -> Result<(Self, mpsc::UnboundedReceiver<WatchEvent>), MediaError> {
         let window = Window::launch(&*backend, &options.viewer)?;
+        let network = backend.low_latency_network();
         let clock = backend.clock();
         let link = Link::start(conn, datagrams, streams, options.session, clock.clone());
         let (events, events_rx) = mpsc::unbounded_channel();
@@ -157,6 +161,7 @@ impl Watch {
                 clock,
                 session,
                 links: AtomicU32::new(0),
+                _network: network,
             },
             events_rx,
         ))

@@ -69,7 +69,11 @@ async fn probe_ffmpeg(report: &mut Report) {
     report.line(Status::Info, "FFmpeg", &ffmpeg.version);
     for encoder in &ffmpeg.encoders {
         match &encoder.result {
-            Ok(()) => report.line(Status::Ok, encoder.name, "opens at 1080p60"),
+            Ok(options) => report.line(
+                Status::Ok,
+                encoder.name,
+                format!("opens at 1080p60 (options: {options})"),
+            ),
             Err(e) => report.line(Status::Info, encoder.name, format!("unavailable: {e}")),
         }
     }

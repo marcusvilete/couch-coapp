@@ -11,13 +11,16 @@ use couch_media::{
 };
 use rsmpeg::{
     avcodec::{AVCodec, AVCodecContext},
-    avutil::{AVDictionary, AVFrame},
+    avutil::AVFrame,
     error::RsmpegError,
     ffi,
     swscale::SwsContext,
 };
 
-use crate::probe::H264_ENCODERS;
+use crate::{
+    options::{OptionSet, option_sets},
+    probe::H264_ENCODERS,
+};
 
 pub struct FfmpegEncoder {
     ctx: AVCodecContext,
@@ -29,6 +32,9 @@ pub struct FfmpegEncoder {
     config: EncoderConfig,
     last_pts: i64,
     pending_bitrate: Option<u32>,
+    /// The index of the option set that opened (`options::option_sets`), so
+    /// reopening for a new bitrate doesn't retry the ones that failed.
+    option_set: usize,
 }
 
 // The codec context is only ever used from the thread that owns the encoder.
@@ -50,7 +56,46 @@ impl FfmpegEncoder {
         )))
     }
 
+    /// Opens `name` with the first of its option sets the driver accepts
+    /// (`options::option_sets`; the last is always the settings from before
+    /// M9a).
     pub fn open(name: &str, config: EncoderConfig) -> Result<Self, MediaError> {
+        Self::open_from(name, config, 0)
+    }
+
+    /// Like [`Self::open`], trying the option sets from `first` on.
+    fn open_from(name: &str, config: EncoderConfig, first: usize) -> Result<Self, MediaError> {
+        let sets = option_sets(name);
+        let mut errors = Vec::new();
+        for (index, set) in sets.iter().enumerate().skip(first) {
+            match Self::open_with(name, config, index, set) {
+                Ok(encoder) => {
+                    if !errors.is_empty() {
+                        tracing::info!(
+                            "{name} opened with \"{}\" after: {}",
+                            set.label,
+                            errors.join("; ")
+                        );
+                    }
+                    return Ok(encoder);
+                }
+                // Not in this FFmpeg build: no set will help.
+                Err(e @ MediaError::Unsupported(_)) => return Err(e),
+                Err(e) => errors.push(format!("\"{}\": {e}", set.label)),
+            }
+        }
+        Err(MediaError::Backend(format!(
+            "{name} opened with none of its option sets ({})",
+            errors.join("; ")
+        )))
+    }
+
+    fn open_with(
+        name: &str,
+        config: EncoderConfig,
+        index: usize,
+        set: &OptionSet,
+    ) -> Result<Self, MediaError> {
         let Codec::H264 = config.codec else {
             return Err(MediaError::Unsupported(format!("{:?}", config.codec)));
         };
@@ -86,8 +131,12 @@ impl FfmpegEncoder {
             (*raw).color_trc = ffi::AVCOL_TRC_BT709;
             (*raw).color_range = ffi::AVCOL_RANGE_MPEG;
         }
-        ctx.open(Some(low_latency_options(name)))
+        let unused = set
+            .open(&mut ctx)
             .map_err(|e| MediaError::Backend(format!("{name}: {e}")))?;
+        if !unused.is_empty() {
+            tracing::warn!("{name} ignored options {unused:?} (\"{}\")", set.label);
+        }
 
         let mut frame = AVFrame::new();
         frame.set_width(config.width as i32);
@@ -109,6 +158,7 @@ impl FfmpegEncoder {
             scaler,
             caps: EncoderCaps {
                 name: name.to_string(),
+                options: set.label.to_string(),
                 hardware: name != "libopenh264",
                 // NVENC resets with an IDR; the others are reopened (`encode`).
                 bitrate_change_costs_keyframe: true,
@@ -116,6 +166,7 @@ impl FfmpegEncoder {
             config,
             last_pts: i64::MIN,
             pending_bitrate: None,
+            option_set: index,
         })
     }
 
@@ -189,12 +240,13 @@ impl VideoEncoder for FfmpegEncoder {
                 // read the rate only when they open. A fresh encoder starts
                 // with a keyframe, the same price NVENC pays.
                 let name = self.caps.name.clone();
-                *self = Self::open(
+                *self = Self::open_from(
                     &name,
                     EncoderConfig {
                         bitrate_bps: bps,
                         ..self.config
                     },
+                    self.option_set,
                 )?;
             }
         }
@@ -299,31 +351,4 @@ fn input_format(codec: &AVCodec) -> Result<i32, MediaError> {
     .into_iter()
     .find(|f| supported.contains(f))
     .ok_or_else(|| MediaError::Unsupported("no usable input pixel format".into()))
-}
-
-fn low_latency_options(name: &str) -> AVDictionary {
-    let base = AVDictionary::new(c"profile", c"high", 0);
-    match name {
-        "h264_nvenc" => base
-            .set(c"preset", c"p1", 0)
-            .set(c"tune", c"ull", 0)
-            .set(c"rc", c"cbr", 0)
-            .set(c"zerolatency", c"1", 0)
-            .set(c"delay", c"0", 0)
-            .set(c"rc-lookahead", c"0", 0)
-            .set(c"forced-idr", c"1", 0),
-        "h264_amf" => base
-            .set(c"usage", c"ultralowlatency", 0)
-            .set(c"rc", c"cbr", 0),
-        "h264_qsv" => base
-            .set(c"preset", c"veryfast", 0)
-            .set(c"async_depth", c"1", 0)
-            .set(c"low_delay_brc", c"1", 0)
-            .set(c"forced_idr", c"1", 0),
-        "h264_mf" => base
-            .set(c"rate_control", c"cbr", 0)
-            .set(c"scenario", c"display_remoting", 0)
-            .set(c"hw_encoding", c"1", 0),
-        _ => AVDictionary::new(c"allow_skip_frames", c"0", 0),
-    }
 }
