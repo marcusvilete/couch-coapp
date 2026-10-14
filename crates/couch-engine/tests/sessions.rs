@@ -1805,6 +1805,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             session: 1,
             first_epoch: SeatEpoch(0),
             rc_trace: None,
+            pacing_trace: None,
             netem_elapsed: None,
             replace_grace: Duration::from_millis(300),
             local: None,

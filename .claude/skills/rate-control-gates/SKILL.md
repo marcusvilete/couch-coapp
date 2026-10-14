@@ -65,7 +65,7 @@ The gates use one or two viewers. After changing the host pipeline, encoding or 
 - **The host copying frames** (`-CopyThroughMemory`, as before M9b): 7 viewers fall to about 40 fps and p50 about 70 ms. Check the host's "GPU frames" log line.
 - **4 viewers at 120 fps** (`-Fps 120`, M9d): 114 to 116 fps each, p50 2.0 to 2.8 ms and p95 4.0 to 4.6 ms. Without pacing (`COUCH_HOST_PACING=0`) about 117 fps and p95 3.8 to 4.0: pacing costs a little on this 240 Hz screen, where the old interval was already right. A p95 near 10 ms means held frames go out before the fresher one arrives (`couch_media::pacing`'s wait).
 
-These capture-to-present references are from before P5, when capture times ran ahead of delivery. Since P5 the same runs read about 3 ms higher (4 viewers at 60 fps: p50 7 to 8 ms unpaced; at 120 fps paced: p50 5.0 to 5.6, p95 6.7 to 6.8 ms). At 60 fps, 4 viewers paced get only about 56 fps until M9e (the `performance-checks` skill).
+These capture-to-present references are from before P5, when capture times ran ahead of delivery. Since P5 the same runs read about 3 ms higher (4 viewers at 60 fps: p50 7 to 8 ms unpaced; at 120 fps paced: p50 5.0 to 5.6, p95 6.7 to 6.8 ms). At 60 fps, `-Screen` alone is a loop (only the stream windows change on the captured screen, so it changes only after a send): 4 viewers paced get about 57 fps and a p95 of 22 to 25 ms (M9e). Add `-Clock` for a busy screen independent of the stream: 60 fps and p95 about 10 ms, paced or not (the `performance-checks` skill).
 
 Every rate controller should stay near its 20 Mbit/s target.
 
