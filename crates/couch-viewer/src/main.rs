@@ -24,6 +24,8 @@ mod input;
 mod pipe;
 mod sink;
 mod viewer;
+#[cfg(windows)]
+mod zero_copy;
 
 use std::io::Write;
 
@@ -44,9 +46,14 @@ pub fn now_us() -> Micros {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Without RUST_LOG (an installed app), our own info lines still reach
+    // viewer.log: they say which decoding path and GPU backend ran.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,couch=info")),
+        )
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();

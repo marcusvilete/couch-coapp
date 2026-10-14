@@ -2,9 +2,38 @@
 //!
 //! Present mode prefers Mailbox (newest frame wins, no tearing), then
 //! Immediate; frame latency is capped at one queued frame.
+//!
+//! With zero-copy decoding (M9c), wgpu runs on DX12 so the decoder can write
+//! into its device; otherwise on wgpu's default backend (Vulkan on NVIDIA).
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use couch_media::Nv12Frame;
+
+/// `COUCH_VIEWER_ZERO_COPY`: whether decoded frames stay on the GPU (M9c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZeroCopy {
+    /// `0`: decoded frames are copied through memory, as before M9c.
+    Off,
+    /// Unset: on for NVIDIA GPUs, the only ones it was tested on.
+    Nvidia,
+    /// `1`: on for any GPU, for trying it on AMD or Intel.
+    Any,
+}
+
+impl ZeroCopy {
+    pub fn from_env() -> Self {
+        if !cfg!(windows) {
+            return Self::Off;
+        }
+        match std::env::var("COUCH_VIEWER_ZERO_COPY").as_deref() {
+            Ok("0") => Self::Off,
+            Ok("1") => Self::Any,
+            _ => Self::Nvidia,
+        }
+    }
+}
+
+const NVIDIA: u32 = 0x10de;
 
 pub struct Gpu {
     pub surface: wgpu::Surface<'static>,
@@ -12,6 +41,9 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub adapter_name: String,
+    /// The device takes decoded frames on the GPU (DX12, NV12 textures).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub zero_copy: bool,
 }
 
 impl Gpu {
@@ -19,7 +51,37 @@ impl Gpu {
     /// `window` must outlive the returned value (declare `Gpu` before the
     /// window in any struct holding both, so it drops first).
     pub unsafe fn new(window: &sdl3::video::Window) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let wanted = ZeroCopy::from_env();
+        if wanted != ZeroCopy::Off {
+            // SAFETY: as for this function.
+            match unsafe { Self::open(window, Some(wanted)) } {
+                Ok(gpu) => return Ok(gpu),
+                Err(e) => tracing::info!("decoded frames go through memory: {e:#}"),
+            }
+        } else if cfg!(windows) {
+            tracing::info!("decoded frames go through memory: COUCH_VIEWER_ZERO_COPY=0");
+        }
+        // SAFETY: as for this function.
+        unsafe { Self::open(window, None) }
+    }
+
+    /// # Safety
+    /// As for [`Self::new`].
+    unsafe fn open(window: &sdl3::video::Window, zero_copy: Option<ZeroCopy>) -> Result<Self> {
+        // WGPU_BACKEND (e.g. dx12, vulkan) picks the backend, for measuring.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        // Validation stays off in debug builds too (wgpu turns it on there),
+        // so the development app's latency is the installed app's: on DX12
+        // the debug layer cost 0.6 ms or more per frame (M9c). WGPU_VALIDATION=1
+        // turns it on.
+        descriptor.flags = wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL.with_env();
+        if zero_copy.is_some() {
+            if !descriptor.backends.contains(wgpu::Backends::DX12) {
+                bail!("WGPU_BACKEND leaves out DX12");
+            }
+            descriptor.backends = wgpu::Backends::DX12;
+        }
+        let instance = wgpu::Instance::new(descriptor);
         let target = unsafe { wgpu::SurfaceTargetUnsafe::from_display_and_window(window, window) }
             .map_err(|e| anyhow!("window handle: {e}"))?;
         let surface =
@@ -30,8 +92,27 @@ impl Gpu {
             ..Default::default()
         }))
         .context("no GPU adapter")?;
+        let info = adapter.get_info();
+        let mut required_features = wgpu::Features::empty();
+        if let Some(mode) = zero_copy {
+            if mode == ZeroCopy::Nvidia && info.vendor != NVIDIA {
+                bail!(
+                    "zero-copy decoding is on by default only for NVIDIA, not {} \
+                     (COUCH_VIEWER_ZERO_COPY=1 tries it)",
+                    info.name
+                );
+            }
+            if !adapter
+                .features()
+                .contains(wgpu::Features::TEXTURE_FORMAT_NV12)
+            {
+                bail!("{} has no NV12 textures on DX12", info.name);
+            }
+            required_features = wgpu::Features::TEXTURE_FORMAT_NV12;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("couch-viewer"),
+            required_features,
             ..Default::default()
         }))
         .context("creating GPU device")?;
@@ -60,14 +141,39 @@ impl Gpu {
             .filter(|v| (1..=3).contains(v))
             .unwrap_or(1);
         surface.configure(&device, &config);
+        tracing::info!(
+            "GPU {} ({:?}), present mode {:?} of {:?}, frame latency {}{}",
+            info.name,
+            info.backend,
+            config.present_mode,
+            caps.present_modes,
+            config.desired_maximum_frame_latency,
+            if zero_copy.is_some() {
+                ", decoded frames stay on the GPU"
+            } else {
+                ""
+            }
+        );
 
         Ok(Self {
             surface,
             device,
             queue,
             config,
-            adapter_name: adapter.get_info().name,
+            adapter_name: format!("{} ({:?})", info.name, info.backend),
+            zero_copy: zero_copy.is_some(),
         })
+    }
+
+    /// The device for a decoder whose frames stay on the GPU, or `None` when
+    /// this device doesn't take them.
+    #[cfg(windows)]
+    pub fn decoder_device(&self) -> Option<crate::zero_copy::DecoderDevice> {
+        if self.zero_copy {
+            crate::zero_copy::DecoderDevice::of(&self.device)
+        } else {
+            None
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -215,13 +321,24 @@ impl VideoPass {
 
     pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Nv12Frame) {
         let size = (frame.width, frame.height);
+        let (y, uv) = self.planes(device, size);
+        let chroma = (frame.width.div_ceil(2), frame.height.div_ceil(2));
+        write_plane(queue, y, &frame.y, frame.y_stride, size);
+        write_plane(queue, uv, &frame.uv, frame.uv_stride, chroma);
+    }
+
+    /// The luma (R8) and chroma (RG8) textures the pass draws, made for
+    /// frames of `size`, for a frame on the GPU to be copied into.
+    pub fn planes(
+        &mut self,
+        device: &wgpu::Device,
+        size: (u32, u32),
+    ) -> (&wgpu::Texture, &wgpu::Texture) {
         if self.planes.as_ref().map(|p| p.size) != Some(size) {
             self.planes = Some(self.create_planes(device, size));
         }
         let planes = self.planes.as_ref().expect("planes created above");
-        let chroma = (frame.width.div_ceil(2), frame.height.div_ceil(2));
-        write_plane(queue, &planes.y, &frame.y, frame.y_stride, size);
-        write_plane(queue, &planes.uv, &frame.uv, frame.uv_stride, chroma);
+        (&planes.y, &planes.uv)
     }
 
     fn create_planes(&self, device: &wgpu::Device, (w, h): (u32, u32)) -> Planes {
@@ -237,7 +354,11 @@ impl VideoPass {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                // Copied into (uploads, or a decoded frame's planes), and
+                // read from for the latency barcode.
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             })
         };

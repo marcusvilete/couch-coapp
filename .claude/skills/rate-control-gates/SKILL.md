@@ -49,7 +49,7 @@ A pass that is clearly worse than the reference is still a regression to explain
 
 | Gate | Normal range |
 |---|---|
-| G1 | p50 12–14 ms, p95 14–18 ms; bitrate steps up to 20 Mbit/s about 9 s in |
+| G1 | p50 12–14 ms (12.3–13.0 since M9c), p95 13–18 ms; bitrate steps up to 20 Mbit/s about 9 s in |
 | G3 | p95 82–84 ms, p50 about 50 ms; mean bitrate 19–20 Mbit/s; no catch-ups; drift within ±2 ms |
 | G4 | first frame 45–100 ms after the outage, with latency back on that frame; 1 keyframe |
 | G5 | catch-up 0.3–0.4 s after the throttle, to about 4 Mbit/s; settled at 0.3–0.4 s; latency back after 0.7–0.9 s; worst frame 100–420 ms; p95 42–45 ms |
@@ -58,10 +58,11 @@ G5's worst frame varies most between runs. Repeat a borderline gate with `--only
 
 ## Many viewers on one PC
 
-The gates use one or two viewers. After changing the host pipeline, encoding or rate control, also run `.\scripts\viewers.ps1 -Screen` with 4 viewers and with `-Viewers 7`. `-Screen` captures the primary screen, so frames take the GPU path (M9b); the test pattern (without `-Screen`) is made in memory and doesn't. Reference from M9b (`docs/m9b-results.md`):
-- **4 viewers:** about 60 fps each, capture to present p50 about 11 ms and p95 about 16 ms, 18.7 Mbit/s each, slowest encode 9 to 10 ms.
-- **7 viewers:** about 58 fps each, p50 about 14 ms and p95 about 21 ms, 18.6 Mbit/s each, slowest encode 11 to 13 ms.
-- **Through memory** (`-CopyThroughMemory`, as before M9b): 7 viewers fall to about 40 fps and p50 about 70 ms. A GPU-path run near those numbers means frames are going through memory again: check the host's "GPU frames" log line.
+The gates use one or two viewers. After changing the host pipeline, encoding or rate control, also run `.\scripts\viewers.ps1 -Screen` with 4 viewers and with `-Viewers 7`. `-Screen` captures the primary screen, so frames take the GPU path (M9b); the test pattern (without `-Screen`) is made in memory and doesn't. Reference from M9c (`docs/m9c-results.md`; frames on the GPU on both sides):
+- **4 viewers:** about 60 fps each, capture to present p50 4.5 to 5.5 ms and p95 about 8 ms, 18.7 Mbit/s each, slowest encode about 9.5 ms; the stream windows at 23% of one core.
+- **7 viewers:** 59 to 60 fps each, p50 5.4 to 6.8 ms and p95 about 9 ms, 18.7 to 19.9 Mbit/s each, slowest encode 10 to 11 ms; the windows at 37%.
+- **The viewers copying frames** (`-CopyFrames`, as before M9c): 7 viewers at p50 about 14 ms and p95 about 24 ms, windows at about 270%. A default run near those numbers means the windows aren't decoding on the GPU: check their "decoding with" log line.
+- **The host copying frames** (`-CopyThroughMemory`, as before M9b): 7 viewers fall to about 40 fps and p50 about 70 ms. Check the host's "GPU frames" log line.
 
 Every rate controller should stay near its 20 Mbit/s target.
 

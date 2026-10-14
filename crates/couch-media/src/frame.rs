@@ -240,10 +240,44 @@ pub enum EncoderInput<'a> {
     Gpu(&'a GpuFrame),
 }
 
-/// What a decoder produces. A GPU-texture variant arrives in M9.
+/// A decoded NV12 picture in GPU memory that a [`GpuNv12Frame`] points at
+/// (M9c). The codec crate implements it; on Windows it is a D3D12 resource the
+/// decoder wrote on the viewer's own device. Pointers are raw so this crate
+/// stays free of OS types. Dropping it gives the picture back to the decoder.
+pub trait DecodedSurface: Send {
+    /// The `ID3D12Resource` (NV12, the frame's size), valid while this lives.
+    /// No reference is added.
+    fn d3d12_resource(&self) -> *mut c_void;
+
+    /// The `ID3D12Fence` the decoder signals, and the value it reaches once
+    /// the picture is decoded. GPU work reading the resource must wait for it.
+    fn d3d12_fence(&self) -> (*mut c_void, u64);
+}
+
+/// A decoded frame that stays on the GPU (M9c).
+pub struct GpuNv12Frame {
+    pub width: u32,
+    pub height: u32,
+    pub captured_at: Micros,
+    pub surface: Box<dyn DecodedSurface>,
+}
+
+impl std::fmt::Debug for GpuNv12Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuNv12Frame")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("captured_at", &self.captured_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a decoder produces: a frame copied to memory, or one left on the GPU
+/// for a renderer on the decoder's device.
 #[non_exhaustive]
 pub enum DecodedFrame {
     CpuNv12(Nv12Frame),
+    Gpu(GpuNv12Frame),
 }
 
 #[non_exhaustive]

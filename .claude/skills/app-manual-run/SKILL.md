@@ -29,10 +29,13 @@ cd apps\desktop; npm run tauri dev        # the default profile; builds couch-vi
 | Any profile's stream window | `...\profiles\<name>\viewer.log`, appended per window (ANSI colour codes included) |
 | The default profile (the app) | only the `npm run tauri dev` terminal: ask the user to copy the lines, or repeat the test with alice hosting |
 
-- **Log level.** `profiles.ps1` gives its instances `dev.ps1`'s default `RUST_LOG` (`couch=debug,iroh=info`); without it only errors are logged.
+- **Log level.** `profiles.ps1` gives its instances `dev.ps1`'s default `RUST_LOG` (`couch=debug,iroh=info`). Without it, the app and its stream windows log at info level (since M9a and M9c).
+- **Environment switches** reach a stream window from the **watcher's** app, so viewer-side ones go in the shell that starts that profile: `$env:COUCH_VIEWER_ZERO_COPY = '0'; .\scripts\profiles.ps1 alice` (after closing alice). Setting one before `npm run tauri dev` reaches only the default profile.
 - **Useful lines:**
   - `went live`, `seat status=Granted/Active/Suspended/Host`, `a viewer asks for control`, `panic key: every seat back to the host`, `stream ended reason=...`;
-  - in a viewer log, `gamepad "..."` and `skipping "...": a host on this PC has a virtual pad plugged in`.
+  - in a viewer log, `gamepad "..."` and `skipping "...": a host on this PC has a virtual pad plugged in`;
+  - in a viewer log, `GPU ... (Dx12)` and `decoding with D3D12VA (GPU frames)` (or `D3D11VA (copied)`, and why: `decoded frames go through memory: ...`).
+- **The stats panel's numbers come from a debug build,** but its stream window runs without wgpu's validation, so its latency matches an installed app's (M9c).
 - **A brief `Suspended` then `Active`** is the host's 300 ms dead-man timer catching a short silence from the guest; it is safe by design.
 
 ## What one PC can't show

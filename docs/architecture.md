@@ -23,7 +23,7 @@ Windows first. Linux and macOS backends come later, behind the same traits.
 | P3 | Settings: the shortcut editor (each shortcut to another key) and the relay (Settings → Network); the splash screen | done, one-PC run and Restart now in a release build included ([results](p3-results.md)) |
 | Polish | The full-screen re-check, with the internet test with friends | done: two PCs over the internet, a direct link; full screen worked, switched to remotely too ([M8 results](m8-results.md)) |
 | M8 | Host overlay: requests and session notes over the game, answered with keys; a chime | done, your one-PC run included; also a fix for hosting on Windows 10 ([results](m8-results.md)) |
-| M9 | Performance, in the order of the [Sunshine and Moonlight research](research/sunshine-moonlight.md): **M9a** the cheap fixes; **M9b** zero-copy on the host; **M9c** zero-copy on the viewer; **M9d** 120 fps and pacing | M9a done ([results](m9a-results.md)): AMD and Intel encoder options with fallbacks, a crash on any failed encoder open fixed, Wi-Fi media streaming mode, the decoder failing fast; the gates unchanged. M9b done ([results](m9b-results.md)): captured frames stay on the GPU into NVENC; seven viewers on this PC went from 40 to 58 fps and from 70 to 14 ms. M9c and M9d next |
+| M9 | Performance, in the order of the [Sunshine and Moonlight research](research/sunshine-moonlight.md): **M9a** the cheap fixes; **M9b** zero-copy on the host; **M9c** zero-copy on the viewer; **M9d** 120 fps and pacing | M9a done ([results](m9a-results.md)): AMD and Intel encoder options with fallbacks, a crash on any failed encoder open fixed, Wi-Fi media streaming mode, the decoder failing fast; the gates unchanged. M9b done ([results](m9b-results.md)): captured frames stay on the GPU into NVENC; seven viewers on this PC went from 40 to 58 fps and from 70 to 14 ms. M9c done ([results](m9c-results.md)): decoded frames stay on the GPU (D3D12VA on wgpu's DX12 device); one viewer about 1 ms faster, seven viewers from 14 to 6 ms with a seventh of the CPU. M9d next |
 | M10a | An installer for testing with friends: the app, its stream window and libraries; ViGEmBus and HidHide offered, each optional; Settings → Drivers; "update needed" between builds that can't talk; a log file | done, your runs on both PCs included ([results](m10a-results.md)) |
 | M7 | Own relay (iroh-relay with an access token), the relay built into release builds, the https invite page, the deploy kit | done: deployed on Oracle Cloud's free tier (`couchrelay.duckdns.org`), checked relay-only from this PC; release installers (0.9.0) use it ([results](m7-results.md)) |
 | M10b | The public source release ([ADR 0009](adr/0009-source-only-releases.md)): the repository public; licence notices and FFmpeg's source with friends' installers; a guide to build the app and host your own relay. Optional: the fallback encoder, an outside review of the admission composition | done: the licence (GPL-3.0-only), the notices and FFmpeg's source with installers, Settings → About, the self-build and relay guides; public at [github.com/marcusvilete/couch-coapp](https://github.com/marcusvilete/couch-coapp), `main` protected (pull requests only) ([results](m10b-results.md)). The optional items remain open |
@@ -87,7 +87,7 @@ Rules that keep this layering useful:
 **Viewer, per frame.**
 1. The main process receives the frame on the epoch stream.
 2. It forwards the frame to `couch-viewer` over stdin.
-3. The viewer decodes it (D3D11VA) and presents it immediately; there is no jitter buffer for video.
+3. The viewer decodes it and presents it immediately; there is no jitter buffer for video. Since M9c the frame stays on the GPU: FFmpeg's D3D12VA decoder runs on wgpu's own DX12 device, and the render thread copies the decoded NV12 planes, GPU to GPU, into the textures it draws (`couch-viewer`'s `zero_copy`), after waiting on the GPU for the decoder's fence. Where that can't run (not NVIDIA by default, or `COUCH_VIEWER_ZERO_COPY=0`), D3D11VA decodes and the frame is copied through memory, as before. If D3D12 decoding fails once running (it can't start on the stream, keeps failing, or its frames can't be brought in), the stream window switches to D3D11VA and copies at the next keyframe, still presenting through DX12.
 4. Decode and present times go back over stdout and become receiver reports.
 
 **Audio, host to viewer** ([protocol.md](protocol.md#audio)).
@@ -103,7 +103,7 @@ Rules that keep this layering useful:
 4. On the host, `couch_input::router` lets input through only from the seat's holder, with the current seat epoch and permissions, and keyboard and mouse only while the game is in front.
 5. Accepted input drives the ViGEm pad or `SendInput`. Rumble goes back as a datagram.
 
-The host keeps frames on the GPU since M9b (`EncoderInput::Gpu`); the viewer still copies decoded frames through CPU memory until M9c (`DecodedFrame` is non-exhaustive for that).
+The host keeps frames on the GPU since M9b (`EncoderInput::Gpu`), and the viewer since M9c (`DecodedFrame::Gpu`).
 
 ## Measuring latency
 
