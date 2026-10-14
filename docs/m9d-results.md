@@ -144,7 +144,7 @@ A review by a separate agent, each finding checked against the code before actin
 - **The likely cause:** a held frame now waits a whole interval for a newer one. That fixed games a little faster than the stream, but when the capture stalls (a GPU busy with 4 encodes and 4 decodes), the held frame goes out up to two intervals old.
 - **At 120 fps** the wait is half as long, and 4 viewers were fine.
 - **A suspected second factor** (P5's review): since P5 the pacer gets delivery times. Frames queued behind a stall arrive back to back, so the shortest recent gap, and with it the slack, collapses for a while, and slightly early frames get held.
-- **The fix is M9e.**
+- **The fix is M9e** ([m9e-results.md](m9e-results.md)). Its trace found no stalls and no bunching: the test's screen showed only the stream's own windows, so it changed only after a send, and the held frame waited for a newer one that couldn't come. A held frame now waits by how often frames come.
 
 ## Left as it is, to watch for
 

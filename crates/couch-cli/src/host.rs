@@ -41,6 +41,8 @@ pub struct Args {
     pub max_viewers: usize,
     /// Write every rate-controller tick to CSV files, one per viewer.
     pub rc_trace: Option<PathBuf>,
+    /// Write every captured frame and what pacing did with it to CSV.
+    pub pacing_trace: Option<PathBuf>,
     /// What the viewer holding seat 0 may send: the gamepad by default.
     pub permissions: Permissions,
     /// Virtual pads, one per seat: each viewer that connects gets the first
@@ -143,6 +145,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             session: 1,
             first_epoch: SeatEpoch(0),
             rc_trace: args.rc_trace.clone(),
+            pacing_trace: args.pacing_trace.clone(),
             netem_elapsed,
             replace_grace: REPLACE_GRACE,
             local,

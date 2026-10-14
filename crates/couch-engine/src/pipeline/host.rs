@@ -144,6 +144,9 @@ pub struct HostOptions {
     /// One CSV of rate-controller ticks per viewer: the first viewer's at
     /// this path, the next ones numbered (`couch-cli host --rc-trace`).
     pub rc_trace: Option<PathBuf>,
+    /// A CSV of every captured frame and what pacing did with it
+    /// (`couch-cli host --pacing-trace`, M9e).
+    pub pacing_trace: Option<PathBuf>,
     /// The netem link's age, for the trace's `netem_us` column.
     pub netem_elapsed: Option<NetemElapsed>,
     /// How long a game may take to show a new window before the stream ends
@@ -281,6 +284,8 @@ struct Shared {
     /// The pacer's counts over the stream's captures ([`ViewerStats`]).
     paced_held: AtomicU64,
     paced_replaced: AtomicU64,
+    /// `HostOptions::pacing_trace`, written by the capture thread.
+    pacing_trace: Mutex<Option<PacingTrace>>,
 }
 
 /// The game's windows other than its new one ([`Shared::remember_windows`]).
@@ -528,6 +533,19 @@ impl HostStream {
         };
         let share = options.upload_bps.map(UploadShare::new);
         let source = SourceWatch::new(options.replace_grace);
+        // Once per stream, so a capture started again (a viewer joining
+        // after the last left) adds to it.
+        let pacing_trace =
+            options
+                .pacing_trace
+                .as_deref()
+                .and_then(|path| match PacingTrace::create(path) {
+                    Ok(trace) => Some(trace),
+                    Err(e) => {
+                        tracing::warn!("no pacing trace at {}: {e}", path.display());
+                        None
+                    }
+                });
         let shared = Arc::new(Shared {
             clock: backend.clock(),
             backend,
@@ -552,6 +570,7 @@ impl HostStream {
             gpu_input_off: AtomicBool::new(false),
             paced_held: AtomicU64::new(0),
             paced_replaced: AtomicU64::new(0),
+            pacing_trace: Mutex::new(pacing_trace),
         });
         // By seat: a seat without a pad (a keyboard seat, or one whose pad
         // failed) drops gamepad input.
@@ -1070,10 +1089,15 @@ fn capture_frames(
                 // (A GPU frame is already even, and the copies share it.)
                 let frame = frame.cropped_to_even();
                 let at = frame.captured_at();
+                let arrived = shared.now();
                 let frame = match pacer.as_mut() {
-                    Some(pacer) => pacer.offer(frame, at, shared.now()),
+                    Some(pacer) => pacer.offer(frame, at, arrived),
                     None => Some(frame),
                 };
+                if let Some(trace) = lock(&shared.pacing_trace).as_mut() {
+                    let event = if frame.is_some() { "sent" } else { "held" };
+                    trace.row(arrived, at, event);
+                }
                 if let Some(frame) = frame {
                     hand_out(shared, frame);
                 }
@@ -1095,7 +1119,11 @@ fn capture_frames(
             }
         }
         if let Some(pacer) = pacer.as_mut() {
-            if let Some(frame) = pacer.take_due(shared.now()) {
+            let now = shared.now();
+            if let Some(frame) = pacer.take_due(now) {
+                if let Some(trace) = lock(&shared.pacing_trace).as_mut() {
+                    trace.row(now, frame.captured_at(), "released");
+                }
                 hand_out(shared, frame);
             }
             let (held, replaced) = pacer.counts();
@@ -1462,6 +1490,28 @@ impl PeriodStats {
 /// (empty without `--netem`), which places its scheduled changes. Written
 /// line by line: `latency-probe` ends the host by killing it.
 struct RcTrace(LineWriter<File>);
+
+/// What pacing did with each captured frame (`--pacing-trace`, M9e), on the
+/// host's clock: `at_us` is when the frame arrived (`sent` at once, or
+/// `held`) or when a held frame went after its wait (`released`). A held
+/// frame followed by another frame before a `released` row was replaced by
+/// it (or dropped, if the capture started again between them). Unpaced,
+/// every frame is `sent`. One per stream, across capture restarts. Written
+/// line by line, as `RcTrace`.
+struct PacingTrace(LineWriter<File>);
+
+impl PacingTrace {
+    fn create(path: &Path) -> std::io::Result<Self> {
+        let mut w = LineWriter::new(File::create(path)?);
+        writeln!(w, "at_us,captured_us,event")?;
+        Ok(Self(w))
+    }
+
+    fn row(&mut self, at: Micros, captured: Micros, event: &str) {
+        // A failed write only loses the measurement.
+        let _ = writeln!(self.0, "{},{},{event}", at.0, captured.0);
+    }
+}
 
 impl RcTrace {
     fn create(path: &Path) -> Result<Self, MediaError> {

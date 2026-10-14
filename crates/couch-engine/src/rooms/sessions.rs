@@ -860,6 +860,7 @@ impl Actor {
             session: session.0,
             first_epoch: SeatEpoch(u32::from_le_bytes(random()?)),
             rc_trace: None,
+            pacing_trace: None,
             netem_elapsed: None,
             replace_grace: self.replace_grace,
             local: controller.as_ref().map(|c| LocalSeat {

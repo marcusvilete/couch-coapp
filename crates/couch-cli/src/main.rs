@@ -123,6 +123,10 @@ enum Cmd {
         /// viewers, the next ones go to numbered files beside it.
         #[arg(long)]
         rc_trace: Option<PathBuf>,
+        /// Write every captured frame, and what pacing did with it (sent,
+        /// held or released after its wait), to this CSV file (M9e).
+        #[arg(long)]
+        pacing_trace: Option<PathBuf>,
         /// Let the viewer use keyboard and mouse, not just the gamepad. This
         /// is remote control of this PC while the captured window is in front.
         #[arg(long)]
@@ -343,6 +347,7 @@ async fn main() -> ExitCode {
             upload_mbps,
             max_viewers,
             rc_trace,
+            pacing_trace,
             allow_kbm,
             pads,
             real_pad_ids,
@@ -372,6 +377,7 @@ async fn main() -> ExitCode {
                 upload_mbps,
                 max_viewers: usize::from(max_viewers),
                 rc_trace,
+                pacing_trace,
                 permissions: if allow_kbm {
                     couch_input::Permissions::all()
                 } else {
