@@ -1,6 +1,7 @@
 //! QPC, the clock frames are stamped with on Windows. Windows.Graphics.Capture
 //! timestamps (`SystemRelativeTime`) are on the same timeline, so capture,
-//! present and barcode times from any process on the machine compare directly.
+//! present and barcode times from any process on the machine compare directly
+//! (though capture's run ahead of delivery: `capture` takes the earlier).
 
 use std::sync::OnceLock;
 

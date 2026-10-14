@@ -225,10 +225,15 @@ impl GraphicsCaptureApiHandler for Handler {
         frame: &mut Frame,
         _control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        let captured_at = frame
-            .timestamp()
-            .map(|t| clock::from_system_relative_time(t.Duration))
-            .unwrap_or_else(|_| clock::now());
+        // Windows stamps a frame with a time still ahead of us when it
+        // arrives (measured in P5: about when it will be on screen; for a
+        // window whose own frames queue up, after we had already encoded
+        // and decoded it). A capture time is never later than its delivery,
+        // or every capture-to-present figure reads too low.
+        let now = clock::now();
+        let captured_at = frame.timestamp().map_or(now, |t| {
+            clock::from_system_relative_time(t.Duration).min(now)
+        });
         if self.output == FrameOutput::Gpu {
             match self.on_gpu(frame, captured_at) {
                 Ok(Some(frame)) => {

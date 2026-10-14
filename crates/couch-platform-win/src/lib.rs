@@ -22,6 +22,7 @@ pub mod held_input;
 pub mod hidhide;
 pub mod host_keys;
 pub mod keymap;
+pub mod links;
 pub(crate) mod markers;
 pub mod monitor;
 pub mod process;

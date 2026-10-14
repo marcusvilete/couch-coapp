@@ -69,7 +69,7 @@ Why, in short: Cubic shrinks its window on random loss, which caps it near 3 Mbi
 - **Loss adds latency.** At 1% loss, about 30% of 20 Mbit/s frames contain a lost packet. Forward error correction would remove the round-trip wait if real networks need it.
 - **Fairness.** The rate controller is delay-based, so it yields to TCP downloads sharing a bottleneck.
 - **One machine only.** These are loopback numbers. Real-network and NAT tests come with our relay (M7); a test with a friend can come earlier.
-- **Capture timestamps.** Windows.Graphics.Capture's frame timestamp runs ahead of delivery, so "capture to present" understates latency. Use the barcode figures.
+- **Capture timestamps.** Windows.Graphics.Capture's frame timestamp runs ahead of delivery, so "capture to present" understates latency. Use the barcode figures. (Fixed in P5: the capture time is never later than delivery.)
 - **Font notices.** The viewer's HUD font comes with egui. Its licenses (OFL 1.1, Ubuntu Font Licence) allow bundling but must ship in the installer's notices (M10).
 
 ## Reproduce
