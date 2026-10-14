@@ -24,10 +24,18 @@ Opening a `couchco://` link only fills in the app's join screen. Joining still n
 ## Hosting
 
 Any static host works: it only needs to serve the three files over https.
-- **GitHub Pages** (free). Publish this folder from a repository; the page is then at `https://<user>.github.io/<repository>/j/`.
+- **GitHub Pages** (free; P4). The repository's workflow, `.github/workflows/invite-page.yml`, checks the page (`check.js`) and publishes `j/` on every push to main that changes it. Switch it on once: the repository's Settings → Pages → Source: "GitHub Actions". Do it before merging the workflow, whose own push runs it; otherwise run it again by hand afterwards (Actions → Invite page → Run workflow). The page is then at `https://<user>.github.io/<repository>/j/`; ours is `https://marcusvilete.github.io/couch-coapp/j/`.
 - **The relay's server.** iroh-relay serves only the relay, so this would need a separate web server there (not set up).
 
-Then set `invite_page` in `release.toml` to the page's address, ending in `/j/`, and build the installer. Builds without it share `couchco://` links, as before.
+**Then point builds at it:**
+- **Release builds:** set `invite_page` in `release.toml` to the page's address, ending in `/j/`.
+- **One build only:** `scripts\build-installer.ps1 -InvitePage <address>` overrides that. It works for `-TestRelay` builds too, which otherwise have none. `-NoInvitePage` builds with `couchco://` links.
+- **Every build prints which it uses.** Builds without a page share `couchco://` links, as before.
+
+**Using someone else's page.** The page doesn't depend on the relay, so a build of your own can link to ours, or to a copy you host.
+- **Whoever runs the page could see the invites opened with it.** The page runs in the reader's browser and reads the invite there. Ours sends nothing anywhere, but a changed page could.
+- **The room's password still guards it,** since joining needs the invite and the password together.
+- **Hosting your own copy** (a fork's Pages) keeps that trust with you.
 
 ## Trying it on this PC
 

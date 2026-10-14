@@ -1,0 +1,48 @@
+# Publishes the invite page (deploy/invite-page, P4) on GitHub Pages, at
+# https://<owner>.github.io/<repository>/j/. Only the page's own files go out.
+#
+# Once per repository: Settings -> Pages -> Source: "GitHub Actions". Then it
+# runs on every push to main that changes the page, or by hand (Actions ->
+# Invite page -> Run workflow).
+
+name: Invite page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/invite-page/**
+      - .github/workflows/invite-page.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push waits for the one in progress.
+concurrency:
+  group: invite-page
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}j/
+    steps:
+      - uses: actions/checkout@v7
+      # The page's reading of an invite the app made (couch_proto's pinned one).
+      - name: Check the page
+        run: node deploy/invite-page/check.js
+      - name: Gather the page
+        run: |
+          mkdir -p site
+          cp -r deploy/invite-page/j site/j
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v5

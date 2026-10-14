@@ -16,6 +16,49 @@
 ; uninstaller without /S, which can't be told from a real uninstall, so the
 ; note would show in the middle of every upgrade. The docs and Settings ->
 ; Drivers say it instead.
+;
+; Uninstalling with "Delete the application data" ticked (P4): Tauri's box
+; deletes only its own folders, named after the bundle id. Ours, with every
+; profile (identity, rooms, settings, logs), is %LOCALAPPDATA%\CouchCoApp of
+; the user running the uninstaller. It goes too, after a Yes/No question.
+; If a session that ended abruptly left a controller hidden or keys held
+; (crash markers, `pid-*`, which the app undoes at its next start and nothing
+; else would), the question says to keep the data and start the app once
+; first, and No is its default: the app can't always clear a marker (HidHide
+; uninstalled since), so deleting anyway stays possible. Never during an
+; update; the box can't be ticked in a silent or passive run.
+
+; Sets RESULT to 1 if folder DIR holds a crash marker (`pid-*`), else 0.
+!macro COUCH_HAS_MARKERS DIR RESULT
+  StrCpy ${RESULT} 0
+  ClearErrors
+  FindFirst $R0 $R1 "${DIR}\pid-*"
+  ${If} $R1 != ""
+    StrCpy ${RESULT} 1
+  ${EndIf}
+  ${If} $R0 != ""
+    FindClose $R0
+  ${EndIf}
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $DeleteAppDataCheckboxState = 1
+  ${AndIf} $UpdateMode <> 1
+    SetShellVarContext current
+    ${If} ${FileExists} "$LOCALAPPDATA\CouchCoApp\*.*"
+      !insertmacro COUCH_HAS_MARKERS "$LOCALAPPDATA\CouchCoApp\hidden-controllers" $R2
+      !insertmacro COUCH_HAS_MARKERS "$LOCALAPPDATA\CouchCoApp\held-input" $R3
+      ${If} $R2 = 1
+      ${OrIf} $R3 = 1
+        MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "Delete Couch Co-App's data anyway?$\r$\n$\r$\nA session that ended abruptly left your controller hidden from games, or keys held down, and the app puts that right when it starts. Best: answer No, install Couch Co-App again, start it once and close it, then uninstall with $\"Delete the application data$\" ticked.$\r$\n$\r$\nYes deletes every profile of this Windows user (identity, rooms, settings, logs); a controller left hidden then needs HidHide's own app to show it again.$\r$\n$\r$\nIt is in $LOCALAPPDATA\CouchCoApp." /SD IDNO IDNO +2
+          RmDir /r "$LOCALAPPDATA\CouchCoApp"
+      ${Else}
+        MessageBox MB_YESNO|MB_ICONQUESTION "Delete Couch Co-App's data too?$\r$\n$\r$\nEvery profile of this Windows user goes: its identity, its rooms, settings and logs. A new install starts as someone new.$\r$\n$\r$\nRooms you own stay as they are for their members, but no one can join them any more. The rooms you're in still list you, until their owner bans you.$\r$\n$\r$\nIt is in $LOCALAPPDATA\CouchCoApp." /SD IDNO IDNO +2
+          RmDir /r "$LOCALAPPDATA\CouchCoApp"
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+!macroend
 
 !macro COUCH_OFFER_DRIVER SERVICE SETUP QUESTION
   ClearErrors

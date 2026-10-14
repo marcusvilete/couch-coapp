@@ -66,8 +66,10 @@ relay_url = ""
 # /etc/iroh-relay/token.env as IROH_RELAY_ACCESS_TOKEN.
 relay_token = "{token}"
 
-# Where invites link to (deploy/invite-page), ending in "/j/". Empty for
-# couchco:// links.
+# Where invites link to (deploy/invite-page), ending in "/j/": published on
+# GitHub Pages by the repository's workflow, https://<user>.github.io/<repository>/j/.
+# Empty for couchco:// links. build-installer.ps1 -InvitePage <address> or
+# -NoInvitePage overrides it for one build.
 invite_page = ""
 
 # true only in a copy for testing on your LAN: allows an http:// relay_url

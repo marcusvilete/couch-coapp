@@ -18,10 +18,17 @@
 #   .\scripts\build-installer.ps1                       # release: our relay and its token, https only
 #   .\scripts\build-installer.ps1 -Config <file>        # another file, e.g. a LAN test one (test = true)
 #   .\scripts\build-installer.ps1 -TestRelay            # a test installer: iroh's public relays, no file needed
+#
+# Where Copy invite links to (P4): the invite page (deploy\invite-page), or couchco:// links.
+# A release build takes release.toml's invite_page; a test build has none. Either way:
+#   -InvitePage https://<user>.github.io/<repository>/j/   # this page, for this build
+#   -NoInvitePage                                         # couchco:// links, for this build
 
 param(
     [string] $Config,
-    [switch] $TestRelay
+    [switch] $TestRelay,
+    [string] $InvitePage,
+    [switch] $NoInvitePage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,8 +41,24 @@ $repo = Split-Path -Parent $PSScriptRoot
 # treats a value it can't read as none.
 $build = @{ COUCH_BUILD_RELAY_URL = $null; COUCH_BUILD_RELAY_TOKEN = $null; COUCH_BUILD_INVITE_PAGE = $null; COUCH_BUILD_TEST = $null; COUCH_BUILD_COMMIT = $null }
 $test = [bool] $TestRelay
+$release = $null
 $dirtyTree = [bool] (git -C $repo status --porcelain)
 $build.COUCH_BUILD_COMMIT = (git -C $repo rev-parse --short=10 HEAD) + $(if ($dirtyTree) { '-dirty' } else { '' })
+if ($InvitePage -and $NoInvitePage) { throw 'Pass -InvitePage or -NoInvitePage, not both.' }
+# A URL the app can't read would quietly make a build without it: parse it here. A test
+# build may use http (a relay or page on this PC or the LAN).
+function Assert-WebAddress([string] $Name, [string] $Value) {
+    $uri = $null
+    $schemes = if ($test) { @('https', 'http') } else { @('https') }
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref] $uri) -or
+        $schemes -notcontains $uri.Scheme -or -not $uri.Host -or $uri.UserInfo) {
+        throw "$Name must be an https:// address with a host$(if ($test) { ' (or http:// in a test build)' }), not '$Value'."
+    }
+    # [Uri] reads HTTPS:// as https, but the app compares the text as it is.
+    if ($Value -cnotmatch '^https?://') {
+        throw "$Name must begin with https:// in lower case, not '$Value'."
+    }
+}
 if ($TestRelay) {
     if ($Config) { throw 'Pass -Config or -TestRelay, not both.' }
     Write-Host "A test installer: iroh's public relays, and plain http relays on the LAN allowed."
@@ -47,27 +70,28 @@ if ($TestRelay) {
     Assert-OutsideRepo $path $repo
     $release = Read-ReleaseConfig $path
     $test = $release.test
-    # A URL the app can't read would quietly make a build without our relay: parse it here.
-    function Assert-WebAddress([string] $Name, [string] $Value) {
-        $uri = $null
-        $schemes = if ($test) { @('https', 'http') } else { @('https') }
-        if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref] $uri) -or
-            $schemes -notcontains $uri.Scheme -or -not $uri.Host -or $uri.UserInfo) {
-            throw "$Name must be an https:// address with a host$(if ($test) { ' (or http:// in a test file)' }), not '$Value'."
-        }
-    }
     if (-not $release.relay_url) {
         throw "$path has no relay_url yet. Until our relay is deployed, build test installers with -TestRelay."
     }
     Assert-WebAddress 'relay_url' $release.relay_url
     if (-not $release.relay_token) { throw "$path has no relay_token." }
-    if ($release.invite_page) { Assert-WebAddress 'invite_page' $release.invite_page }
     $build.COUCH_BUILD_RELAY_URL = $release.relay_url
     $build.COUCH_BUILD_RELAY_TOKEN = $release.relay_token
-    if ($release.invite_page) { $build.COUCH_BUILD_INVITE_PAGE = $release.invite_page }
     Write-Host "Our relay: $($release.relay_url)$(if ($test) { ' (a test build)' })"
 }
 if ($test) { $build.COUCH_BUILD_TEST = '1' }
+
+# Where invites link to: this build's choice, else release.toml's (release builds only).
+$page = if ($NoInvitePage) { '' } elseif ($InvitePage) { $InvitePage } elseif ($release) { $release.invite_page } else { '' }
+if ($page) {
+    Assert-WebAddress 'The invite page' $page
+    # The app appends "#<invite>" to it: the page's folder, as in .../j/.
+    if (-not $page.EndsWith('/')) { throw "The invite page's address must end in '/' (the page is at .../j/), not '$page'." }
+    $build.COUCH_BUILD_INVITE_PAGE = $page
+    Write-Host "Invites link to $page"
+} else {
+    Write-Host 'Invites are couchco:// links (no invite page).'
+}
 
 # The notices link the app's source at this commit: it must be that exact commit, and reachable.
 if ($dirtyTree) {
