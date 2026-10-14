@@ -50,7 +50,10 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let first = match capturer.next_event(Duration::from_secs(5))? {
         Some(CaptureEvent::Frame(frame)) => frame.cpu()?.cropped_to_even(),
         Some(CaptureEvent::SourceClosed) => bail!("the source closed"),
-        None => bail!("no frame within 5 s (is the window visible and changing?)"),
+        // (Frames in memory: never a GPU failure.)
+        Some(CaptureEvent::GpuFramesFailed) | None => {
+            bail!("no frame within 5 s (is the window visible and changing?)")
+        }
     };
     let config = EncoderConfig {
         codec: Codec::H264,
@@ -93,7 +96,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                     println!("source closed");
                     break;
                 }
-                None => continue,
+                Some(CaptureEvent::GpuFramesFailed) | None => continue,
             },
         };
         if (frame.width, frame.height) != (config.width, config.height) {

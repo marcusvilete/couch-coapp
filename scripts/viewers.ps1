@@ -5,7 +5,8 @@
 #   .\scripts\viewers.ps1 -Screen         # capture the primary screen instead (M9b: GPU frames)
 #   .\scripts\viewers.ps1 -Screen -CopyThroughMemory   # the same, frames through memory as before M9b
 #   .\scripts\viewers.ps1 -Screen -CopyFrames          # the viewers copy decoded frames through memory, as before M9c
-# Streams a 1080p60 test pattern with `couch-cli host` and starts that many `couch-cli view`
+#   .\scripts\viewers.ps1 -Screen -Fps 120             # the stream at 120 fps (M9d; 60 by default)
+# Streams a 1080p test pattern (60 fps, or -Fps) with `couch-cli host` and starts that many `couch-cli view`
 # windows (small, in a grid), then prints each viewer's fps, capture-to-present latency and
 # received bitrate, the host's last per-viewer line (bitrate, target, slowest encode), and the
 # stream windows' CPU use (all of them together, measured over the middle of the run).
@@ -15,7 +16,7 @@
 # Needs the release build: cargo build --release -p couch-cli -p couch-viewer
 # Logs go to %TEMP%\couch-viewers-<N>. Leave the machine alone while it runs.
 
-param([int]$Viewers = 4, [int]$Secs = 20, [switch]$Screen, [switch]$CopyThroughMemory, [switch]$CopyFrames)
+param([int]$Viewers = 4, [int]$Secs = 20, [int]$Fps = 60, [switch]$Screen, [switch]$CopyThroughMemory, [switch]$CopyFrames)
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path .\target\release\couch-cli.exe)) {
     throw 'No release build: run cargo build --release -p couch-cli -p couch-viewer from the repo root.'
@@ -40,7 +41,7 @@ $source = if ($Screen) { '--source monitor' } else { '--source testpattern --pat
 # something) is kept, and restored afterwards.
 $hostSwitch = $env:COUCH_HOST_ZERO_COPY
 if ($CopyThroughMemory) { $env:COUCH_HOST_ZERO_COPY = '0' }
-$h = Start-Hidden "host $source --fps 60 --relay none --max-viewers 7 --audio off" $hostOut
+$h = Start-Hidden "host $source --fps $Fps --relay none --max-viewers 7 --audio off" $hostOut
 $env:COUCH_HOST_ZERO_COPY = $hostSwitch
 $ticket = $null
 for ($i = 0; $i -lt 100 -and -not $ticket; $i++) {

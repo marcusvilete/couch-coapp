@@ -40,12 +40,21 @@ struct Metrics {
     clock_to_present: Samples,
     capture_to_present: Samples,
     arrive_to_present: Samples,
+    /// Between the capture times of consecutive frames shown: how even the
+    /// host's pacing is (M9d), skipped frames included.
+    frame_gap: Samples,
+    last_capture_us: Option<u64>,
 }
 
 impl Metrics {
     fn record(&mut self, t: &FrameTiming) {
         let ms = |later: u64, earlier: u64| later.saturating_sub(earlier) as f64 / 1000.0;
         self.frames += 1;
+        if let Some(last) = self.last_capture_us.replace(t.capture_us)
+            && t.capture_us > last
+        {
+            self.frame_gap.push(ms(t.capture_us, last));
+        }
         self.capture_to_present
             .push(ms(t.presented_us, t.capture_us));
         self.arrive_to_present
@@ -318,6 +327,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         "arrive -> present    {}",
         latency.all.arrive_to_present.summary_ms()
     );
+    println!(
+        "frame gap            {}",
+        latency.all.frame_gap.summary_ms()
+    );
     if args.measure_secs.is_some() {
         let a = audio_stats;
         let result = serde_json::json!({
@@ -337,6 +350,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             "clock_to_present_ms": percentiles(&latency.all.clock_to_present),
             "capture_to_present_ms": percentiles(&latency.all.capture_to_present),
             "arrive_to_present_ms": percentiles(&latency.all.arrive_to_present),
+            "frame_gap_ms": percentiles(&latency.all.frame_gap),
             "receive_mbps": percentiles(&receive_mbps),
             "rtt_ms": path.rtt.as_secs_f64() * 1000.0,
             "relayed": path.relayed,

@@ -2,7 +2,8 @@
 //! descendants (the game's process tree), and, for test tools, freeze it,
 //! close its windows, send it Ctrl+Break.
 //! `couch-cli release-check` uses these to stage a viewer that dies, hangs
-//! or is closed, and a host that is stopped.
+//! or is closed, and a host that is stopped; `latency-probe --cpus` confines
+//! itself to a few CPUs.
 
 use std::{io, mem::size_of};
 
@@ -15,8 +16,8 @@ use windows::Win32::{
             TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         },
         Threading::{
-            OpenProcess, OpenThread, PROCESS_TERMINATE, ResumeThread, SuspendThread,
-            THREAD_SUSPEND_RESUME, TerminateProcess,
+            GetCurrentProcess, OpenProcess, OpenThread, PROCESS_TERMINATE, ResumeThread,
+            SetProcessAffinityMask, SuspendThread, THREAD_SUSPEND_RESUME, TerminateProcess,
         },
     },
     UI::WindowsAndMessaging::{
@@ -193,4 +194,23 @@ pub fn close_windows(pid: u32) -> usize {
 pub fn ctrl_break(process_group: u32) -> io::Result<()> {
     // SAFETY: no pointers.
     unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, process_group) }.map_err(os)
+}
+
+/// Confines this process, and every process it starts from now on (they
+/// inherit it), to the logical CPUs listed: a weaker PC on this one, for
+/// measuring (`couch-cli latency-probe --cpus`, M9d). CPUs from 0 to 63.
+pub fn confine_to_cpus(cpus: &[u32]) -> io::Result<()> {
+    let mut mask = 0usize;
+    for &cpu in cpus {
+        if cpu >= usize::BITS {
+            return Err(io::Error::other(format!("CPU {cpu}: only 0 to 63")));
+        }
+        mask |= 1 << cpu;
+    }
+    if mask == 0 {
+        return Err(io::Error::other("no CPUs given"));
+    }
+    // SAFETY: the pseudo-handle of this process needs no closing; a mask
+    // naming CPUs this PC lacks makes the call fail.
+    unsafe { SetProcessAffinityMask(GetCurrentProcess(), mask) }.map_err(os)
 }

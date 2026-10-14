@@ -344,7 +344,8 @@ fn stats_line(s: &ViewerStats, name_it: bool) -> String {
     };
     format!(
         "{who}{:5.1} fps  {:5.1} Mbit/s (target {:5.1})  rtt {:5.1} ms  delay+ {:5.1} ms  backlog {:6} B  \
-         loss {}  key {}  catch-up {}  pause {}  encode max {:.1} ms  {}  audio {}",
+         loss {}  key {}  catch-up {}  pause {}  encode max {:.1} ms  {}  audio {}  \
+         paced held {} replaced {}",
         s.fps,
         s.bps / 1e6,
         f64::from(s.applied_bps) / 1e6,
@@ -358,6 +359,8 @@ fn stats_line(s: &ViewerStats, name_it: bool) -> String {
         f64::from(s.encode_us_max) / 1000.0,
         if fb.relayed { "RELAY" } else { "direct" },
         s.audio_packets,
+        s.paced_held,
+        s.paced_replaced,
     )
 }
 

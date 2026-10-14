@@ -30,7 +30,8 @@ cd apps\desktop; npm run tauri dev        # the default profile; builds couch-vi
 | The default profile (the app) | only the `npm run tauri dev` terminal: ask the user to copy the lines, or repeat the test with alice hosting |
 
 - **Log level.** `profiles.ps1` gives its instances `dev.ps1`'s default `RUST_LOG` (`couch=debug,iroh=info`). Without it, the app and its stream windows log at info level (since M9a and M9c).
-- **Environment switches** reach a stream window from the **watcher's** app, so viewer-side ones go in the shell that starts that profile: `$env:COUCH_VIEWER_ZERO_COPY = '0'; .\scripts\profiles.ps1 alice` (after closing alice). Setting one before `npm run tauri dev` reaches only the default profile.
+- **Environment switches** reach a stream window from the **watcher's** app, so viewer-side ones go in the shell that starts that profile: `$env:COUCH_VIEWER_ZERO_COPY = '0'; .\scripts\profiles.ps1 alice` (after closing alice). Setting one before `npm run tauri dev` reaches only the default profile, which is where the host-side ones go when it hosts (`COUCH_HOST_PACING=0`, `COUCH_HOST_ZERO_COPY=0`).
+- **Frame rates** (M9d): Go live offers 120, 60 and 30 fps, and warns when the chosen source's screen refreshes slower than the rate. The stream window's stats show the fps reached; the host's log line `capturing at N fps: frames on the GPU, at most every 4.0 ms, paced by the stream` shows the pacing.
 - **Useful lines:**
   - `went live`, `seat status=Granted/Active/Suspended/Host`, `a viewer asks for control`, `panic key: every seat back to the host`, `stream ended reason=...`;
   - in a viewer log, `gamepad "..."` and `skipping "...": a host on this PC has a virtual pad plugged in`;
@@ -192,6 +193,7 @@ Pick what the change touched; add the basics (watch, ask, pass control, the pani
 | Alt+F4 on the guest | press it while holding the controller with keyboard, then while only watching | holding: nothing happens; watching: the stream window closes (that counts as leaving) |
 | Display mode | switch the game between windowed and full screen, also from the guest | the stream goes on; the guest's input works in both (the host's log says "the game opened a new window" if the game swapped windows) |
 | Game exit | quit the game | everyone gets "The game closed" |
+| 120 fps (M9d) | go live at 120 fps on a screen at 120 Hz or more; then at 60 with the screen at 144 or 165 Hz (Windows display settings), if it offers them | the stream window's stats show about 120, then 60 fps (before M9d, 60 on 144 Hz gave 48) |
 | Network drop | turn off the guest's network for about 10 s while it plays | frozen picture, "Reconnecting…", the stream comes back within 30 s, the guest has to ask for control again |
 | Host killed | end the host app in Task Manager | the guest is told the stream ended within about 5 s |
 | Stream window crash | on the guest, Task Manager's **Details** tab, End task on `couch-viewer.exe`; again within a minute | it comes back by itself, still holding the controller; the second time, watching ends |

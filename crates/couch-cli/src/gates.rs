@@ -197,6 +197,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             viewers: 1,
             impair_first: None,
             log: Some(file(".log")),
+            cpu_load: None,
+            cpus: None,
+            clock_fps: None,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,
@@ -288,6 +291,9 @@ async fn run_g7(spec: &Spec, args: &Args) -> anyhow::Result<Report> {
             viewers: 2,
             impair_first: impair.map(Into::into),
             log: Some(file(".log")),
+            cpu_load: None,
+            cpus: None,
+            clock_fps: None,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,

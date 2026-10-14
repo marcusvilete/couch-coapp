@@ -336,6 +336,10 @@ pub enum CaptureEvent {
     Frame(VideoFrame),
     /// The captured window or display went away (for example, the game exited).
     SourceClosed,
+    /// Frames can't stay on the GPU here: they come in memory from now on.
+    /// A capture asked for GPU frames may run faster than the stream
+    /// (M9d), so the pipeline captures again with frames in memory.
+    GpuFramesFailed,
 }
 
 /// Identifies an epoch: a keyframe plus the frames that depend on it, sent in

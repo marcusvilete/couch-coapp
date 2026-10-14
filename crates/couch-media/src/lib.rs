@@ -9,6 +9,7 @@ pub mod barcode;
 pub mod clock;
 mod frame;
 pub mod mailbox;
+pub mod pacing;
 pub mod ratecontrol;
 pub mod testpattern;
 mod traits;
