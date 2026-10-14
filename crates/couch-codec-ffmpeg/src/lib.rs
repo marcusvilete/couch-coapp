@@ -5,10 +5,11 @@
 //! dynamically; its DLLs must sit next to the executable (`cargo xtask stage-dlls`).
 
 mod d3d11;
+mod d3d12;
 pub mod decoder;
 pub mod encoder;
 pub mod options;
 pub mod probe;
 
-pub use decoder::FfmpegDecoder;
+pub use decoder::{DecoderKind, FfmpegDecoder};
 pub use encoder::FfmpegEncoder;

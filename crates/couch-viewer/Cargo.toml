@@ -27,6 +27,9 @@ wgpu.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 couch-platform-win.workspace = true
+# Direct3D 12 interface types only, to hand COM pointers between FFmpeg and
+# wgpu-hal (zero_copy.rs, M9c); wgpu-hal already builds these.
+windows = { workspace = true, features = ["Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common"] }
 
 [lints]
 workspace = true

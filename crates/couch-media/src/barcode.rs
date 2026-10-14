@@ -18,7 +18,7 @@ pub const TOTAL_CELLS: u32 = SYNC_CELLS + DATA_BITS;
 pub const MAX_VALUE: u64 = (1 << 48) - 1;
 
 /// Width in pixels of a barcode drawn with `cell`-pixel cells.
-pub fn width(cell: u32) -> u32 {
+pub const fn width(cell: u32) -> u32 {
     TOTAL_CELLS * cell
 }
 

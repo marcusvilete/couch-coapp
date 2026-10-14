@@ -3,15 +3,22 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
-use couch_codec_ffmpeg::FfmpegDecoder;
+use couch_codec_ffmpeg::{DecoderKind, FfmpegDecoder};
 use couch_input::shortcuts::{Shortcut, Shortcuts};
-use couch_media::{DecodedFrame, Micros, Nv12Frame, VideoDecoder, barcode, mailbox::Mailbox};
+use couch_media::{
+    DecodedFrame, GpuNv12Frame, MediaError, Micros, Nv12Frame, VideoDecoder, barcode,
+    mailbox::Mailbox,
+};
 use couch_proto::ipc::{FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, UserAction};
 use sdl3::{
     event::{Event, WindowEvent},
@@ -29,9 +36,30 @@ use crate::{
 
 /// A decoded frame and what we know about its journey so far.
 struct Decoded {
-    frame: Nv12Frame,
+    picture: Picture,
     timing: FrameTiming,
 }
+
+/// A decoded frame copied to memory, or left on the GPU (M9c).
+enum Picture {
+    Cpu(Nv12Frame),
+    Gpu(GpuNv12Frame),
+}
+
+impl Picture {
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Self::Cpu(f) => (f.width, f.height),
+            Self::Gpu(f) => (f.width, f.height),
+        }
+    }
+}
+
+/// The device a decoder whose frames stay on the GPU decodes on.
+#[cfg(windows)]
+type DecoderDevice = crate::zero_copy::DecoderDevice;
+#[cfg(not(windows))]
+type DecoderDevice = std::convert::Infallible;
 
 /// Where the stream window goes. Latency tests place it at a known spot and
 /// at the stream's own size, so it shows the stream 1:1.
@@ -103,17 +131,6 @@ pub fn run(options: WindowOptions) -> Result<()> {
         }
     };
 
-    let decoded = Arc::new(Mailbox::new());
-    let decoder_name = Arc::new(std::sync::Mutex::new(String::from("starting")));
-    {
-        let decoded = decoded.clone();
-        let out_tx = out_tx.clone();
-        let decoder_name = decoder_name.clone();
-        thread::Builder::new()
-            .name("decode".into())
-            .spawn(move || decode_loop(in_rx, &decoded, &out_tx, &decoder_name))?;
-    }
-
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
     let mouse = sdl.mouse();
     let mut input = InputCapture::new(&sdl)?;
@@ -133,6 +150,52 @@ pub fn run(options: WindowOptions) -> Result<()> {
     // (locals drop in reverse declaration order).
     let mut gpu = unsafe { gpu::Gpu::new(&window)? };
     let mut video_pass = gpu::VideoPass::new(&gpu.device, gpu.config.format);
+
+    // The decoder starts once the GPU is set up, so frames that stay on the
+    // GPU can be decoded on its device. Frames arriving meanwhile wait in the
+    // channel; the stale check doesn't count that wait (`is_stale`).
+    let decoded = Arc::new(Mailbox::new());
+    let decoder_name = Arc::new(std::sync::Mutex::new(String::from("starting")));
+    // Frames decoded but never shown, a newer one already waiting.
+    let behind = Arc::new(AtomicU64::new(0));
+    // Set by the render thread when it can't bring a decoded frame in: the
+    // decoder then goes back to frames through memory.
+    let gpu_frames_failed = Arc::new(AtomicBool::new(false));
+    {
+        let decoded = decoded.clone();
+        let out_tx = out_tx.clone();
+        let decoder_name = decoder_name.clone();
+        let behind = behind.clone();
+        let gpu_frames_failed = gpu_frames_failed.clone();
+        #[cfg(windows)]
+        let device = gpu.decoder_device();
+        #[cfg(not(windows))]
+        let device = None;
+        thread::Builder::new()
+            .name("decode".into())
+            .spawn(move || {
+                decode_loop(
+                    in_rx,
+                    &decoded,
+                    &out_tx,
+                    &decoder_name,
+                    &behind,
+                    &gpu_frames_failed,
+                    device,
+                )
+            })?;
+    }
+    // Frames on the GPU: brought into the video pass, given back to the
+    // decoder once drawn, and their barcode corner read back for latency.
+    #[cfg(windows)]
+    let mut importer = crate::zero_copy::FrameImporter::new();
+    #[cfg(windows)]
+    let mut strips = crate::zero_copy::BarcodeStrips::<FrameTiming>::default();
+    #[cfg(windows)]
+    let mut gpu_locator = BarcodeLocator::default();
+    // The strip of the frame being shown, until its timing is attached.
+    #[cfg(windows)]
+    let mut strip_slot: Option<usize> = None;
     let mut hud = Hud::new(&gpu.device, gpu.config.format);
     hud.visible = !options.hide_hud;
     hud.show_stats = !options.hide_stats;
@@ -266,11 +329,87 @@ pub fn run(options: WindowOptions) -> Result<()> {
             let _ = out_tx.send(Outgoing::AudioStats(audio.stats()));
         }
 
+        // Frames on the GPU whose copies finished go back to the decoder, and
+        // timings whose barcode strip is read go out.
+        #[cfg(windows)]
+        if importer.held() > 0 || strips.busy() {
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
+            importer.release_finished();
+            for strip in strips.take_ready() {
+                let mut timing = strip.value;
+                if !strip.luma.is_empty() {
+                    timing.barcode_us = gpu_locator
+                        .read(&strip.luma, strip.size.0 as usize, strip.size)
+                        .unwrap_or(0);
+                }
+                stats.record(&timing);
+                if out_tx.send(Outgoing::Timing(timing)).is_err() {
+                    break 'running;
+                }
+            }
+        }
+
         let timing = match decoded.take_timeout(Duration::from_millis(4)) {
-            Ok(Some(Decoded { frame, timing })) => {
-                video_pass.upload(&gpu.device, &gpu.queue, &frame);
-                shown = Some((frame.width, frame.height));
-                Some(timing)
+            Ok(Some(Decoded { picture, timing })) => {
+                let size = picture.size();
+                // A strip whose frame was never shown.
+                #[cfg(windows)]
+                if let Some(slot) = strip_slot.take() {
+                    strips.forget(slot);
+                }
+                let brought_in = match picture {
+                    Picture::Cpu(frame) => {
+                        video_pass.upload(&gpu.device, &gpu.queue, &frame);
+                        true
+                    }
+                    #[cfg(windows)]
+                    Picture::Gpu(frame) => {
+                        // In a submit of its own, before the draw: a frame
+                        // that never gets drawn (the surface was lost) is
+                        // still in the textures for the next redraw.
+                        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                        let (luma, chroma) = video_pass.planes(&gpu.device, size);
+                        let result = importer.copy(
+                            &gpu.device,
+                            &gpu.queue,
+                            &mut encoder,
+                            frame,
+                            luma,
+                            chroma,
+                        );
+                        if result.is_ok() && gpu_locator.wants() {
+                            strip_slot = strips.record(&gpu.device, &mut encoder, luma);
+                        }
+                        gpu.queue.submit([encoder.finish()]);
+                        importer.submitted(&gpu.queue);
+                        if let Some(slot) = strip_slot {
+                            strips.submitted(slot);
+                        }
+                        match result {
+                            Ok(()) => true,
+                            Err(e) => {
+                                // Frames through memory from the next
+                                // keyframe on; until then the last frame
+                                // brought in stays.
+                                if !gpu_frames_failed.swap(true, Ordering::Relaxed) {
+                                    tracing::warn!(
+                                        "bringing a decoded frame in: {e:#}; frames go \
+                                         through memory from now on"
+                                    );
+                                }
+                                false
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    Picture::Gpu(_) => false,
+                };
+                if brought_in {
+                    shown = Some(size);
+                    Some(timing)
+                } else {
+                    None
+                }
             }
             Ok(None) => None,
             Err(_closed) => break,
@@ -322,7 +461,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
             &decoder_name.lock().unwrap(),
             &gpu.adapter_name,
             &format!("{:?} (latency {})", gpu.present_mode(), gpu.frame_latency()),
-            decoded.replaced_count(),
+            decoded.replaced_count() + behind.load(Ordering::Relaxed),
             *net.lock().unwrap(),
         );
         lines.insert(2, input.hud_line());
@@ -349,9 +488,15 @@ pub fn run(options: WindowOptions) -> Result<()> {
         gpu.queue.present(surface_texture);
         redraw = false;
 
-        // Only a new frame's first showing is measured.
+        // Only a new frame's first showing is measured. A frame on the GPU
+        // whose barcode corner is being read back waits for it (above).
         if let Some(mut timing) = timing {
             timing.presented_us = now_us().0;
+            #[cfg(windows)]
+            if let Some(slot) = strip_slot.take() {
+                strips.attach(slot, timing);
+                continue;
+            }
             stats.record(&timing);
             if out_tx.send(Outgoing::Timing(timing)).is_err() {
                 break;
@@ -369,6 +514,15 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let _ = out_tx.send(Outgoing::Close);
     drop(out_tx);
     drop(audio);
+    // Frames still held for the GPU go back once it has finished with them.
+    #[cfg(windows)]
+    {
+        let _ = gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(1)),
+        });
+        drop(importer);
+    }
     drop(gpu);
     if let Some(writer) = writer {
         let _ = writer.join();
@@ -450,13 +604,50 @@ fn toggle_fullscreen(window: &mut Window, hud: &mut Hud) {
 /// up (software decoding a large stream, say). Normal waits are a few ms.
 const STALE: Duration = Duration::from_millis(200);
 
+/// Whether a frame that arrived at `arrived_us` is stale at `now_us`: it
+/// waited more than [`STALE`] since it arrived or since the decoder became
+/// ready (`ready_us`), whichever is later. Waiting behind the decoder's own
+/// start-up isn't falling behind; once started, a decoder slower than the
+/// stream still is.
+fn is_stale(arrived_us: u64, ready_us: u64, now_us: u64) -> bool {
+    now_us.saturating_sub(arrived_us.max(ready_us)) > STALE.as_micros() as u64
+}
+
+/// The decoder for this stream window: on the GPU's device when frames can
+/// stay on the GPU (falling back to D3D11VA if that can't start), else
+/// D3D11VA, else software.
+fn open_decoder(device: Option<DecoderDevice>) -> Result<FfmpegDecoder, MediaError> {
+    #[cfg(windows)]
+    if let Some(device) = device {
+        match FfmpegDecoder::new_d3d12(device.into_raw()) {
+            Ok(decoder) => return Ok(decoder),
+            Err(e) => tracing::warn!("D3D12VA unavailable, frames go through memory: {e}"),
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = device;
+    FfmpegDecoder::new(true)
+}
+
+fn decoder_label(decoder: &FfmpegDecoder) -> String {
+    match decoder.kind() {
+        DecoderKind::D3d12 => "D3D12VA (GPU frames)",
+        DecoderKind::D3d11 => "D3D11VA (copied)",
+        DecoderKind::Software => "software",
+    }
+    .into()
+}
+
 fn decode_loop(
     rx: mpsc::Receiver<Incoming>,
     decoded: &Mailbox<Decoded>,
     out: &mpsc::Sender<Outgoing>,
     decoder_name: &std::sync::Mutex<String>,
+    skipped: &AtomicU64,
+    gpu_frames_failed: &AtomicBool,
+    device: Option<DecoderDevice>,
 ) {
-    let mut decoder = match FfmpegDecoder::new(true) {
+    let mut decoder = match open_decoder(device) {
         Ok(d) => d,
         Err(e) => {
             tracing::error!("no decoder: {e}");
@@ -464,15 +655,18 @@ fn decode_loop(
             return;
         }
     };
-    *decoder_name.lock().unwrap() = if decoder.is_hardware() {
-        "D3D11VA".into()
-    } else {
-        "software".into()
-    };
+    *decoder_name.lock().unwrap() = decoder_label(&decoder);
+    tracing::info!("decoding with {}", decoder_label(&decoder));
+    // Until the decoder has returned its first frame it is still starting
+    // (the hardware decoder starts at the first keyframe): frames waiting
+    // behind that aren't stale.
+    let mut ready_us = u64::MAX;
     let mut locator = BarcodeLocator::default();
     // After a decode error, or when decoding falls behind, wait for the next
     // keyframe instead of showing garbage or ever older frames.
     let mut need_keyframe = false;
+    // Decode errors in a row on a D3D12 decoder.
+    let mut d3d12_errors = 0u32;
     let mut last_request: Option<Instant> = None;
     let mut request_keyframe = || {
         if last_request.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
@@ -481,15 +675,39 @@ fn decode_loop(
         }
     };
 
-    for message in rx {
+    // One message read ahead, to know whether a newer frame already waits.
+    let mut queued: Option<Incoming> = None;
+    loop {
+        let message = match queued.take() {
+            Some(message) => message,
+            None => match rx.recv() {
+                Ok(message) => message,
+                Err(_) => break,
+            },
+        };
         let (header, data) = match message {
             Incoming::Video(header, data) => (header, data),
             Incoming::Shutdown => break,
         };
+        // The render thread couldn't bring this decoder's frames in.
+        if decoder.kind() == DecoderKind::D3d12 && gpu_frames_failed.load(Ordering::Relaxed) {
+            if !reopen_in_memory(&mut decoder, decoder_name) {
+                break;
+            }
+            ready_us = u64::MAX;
+            need_keyframe = true;
+        }
+        queued = rx.try_recv().ok();
+        // With a newer frame already waiting (a backlog: frames that queued
+        // while the window started, or behind a slow decode), this one is
+        // decoded, since later frames refer to it, but not shown: showing
+        // it would only show the past.
+        let newer_waiting = matches!(queued, Some(Incoming::Video(..)));
         // Frames queue here unseen by the host (its reports measure arrival),
         // so a decoder slower than the stream must catch up on its own.
-        let waited = Duration::from_micros(now_us().0.saturating_sub(header.arrived_us));
-        if !need_keyframe && !header.keyframe && waited > STALE {
+        let now = now_us().0;
+        if !need_keyframe && !header.keyframe && is_stale(header.arrived_us, ready_us, now) {
+            let waited = Duration::from_micros(now.saturating_sub(header.arrived_us));
             tracing::warn!(
                 seq = header.seq,
                 ?waited,
@@ -504,11 +722,34 @@ fn decode_loop(
         match decoder.decode(&data, Micros(header.capture_us)) {
             Ok(frames) => {
                 need_keyframe = false;
+                d3d12_errors = 0;
                 for frame in frames {
-                    let DecodedFrame::CpuNv12(frame) = frame else {
+                    if ready_us == u64::MAX {
+                        ready_us = now_us().0;
+                    }
+                    if newer_waiting {
+                        skipped.fetch_add(1, Ordering::Relaxed);
                         continue;
+                    }
+                    let (picture, barcode_us) = match frame {
+                        DecodedFrame::CpuNv12(frame) => {
+                            let barcode_us = if locator.wants() {
+                                locator
+                                    .read(
+                                        &frame.y,
+                                        frame.y_stride as usize,
+                                        (frame.width, frame.height),
+                                    )
+                                    .unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            (Picture::Cpu(frame), barcode_us)
+                        }
+                        // Its barcode is read by the render thread.
+                        DecodedFrame::Gpu(frame) => (Picture::Gpu(frame), 0),
+                        _ => continue,
                     };
-                    let barcode_us = locator.read(&frame).unwrap_or(0);
                     let timing = FrameTiming {
                         epoch: header.epoch,
                         seq: header.seq,
@@ -518,17 +759,61 @@ fn decode_loop(
                         presented_us: 0,
                         barcode_us,
                     };
-                    decoded.put(Decoded { frame, timing });
+                    decoded.put(Decoded { picture, timing });
                 }
+            }
+            // The D3D12 decoder couldn't start on this stream: decode it
+            // as before, from the next keyframe.
+            Err(MediaError::Unsupported(e)) if decoder.kind() == DecoderKind::D3d12 => {
+                tracing::warn!("{e}; frames go through memory from now on");
+                if !reopen_in_memory(&mut decoder, decoder_name) {
+                    break;
+                }
+                ready_us = u64::MAX;
+                need_keyframe = true;
+                request_keyframe();
             }
             Err(e) => {
                 tracing::warn!(seq = header.seq, "decode failed: {e}");
+                d3d12_errors += u32::from(decoder.kind() == DecoderKind::D3d12);
+                if d3d12_errors >= D3D12_ERRORS {
+                    tracing::warn!(
+                        "D3D12VA failed {d3d12_errors} times in a row; frames go through \
+                         memory from now on"
+                    );
+                    if !reopen_in_memory(&mut decoder, decoder_name) {
+                        break;
+                    }
+                    d3d12_errors = 0;
+                    ready_us = u64::MAX;
+                }
                 need_keyframe = true;
                 request_keyframe();
             }
         }
     }
     decoded.close();
+}
+
+/// Decode errors in a row after which a D3D12 decoder is given up for one
+/// decoding through memory: it decodes, but not this stream.
+const D3D12_ERRORS: u32 = 3;
+
+/// Replaces `decoder` with one decoding through memory (D3D11VA, or
+/// software). `false` if there is none.
+fn reopen_in_memory(decoder: &mut FfmpegDecoder, name: &std::sync::Mutex<String>) -> bool {
+    match FfmpegDecoder::new(true) {
+        Ok(d) => {
+            *decoder = d;
+            *name.lock().unwrap() = decoder_label(decoder);
+            tracing::info!("decoding with {}", decoder_label(decoder));
+            true
+        }
+        Err(e) => {
+            tracing::error!("no decoder: {e}");
+            false
+        }
+    }
 }
 
 /// Finds the latency clock's barcode once, then reads it at that spot.
@@ -539,11 +824,25 @@ struct BarcodeLocator {
 }
 
 impl BarcodeLocator {
-    fn read(&mut self, frame: &Nv12Frame) -> Option<u64> {
-        let size = (frame.width, frame.height);
-        let stride = frame.y_stride as usize;
+    /// Whether this frame should be read: every frame once the barcode is
+    /// found; while searching, only every 30th (not every stream shows the
+    /// clock).
+    fn wants(&mut self) -> bool {
+        if self.position.is_some() {
+            return true;
+        }
+        // Counted here, not when read: a frame on the GPU is read a frame or
+        // two later, and the frames between must not ask again.
+        let due = self.misses.is_multiple_of(30);
+        self.misses += 1;
+        due
+    }
+
+    /// Reads a frame [`Self::wants`], from its luma plane (or the plane's
+    /// top-left corner: the barcode is searched for within `3 × MARGIN` of it).
+    fn read(&mut self, luma: &[u8], stride: usize, size: (u32, u32)) -> Option<u64> {
         if let Some((x, y)) = self.position {
-            if let Some(v) = barcode::read_luma(&frame.y, stride, size, x, y, clock::CELL) {
+            if let Some(v) = barcode::read_luma(luma, stride, size, x, y, clock::CELL) {
                 self.misses = 0;
                 return Some(v);
             }
@@ -551,16 +850,11 @@ impl BarcodeLocator {
             if self.misses < 30 {
                 return None;
             }
+            // Lost: search now, then every 30th frame.
             self.position = None;
-        }
-        // Not every stream shows the clock; only search occasionally.
-        if !self.misses.is_multiple_of(30) {
             self.misses += 1;
-            return None;
         }
-        self.misses += 1;
-        let (x, y, v) =
-            barcode::locate_luma(&frame.y, stride, size, clock::CELL, clock::MARGIN * 3)?;
+        let (x, y, v) = barcode::locate_luma(luma, stride, size, clock::CELL, clock::MARGIN * 3)?;
         self.position = Some((x, y));
         self.misses = 0;
         Some(v)
@@ -653,5 +947,52 @@ impl Stats {
             format!("decoder {decoder}, {presentation}, {dropped} skipped"),
             format!("GPU {adapter}   (Ctrl+Alt+Shift+H hides this)"),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: u64 = 1000;
+
+    #[test]
+    fn frames_waiting_behind_the_decoders_start_are_not_stale() {
+        // Not started yet: however long the wait.
+        assert!(!is_stale(0, u64::MAX, 900 * MS));
+        // Started at 400 ms; a frame from 0 ms decoded at 450 ms.
+        assert!(!is_stale(0, 400 * MS, 450 * MS));
+    }
+
+    #[test]
+    fn a_decoder_that_falls_behind_after_starting_still_skips() {
+        // Ready at 400 ms; the frame from 0 ms still waiting at 650 ms.
+        assert!(is_stale(0, 400 * MS, 650 * MS));
+        // A frame that arrived after the start and waited 250 ms.
+        assert!(is_stale(1000 * MS, 400 * MS, 1250 * MS));
+        // A normal wait of a few ms.
+        assert!(!is_stale(1000 * MS, 400 * MS, 1004 * MS));
+    }
+
+    #[test]
+    fn the_locator_reads_every_frame_once_found_and_every_30th_while_searching() {
+        // A grey frame: no barcode to find. `true` when the frame was read.
+        let grey = vec![128u8; 1280 * 64];
+        let frame = |l: &mut BarcodeLocator| {
+            let wanted = l.wants();
+            if wanted {
+                assert_eq!(l.read(&grey, 1280, (1280, 64)), None);
+            }
+            wanted
+        };
+        let mut locator = BarcodeLocator::default();
+        assert_eq!((0..90).filter(|_| frame(&mut locator)).count(), 3);
+        // Found, then lost: read every frame until 30 misses (the last one
+        // also searches), then searched every 30th frame, as before M9c.
+        locator.position = Some((16, 16));
+        locator.misses = 0;
+        assert!((0..30).all(|_| frame(&mut locator)));
+        assert!(locator.position.is_none());
+        assert_eq!((0..60).filter(|_| frame(&mut locator)).count(), 2);
     }
 }
