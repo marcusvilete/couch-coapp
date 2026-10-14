@@ -28,8 +28,8 @@ use couch_platform_win::{
 };
 
 use super::{
-    AudioKind, Backend, Focus, GameProcess, Hiding, NativeId, ScreenSource, Source, Sources,
-    ViewerOptions, ViewerProcess, WindowSource,
+    AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, ScreenSource, Source,
+    Sources, ViewerOptions, ViewerProcess, WindowSource,
 };
 use crate::{DriverName, DriverState, ScreenArea};
 
@@ -68,6 +68,11 @@ fn zero_copy() -> bool {
     std::env::var("COUCH_HOST_ZERO_COPY").map_or(true, |v| v.trim() != "0")
 }
 
+/// Windows' minimum interval between captured frames on the GPU when the
+/// stream paces them itself (M9d): up to 250 a second, as Sunshine asks.
+/// Each is a GPU copy into the pool, a fraction of a millisecond.
+const PACED_INTERVAL: Duration = Duration::from_millis(4);
+
 fn wgc(source: CaptureSource, options: CaptureOptions) -> Result<Capture, MediaError> {
     let capturer = WgcCapturer::start(&source, options)?;
     let window = capturer.window().map(|w| w.0);
@@ -90,6 +95,7 @@ impl Backend for WindowsBackend {
                 elevated: *elevated
                     .entry(w.process_id)
                     .or_insert_with(|| game::runs_elevated(w.process_id)),
+                refresh_hz: monitor::refresh_of_window(w.window.0),
             })
             .collect();
         let screens = capture::list_monitors()?
@@ -100,20 +106,47 @@ impl Backend for WindowsBackend {
                 width: m.width,
                 height: m.height,
                 primary: m.primary,
+                refresh_hz: monitor::refresh_of_monitor(m.monitor.0),
             })
             .collect();
         Ok(Sources { windows, screens })
     }
 
-    fn capture(&self, source: &Source, fps: u32) -> Result<Capture, MediaError> {
+    fn capture(&self, source: &Source, request: CaptureRequest) -> Result<Capture, MediaError> {
+        let fps = request.fps.max(1);
+        let output = if zero_copy() && !request.in_memory {
+            FrameOutput::Gpu
+        } else {
+            FrameOutput::Cpu
+        };
+        // Faster than the stream only on the GPU: frames in memory cost a
+        // copy each, so those hosts keep Windows' own limit (see
+        // `CaptureOptions::min_interval` for what that costs).
+        let min_interval = if request.paced && output == FrameOutput::Gpu {
+            PACED_INTERVAL
+        } else {
+            Duration::from_secs(1) / fps
+        };
+        if !matches!(source, Source::TestPattern { .. }) {
+            tracing::info!(
+                "capturing at {fps} fps: frames {}, at most every {:.1} ms{}",
+                if output == FrameOutput::Gpu {
+                    "on the GPU"
+                } else {
+                    "in memory"
+                },
+                min_interval.as_secs_f64() * 1e3,
+                if request.paced {
+                    ", paced by the stream"
+                } else {
+                    ", not paced (COUCH_HOST_PACING=0)"
+                },
+            );
+        }
         let options = CaptureOptions {
-            min_interval: Duration::from_secs(1) / fps.max(1),
+            min_interval,
             cursor: true,
-            output: if zero_copy() {
-                FrameOutput::Gpu
-            } else {
-                FrameOutput::Cpu
-            },
+            output,
         };
         match source {
             Source::Window(id) => wgc(CaptureSource::Window(WindowId(*id)), options),
@@ -132,6 +165,16 @@ impl Backend for WindowsBackend {
         config: EncoderConfig,
         gpu: Option<&GpuFrame>,
     ) -> Result<Box<dyn VideoEncoder>, MediaError> {
+        // A developer switch: one encoder by FFmpeg's name, taking frames in
+        // memory, to measure another machine's path here (M9d; e.g.
+        // `libopenh264`, the software fallback a host without a hardware
+        // encoder uses).
+        if let Ok(name) = std::env::var("COUCH_HOST_ENCODER")
+            && !name.trim().is_empty()
+        {
+            tracing::info!("encoder {name}, frames in memory (COUCH_HOST_ENCODER)");
+            return Ok(Box::new(FfmpegEncoder::open(name.trim(), config)?));
+        }
         if let Some(frame) = gpu {
             match FfmpegEncoder::open_gpu(config, frame) {
                 Ok(encoder) => return Ok(Box::new(encoder)),

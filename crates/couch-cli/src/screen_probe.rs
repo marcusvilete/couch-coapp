@@ -109,7 +109,8 @@ pub fn scan_once(out: Option<&std::path::Path>) -> anyhow::Result<()> {
     let frame = match capturer.next_event(Duration::from_secs(3))? {
         Some(CaptureEvent::Frame(frame)) => frame.cpu()?,
         Some(CaptureEvent::SourceClosed) => anyhow::bail!("monitor capture closed"),
-        None => anyhow::bail!("no screen frame within 3 s"),
+        // (Frames in memory: never a GPU failure.)
+        Some(CaptureEvent::GpuFramesFailed) | None => anyhow::bail!("no screen frame within 3 s"),
     };
     println!("{}x{} stride {}", frame.width, frame.height, frame.stride);
     for (x, y) in scan(&frame, LATENCY_CLOCK_CELL) {

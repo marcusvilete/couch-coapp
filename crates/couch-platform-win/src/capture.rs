@@ -59,7 +59,10 @@ pub enum CaptureSource {
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureOptions {
     /// Lower bound between delivered frames. Windows only delivers a frame when
-    /// the content changed, so this is a cap, not a rate.
+    /// the content changed, and only at the display's refresh: the first
+    /// refresh after the interval. So this is a cap, not a rate, and a cap of
+    /// one frame at 60 fps gives 48 fps on a 144 Hz screen (M9d); the host
+    /// pipeline asks for more and paces them itself.
     pub min_interval: Duration,
     pub cursor: bool,
     pub output: FrameOutput,
@@ -71,7 +74,8 @@ pub enum FrameOutput {
     /// Copied to memory ([`VideoFrame::Cpu`]).
     Cpu,
     /// Kept on the capture's GPU ([`VideoFrame::Gpu`]). If that fails, the
-    /// capture logs why and copies to memory from then on.
+    /// capture logs why, copies to memory from then on, and says so once
+    /// ([`CaptureEvent::GpuFramesFailed`]).
     Gpu,
 }
 
@@ -165,8 +169,9 @@ pub fn list_monitors() -> Result<Vec<MonitorInfo>, MediaError> {
 struct Shared {
     frames: Mailbox<VideoFrame>,
     output: FrameOutput,
-    /// [`Capturer::frames_in_memory`] was called: GPU output switches to memory.
-    to_memory: AtomicBool,
+    /// Keeping frames on the GPU failed, and they come in memory now: not
+    /// yet reported ([`CaptureEvent::GpuFramesFailed`]).
+    gpu_failed: AtomicBool,
 }
 
 struct Handler {
@@ -224,11 +229,6 @@ impl GraphicsCaptureApiHandler for Handler {
             .timestamp()
             .map(|t| clock::from_system_relative_time(t.Duration))
             .unwrap_or_else(|_| clock::now());
-        if self.output == FrameOutput::Gpu && self.shared.to_memory.load(Ordering::Relaxed) {
-            tracing::info!("no encoder reads frames on the GPU; copying them to memory");
-            self.output = FrameOutput::Cpu;
-            self.pool = None;
-        }
         if self.output == FrameOutput::Gpu {
             match self.on_gpu(frame, captured_at) {
                 Ok(Some(frame)) => {
@@ -242,6 +242,7 @@ impl GraphicsCaptureApiHandler for Handler {
                     );
                     self.output = FrameOutput::Cpu;
                     self.pool = None;
+                    self.shared.gpu_failed.store(true, Ordering::Relaxed);
                 }
             }
             if self.output == FrameOutput::Gpu {
@@ -281,7 +282,7 @@ impl WgcCapturer {
         let shared = Arc::new(Shared {
             frames: Mailbox::new(),
             output: options.output,
-            to_memory: AtomicBool::new(false),
+            gpu_failed: AtomicBool::new(false),
         });
         let cursor = if options.cursor {
             CursorCaptureSettings::WithCursor
@@ -391,6 +392,9 @@ where
 
 impl Capturer for WgcCapturer {
     fn next_event(&mut self, timeout: Duration) -> Result<Option<CaptureEvent>, MediaError> {
+        if self.shared.gpu_failed.swap(false, Ordering::Relaxed) {
+            return Ok(Some(CaptureEvent::GpuFramesFailed));
+        }
         match self.shared.frames.take_timeout(timeout) {
             Ok(Some(frame)) => Ok(Some(CaptureEvent::Frame(frame))),
             Ok(None) => Ok(None),
@@ -400,10 +404,6 @@ impl Capturer for WgcCapturer {
             }
             Err(_closed) => Err(MediaError::Closed),
         }
-    }
-
-    fn frames_in_memory(&mut self) {
-        self.shared.to_memory.store(true, Ordering::Relaxed);
     }
 }
 

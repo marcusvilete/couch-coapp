@@ -8,7 +8,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -18,8 +18,8 @@ use couch_engine::{
     MemberLink, Profile, Response, RoomView, SeatChoice, SessionEnd, SessionRole, SessionView,
     SourceChoice, WatchEnd,
     pipeline::{
-        AudioKind, Backend, Focus, GameProcess, Hiding, NativeId, Source, Sources, ViewerOptions,
-        ViewerProcess, WindowSource, ipc,
+        AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, Source, Sources,
+        ViewerOptions, ViewerProcess, WindowSource, ipc,
     },
     secrets::Unprotected,
 };
@@ -81,6 +81,11 @@ struct Fake {
     hide_fails: AtomicBool,
     /// Frames on the GPU (M9b).
     gpu: FakeGpuSide,
+    /// The capture's frame rate, if not the stream's: a screen refreshing
+    /// faster than the stream (M9d).
+    capture_fps: AtomicU32,
+    /// Every capture started, as asked for.
+    captures: Mutex<Vec<CaptureRequest>>,
 }
 
 /// GPU frames on the fake machine: off unless a scenario turns them on.
@@ -284,6 +289,7 @@ impl Backend for Fake {
                 title: "Celeste".into(),
                 app: "Celeste.exe".into(),
                 elevated: false,
+                refresh_hz: Some(60),
             }],
             screens: Vec::new(),
         })
@@ -292,8 +298,9 @@ impl Backend for Fake {
     fn capture(
         &self,
         source: &Source,
-        fps: u32,
+        request: CaptureRequest,
     ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError> {
+        self.captures.lock().unwrap().push(request);
         let window = match source {
             Source::Window(window) => Some(*window),
             _ => None,
@@ -306,8 +313,12 @@ impl Backend for Fake {
         }
         let closed = Arc::new(AtomicBool::new(false));
         *self.capture_closed.lock().unwrap() = closed.clone();
+        let fps = match self.capture_fps.load(Ordering::SeqCst) {
+            0 => request.fps,
+            faster => faster,
+        };
         let capturer = FakeCapturer::new(64, 36, fps, self.clock.clone(), closed);
-        let capturer = if self.gpu.capture_on_gpu.load(Ordering::SeqCst) {
+        let capturer = if self.gpu.capture_on_gpu.load(Ordering::SeqCst) && !request.in_memory {
             capturer.on_gpu(self.gpu.frames.clone())
         } else {
             capturer
@@ -1549,8 +1560,9 @@ async fn gpu_frames_reach_the_encoders_and_a_new_pool_reopens_them() {
 }
 
 /// M9b: when the encoder can't read GPU frames (not NVIDIA, or another GPU
-/// than the capture's), the capture is told to deliver frames in memory, so
-/// they aren't copied back from the GPU frame after frame.
+/// than the capture's), the capture starts again with frames in memory
+/// (M9d: a paced capture on the GPU runs faster than the stream), so they
+/// aren't copied back from the GPU frame after frame.
 #[tokio::test(flavor = "multi_thread")]
 async fn encoders_that_cant_read_gpu_frames_turn_the_capture_to_memory() {
     let (mut a, mut b, mut c, room) = three().await;
@@ -1562,6 +1574,15 @@ async fn encoders_that_cant_read_gpu_frames_turn_the_capture_to_memory() {
     // B's encoder was offered a GPU frame and couldn't take it; by the time
     // C came, frames were in memory.
     assert_eq!(*gpu.opened.lock().unwrap(), [None, None]);
+    let in_memory: Vec<bool> = a
+        .fake
+        .captures
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.in_memory)
+        .collect();
+    assert_eq!(in_memory, [false, true], "captured again in memory");
     let downloads = gpu.frames.downloads.load(Ordering::SeqCst);
     let (b_frames, c_frames) = (b_window.frames(), c_window.frames());
     wait("frames to both", || {
@@ -1572,6 +1593,37 @@ async fn encoders_that_cant_read_gpu_frames_turn_the_capture_to_memory() {
         gpu.frames.downloads.load(Ordering::SeqCst),
         downloads,
         "no more copies back from the GPU"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M9d: a capture faster than the stream (a 240 Hz screen) is paced to the
+/// stream's rate: the viewer gets about 30 frames a second, not 240.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capture_faster_than_the_stream_is_paced_to_its_rate() {
+    // Left over from measuring against the old path: nothing to check.
+    if std::env::var("COUCH_HOST_PACING").is_ok_and(|v| v.trim() == "0") {
+        eprintln!("COUCH_HOST_PACING=0 is set: pacing is off, skipped");
+        return;
+    }
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.capture_fps.store(240, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    wait("frames", || window.frames() > 10).await;
+    let (frames, started) = (window.frames(), Instant::now());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let rate = (window.frames() - frames) as f64 / started.elapsed().as_secs_f64();
+    // Wide bounds, so a busy machine can't fail it: unpaced, it would be
+    // near 240.
+    assert!((15.0..=45.0).contains(&rate), "{rate:.1} frames a second");
+    assert!(
+        a.fake
+            .captures
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.paced && r.fps == 30)
     );
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
@@ -1598,7 +1650,11 @@ async fn a_failing_gpu_encoder_falls_back_to_frames_in_memory() {
     .await;
     let frames = window.frames();
     wait("frames keep coming", || window.frames() > frames + 5).await;
-    assert!(gpu.frames.downloads.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        a.fake.captures.lock().unwrap().last().map(|r| r.in_memory),
+        Some(true),
+        "captured again in memory"
+    );
     // Later encoders in this stream take frames in memory too.
     let c_window = watching(&room, &a, &c).await;
     assert_eq!(gpu.opened.lock().unwrap().last(), Some(&None));

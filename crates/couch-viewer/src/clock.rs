@@ -1,7 +1,11 @@
 //! `couch-viewer --clock`: a borderless window that paints the current QPC
 //! time every vsync, as a barcode (for `couch-cli latency-probe`) and as
 //! digits (for side-by-side screenshots). With `--clicks` it also clicks
-//! twice a second (for `latency-probe --audio`). Esc closes it.
+//! twice a second (for `latency-probe --audio`); with `--fps N` it paints at
+//! most N times a second, like a game capped at that rate (M9d: a game a
+//! little faster than the stream). Esc closes it.
+
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use couch_media::{
@@ -32,8 +36,8 @@ const DIGIT_GAP: f32 = 20.0;
 const SEGMENT: f32 = 12.0;
 const DIGITS: usize = 8;
 
-/// `clicks`: also play the click track.
-pub fn run(x: i32, y: i32, clicks: bool) -> Result<()> {
+/// `clicks`: also play the click track. `fps`: paint at most this often.
+pub fn run(x: i32, y: i32, clicks: bool, fps: Option<u32>) -> Result<()> {
     sdl3::hint::set("SDL_RENDER_VSYNC", "1");
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
@@ -59,6 +63,8 @@ pub fn run(x: i32, y: i32, clicks: bool) -> Result<()> {
         None
     };
 
+    let interval = fps.map(|fps| Duration::from_secs(1) / fps.max(1));
+    let mut next_frame = Instant::now();
     loop {
         for event in events.poll_iter() {
             match event {
@@ -69,6 +75,16 @@ pub fn run(x: i32, y: i32, clicks: bool) -> Result<()> {
                 } => return Ok(()),
                 _ => {}
             }
+        }
+
+        // Capped: wait for the frame's time, on a schedule that doesn't
+        // drift (and doesn't catch up after a stall).
+        if let Some(interval) = interval {
+            let now = Instant::now();
+            if next_frame > now {
+                std::thread::sleep(next_frame - now);
+            }
+            next_frame = (next_frame + interval).max(Instant::now());
         }
 
         let now = now_us();

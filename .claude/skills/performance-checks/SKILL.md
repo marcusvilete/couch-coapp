@@ -19,8 +19,10 @@ description: Measure whether a Couch Co-App change made streaming faster or ligh
 |---|---|---|
 | Does the GPU path give the same pictures? | Host: `cargo test -p couch-codec-ffmpeg --features gpu-tests --test gpu_input -- --test-threads 1` (NVIDIA); the pool alone `cargo test -p couch-platform-win gpu_frames -- --ignored`. Viewer: `cargo test -p couch-viewer zero_copy -- --ignored --nocapture` (bit-exact against D3D11VA; says whether the D3D12 debug layer was active) | 10 to 30 s |
 | What does this machine take? | `.\target\release\couch-cli.exe probe` ("GPU frames (M9b)", each encoder's option set) | 10 s |
-| One viewer's latency (G1) | `couch-cli latency-probe --secs 30 --relay none --fps 60`, and `--fps 120` | 45 s each |
-| Several viewers' load | `.\scripts\viewers.ps1 -Screen` (4) and `-Viewers 7`; `-CopyThroughMemory` for the host's path from before M9b, `-CopyFrames` for the viewers' path from before M9c. It also prints the stream windows' CPU | 40 s each |
+| One viewer's latency (G1) | `couch-cli latency-probe --secs 30 --relay none --fps 60`, and `--fps 120`. `--fps 100` checks pacing on this 239 Hz screen (a rate that isn't a divisor of its refresh: 80 fps without pacing) | 45 s each |
+| A game near the stream's rate (pacing's hard case) | `latency-probe ... --fps 60 --clock-fps 61` (or 66): the clock paints like a game capped at that rate. Every frame should go as it arrives: clock to present like an uncapped run's | 45 s each |
+| Under a game's CPU load, or on a weaker PC | `latency-probe ... --cpu-load` (busy threads on every core; reports `cpu_load_work`, the game's share), plus `--cpus 16-19` (4 efficiency cores; the whole run is confined) | 45 s each |
+| Several viewers' load | `.\scripts\viewers.ps1 -Screen` (4) and `-Viewers 7`; `-Fps 120` for 120 fps; `-CopyThroughMemory` for the host's path from before M9b, `-CopyFrames` for the viewers' path from before M9c. It also prints the stream windows' CPU, and the host's lines count the frames the pacer held and replaced | 40 s each |
 | Still passing? | `couch-cli gates --quick` (the `rate-control-gates` skill) | 6 min |
 
 - **Measure where the change acts.** One viewer on one PC rarely shows a host-side saving: the copies M9b removed never limited one viewer's median, but halved seven viewers' frame rate. Use `viewers.ps1 -Screen` for anything on the host's per-viewer path, and `latency-probe` at 120 fps for anything on pacing or presentation.
@@ -28,6 +30,8 @@ description: Measure whether a Couch Co-App change made streaming faster or ligh
 - **`latency-probe` streams a small clock window (1088x184),** so per-pixel costs (copies, uploads) barely show in it. `viewers.ps1 -Screen` streams 1080p.
 - **"arrive → decoded" doesn't compare across the viewer's paths:** with D3D12VA (M9c) it ends when decoding is submitted, not finished. Compare capture to present and clock to present.
 - **`viewers.ps1` without `-Screen` streams the test pattern, made in memory: it never takes the GPU path.** Only `-Screen` (the primary screen, kept changing by the viewer windows on it) measures capture into NVENC.
+- **`latency-probe`'s `capture_to_present` reads 0.0 at the median** (the clock window's capture timestamps; before M9d too). Read `clock_to_present` there. `frame_gap_ms` shows how even the pacing is: on this 239 Hz screen, 100 fps alternates two and three refreshes (8.3 and 12.5 ms).
+- **Under `--cpu-load`, the latency clock is the stand-in game, and renders late itself:** p95 rose from 12 to 20–25 ms in M9d whatever our side did. To see our pipeline alone, raise only the clock from outside (`couch-viewer.exe` whose command line has `--clock`, `PriorityClass = 'High'`): then it stayed at 13 ms. Raising every `couch-viewer.exe` raises the clock too, which once made a priority change look like a win.
 
 ## Before and after: the switches
 
@@ -39,6 +43,8 @@ Each performance change keeps a switch that restores the old path, so the compar
 | `COUCH_VIEWER_ZERO_COPY=0` | the viewer decodes with D3D11VA and copies frames through memory, on wgpu's default backend (Vulkan on NVIDIA) | M9c |
 | `WGPU_BACKEND=dx12` (or `vulkan`) | wgpu's backend alone, e.g. DX12's presentation without zero-copy (about 0.5 ms slower than Vulkan here) | M9c |
 | `COUCH_VIEWER_FRAME_LATENCY=1..3` | the viewer's swap-chain frame latency (1 is the default) | M9a |
+| `COUCH_HOST_PACING=0` | the capture at Windows' one-frame interval, unpaced (loses frames when the screen's refresh isn't a multiple of the rate) | M9d |
+| `COUCH_HOST_ENCODER=<name>` | not an old path: one FFmpeg encoder taking frames in memory, e.g. `libopenh264`, the software fallback of a host without a hardware encoder | M9d |
 
 Add a row here, and to CLAUDE.md's commands, when a new change gets one. Set it in the shell that starts the runs; `couch-cli` passes its environment to the host and viewer it starts. `viewers.ps1 -CopyThroughMemory` and `-CopyFrames` set the M9b and M9c ones themselves. Alternate the runs (new, old, new, old) rather than all of one then all of the other, so a drift in the machine shows as noise, not as a difference.
 
@@ -68,7 +74,9 @@ Remove-Item Env:COUCH_HOST_ZERO_COPY -ErrorAction SilentlyContinue
   - **G1's p95 with viewer zero-copy:** 13.4 to 13.8 ms usually, but 16 to 17 ms in 2 of 12 runs in M9c. Repeat before calling a p95 change real.
   - **Bitrate below 20 Mbit/s for the first seconds:** the rate controller ramping up (keyframes at each step on NVENC).
 - **With many viewers on one PC,** the GPU also decodes every stream, so the numbers overstate a real host's load. Compare like with like.
+- **A change that shows no gain is dropped,** not kept as insurance (M9d dropped MMCSS and process priority after `--cpu-load` and `--cpus` runs showed nothing either way).
 - **Reference numbers** (this PC):
+  - `docs/m9d-results.md`: pacing; 100 fps gives 100 (80 before); one viewer's clock to present 10.8–11.3 ms p50 at 60 and 100 fps; a 61 or 66 fps clock into a 60 fps stream about 59.7 fps and p95 about 14 ms (about 22.5 ms unpaced); 4 viewers at 120 fps 114–116 fps, p95 4.0–4.6 ms; on 4 efficiency cores with 4 busy threads, p50 about 28 ms and 55 fps.
   - `docs/m9c-results.md`: zero-copy on both sides. 7 viewers at 59 to 60 fps, p50 5.4 to 6.8 ms, p95 about 9 ms, the stream windows at 37% of one core; one viewer's clock to present p50 12.4 ms at 60 fps.
   - `docs/m9b-results.md`: GPU frames on the host; 7 viewers at 58 fps, p50 about 14 ms.
   - `docs/m9a-results.md`: frame latency, 120 fps.

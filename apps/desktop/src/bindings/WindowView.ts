@@ -15,4 +15,9 @@ elevated: boolean,
 /**
  * The input setup last used with this program, if any.
  */
-inputSetup: InputSetup | null, };
+inputSetup: InputSetup | null, 
+/**
+ * The refresh rate of the screen it is on, if known: the stream gets
+ * no more frames a second than that (Go live warns).
+ */
+refreshHz: number | null, };

@@ -7,13 +7,22 @@
 //! `--impair-first` impairs only the host's traffic to the first one. Every
 //! process then runs on the netem transport, each viewer on a port of its
 //! own, so the host can tell their traffic apart.
+//!
+//! With `--cpu-load`, busy threads load every core for the whole run, as a
+//! game would, and report how much work they got done (the game's share);
+//! `--cpus` confines the whole run to a few CPUs, a weaker PC on this one.
+//! M9d measured thread and process priorities with them, and dropped both
+//! (docs/m9d-results.md).
 
 use std::{
     fs::File,
     io::{LineWriter, Write},
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -51,7 +60,97 @@ pub struct Args {
     /// Write the host's and viewer's output and the report here instead of
     /// to the console.
     pub log: Option<PathBuf>,
+    /// Busy threads at normal priority for the whole run, a stand-in for a
+    /// game using every core (M9d); 0 means one per logical CPU.
+    pub cpu_load: Option<usize>,
+    /// Confine the whole run (this process and all it starts) to these
+    /// logical CPUs: a weaker PC on this one (M9d).
+    pub cpus: Option<Vec<u32>>,
+    /// Cap the latency clock (the stand-in game) at this frame rate; by
+    /// default it paints every refresh.
+    pub clock_fps: Option<u32>,
     pub net: NetArgs,
+}
+
+/// Iterations each load thread runs between looks at the stop flag.
+const LOAD_BATCH: u64 = 10_000;
+
+/// Threads spinning at normal priority until dropped, counting their work:
+/// the stand-in game's share of the CPU.
+struct CpuLoad {
+    stop: Arc<AtomicBool>,
+    work: Arc<AtomicU64>,
+    started: std::time::Instant,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl CpuLoad {
+    fn start(threads: usize) -> anyhow::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let work = Arc::new(AtomicU64::new(0));
+        let threads = (0..threads)
+            .map(|i| {
+                let (stop, work) = (stop.clone(), work.clone());
+                std::thread::Builder::new()
+                    .name(format!("cpu-load-{i}"))
+                    .spawn(move || {
+                        let mut x = 0u64;
+                        while !stop.load(Ordering::Relaxed) {
+                            for _ in 0..LOAD_BATCH {
+                                x = std::hint::black_box(x.wrapping_mul(6364136223846793005) + 1);
+                            }
+                            work.fetch_add(LOAD_BATCH, Ordering::Relaxed);
+                        }
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            stop,
+            work,
+            started: std::time::Instant::now(),
+            threads,
+        })
+    }
+
+    /// The load's work so far, in millions of iterations a second.
+    fn rate(&self) -> f64 {
+        self.work.load(Ordering::Relaxed) as f64 / self.started.elapsed().as_secs_f64() / 1e6
+    }
+}
+
+impl Drop for CpuLoad {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// `16-19` or `0,2,4-7`: logical CPU numbers.
+pub fn parse_cpus(list: &str) -> Result<Vec<u32>, String> {
+    let mut cpus = Vec::new();
+    for part in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let number = |s: &str| {
+            s.trim()
+                .parse::<u32>()
+                .map_err(|_| format!("{s:?} isn't a CPU number"))
+        };
+        match part.split_once('-') {
+            Some((first, last)) => {
+                let (first, last) = (number(first)?, number(last)?);
+                if first > last {
+                    return Err(format!("{part}: backwards"));
+                }
+                cpus.extend(first..=last);
+            }
+            None => cpus.push(number(part)?),
+        }
+    }
+    if cpus.is_empty() {
+        return Err("no CPUs".into());
+    }
+    Ok(cpus)
 }
 
 /// Clock window position; the viewers go below it at the same size.
@@ -111,6 +210,23 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
     };
     let exe = std::env::current_exe()?;
     let viewer_exe = exe.with_file_name(format!("couch-viewer{}", std::env::consts::EXE_SUFFIX));
+    if let Some(cpus) = &args.cpus {
+        couch_platform_win::process::confine_to_cpus(cpus)
+            .with_context(|| format!("confining the run to CPUs {cpus:?}"))?;
+        echo.line(&format!("confined to CPUs {cpus:?}"));
+    }
+    let load = match args.cpu_load {
+        Some(n) => {
+            let n = match (n, &args.cpus) {
+                (0, Some(cpus)) => cpus.len(),
+                (0, None) => std::thread::available_parallelism().map_or(1, usize::from),
+                (n, _) => n,
+            };
+            echo.line(&format!("CPU load: {n} busy threads at normal priority"));
+            Some(CpuLoad::start(n)?)
+        }
+        None => None,
+    };
 
     let mut clock = Command::new(&viewer_exe);
     clock.args([
@@ -120,6 +236,9 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
     ]);
     if args.audio {
         clock.arg("--clicks");
+    }
+    if let Some(fps) = args.clock_fps {
+        clock.args(["--fps", &fps.to_string()]);
     }
     let mut clock = clock
         .kill_on_drop(true)
@@ -234,6 +353,10 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
     for reader in readers {
         results.push(reader.await.context("reading a viewer")??);
     }
+    // What the stand-in game got done meanwhile: a stream that takes from
+    // it shows here (M9d).
+    let load_rate = load.as_ref().map(CpuLoad::rate);
+    drop(load);
     let screen = screen.map(ScreenProbe::finish);
     let audio = audio
         .map(|probe| tokio::task::block_in_place(|| probe.finish()))
@@ -253,6 +376,11 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
         for line in report(result, g1) {
             echo.line(&line);
         }
+    }
+    if let Some(rate) = load_rate {
+        echo.line(&format!(
+            "cpu_load_work            {rate:.0} M iterations/s (the stand-in game's share)"
+        ));
     }
     let result = &results[0];
     if let Some(screen) = screen {
@@ -397,6 +525,7 @@ fn report(result: &serde_json::Value, g1: bool) -> Vec<String> {
         "clock_to_present_ms",
         "capture_to_present_ms",
         "arrive_to_present_ms",
+        "frame_gap_ms",
     ] {
         lines.push(format!(
             "{metric:<24} p50 {:>6.1}  p95 {:>6.1}  max {:>6.1}",
@@ -420,4 +549,18 @@ fn report(result: &serde_json::Value, g1: bool) -> Vec<String> {
         ));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_lists_take_numbers_and_ranges() {
+        assert_eq!(parse_cpus("16-19"), Ok(vec![16, 17, 18, 19]));
+        assert_eq!(parse_cpus("0, 2,4-5"), Ok(vec![0, 2, 4, 5]));
+        assert!(parse_cpus("").is_err());
+        assert!(parse_cpus("5-3").is_err());
+        assert!(parse_cpus("a").is_err());
+    }
 }

@@ -3,9 +3,9 @@
 //! viewer's input.
 //!
 //! Threads and tasks:
-//! - **capture**, a thread that runs while anyone watches. It hands each
-//!   frame to every viewer's latest-frame mailbox, so a slow viewer never
-//!   holds up another.
+//! - **capture**, a thread that runs while anyone watches. It paces frames
+//!   to the stream's rate (M9d, [`Pacer`]) and hands each to every viewer's
+//!   latest-frame mailbox, so a slow viewer never holds up another.
 //! - **an encoder thread per viewer**, with its own encoder, rate controller
 //!   and epoch streams.
 //! - **sound**, a thread that runs with the capture: one Opus encoder, every
@@ -46,6 +46,7 @@ use couch_media::{
     audio::Framer,
     clock::Clock,
     mailbox::Mailbox,
+    pacing::Pacer,
     ratecontrol::{RateAction, RateConfig, RateController, UploadShare},
 };
 use couch_net::{
@@ -68,7 +69,7 @@ use tokio::{
 };
 
 use super::{
-    AudioChoice, AudioKind, Backend, Focus, GameProcess, NativeId, Source,
+    AudioChoice, AudioKind, Backend, CaptureRequest, Focus, GameProcess, NativeId, Source,
     source::{self, Game, SourceWatch, Verdict},
 };
 
@@ -84,6 +85,17 @@ const HOUSEKEEPING: Duration = Duration::from_secs(1);
 const WINDOW_WAIT: Duration = Duration::from_secs(10);
 /// No share of an upload cap.
 const NO_SHARE: u32 = u32::MAX;
+/// The capture thread's longest wait for a frame.
+const CAPTURE_WAIT: Duration = Duration::from_millis(10);
+/// Before trying once more to start a capture again in memory.
+const RESTART_RETRY: Duration = Duration::from_millis(250);
+
+/// Captured frames are paced to the stream's rate (M9d) unless
+/// `COUCH_HOST_PACING=0`, a switch for measuring against Windows' own limit
+/// from before.
+fn pacing() -> bool {
+    std::env::var("COUCH_HOST_PACING").map_or(true, |v| v.trim() != "0")
+}
 /// Changes of the game window's focus closer together than this are
 /// reported once, as the latest: switching windows mustn't flood viewers.
 const FOCUS_COALESCE: Duration = Duration::from_millis(250);
@@ -218,6 +230,10 @@ pub struct ViewerStats {
     pub audio_packets: u64,
     /// The slowest encode of the second, microseconds.
     pub encode_us_max: u32,
+    /// Since the stream started: captured frames the pacer held and sent at
+    /// their due time, and held frames a newer one replaced.
+    pub paced_held: u64,
+    pub paced_replaced: u64,
 }
 
 /// One session's stream, to however many viewers. Dropping it stops
@@ -259,8 +275,12 @@ struct Shared {
     /// No encoder reads GPU frames in this stream (M9b): one opened for a
     /// GPU frame couldn't take it (not NVIDIA, or another GPU than the
     /// capture's), or one reading them failed. Encoders opened from then on
-    /// take frames in memory, and the capture is told to deliver them so.
+    /// take frames in memory, and the capture starts again with frames in
+    /// memory. Also set when the capture can't keep frames on the GPU.
     gpu_input_off: AtomicBool,
+    /// The pacer's counts over the stream's captures ([`ViewerStats`]).
+    paced_held: AtomicU64,
+    paced_replaced: AtomicU64,
 }
 
 /// The game's windows other than its new one ([`Shared::remember_windows`]).
@@ -530,6 +550,8 @@ impl HostStream {
             audio_sent: AtomicU64::new(0),
             grants_paused: Arc::new(AtomicBool::new(false)),
             gpu_input_off: AtomicBool::new(false),
+            paced_held: AtomicU64::new(0),
+            paced_replaced: AtomicU64::new(0),
         });
         // By seat: a seat without a pad (a keyboard seat, or one whose pad
         // failed) drops gamepad input.
@@ -941,6 +963,7 @@ fn start_capture(shared: &Arc<Shared>) -> Running {
 
 fn capture_loop(shared: &Shared, stop: &AtomicBool) {
     let options = &shared.options;
+    let paced = pacing();
     // A window found earlier (or followed while nobody watched) wins over
     // the source as first given.
     let mut source = match shared.window.load(Ordering::Acquire) {
@@ -948,6 +971,8 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
         window if options.source.is_window() => Source::Window(window),
         _ => options.source.clone(),
     };
+    // Starting again with frames in memory (`Next::InMemory`).
+    let mut restarting = false;
     loop {
         if stop.load(Ordering::SeqCst) || lock(&shared.state).source.ended() {
             return;
@@ -970,7 +995,18 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
                 None => return,
             }
         }
-        let (capturer, window) = match shared.backend.capture(&source, options.fps) {
+        let request = CaptureRequest {
+            fps: options.fps,
+            in_memory: shared.gpu_input_off.load(Ordering::SeqCst),
+            paced,
+        };
+        let mut started = shared.backend.capture(&source, request);
+        if started.is_err() && restarting {
+            // The stream ran a moment ago: once more before ending it.
+            std::thread::sleep(RESTART_RETRY);
+            started = shared.backend.capture(&source, request);
+        }
+        let (capturer, window) = match started {
             Ok(capture) => capture,
             Err(e) => {
                 shared.event(HostEvent::CaptureFailed(e.to_string()));
@@ -981,46 +1017,104 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
             shared.window.store(window, Ordering::Release);
             shared.watch_game(window);
         }
-        match capture_frames(shared, capturer, stop) {
-            Some(window) => source = Source::Window(window),
-            None => return,
+        restarting = false;
+        match capture_frames(shared, capturer, stop, request) {
+            Next::Follow(window) => source = Source::Window(window),
+            Next::InMemory => restarting = true,
+            Next::Stop => return,
         }
     }
 }
 
-/// Hands every frame to every viewer until stopped or the window goes;
-/// returns the game's new window, if it showed one.
+/// Why [`capture_frames`] returned.
+enum Next {
+    /// The game showed a new window: capture that.
+    Follow(NativeId),
+    /// No encoder reads frames on the GPU, or the capture can't keep them
+    /// there: capture again with frames in memory. Windows can't change a
+    /// running capture's interval, and a paced one runs faster than the
+    /// stream, which on the GPU costs little but in memory a copy each.
+    InMemory,
+    Stop,
+}
+
+/// Paces frames and hands each to every viewer until stopped, the window
+/// goes or frames must move to memory.
 fn capture_frames(
     shared: &Shared,
     mut capturer: Box<dyn couch_media::Capturer>,
     stop: &AtomicBool,
-) -> Option<NativeId> {
+    request: CaptureRequest,
+) -> Next {
+    let mut pacer = request.paced.then(|| Pacer::new(shared.options.fps));
+    let mut counted = (0, 0);
     while !stop.load(Ordering::SeqCst) {
-        match capturer.next_event(Duration::from_millis(10)) {
+        // A held frame goes at its time if nothing newer comes first (the
+        // pacer's times are on our clock, the one frames arrive by).
+        let wait = pacer
+            .as_ref()
+            .and_then(Pacer::due)
+            .map_or(CAPTURE_WAIT, |due| {
+                Duration::from_micros(due.saturating_sub(shared.now())).min(CAPTURE_WAIT)
+            });
+        match capturer.next_event(wait) {
             Ok(Some(CaptureEvent::Frame(frame))) => {
+                // (Once only: a capture asked for memory that still gives
+                // GPU frames has them copied by the encoders instead.)
                 if matches!(frame, VideoFrame::Gpu(_))
                     && shared.gpu_input_off.load(Ordering::SeqCst)
+                    && !request.in_memory
                 {
-                    capturer.frames_in_memory();
+                    return Next::InMemory;
                 }
                 // (A GPU frame is already even, and the copies share it.)
                 let frame = frame.cropped_to_even();
-                for feed in lock(&shared.feeds).iter() {
-                    feed.frames.put(frame.clone());
+                let at = frame.captured_at();
+                let frame = match pacer.as_mut() {
+                    Some(pacer) => pacer.offer(frame, at, shared.now()),
+                    None => Some(frame),
+                };
+                if let Some(frame) = frame {
+                    hand_out(shared, frame);
+                }
+            }
+            Ok(Some(CaptureEvent::GpuFramesFailed)) => {
+                shared.gpu_input_off.store(true, Ordering::SeqCst);
+                if !request.in_memory {
+                    return Next::InMemory;
                 }
             }
             Ok(Some(CaptureEvent::SourceClosed)) => {
                 drop(capturer);
-                return follow_game(shared, stop);
+                return follow_game(shared, stop).map_or(Next::Stop, Next::Follow);
             }
             Ok(None) => {}
             Err(e) => {
                 shared.event(HostEvent::CaptureFailed(e.to_string()));
-                return None;
+                return Next::Stop;
             }
         }
+        if let Some(pacer) = pacer.as_mut() {
+            if let Some(frame) = pacer.take_due(shared.now()) {
+                hand_out(shared, frame);
+            }
+            let (held, replaced) = pacer.counts();
+            shared
+                .paced_held
+                .fetch_add(held - counted.0, Ordering::Relaxed);
+            shared
+                .paced_replaced
+                .fetch_add(replaced - counted.1, Ordering::Relaxed);
+            counted = (held, replaced);
+        }
     }
-    None
+    Next::Stop
+}
+
+fn hand_out(shared: &Shared, frame: VideoFrame) {
+    for feed in lock(&shared.feeds).iter() {
+        feed.frames.put(frame.clone());
+    }
 }
 
 /// The captured window went. Looks for the game's next window until the
@@ -1327,6 +1421,8 @@ fn encode(
                 feedback: stats.last_feedback.unwrap_or_default(),
                 audio_packets: shared.audio_sent.swap(0, Ordering::Relaxed),
                 encode_us_max: stats.encode_us_max,
+                paced_held: shared.paced_held.load(Ordering::Relaxed),
+                paced_replaced: shared.paced_replaced.load(Ordering::Relaxed),
             }));
             stats = PeriodStats::new();
         }

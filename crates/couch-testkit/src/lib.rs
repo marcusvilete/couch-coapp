@@ -140,10 +140,6 @@ impl Capturer for FakeCapturer {
         };
         Ok(Some(CaptureEvent::Frame(frame)))
     }
-
-    fn frames_in_memory(&mut self) {
-        self.gpu = None;
-    }
 }
 
 /// An encoder that emits a small access unit per frame: a keyframe when

@@ -617,6 +617,13 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
 
   const isPicked = (kind: Picked["kind"], id: string) => picked?.kind === kind && picked.id === id;
   const pickedElevated = sources?.windows.some((w) => w.elevated && isPicked("window", w.id)) ?? false;
+  // The screen's refresh rate caps the frames a capture gets. Windows
+  // reports whole hertz, 59 for 59.94, hence the 1 Hz of room.
+  const pickedRefresh =
+    (picked?.kind === "window"
+      ? sources?.windows.find((w) => isPicked("window", w.id))?.refreshHz
+      : sources?.screens.find((s) => isPicked("screen", s.id))?.refreshHz) ?? null;
+  const refreshTooLow = pickedRefresh != null && fps > pickedRefresh + 1;
 
   return (
     <Modal
@@ -679,6 +686,7 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
                   </span>
                   <span className="hint">
                     {s.width}×{s.height}
+                    {s.refreshHz != null && `, ${s.refreshHz} Hz`}
                   </span>
                 </label>
               ))}
@@ -710,6 +718,7 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
           <label>
             Frame rate
             <select value={fps} onChange={(e) => setFps(Number(e.target.value))}>
+              <option value={120}>120 fps</option>
               <option value={60}>60 fps</option>
               <option value={30}>30 fps</option>
             </select>
@@ -726,6 +735,17 @@ export function GoLiveDialog(props: { room: RoomView; onClose: () => void; onLiv
             </select>
           </label>
         </div>
+        {refreshTooLow && (
+          <p className="banner warn" role="status">
+            Your screen runs at {pickedRefresh} Hz, so the stream can't go above {pickedRefresh} fps. Pick a lower frame rate, or
+            raise the screen's refresh rate in Windows' display settings.
+          </p>
+        )}
+        {fps === 120 && !refreshTooLow && (
+          <p className="hint">
+            120 fps doubles each viewer's encoding on your graphics card, and the same bitrate is spread over twice the frames.
+          </p>
+        )}
 
         <label>
           Quality for each viewer

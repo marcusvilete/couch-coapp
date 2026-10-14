@@ -76,6 +76,9 @@ pub struct WindowSource {
     pub app: String,
     /// It runs with more rights than we do (as administrator).
     pub elevated: bool,
+    /// The refresh rate of the screen it is on, if known: a capture gets no
+    /// more frames a second than that.
+    pub refresh_hz: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +88,20 @@ pub struct ScreenSource {
     pub width: u32,
     pub height: u32,
     pub primary: bool,
+    pub refresh_hz: Option<u32>,
+}
+
+/// How to capture for a stream ([`Backend::capture`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureRequest {
+    /// The stream's frame rate.
+    pub fps: u32,
+    /// Frames in memory: no encoder in this stream reads them on the GPU.
+    pub in_memory: bool,
+    /// The stream paces frames itself (M9d, `couch_media::pacing`), so
+    /// frames on the GPU may come faster than `fps`. Frames in memory never
+    /// do: each costs a copy.
+    pub paced: bool,
 }
 
 /// Which sound a host streams (`couch-cli host --audio`).
@@ -173,12 +190,13 @@ pub trait Backend: Send + Sync + 'static {
     /// What could be streamed right now.
     fn sources(&self) -> Result<Sources, MediaError>;
 
-    /// Starts capturing at up to `fps`. Also returns the captured window,
-    /// if the source is one. Frames may come in memory or on the GPU.
+    /// Starts capturing for a stream at `request.fps`. Also returns the
+    /// captured window, if the source is one. Frames may come in memory or
+    /// on the GPU, unless `request.in_memory`.
     fn capture(
         &self,
         source: &Source,
-        fps: u32,
+        request: CaptureRequest,
     ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError>;
 
     /// An encoder. With `gpu` (a frame like the ones to come), one that reads
@@ -314,7 +332,7 @@ impl Backend for Unsupported {
     fn capture(
         &self,
         _: &Source,
-        _: u32,
+        _: CaptureRequest,
     ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError> {
         Err(unsupported())
     }

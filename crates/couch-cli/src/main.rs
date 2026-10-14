@@ -212,6 +212,20 @@ enum Cmd {
         /// first viewer only, e.g. `rate=5mbit`.
         #[arg(long)]
         impair_first: Option<String>,
+        /// Load the CPU for the whole run with this many busy threads at
+        /// normal priority, as a game would; alone, one per logical CPU.
+        #[arg(long, num_args = 0..=1, default_missing_value = "0")]
+        cpu_load: Option<usize>,
+        /// Confine the whole run to these logical CPUs, e.g. `16-19`: a
+        /// weaker PC on this one. With `--cpu-load` alone, the load fills
+        /// exactly these.
+        #[arg(long)]
+        cpus: Option<String>,
+        /// Cap the latency clock, which plays the game, at this frame rate
+        /// (by default it paints every refresh), e.g. 61 against a 60 fps
+        /// stream: a game a little faster than the stream.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        clock_fps: Option<u32>,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -414,23 +428,32 @@ async fn main() -> ExitCode {
             netem_viewer,
             viewers,
             impair_first,
+            cpu_load,
+            cpus,
+            clock_fps,
             net,
-        } => latency_probe::run_all(latency_probe::Args {
-            secs,
-            fps,
-            max_mbps,
-            screen,
-            audio,
-            timings_csv,
-            rc_trace,
-            netem_viewer,
-            viewers: usize::from(viewers),
-            impair_first,
-            log: None,
-            net,
-        })
-        .await
-        .map(drop),
+        } => match cpus.as_deref().map(latency_probe::parse_cpus).transpose() {
+            Err(e) => Err(anyhow::anyhow!("--cpus: {e}")),
+            Ok(cpus) => latency_probe::run_all(latency_probe::Args {
+                secs,
+                fps,
+                max_mbps,
+                screen,
+                audio,
+                timings_csv,
+                rc_trace,
+                netem_viewer,
+                viewers: usize::from(viewers),
+                impair_first,
+                log: None,
+                cpu_load,
+                cpus,
+                clock_fps,
+                net,
+            })
+            .await
+            .map(drop),
+        },
         Cmd::Gates {
             quick,
             only,

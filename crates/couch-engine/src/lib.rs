@@ -490,6 +490,9 @@ pub struct WindowView {
     pub elevated: bool,
     /// The input setup last used with this program, if any.
     pub input_setup: Option<InputSetup>,
+    /// The refresh rate of the screen it is on, if known: the stream gets
+    /// no more frames a second than that (Go live warns).
+    pub refresh_hz: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -501,6 +504,7 @@ pub struct ScreenView {
     pub width: u32,
     pub height: u32,
     pub primary: bool,
+    pub refresh_hz: Option<u32>,
 }
 
 /// A live session in a room, as this profile sees it.
@@ -1482,6 +1486,7 @@ impl Engine {
                             title: w.title,
                             app: w.app,
                             elevated: w.elevated,
+                            refresh_hz: w.refresh_hz,
                         })
                         .collect(),
                     screens: sources
@@ -1493,6 +1498,7 @@ impl Engine {
                             width: s.width,
                             height: s.height,
                             primary: s.primary,
+                            refresh_hz: s.refresh_hz,
                         })
                         .collect(),
                     controllers: u32::try_from(controllers).unwrap_or(u32::MAX),
@@ -1661,6 +1667,7 @@ mod tests {
                     app: "chrome.exe".into(),
                     elevated: false,
                     input_setup: None,
+                    refresh_hz: None,
                 }],
                 screens: Vec::new(),
                 controllers: 0,

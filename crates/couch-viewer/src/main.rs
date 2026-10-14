@@ -7,7 +7,7 @@
 //! - no arguments: show the stream arriving on the IPC pipe until it closes;
 //! - `--hud-preview watching|asking|controlling`: no pipe, a made-up session,
 //!   to check the HUD by eye;
-//! - `--clock [x y] [--clicks]`: the latency clock window (see `clock.rs`);
+//! - `--clock [x y] [--clicks] [--fps N]`: the latency clock window (see `clock.rs`);
 //! - `--input-sink FILE`: a window that records the input it receives (see
 //!   `sink.rs`);
 //! - `--probe`: print SDL3 and gamepad information as one JSON line, for
@@ -65,7 +65,16 @@ fn main() -> anyhow::Result<()> {
             let coord =
                 |i: usize, default| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default);
             let clicks = args.iter().any(|a| a == "--clicks");
-            clock::run(coord(1, 80), coord(2, 80), clicks)
+            let fps = match args.iter().position(|a| a == "--fps") {
+                Some(i) => Some(
+                    args.get(i + 1)
+                        .and_then(|v| v.parse().ok())
+                        .filter(|&fps: &u32| fps > 0)
+                        .ok_or_else(|| anyhow!("--fps needs a frame rate"))?,
+                ),
+                None => None,
+            };
+            clock::run(coord(1, 80), coord(2, 80), clicks, fps)
         }
         Some("--input-sink") => {
             let path = args
