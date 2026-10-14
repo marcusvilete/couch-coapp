@@ -18,9 +18,11 @@ relay_url = "https://relay.example.com"
 # /etc/iroh-relay/token.env. A long random string (release-config makes 64 hex digits).
 relay_token = "0000000000000000000000000000000000000000000000000000000000000000"
 
-# Where invites link to: the page in deploy/invite-page, ending in "/j/". Empty for
-# couchco:// links.
-invite_page = "https://couch.example.com/j/"
+# Where invites link to: the page in deploy/invite-page, ending in "/j/". The repository's
+# workflow publishes it on GitHub Pages, at https://<user>.github.io/<repository>/j/.
+# Empty for couchco:// links. scripts\build-installer.ps1 -InvitePage <address> or
+# -NoInvitePage overrides it for one build.
+invite_page = "https://example.github.io/couch-coapp/j/"
 
 # true only for a copy used to test on your LAN: it allows http:// in relay_url and
 # invite_page (such as http://192.168.1.10:3340 for scripts\relay.ps1 -Lan), lets the app

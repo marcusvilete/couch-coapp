@@ -61,7 +61,7 @@ Release installers, with your own relay, are in [self-hosting.md](self-hosting.m
 
 **A relay on this PC:** run `cargo xtask relay-tool` once, then `.\scripts\relay.ps1`. It serves `http://localhost:3340` with the token from your `release.toml` (`-Lan` opens it to your network, `-Open` drops the token). Point a development build at it by setting `COUCH_BUILD_RELAY_URL` and `COUCH_BUILD_RELAY_TOKEN` before `npm run tauri dev`.
 
-**The invite page** (optional): a static page that makes invite links clickable in chat apps. [deploy/invite-page/README.md](../deploy/invite-page/README.md) covers trying and hosting it.
+**The invite page** (optional): a static page that makes invite links clickable in chat apps. A workflow publishes it on the repository's GitHub Pages, and `build-installer.ps1 -InvitePage <address>` points one build at a page. [deploy/invite-page/README.md](../deploy/invite-page/README.md) covers trying and hosting it.
 
 ## Tests and checks
 

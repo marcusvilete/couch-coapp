@@ -5,6 +5,8 @@
 //! own webview data. `couchco://` invite links open in the default profile:
 //! Windows runs one command per link scheme, without our environment.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use couch_engine::{Command, Engine, EngineOptions, Profile, Response};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -25,10 +27,28 @@ async fn engine_command(
 
 /// Starts the app again, as after a change in Settings → Network. It goes
 /// through the usual exit, so the rooms hear we are going (`RunEvent::Exit`
-/// below) and the single-instance lock is let go before the new one starts.
+/// below) and the single-instance lock is let go before the new one starts
+/// ([`start_again`]).
 #[tauri::command]
 fn restart_app(app: AppHandle) {
-    app.request_restart();
+    RESTART.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+/// Set by [`restart_app`]: the exit handler starts the app again.
+static RESTART: AtomicBool = AtomicBool::new(false);
+
+/// Starts this app again for Restart now: the same exe and environment (so
+/// the same profile), without the arguments it was first given. Tauri's own
+/// restart passes those on, and they may hold the invite link the app was
+/// opened with, whose join screen would come back (P4). By now the
+/// single-instance plugin has let go of its lock (on `RunEvent::Exit`, before
+/// our handler), and the new engine waits for this one's profile lock.
+fn start_again() {
+    let started = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn());
+    if let Err(e) = started {
+        tracing::error!("could not start the app again: {e}");
+    }
 }
 
 pub fn run() {
@@ -139,6 +159,9 @@ pub fn run() {
         RunEvent::Exit => {
             let engine = app.state::<Engine>();
             tauri::async_runtime::block_on(engine.shutdown());
+            if RESTART.load(Ordering::SeqCst) {
+                start_again();
+            }
         }
         _ => {}
     });
