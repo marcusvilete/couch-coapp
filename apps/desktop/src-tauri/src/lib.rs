@@ -99,13 +99,8 @@ pub fn run() {
             if let Ok(Some(urls)) = app.deep_link().get_current() {
                 open_links(app.handle(), urls);
             }
-            // Development only: point `couchco://` at this build. The
-            // installer registers it for release builds (M10).
-            if cfg!(debug_assertions)
-                && window_profile.is_default()
-                && let Err(e) = app.deep_link().register_all()
-            {
-                tracing::warn!("could not register invite links: {e}");
+            if cfg!(debug_assertions) && window_profile.is_default() {
+                dev_links(app.handle());
             }
 
             let mut events = app.state::<Engine>().subscribe();
@@ -211,6 +206,29 @@ fn start_logging(profile: &Profile) {
 
 /// `desktop.log` is set aside as `desktop.old.log` at start past this size.
 const LOG_LIMIT: u64 = 10 * 1024 * 1024;
+
+/// Development only: `couchco://` links open this build if
+/// `COUCH_DEV_LINKS=1` (P5). The installer registers them for an installed
+/// app (M10a), and this build's registration, per user, would outrank an
+/// install for everyone: its links would start the debug exe, whose window
+/// needs the dev server. So without the switch, this user's registration is
+/// removed if it points at this build (not with the plugin's `unregister`,
+/// which goes for the installer's machine-wide one first).
+fn dev_links(app: &AppHandle) {
+    if std::env::var("COUCH_DEV_LINKS").is_ok_and(|v| v.trim() == "1") {
+        if let Err(e) = app.deep_link().register_all() {
+            tracing::warn!("could not register invite links: {e}");
+        }
+        return;
+    }
+    match couch_engine::forget_own_link_registration(INVITE_SCHEME) {
+        Ok(true) => tracing::info!(
+            "invite links no longer open this development build (COUCH_DEV_LINKS=1 to keep them)"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("invite links: {e}"),
+    }
+}
 
 /// Hands invite links to the engine, which keeps them for the UI. Never
 /// logged: an invite is half of what lets someone in.

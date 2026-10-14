@@ -20,10 +20,11 @@
 //! - a held frame that nothing replaces goes after that wait: the last
 //!   change before a still picture.
 //!
-//! The schedule runs on the frames' capture times, which come from the
-//! compositor; the held frame's wait is measured on the clock frames arrive
-//! by (`offer`'s `arrived`, [`Pacer::due`], [`Pacer::take_due`]), so a
-//! difference between the two clocks can't hold a frame longer.
+//! The schedule runs on the frames' capture times; the held frame's wait is
+//! measured on the clock frames arrive by (`offer`'s `arrived`,
+//! [`Pacer::due`], [`Pacer::take_due`]), so a difference between the two
+//! clocks can't hold a frame longer. (Since P5 a capture time is never later
+//! than its delivery, so on Windows the two are close.)
 
 use crate::Micros;
 

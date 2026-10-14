@@ -138,9 +138,17 @@ A review by a separate agent, each finding checked against the code before actin
 | A refresh-rate lookup per listed window | **Left:** three cheap calls per window, when Go live opens |
 | Wording: "the usual gap" (it's the shortest), restarts "only at the start" (also on a later failure), the `viewers.ps1` header | **Fixed** |
 
+## Found later
+
+**In P5, a regression from the review's fix:** with 4 viewers of a screen at 60 fps (`viewers.ps1 -Screen`), pacing gave 55.5 to 57.3 fps, and a p95 from 10 to 28 ms that varied from run to run and viewer to viewer. Unpaced runs gave 59.5 to 59.9 fps and 10.2 to 10.6 ms. Several runs, with and without P5's timestamp change.
+- **The likely cause:** a held frame now waits a whole interval for a newer one. That fixed games a little faster than the stream, but when the capture stalls (a GPU busy with 4 encodes and 4 decodes), the held frame goes out up to two intervals old.
+- **At 120 fps** the wait is half as long, and 4 viewers were fine.
+- **A suspected second factor** (P5's review): since P5 the pacer gets delivery times. Frames queued behind a stall arrive back to back, so the shortest recent gap, and with it the slack, collapses for a while, and slightly early frames get held.
+- **The fix is M9e.**
+
 ## Left as it is, to watch for
 
-- **`latency-probe`'s `capture_to_present` reads 0.0 at the median** for the clock window, before M9d too (step 1's runs on main). The window capture's timestamps seem to be in another time base than the viewer's present time. `clock_to_present` is the one to read there; `viewers.ps1` (a screen capture) gives sensible values.
+- **`latency-probe`'s `capture_to_present` reads 0.0 at the median** for the clock window, before M9d too (step 1's runs on main). Explained and fixed in P5: Windows' capture timestamps run ahead of delivery, and since P5 a capture time is never later than delivery ([p5-results.md](p5-results.md)).
 - **120 fps on a 240 Hz screen:** pacing costs about 0.5 ms of p95 and 2 fps with 4 viewers. Small, and the price of the exact rate elsewhere.
 - **G1's p95 was 15.6 ms in the last gates run** (12.0 in the one before): within the gate's normal range, and M9c saw 16–17 ms in 2 of 12 runs too.
 - **Hosts with frames in memory** (no NVIDIA encoder) aren't paced: on a 144 Hz screen they still get 48 of 60 fps.

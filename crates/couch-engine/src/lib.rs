@@ -42,6 +42,23 @@ pub use profile::{Profile, ProfileError};
 pub use secrets::SecretStore;
 pub use store::StoreError;
 
+/// For a development build: removes this user's registration of the link
+/// `scheme` if it opens this very program, and never another's, nor the
+/// one an installer made for everyone (P5; `couch_platform_win::links`).
+/// Returns whether it removed one.
+pub fn forget_own_link_registration(scheme: &str) -> std::io::Result<bool> {
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe()?;
+        couch_platform_win::links::forget_user_scheme(scheme, &exe)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = scheme;
+        Ok(false)
+    }
+}
+
 /// Everything the UI can ask of the engine. Its `Debug` leaves out passwords
 /// and invites.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
