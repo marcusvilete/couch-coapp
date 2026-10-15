@@ -2,17 +2,28 @@
 //! - its work area (the monitor without the taskbar), where the host's
 //!   overlay goes (M8), in physical pixels and desktop coordinates;
 //! - its refresh rate, which caps how many frames a capture gets (M9d).
+//!
+//! It also lists the monitors a capture can take, with their names and sizes
+//! (M9f, replacing the `windows-capture` crate's listing).
 
 use std::ffi::c_void;
 
 use windows::Win32::{
-    Foundation::{HWND, POINT},
+    Devices::Display::{
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
+        QueryDisplayConfig,
+    },
+    Foundation::{HWND, LPARAM, POINT, RECT},
     Graphics::Gdi::{
-        DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HMONITOR,
-        MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
+        DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW,
+        GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
+        MonitorFromPoint, MonitorFromWindow,
     },
 };
-use windows_core::PCWSTR;
+use windows_core::{BOOL, PCWSTR};
 
 /// A rectangle on the desktop, in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +61,135 @@ fn showing(window: isize) -> HMONITOR {
 }
 
 fn refresh(monitor: HMONITOR) -> Option<u32> {
+    // 0 and 1 mean "the hardware's default", which says nothing.
+    mode(monitor)
+        .map(|mode| mode.dmDisplayFrequency)
+        .filter(|&hz| hz > 1)
+}
+
+/// The work area of `monitor` (a monitor handle value, as screens are
+/// listed); the primary monitor's if it is gone.
+pub fn of_monitor(monitor: isize) -> Option<Area> {
+    work_area(HMONITOR(monitor as *mut c_void)).or_else(primary)
+}
+
+/// The primary monitor's work area.
+pub fn primary() -> Option<Area> {
+    work_area(primary_monitor())
+}
+
+fn primary_monitor() -> HMONITOR {
+    // SAFETY: no pointers; with MONITOR_DEFAULTTOPRIMARY it always returns
+    // a monitor.
+    unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }
+}
+
+/// Every monitor's handle value, in Windows' order.
+pub fn handles() -> Vec<isize> {
+    let mut found: Vec<isize> = Vec::new();
+    // SAFETY: the callback runs during this call only, and gets a pointer to
+    // `found`, live for the whole call.
+    let _ = unsafe {
+        EnumDisplayMonitors(None, None, Some(collect), LPARAM((&raw mut found) as isize))
+    };
+    found
+}
+
+unsafe extern "system" fn collect(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> BOOL {
+    // SAFETY: `handles` passes a pointer to its live Vec, used only during
+    // its EnumDisplayMonitors call, on its thread.
+    let found = unsafe { &mut *(found.0 as *mut Vec<isize>) };
+    found.push(monitor.0 as isize);
+    BOOL::from(true)
+}
+
+/// The primary monitor's handle value.
+pub fn primary_handle() -> isize {
+    primary_monitor().0 as isize
+}
+
+/// A monitor's size in pixels, from its current display mode.
+pub fn size(monitor: isize) -> Option<(u32, u32)> {
+    let mode = mode(HMONITOR(monitor as *mut c_void))?;
+    Some((mode.dmPelsWidth, mode.dmPelsHeight))
+}
+
+/// A monitor's own name ("DELL U2720Q"), as Windows' display settings show
+/// it; `None` if it reports none.
+pub fn name(monitor: isize) -> Option<String> {
+    let device = device_name(HMONITOR(monitor as *mut c_void))?;
+    let (mut paths, mut modes) = (0u32, 0u32);
+    // SAFETY: live out-parameters.
+    unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }
+        .ok()
+        .ok()?;
+    let mut path_info = vec![DISPLAYCONFIG_PATH_INFO::default(); paths as usize];
+    let mut mode_info = vec![DISPLAYCONFIG_MODE_INFO::default(); modes as usize];
+    // SAFETY: both buffers hold the counts passed with them.
+    unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut paths,
+            path_info.as_mut_ptr(),
+            &mut modes,
+            mode_info.as_mut_ptr(),
+            None,
+        )
+    }
+    .ok()
+    .ok()?;
+    for path in &path_info[..paths as usize] {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        // SAFETY: the header names the struct around it and its size.
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0
+            || wide(&source.viewGdiDeviceName) != device
+        {
+            continue;
+        }
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        // SAFETY: as above.
+        if unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } == 0 {
+            let name = wide(&target.monitorFriendlyDeviceName);
+            return (!name.trim().is_empty()).then_some(name);
+        }
+    }
+    None
+}
+
+/// Text up to its NUL.
+fn wide(text: &[u16]) -> String {
+    let len = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+    String::from_utf16_lossy(&text[..len])
+}
+
+/// The monitor's GDI device name (`\\.\DISPLAY1`).
+fn device_name(monitor: HMONITOR) -> Option<String> {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    // SAFETY: a live MONITORINFOEXW whose size lets the call fill the name.
+    unsafe { GetMonitorInfoW(monitor, (&raw mut info).cast()) }
+        .as_bool()
+        .then(|| wide(&info.szDevice))
+}
+
+/// The monitor's current display mode.
+fn mode(monitor: HMONITOR) -> Option<DEVMODEW> {
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
     let mut mode = DEVMODEW {
@@ -69,25 +209,7 @@ fn refresh(monitor: HMONITOR) -> Option<u32> {
             )
             .as_bool()
     };
-    // 0 and 1 mean "the hardware's default", which says nothing.
-    (found && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
-}
-
-/// The work area of `monitor` (a monitor handle value, as screens are
-/// listed); the primary monitor's if it is gone.
-pub fn of_monitor(monitor: isize) -> Option<Area> {
-    work_area(HMONITOR(monitor as *mut c_void)).or_else(primary)
-}
-
-/// The primary monitor's work area.
-pub fn primary() -> Option<Area> {
-    work_area(primary_monitor())
-}
-
-fn primary_monitor() -> HMONITOR {
-    // SAFETY: no pointers; with MONITOR_DEFAULTTOPRIMARY it always returns
-    // a monitor.
-    unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }
+    found.then_some(mode)
 }
 
 fn work_area(monitor: HMONITOR) -> Option<Area> {
@@ -121,6 +243,19 @@ mod tests {
         // Not a window: the primary monitor's.
         assert_eq!(of_window(0x7fff_0001), Some(primary));
         assert_eq!(of_monitor(0x7fff_0001), Some(primary));
+    }
+
+    #[test]
+    fn monitors_are_listed_with_their_sizes() {
+        let Some(_) = primary() else { return };
+        let all = handles();
+        assert!(all.contains(&primary_handle()), "{all:?}");
+        for monitor in all {
+            let (width, height) = size(monitor).unwrap();
+            assert!(width > 0 && height > 0);
+            // A name is optional (some displays report none), never blank.
+            assert!(name(monitor).is_none_or(|n| !n.trim().is_empty()));
+        }
     }
 
     #[test]

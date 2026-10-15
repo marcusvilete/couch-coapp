@@ -54,6 +54,8 @@ static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub struct TexturePool {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
+    /// The device's lock (multithread protection), held around each copy.
+    multithread: ID3D11Multithread,
     format: DXGI_FORMAT,
     width: u32,
     height: u32,
@@ -62,6 +64,9 @@ pub struct TexturePool {
     textures: Vec<Arc<PooledTexture>>,
     /// Every texture again, for encoders to keep alive past the pool.
     kept: Arc<Kept>,
+    /// The last copy's timings, in microseconds: waiting for the device's
+    /// lock, queuing the copy, and flushing it (M9f: `COUCH_CAPTURE_TRACE`).
+    pub last_timings: (u64, u64, u64),
 }
 
 // SAFETY: D3D11 devices are free-threaded, and the device's immediate context
@@ -87,18 +92,20 @@ impl TexturePool {
         width: u32,
         height: u32,
     ) -> Result<Self, MediaError> {
-        protect(device)?;
+        let multithread = protect(device)?;
         // SAFETY: a plain getter on a live device.
         let context = unsafe { device.GetImmediateContext() }.map_err(backend)?;
         Ok(Self {
             device: device.clone(),
             context,
+            multithread,
             format,
             width,
             height,
             source: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             textures: Vec::new(),
             kept: Arc::new(Kept(Mutex::new(Vec::new()))),
+            last_timings: (0, 0, 0),
         })
     }
 
@@ -123,6 +130,9 @@ impl TexturePool {
         from: &ID3D11Texture2D,
         captured_at: Micros,
     ) -> Result<Option<GpuFrame>, MediaError> {
+        // A frame dropped below (every texture in use) or failed shows no
+        // timings, not the last frame's.
+        self.last_timings = (0, 0, 0);
         let free = self
             .textures
             .iter()
@@ -158,14 +168,30 @@ impl TexturePool {
             bottom: self.height,
             back: 1,
         };
+        let started = std::time::Instant::now();
+        // The device's lock taken explicitly, to time the wait for it apart
+        // from the calls (they take it again, which nests).
+        // SAFETY: paired with the Leave below; nothing between can return.
+        unsafe { self.multithread.Enter() };
+        let locked = started.elapsed();
         // SAFETY: both textures are live on this device, in the same format,
         // and the region lies within both. Flush hands the copy to the GPU
         // now, ahead of the encoder's work on the same device.
         unsafe {
             self.context
                 .CopySubresourceRegion(&slot.texture, 0, 0, 0, 0, from, 0, Some(&region));
-            self.context.Flush();
         }
+        let copied = started.elapsed();
+        // SAFETY: as above.
+        unsafe { self.context.Flush() };
+        let flushed = started.elapsed();
+        // SAFETY: entered above.
+        unsafe { self.multithread.Leave() };
+        self.last_timings = (
+            locked.as_micros() as u64,
+            (copied - locked).as_micros() as u64,
+            (flushed - copied).as_micros() as u64,
+        );
         Ok(Some(GpuFrame::new(
             slot,
             self.width,
@@ -242,11 +268,11 @@ impl GpuTexture for PooledTexture {
 /// Lets several threads use the device's immediate context: the capture
 /// thread copies on it while encoder threads run NVENC on the same device.
 /// FFmpeg turns this on only for devices it creates itself.
-fn protect(device: &ID3D11Device) -> Result<(), MediaError> {
+fn protect(device: &ID3D11Device) -> Result<ID3D11Multithread, MediaError> {
     let multithread: ID3D11Multithread = device.cast().map_err(backend)?;
     // SAFETY: a plain setter on a live device; the previous value is ignored.
     let _ = unsafe { multithread.SetMultithreadProtected(true) };
-    Ok(())
+    Ok(multithread)
 }
 
 fn texture(
@@ -282,7 +308,7 @@ fn texture(
     made.ok_or_else(|| MediaError::Backend("CreateTexture2D returned no texture".into()))
 }
 
-fn staging_texture(
+pub(crate) fn staging_texture(
     device: &ID3D11Device,
     desc: &D3D11_TEXTURE2D_DESC,
 ) -> Result<ID3D11Texture2D, MediaError> {
@@ -310,7 +336,7 @@ pub struct Uploader {
 }
 
 impl Uploader {
-    /// A device on the default adapter, as windows-capture makes one.
+    /// A device on the default adapter, as the capture makes one (`wgc::new_device`).
     pub fn new(width: u32, height: u32) -> Result<Self, MediaError> {
         let mut device = None;
         // SAFETY: out-parameters are live locals.

@@ -1,18 +1,23 @@
-//! Windows.Graphics.Capture (through windows-capture) as a [`Capturer`]: one
-//! window or one monitor, BGRA, no yellow border where Windows allows hiding
-//! it (Windows 11; see `settings`).
+//! Windows.Graphics.Capture (our own, [`crate::wgc`], since M9f) as a
+//! [`Capturer`]: one window or one monitor, BGRA, no yellow border where
+//! Windows allows hiding it (Windows 11).
 //!
 //! Frames come out on the GPU ([`FrameOutput::Gpu`], M9b: copied into a
 //! [`TexturePool`] for an encoder that reads textures) or in memory
 //! ([`FrameOutput::Cpu`], for tools that read pixels).
+//!
+//! `COUCH_CAPTURE_BUFFERS` sets the frame pool's buffers (2;
+//! 1 as before M9f). `COUCH_CAPTURE_TRACE=<file>` appends each GPU frame's
+//! timings: `entry_us,windows_us,lock_us,copy_us,flush_us,total_us,outcome`.
 
 use std::{
     ffi::c_void,
+    io::{LineWriter, Write},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -22,23 +27,22 @@ use couch_media::{
 use windows::Win32::{
     Foundation::HWND,
     Graphics::{
-        Direct3D11::D3D11_TEXTURE2D_DESC,
+        Direct3D11::{
+            D3D11_BOX, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
+            ID3D11Texture2D,
+        },
         Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
     },
-};
-use windows_capture::{
-    capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
-    frame::Frame,
-    graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl},
-    monitor::Monitor,
-    settings::{
-        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
-        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
-    },
-    window::Window,
+    UI::WindowsAndMessaging::IsWindow,
 };
 
-use crate::{clock, foreground::WindowId, gpu_frames::TexturePool};
+use crate::{
+    clock,
+    foreground::WindowId,
+    gpu_frames::{TexturePool, staging_texture},
+    monitor, top_windows,
+    wgc::{self, Arrived, Sink, Target},
+};
 
 /// A monitor, by its handle value, as [`list_monitors`] found it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,21 +99,18 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, MediaError> {
     let me = std::process::id();
     let mut ours = vec![me];
     ours.extend(crate::process::child_processes(me).unwrap_or_default());
-    let windows = Window::enumerate().map_err(backend)?;
-    Ok(windows
+    Ok(top_windows::capturable()
         .into_iter()
-        .filter(|w| w.is_valid())
-        .filter_map(|w| {
-            let window = WindowId(w.as_raw_hwnd() as isize);
-            let process_id = w.process_id().unwrap_or_default();
+        .filter_map(|window| {
+            let process_id = top_windows::process_id(window).unwrap_or_default();
             if ours.contains(&process_id) || is_cloaked(window) {
                 return None;
             }
-            let title = w.title().ok()?;
+            let title = top_windows::title(window);
             (!title.trim().is_empty()).then(|| WindowInfo {
                 window,
                 title,
-                process: w.process_name().unwrap_or_default(),
+                process: top_windows::process_name(process_id).unwrap_or_default(),
                 process_id,
             })
         })
@@ -142,42 +143,58 @@ pub struct MonitorInfo {
 }
 
 pub fn list_monitors() -> Result<Vec<MonitorInfo>, MediaError> {
-    let primary = Monitor::primary()
-        .ok()
-        .map(|m| m.as_raw_hmonitor() as isize);
-    let monitors = Monitor::enumerate().map_err(backend)?;
-    Ok(monitors
+    let primary = monitor::primary_handle();
+    Ok(monitor::handles()
         .into_iter()
         .enumerate()
-        .map(|(i, m)| {
-            let id = m.as_raw_hmonitor() as isize;
+        .map(|(i, id)| {
+            let (width, height) = monitor::size(id).unwrap_or((0, 0));
             MonitorInfo {
                 monitor: MonitorId(id),
-                name: m
-                    .name()
-                    .ok()
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| format!("Screen {}", i + 1)),
-                width: m.width().unwrap_or(0),
-                height: m.height().unwrap_or(0),
-                primary: primary == Some(id),
+                name: monitor::name(id).unwrap_or_else(|| format!("Screen {}", i + 1)),
+                width,
+                height,
+                primary: id == primary,
             }
         })
         .collect())
 }
 
+/// How often a capture checks its window or monitor still exists.
+const SOURCE_CHECK: Duration = Duration::from_millis(100);
+
+/// The smallest frame worth streaming, width and height. NVENC refuses H.264
+/// frames under about 145x49; nothing a game shows is this small.
+const MIN_FRAME: (u32, u32) = (160, 64);
+
+/// The frame pool's buffers: two, so Windows can write the next frame while
+/// the GPU still has to copy the last (M9f); `COUCH_CAPTURE_BUFFERS` (1 to 4)
+/// for measuring.
+fn buffers() -> i32 {
+    std::env::var("COUCH_CAPTURE_BUFFERS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n| (1..=4).contains(n))
+        .unwrap_or(2)
+}
+
 struct Shared {
     frames: Mailbox<VideoFrame>,
-    output: FrameOutput,
     /// Keeping frames on the GPU failed, and they come in memory now: not
     /// yet reported ([`CaptureEvent::GpuFramesFailed`]).
     gpu_failed: AtomicBool,
 }
 
+/// Takes each frame on Windows' thread: into the texture pool, or to memory.
 struct Handler {
     shared: Arc<Shared>,
     output: FrameOutput,
     pool: Option<TexturePool>,
+    /// For frames to memory: the texture they are copied into to be read.
+    staging: Option<ID3D11Texture2D>,
+    /// Frames are being skipped as too small (logged once each time).
+    too_small: bool,
+    trace: Option<LineWriter<std::fs::File>>,
 }
 
 impl Handler {
@@ -185,57 +202,118 @@ impl Handler {
     /// format or size changed. `None`: every texture is still in use.
     fn on_gpu(
         &mut self,
-        frame: &Frame,
+        frame: &Arrived<'_>,
         captured_at: Micros,
     ) -> Result<Option<VideoFrame>, MediaError> {
-        let texture = frame.as_raw_texture();
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: fills a local description of the live frame texture.
-        unsafe { texture.GetDesc(&mut desc) };
+        unsafe { frame.texture.GetDesc(&mut desc) };
         // 4:2:0 encoders need even sizes; the copy drops an odd last row or column.
-        let (width, height) = (frame.width() & !1, frame.height() & !1);
-        if width == 0 || height == 0 {
-            // A window a pixel wide (minimized, or mid-resize): nothing to send.
-            return Ok(None);
-        }
-        let device = frame.device();
+        let (width, height) = (frame.width & !1, frame.height & !1);
         let pool = match self.pool.take() {
-            Some(pool) if pool.fits(device, desc.Format, width, height) => pool,
-            _ => TexturePool::new(device, desc.Format, width, height)?,
+            Some(pool) if pool.fits(frame.device, desc.Format, width, height) => pool,
+            _ => TexturePool::new(frame.device, desc.Format, width, height)?,
         };
         let pool = self.pool.insert(pool);
-        Ok(pool.copy(texture, captured_at)?.map(VideoFrame::Gpu))
+        Ok(pool.copy(frame.texture, captured_at)?.map(VideoFrame::Gpu))
+    }
+
+    /// The frame read into memory, through a staging texture kept while the
+    /// size and format stay.
+    fn on_cpu(
+        &mut self,
+        frame: &Arrived<'_>,
+        captured_at: Micros,
+    ) -> Result<BgraFrame, MediaError> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: fills a local description of the live frame texture.
+        unsafe { frame.texture.GetDesc(&mut desc) };
+        let fits = self.staging.as_ref().is_some_and(|s| {
+            let mut have = D3D11_TEXTURE2D_DESC::default();
+            // SAFETY: as above.
+            unsafe { s.GetDesc(&mut have) };
+            (have.Width, have.Height, have.Format) == (desc.Width, desc.Height, desc.Format)
+        });
+        if !fits {
+            self.staging = Some(staging_texture(frame.device, &desc)?);
+        }
+        let staging = self.staging.as_ref().expect("made above");
+        // SAFETY: a plain getter on a live device.
+        let context = unsafe { frame.device.GetImmediateContext() }.map_err(backend)?;
+        let region = D3D11_BOX {
+            right: frame.width,
+            bottom: frame.height,
+            back: 1,
+            ..Default::default()
+        };
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: both textures are live on this device, in the same format,
+        // and the region lies within both; Map waits for the copy, and the
+        // mapping is read and then unmapped before anything else uses it.
+        let data = unsafe {
+            context.CopySubresourceRegion(staging, 0, 0, 0, 0, frame.texture, 0, Some(&region));
+            context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(backend)?;
+            let len = mapped.RowPitch as usize * frame.height as usize;
+            let data =
+                Bytes::copy_from_slice(std::slice::from_raw_parts(mapped.pData.cast::<u8>(), len));
+            context.Unmap(staging, 0);
+            data
+        };
+        Ok(BgraFrame {
+            width: frame.width,
+            height: frame.height,
+            stride: mapped.RowPitch,
+            data,
+            captured_at,
+        })
     }
 }
 
-impl GraphicsCaptureApiHandler for Handler {
-    type Flags = Arc<Shared>;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
-    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self {
-            output: ctx.flags.output,
-            shared: ctx.flags,
-            pool: None,
-        })
-    }
-
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut Frame,
-        _control: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
+impl Sink for Handler {
+    fn frame(&mut self, frame: Arrived<'_>) {
+        // A minimized window (146x28 on this PC) or one mid-resize: nothing to
+        // stream, and too small for the encoders. Sent on, it once made
+        // NVENC refuse to open, which turned GPU frames off for the whole
+        // stream (M9f: a game minimized as someone started watching).
+        if frame.width < MIN_FRAME.0 || frame.height < MIN_FRAME.1 {
+            if !self.too_small {
+                self.too_small = true;
+                tracing::info!(
+                    "the captured {}x{} is too small to stream (minimized?): no frames until it grows",
+                    frame.width,
+                    frame.height
+                );
+            }
+            return;
+        }
+        self.too_small = false;
         // Windows stamps a frame with a time still ahead of us when it
         // arrives (measured in P5: about when it will be on screen; for a
         // window whose own frames queue up, after we had already encoded
         // and decoded it). A capture time is never later than its delivery,
         // or every capture-to-present figure reads too low.
         let now = clock::now();
-        let captured_at = frame.timestamp().map_or(now, |t| {
-            clock::from_system_relative_time(t.Duration).min(now)
-        });
+        let captured_at = frame.timestamp.map_or(now, |t| t.min(now));
         if self.output == FrameOutput::Gpu {
-            match self.on_gpu(frame, captured_at) {
+            let result = self.on_gpu(&frame, captured_at);
+            if let Some(trace) = self.trace.as_mut() {
+                let (lock, copy, flush) = self.pool.as_ref().map_or((0, 0, 0), |p| p.last_timings);
+                let outcome = match &result {
+                    Ok(Some(_)) => "put",
+                    Ok(None) => "full",
+                    Err(_) => "failed",
+                };
+                let _ = writeln!(
+                    trace,
+                    "{},{},{lock},{copy},{flush},{},{outcome}",
+                    now.0,
+                    frame.timestamp.map_or(0, |t| t.0),
+                    clock::now().0.saturating_sub(now.0)
+                );
+            }
+            match result {
                 Ok(Some(frame)) => {
                     self.shared.frames.put(frame);
                 }
@@ -251,83 +329,95 @@ impl GraphicsCaptureApiHandler for Handler {
                 }
             }
             if self.output == FrameOutput::Gpu {
-                return Ok(());
+                return;
             }
         }
-        let (width, height) = (frame.width(), frame.height());
-        let mut buffer = frame.buffer()?;
-        let stride = buffer.row_pitch();
-        let data = Bytes::copy_from_slice(buffer.as_raw_buffer());
-        self.shared.frames.put(VideoFrame::Cpu(BgraFrame {
-            width,
-            height,
-            stride,
-            data,
-            captured_at,
-        }));
-        Ok(())
+        match self.on_cpu(&frame, captured_at) {
+            Ok(frame) => {
+                self.shared.frames.put(VideoFrame::Cpu(frame));
+            }
+            Err(e) => tracing::debug!("a captured frame couldn't be read: {e}"),
+        }
     }
 
-    fn on_closed(&mut self) -> Result<(), Self::Error> {
+    fn closed(&mut self) {
         self.shared.frames.close();
-        Ok(())
     }
 }
 
 /// Captures one source until dropped.
 pub struct WgcCapturer {
     shared: Arc<Shared>,
-    control: Option<CaptureControl<Handler, Box<dyn std::error::Error + Send + Sync>>>,
+    /// Running until dropped.
+    _session: wgc::Session,
     closed_reported: bool,
     window: Option<WindowId>,
+    target: Target,
+    /// When the captured window or monitor was last seen to exist.
+    source_checked: Instant,
 }
 
 impl WgcCapturer {
     pub fn start(source: &CaptureSource, options: CaptureOptions) -> Result<Self, MediaError> {
-        let shared = Arc::new(Shared {
-            frames: Mailbox::new(),
-            output: options.output,
-            gpu_failed: AtomicBool::new(false),
-        });
-        let cursor = if options.cursor {
-            CursorCaptureSettings::WithCursor
-        } else {
-            CursorCaptureSettings::WithoutCursor
-        };
-        let interval = MinimumUpdateIntervalSettings::Custom(options.min_interval);
-        let mut captured = None;
-        let control = match source {
+        let (target, window) = match source {
             CaptureSource::WindowTitle(title) => {
-                let window = Window::from_contains_name(title)
-                    .map_err(|e| MediaError::Backend(format!("no window titled {title:?}: {e}")))?;
-                captured = Some(WindowId(window.as_raw_hwnd() as isize));
-                Handler::start_free_threaded(settings(window, cursor, interval, shared.clone()))
+                let window = top_windows::find_by_title(title)
+                    .ok_or_else(|| MediaError::Backend(format!("no window titled {title:?}")))?;
+                (Target::Window(window.0), Some(window))
             }
             CaptureSource::Window(id) => {
-                let window = Window::from_raw_hwnd(id.0 as *mut c_void);
-                if !window.is_valid() {
+                if !top_windows::is_capturable(*id) {
                     return Err(MediaError::Backend(
                         "the window is gone, or can't be captured".into(),
                     ));
                 }
-                captured = Some(*id);
-                Handler::start_free_threaded(settings(window, cursor, interval, shared.clone()))
+                (Target::Window(id.0), Some(*id))
             }
-            CaptureSource::Monitor(id) => {
-                let monitor = Monitor::from_raw_hmonitor(id.0 as *mut c_void);
-                Handler::start_free_threaded(settings(monitor, cursor, interval, shared.clone()))
-            }
-            CaptureSource::PrimaryMonitor => {
-                let monitor = Monitor::primary().map_err(backend)?;
-                Handler::start_free_threaded(settings(monitor, cursor, interval, shared.clone()))
-            }
-        }
-        .map_err(backend)?;
+            CaptureSource::Monitor(id) => (Target::Monitor(id.0), None),
+            CaptureSource::PrimaryMonitor => (Target::Monitor(monitor::primary_handle()), None),
+        };
+        let device = wgc::new_device().map_err(backend)?;
+        let shared = Arc::new(Shared {
+            frames: Mailbox::new(),
+            gpu_failed: AtomicBool::new(false),
+        });
+        let trace = std::env::var_os("COUCH_CAPTURE_TRACE").and_then(|path| {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()?;
+            Some(LineWriter::new(file))
+        });
+        let handler = Handler {
+            shared: shared.clone(),
+            output: options.output,
+            pool: None,
+            staging: None,
+            too_small: false,
+            trace,
+        };
+        let wgc_options = wgc::Options {
+            buffers: buffers(),
+            min_interval: options.min_interval,
+            cursor: options.cursor,
+        };
+        tracing::debug!(
+            buffers = wgc_options.buffers,
+            cursor_choice = wgc::has("IsCursorCaptureEnabled"),
+            border_choice = wgc::has("IsBorderRequired"),
+            min_interval = wgc::has("MinUpdateInterval"),
+            "capture settings this Windows supports"
+        );
+        let session =
+            wgc::Session::start(target, wgc_options, &device, handler).map_err(backend)?;
         Ok(Self {
             shared,
-            control: Some(control),
+            _session: session,
             closed_reported: false,
-            window: captured,
+            window,
+            target,
+            source_checked: Instant::now(),
         })
     }
 
@@ -342,61 +432,24 @@ impl WgcCapturer {
     }
 }
 
-/// Our capture settings, each one only where this Windows supports it.
-/// Windows.Graphics.Capture grew its options over versions, and a capture
-/// that asks for one this Windows lacks fails to start: on a Windows 10 PC
-/// every stream ended at its first viewer ("Toggling the capture border is
-/// not supported"). Where an option is missing, Windows' default applies:
-/// - the yellow border around the captured window (Windows 11 lets us hide
-///   it; it is drawn on the host's screen, not in the stream);
-/// - frames as often as the screen changes, which the pipeline paces
-///   anyway (the minimum interval is newer still);
-/// - the cursor captured (choosing needs Windows 10 2004).
-fn settings<T>(
-    item: T,
-    cursor: CursorCaptureSettings,
-    interval: MinimumUpdateIntervalSettings,
-    shared: Arc<Shared>,
-) -> Settings<Arc<Shared>, T>
-where
-    T: TryInto<windows_capture::settings::GraphicsCaptureItemType>,
-{
-    let can = |check: Result<bool, _>| check.unwrap_or(false);
-    let border = if can(GraphicsCaptureApi::is_border_settings_supported()) {
-        DrawBorderSettings::WithoutBorder
-    } else {
-        DrawBorderSettings::Default
-    };
-    let interval = if can(GraphicsCaptureApi::is_minimum_update_interval_supported()) {
-        interval
-    } else {
-        MinimumUpdateIntervalSettings::Default
-    };
-    let cursor = if can(GraphicsCaptureApi::is_cursor_settings_supported()) {
-        cursor
-    } else {
-        CursorCaptureSettings::Default
-    };
-    tracing::debug!(
-        ?border,
-        ?interval,
-        ?cursor,
-        "capture settings this Windows supports"
-    );
-    Settings::new(
-        item,
-        cursor,
-        border,
-        SecondaryWindowSettings::Default,
-        interval,
-        DirtyRegionSettings::Default,
-        ColorFormat::Bgra8,
-        shared,
-    )
-}
-
 impl Capturer for WgcCapturer {
     fn next_event(&mut self, timeout: Duration) -> Result<Option<CaptureEvent>, MediaError> {
+        // A window that closed, or a monitor that went (unplugged, or the
+        // display mode changed), ends the capture. Windows also raises the
+        // item's Closed event, but a free-threaded frame pool has no thread
+        // of ours to deliver it on, so it can't be relied on (M9f).
+        if self.source_checked.elapsed() >= SOURCE_CHECK {
+            self.source_checked = Instant::now();
+            let gone = match self.target {
+                // SAFETY: IsWindow takes any handle value.
+                Target::Window(w) => !unsafe { IsWindow(Some(HWND(w as *mut c_void))) }.as_bool(),
+                // (GetMonitorInfoW answers even for a stale handle.)
+                Target::Monitor(m) => !monitor::handles().contains(&m),
+            };
+            if gone {
+                self.shared.frames.close();
+            }
+        }
         if self.shared.gpu_failed.swap(false, Ordering::Relaxed) {
             return Ok(Some(CaptureEvent::GpuFramesFailed));
         }
@@ -408,16 +461,6 @@ impl Capturer for WgcCapturer {
                 Ok(Some(CaptureEvent::SourceClosed))
             }
             Err(_closed) => Err(MediaError::Closed),
-        }
-    }
-}
-
-impl Drop for WgcCapturer {
-    fn drop(&mut self) {
-        if let Some(control) = self.control.take()
-            && let Err(e) = control.stop()
-        {
-            tracing::warn!("stopping capture failed: {e}");
         }
     }
 }

@@ -7,7 +7,7 @@
 //! - no arguments: show the stream arriving on the IPC pipe until it closes;
 //! - `--hud-preview watching|asking|controlling`: no pipe, a made-up session,
 //!   to check the HUD by eye;
-//! - `--clock [x y] [--clicks] [--fps N]`: the latency clock window (see `clock.rs`);
+//! - `--clock [x y] [--clicks] [--fps N] [--gpu-load N]`: the latency clock window (see `clock.rs`);
 //! - `--input-sink FILE`: a window that records the input it receives (see
 //!   `sink.rs`);
 //! - `--probe`: print SDL3 and gamepad information as one JSON line, for
@@ -74,7 +74,14 @@ fn main() -> anyhow::Result<()> {
                 ),
                 None => None,
             };
-            clock::run(coord(1, 80), coord(2, 80), clicks, fps)
+            let gpu_load = match args.iter().position(|a| a == "--gpu-load") {
+                Some(i) => args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| anyhow!("--gpu-load needs a number of rectangles"))?,
+                None => 0,
+            };
+            clock::run(coord(1, 80), coord(2, 80), clicks, fps, gpu_load)
         }
         Some("--input-sink") => {
             let path = args

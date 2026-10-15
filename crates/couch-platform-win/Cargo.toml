@@ -18,10 +18,17 @@ tracing.workspace = true
 [target.'cfg(windows)'.dependencies]
 vigem-rust.workspace = true
 windows = { workspace = true, features = [
+    "Foundation_Metadata",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Display",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Media",
@@ -44,7 +51,6 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-windows-capture.workspace = true
 # `#[implement]` expands to paths in windows-core.
 windows-core.workspace = true
 

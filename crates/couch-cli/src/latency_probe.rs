@@ -69,6 +69,11 @@ pub struct Args {
     /// Cap the latency clock (the stand-in game) at this frame rate; by
     /// default it paints every refresh.
     pub clock_fps: Option<u32>,
+    /// Make the latency clock GPU-bound like a demanding game: this many
+    /// blended full-size rectangles drawn offscreen each frame (M9f).
+    pub gpu_load: Option<u32>,
+    /// The host's pacing trace (`host --pacing-trace`).
+    pub pacing_trace: Option<PathBuf>,
     pub net: NetArgs,
 }
 
@@ -240,10 +245,40 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
     if let Some(fps) = args.clock_fps {
         clock.args(["--fps", &fps.to_string()]);
     }
+    if let Some(n) = args.gpu_load {
+        clock.args(["--gpu-load", &n.to_string()]);
+        echo.line(&format!(
+            "GPU load: the clock draws {n} full-size rectangles offscreen each frame"
+        ));
+    }
     let mut clock = clock
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("starting the latency clock")?;
+    // The clock's own frame rate, once a second: the stand-in game's.
+    let clock_rates = {
+        let mut stderr = BufReader::new(clock.stderr.take().expect("piped"));
+        let echo = echo.clone();
+        tokio::spawn(async move {
+            let mut rates = Vec::new();
+            let mut buf = Vec::new();
+            // Lossy: a line that isn't UTF-8 mustn't end the reading.
+            while stderr
+                .read_until(b'\n', &mut buf)
+                .await
+                .is_ok_and(|n| n > 0)
+            {
+                let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+                buf.clear();
+                match line.strip_prefix("clock fps ") {
+                    Some(fps) => rates.extend(fps.trim().parse::<f64>().ok()),
+                    None => echo.line(&format!("[clock] {line}")),
+                }
+            }
+            rates
+        })
+    };
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let mut host = Command::new(&exe);
@@ -257,6 +292,9 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
         .args(args.net.to_args());
     if let Some(trace) = &args.rc_trace {
         host.arg("--rc-trace").arg(trace);
+    }
+    if let Some(trace) = &args.pacing_trace {
+        host.arg("--pacing-trace").arg(trace);
     }
     let mut host = host
         .stdout(Stdio::piped())
@@ -365,9 +403,19 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
     // old clock window.
     let _ = host.kill().await;
     let _ = clock.kill().await;
-    let Some(results) = results.into_iter().collect::<Option<Vec<_>>>() else {
+    let clock_rates = clock_rates.await.unwrap_or_default();
+    let Some(mut results) = results.into_iter().collect::<Option<Vec<_>>>() else {
         bail!("a viewer exited without a result");
     };
+    // The median second, the first two (start-up) left out.
+    let clock_fps = {
+        let mut rates: Vec<f64> = clock_rates.into_iter().skip(2).collect();
+        rates.sort_by(f64::total_cmp);
+        rates.get(rates.len() / 2).copied()
+    };
+    for result in &mut results {
+        result["clock_fps"] = serde_json::json!(clock_fps);
+    }
     let g1 = args.net.netem.is_none() && !args.net.relay_only;
     for (i, result) in results.iter().enumerate() {
         if two {
@@ -521,6 +569,11 @@ fn report(result: &serde_json::Value, g1: bool) -> Vec<String> {
             result["decode_errors"], result["path_changes"], result["ended_early"]
         ),
     ];
+    if let Some(fps) = result["clock_fps"].as_f64() {
+        lines.push(format!(
+            "clock_fps                {fps:.1} (the stand-in game's own frame rate)"
+        ));
+    }
     for metric in [
         "clock_to_present_ms",
         "capture_to_present_ms",
