@@ -100,4 +100,6 @@ In the app (`npm run tauri dev`: debug builds), with Witcher 3 in game and a 120
 - **Notepad and Graveyard Keeper** behaved as before.
 - **Minimized, then watched:** the stream recovered normally once the game came back. No "too small" line appeared: Windows usually delivers no frames at all while a window stays minimized.
 - **Moving the mouse fast raised the stream to 120 fps,** in Witcher 3's paused menu too. The capture includes the cursor, so each movement is a new picture, and the menu doesn't keep the GPU busy. That's expected.
-- **Not tried:** the two-PC check, and a screen stream losing its monitor.
+- **Not tried:** a screen stream losing its monitor.
+
+**With a friend, over the internet** (the 0.10.2 installer, 2026-10-15): everything worked. Witcher 3 streamed at about 80 fps, briefly 100. The bitrate stayed near its 20 Mbit/s ceiling, dipping to 8–12 at times. There were some lag spikes, likely the friend's Wi-Fi; a test on a cable is to come.
