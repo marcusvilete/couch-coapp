@@ -28,6 +28,8 @@ pub mod monitor;
 pub mod process;
 pub mod sendinput;
 pub mod timer;
+pub mod top_windows;
 pub mod vigem;
 pub mod virtual_pads;
+pub mod wgc;
 pub mod wifi;

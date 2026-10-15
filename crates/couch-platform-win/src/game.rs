@@ -16,9 +16,8 @@ use windows::Win32::{
     },
     UI::WindowsAndMessaging::{GetWindowRect, IsIconic},
 };
-use windows_capture::window::Window;
 
-use crate::{capture::is_cloaked, foreground::WindowId, process};
+use crate::{capture::is_cloaked, foreground::WindowId, process, top_windows};
 
 /// Windows smaller than this (either side, in pixels) are splash screens,
 /// tooltips or hidden helpers, never the game.
@@ -84,16 +83,11 @@ impl GameProcess {
     pub fn windows(&self) -> Vec<WindowId> {
         let mut tree = vec![self.pid];
         tree.extend(process::descendants(self.pid).unwrap_or_default());
-        let Ok(all) = Window::enumerate() else {
-            return Vec::new();
-        };
-        let mut found: Vec<(i64, WindowId)> = all
+        let mut found: Vec<(i64, WindowId)> = top_windows::capturable()
             .into_iter()
-            .filter(|w| w.is_valid())
-            .filter(|w| w.process_id().is_ok_and(|pid| tree.contains(&pid)))
-            .filter(|w| w.title().is_ok_and(|t| !t.trim().is_empty()))
-            .filter_map(|w| {
-                let window = WindowId(w.as_raw_hwnd() as isize);
+            .filter(|&w| top_windows::process_id(w).is_some_and(|pid| tree.contains(&pid)))
+            .filter(|&w| !top_windows::title(w).trim().is_empty())
+            .filter_map(|window| {
                 let area = usable_area(window)?;
                 Some((area, window))
             })

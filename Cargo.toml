@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -43,7 +43,6 @@ opus = "0.4"
 sdl3 = "=0.20.0"
 windows = "0.62"
 windows-core = "0.62"
-windows-capture = "2.0.1"
 vigem-rust = "0.2"
 
 # Viewer rendering

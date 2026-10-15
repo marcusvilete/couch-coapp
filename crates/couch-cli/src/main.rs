@@ -230,6 +230,14 @@ enum Cmd {
         /// stream: a game a little faster than the stream.
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
         clock_fps: Option<u32>,
+        /// Make the latency clock GPU-bound like a demanding game: it draws
+        /// this many blended full-size rectangles into a 4K texture each
+        /// frame (M9f). The summary shows the clock's own frame rate.
+        #[arg(long)]
+        gpu_load: Option<u32>,
+        /// Write the host's pacing trace to this CSV (see `host --pacing-trace`).
+        #[arg(long)]
+        pacing_trace: Option<PathBuf>,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -437,6 +445,8 @@ async fn main() -> ExitCode {
             cpu_load,
             cpus,
             clock_fps,
+            gpu_load,
+            pacing_trace,
             net,
         } => match cpus.as_deref().map(latency_probe::parse_cpus).transpose() {
             Err(e) => Err(anyhow::anyhow!("--cpus: {e}")),
@@ -455,6 +465,8 @@ async fn main() -> ExitCode {
                 cpu_load,
                 cpus,
                 clock_fps,
+                gpu_load,
+                pacing_trace,
                 net,
             })
             .await

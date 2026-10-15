@@ -3,9 +3,16 @@
 //! digits (for side-by-side screenshots). With `--clicks` it also clicks
 //! twice a second (for `latency-probe --audio`); with `--fps N` it paints at
 //! most N times a second, like a game capped at that rate (M9d: a game a
-//! little faster than the stream). Esc closes it.
+//! little faster than the stream). With `--gpu-load N` it also draws N
+//! blended full-size rectangles into an offscreen 4K texture each frame,
+//! without waiting for vsync, so the GPU limits it as it does a demanding
+//! game (M9f). It always reports its frame rate on stderr once a second
+//! (`clock fps <n>`; `latency-probe` shows it as `clock_fps`). Esc closes it.
 
-use std::time::{Duration, Instant};
+use std::{
+    io::Write,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 use couch_media::{
@@ -21,7 +28,7 @@ use sdl3::{
     event::Event,
     keyboard::Keycode,
     pixels::Color,
-    render::FRect,
+    render::{BlendMode, FRect},
 };
 
 use crate::now_us;
@@ -36,9 +43,15 @@ const DIGIT_GAP: f32 = 20.0;
 const SEGMENT: f32 = 12.0;
 const DIGITS: usize = 8;
 
+/// The offscreen texture `--gpu-load` draws into: 4K, like a game's frame.
+const LOAD_SIZE: (u32, u32) = (3840, 2160);
+
 /// `clicks`: also play the click track. `fps`: paint at most this often.
-pub fn run(x: i32, y: i32, clicks: bool, fps: Option<u32>) -> Result<()> {
-    sdl3::hint::set("SDL_RENDER_VSYNC", "1");
+/// `gpu_load`: blended full-size rectangles drawn offscreen each frame.
+pub fn run(x: i32, y: i32, clicks: bool, fps: Option<u32>, gpu_load: u32) -> Result<()> {
+    // Loaded, it paints as fast as the GPU lets it, as a demanding game
+    // does; waiting for vsync would leave the GPU idle part of each frame.
+    sdl3::hint::set("SDL_RENDER_VSYNC", if gpu_load > 0 { "0" } else { "1" });
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
     let (width, height) = latency_clock_size();
@@ -62,6 +75,15 @@ pub fn run(x: i32, y: i32, clicks: bool, fps: Option<u32>) -> Result<()> {
     } else {
         None
     };
+
+    let creator = canvas.texture_creator();
+    let mut load = if gpu_load > 0 {
+        Some(creator.create_texture_target(None, LOAD_SIZE.0, LOAD_SIZE.1)?)
+    } else {
+        None
+    };
+    // The clock's own frame rate, reported once a second.
+    let (mut painted, mut since) = (0u32, Instant::now());
 
     let interval = fps.map(|fps| Duration::from_secs(1) / fps.max(1));
     let mut next_frame = Instant::now();
@@ -112,7 +134,26 @@ pub fn run(x: i32, y: i32, clicks: bool, fps: Option<u32>) -> Result<()> {
                 canvas.fill_rect(rect)?;
             }
         }
+        if let Some(load) = load.as_mut() {
+            canvas.with_texture_canvas(load, |target| {
+                target.set_blend_mode(BlendMode::Blend);
+                target.set_draw_color(Color::RGBA(200, 120, 60, 8));
+                for _ in 0..gpu_load {
+                    // Work for the GPU only; a failed draw just lightens it.
+                    let _ = target.fill_rect(None);
+                }
+                target.set_blend_mode(BlendMode::None);
+            })?;
+        }
         canvas.present();
+
+        painted += 1;
+        if since.elapsed() >= Duration::from_secs(1) {
+            let fps = f64::from(painted) / since.elapsed().as_secs_f64();
+            // stderr: the viewer never writes to stdout.
+            let _ = writeln!(std::io::stderr().lock(), "clock fps {fps:.1}");
+            (painted, since) = (0, Instant::now());
+        }
     }
 }
 

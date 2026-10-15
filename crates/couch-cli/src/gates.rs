@@ -200,6 +200,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             cpu_load: None,
             cpus: None,
             clock_fps: None,
+            gpu_load: None,
+            pacing_trace: None,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,
@@ -294,6 +296,8 @@ async fn run_g7(spec: &Spec, args: &Args) -> anyhow::Result<Report> {
             cpu_load: None,
             cpus: None,
             clock_fps: None,
+            gpu_load: None,
+            pacing_trace: None,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,
