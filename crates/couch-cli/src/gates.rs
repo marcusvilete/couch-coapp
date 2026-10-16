@@ -202,6 +202,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             clock_fps: None,
             gpu_load: None,
             pacing_trace: None,
+            // The throttles must touch the stream (M12c).
+            h264: true,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,
@@ -298,6 +300,8 @@ async fn run_g7(spec: &Spec, args: &Args) -> anyhow::Result<Report> {
             clock_fps: None,
             gpu_load: None,
             pacing_trace: None,
+            // The throttles must touch the stream (M12c).
+            h264: true,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,

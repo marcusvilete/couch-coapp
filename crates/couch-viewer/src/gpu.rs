@@ -7,7 +7,7 @@
 //! into its device; otherwise on wgpu's default backend (Vulkan on NVIDIA).
 
 use anyhow::{Context, Result, anyhow, bail};
-use couch_media::Nv12Frame;
+use couch_media::{Nv12Frame, YuvMatrix};
 
 /// `COUCH_VIEWER_ZERO_COPY`: whether decoded frames stay on the GPU (M9c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,15 +222,33 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     return out;
 }
 
-// BT.709, limited range.
+// Limited range: luma and chroma (Cb, Cr), centred.
+fn planes(uv: vec2<f32>) -> vec3<f32> {
+    let y = (textureSample(y_tex, samp, uv).r - 0.0627451) * 1.1643836;
+    let c = textureSample(uv_tex, samp, uv).rg - vec2<f32>(0.5019608, 0.5019608);
+    return vec3<f32>(y, c);
+}
+
+// BT.709 (what our converter writes for the encoders other than NVENC).
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let y = (textureSample(y_tex, samp, in.uv).r - 0.0627451) * 1.1643836;
-    let c = textureSample(uv_tex, samp, in.uv).rg - vec2<f32>(0.5019608, 0.5019608);
+fn fs_bt709(in: VsOut) -> @location(0) vec4<f32> {
+    let p = planes(in.uv);
     let rgb = vec3<f32>(
-        y + 1.7927411 * c.y,
-        y - 0.2132486 * c.x - 0.5329093 * c.y,
-        y + 2.1124018 * c.x,
+        p.x + 1.7927411 * p.z,
+        p.x - 0.2132486 * p.y - 0.5329093 * p.z,
+        p.x + 2.1124018 * p.y,
+    );
+    return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+// BT.601 (NVENC's conversion of RGB, M12c).
+@fragment
+fn fs_bt601(in: VsOut) -> @location(0) vec4<f32> {
+    let p = planes(in.uv);
+    let rgb = vec3<f32>(
+        p.x + 1.5960268 * p.z,
+        p.x - 0.3917623 * p.y - 0.8129676 * p.z,
+        p.x + 2.0172321 * p.y,
     );
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
@@ -244,10 +262,13 @@ struct Planes {
 }
 
 pub struct VideoPass {
-    pipeline: wgpu::RenderPipeline,
+    bt709: wgpu::RenderPipeline,
+    bt601: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     planes: Option<Planes>,
+    /// The matrix of the frame in the planes, as its stream declares.
+    pub matrix: YuvMatrix,
 }
 
 impl VideoPass {
@@ -284,27 +305,30 @@ impl VideoPass {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("nv12"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = |fragment| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(fragment),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fragment),
+                    targets: &[Some(format.into())],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let (bt709, bt601) = (pipeline("fs_bt709"), pipeline("fs_bt601"));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nv12"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -312,14 +336,17 @@ impl VideoPass {
             ..Default::default()
         });
         Self {
-            pipeline,
+            bt709,
+            bt601,
             layout,
             sampler,
             planes: None,
+            matrix: YuvMatrix::default(),
         }
     }
 
     pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Nv12Frame) {
+        self.matrix = frame.matrix;
         let size = (frame.width, frame.height);
         let (y, uv) = self.planes(device, size);
         let chroma = (frame.width.div_ceil(2), frame.height.div_ceil(2));
@@ -404,7 +431,10 @@ impl VideoPass {
         };
         let [x, y, w, h] = viewport;
         pass.set_viewport(x, y, w, h, 0.0, 1.0);
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(match self.matrix {
+            YuvMatrix::Bt601 => &self.bt601,
+            YuvMatrix::Bt709 => &self.bt709,
+        });
         pass.set_bind_group(0, &planes.bind_group, &[]);
         pass.draw(0..3, 0..1);
     }

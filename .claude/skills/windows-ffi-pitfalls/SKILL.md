@@ -65,6 +65,12 @@ Each item below cost time or nearly caused undefined behaviour in M1–M3. Check
 - **The D3D12 debug layer won't catch a wrong initial state that is a read state** (shader resource, copy source): D3D12 may promote COMMON to those implicitly. Bit-exact comparison against another path is the real check. To check that the layer is on at all, `cast::<ID3D12InfoQueue>()` the device: wgpu-hal skips it silently when the Graphics Tools aren't installed, and an inactive layer looks exactly like a clean run.
 - **`couch-viewer` is the one crate besides `couch-platform-win` that uses `windows`,** and only to pass COM pointers between FFmpeg and wgpu-hal (`from_raw_borrowed`, `clone`, `into_raw`) and to read a resource's description.
 
+## Video hardware through FFmpeg
+
+- **FFmpeg's D3D12VA frame pool is the picture's exact size** (`ff_d3d12va_common_frame_params`, 8.1 to 9.0); D3D11VA's (`dxva2.c`) aligns HEVC to 128. NVIDIA's driver refuses an HEVC texture of many exact heights (`h mod 32` from 1 to 16: 720, 900, 1200, 2160), and the decode fails as "Could not create the texture" then "hardware accelerator failed to decode picture". The fix is our own pool: in `get_format`, `avcodec_get_hw_frames_parameters`, align the size, `av_hwframe_ctx_init`, and put it in `hw_frames_ctx` (`couch_codec_ffmpeg::decoder`). A decoded texture can then be larger than the picture: copy the picture's extent, never the texture's (`couch-viewer`'s `FrameImporter`). Test a new codec or decoder path at 1280x720, 1920x1080 and an odd height such as 1682x1070.
+- **What a GPU decodes:** create a D3D11 device with `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`, cast it to `ID3D11VideoDevice` and walk `GetVideoDecoderProfile(0..GetVideoDecoderProfileCount())` for the profile's GUID (`couch_platform_win::video_caps`). It's a driver call; cache the answer.
+- **NVENC's RGB input is converted with BT.601,** limited range, whatever colorspace the codec context says (`nvenc.c`), and the stream declares it. Anything that compares or renders decoded pictures takes the declared matrix from the frame (`YuvMatrix`, read by the decoder), never a fixed one: the viewer assumed BT.709 from M1 to M12c.
+
 ## Low-level hooks
 
 - **Raw keyboard input blinds the process's own hooks.** While a process that registered for raw keyboard input (`RegisterRawInputDevices`, usage page 1, usage 6) is in front, Windows doesn't call that process's own `WH_KEYBOARD_LL` hooks. Measured in M5b: 0 of 2 events with the registration, 2 of 2 without it or after `RIDEV_REMOVE`.

@@ -16,7 +16,7 @@ use std::{
 
 use bytes::Bytes;
 use couch_media::{
-    EncodedFrame, EpochId, FeedbackSnapshot, MediaError, Micros, VideoParams, VideoSender,
+    Codec, EncodedFrame, EpochId, FeedbackSnapshot, MediaError, Micros, VideoParams, VideoSender,
     clock::Clock,
     ratecontrol::{FeedbackTracker, PathSample, SendDelays},
 };
@@ -132,7 +132,7 @@ impl VideoSender for HostVideo {
         let preamble = EpochPreamble {
             session: self.session,
             epoch,
-            codec: EpochPreamble::CODEC_H264,
+            codec: params.codec.wire(),
             width: params.width as u16,
             height: params.height as u16,
             fps: params.fps as u16,
@@ -297,6 +297,8 @@ async fn read_reports(
 #[derive(Debug, Clone)]
 pub struct VideoFrameIn {
     pub epoch: u32,
+    /// The epoch's codec, as its preamble named it (`couch_proto::codec`).
+    pub codec: u8,
     pub header: FrameHeader,
     pub data: Bytes,
     pub arrived: Micros,
@@ -397,6 +399,11 @@ async fn read_epoch(
         let _ = recv.stop(VarInt::from_u32(0));
         return;
     };
+    if Codec::from_wire(preamble.codec).is_none() {
+        tracing::warn!(codec = preamble.codec, "an epoch in an unknown codec");
+        let _ = recv.stop(VarInt::from_u32(0));
+        return;
+    }
     if session.is_some_and(|s| s != preamble.session) {
         tracing::debug!(
             session = preamble.session,
@@ -456,6 +463,7 @@ async fn read_epoch(
         }
         let frame = VideoFrameIn {
             epoch,
+            codec: preamble.codec,
             header: h,
             data: data.into(),
             arrived,
@@ -497,5 +505,24 @@ async fn send_reports(
             Err(iroh::endpoint::SendDatagramError::ConnectionLost(_)) => return,
             Err(e) => tracing::debug!("receiver report not sent: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use couch_media::Codec;
+    use couch_proto::codec;
+
+    #[test]
+    fn codec_numbers_agree_with_the_wire() {
+        assert_eq!(Codec::H264.wire(), codec::H264);
+        assert_eq!(Codec::Hevc.wire(), codec::HEVC);
+        assert_eq!(Codec::H264.bit(), codec::DECODES_H264);
+        assert_eq!(Codec::Hevc.bit(), codec::DECODES_HEVC);
+        for c in [Codec::H264, Codec::Hevc] {
+            assert_eq!(Codec::from_wire(c.wire()), Some(c));
+        }
+        assert_eq!(Codec::from_wire(0), None);
+        assert_eq!(Codec::from_wire(3), None);
     }
 }

@@ -107,6 +107,21 @@ const NVENC: &[OptionSet] = &[OptionSet {
     ],
 }];
 
+/// NVIDIA's HEVC (M12c): H.264's settings, with HEVC's Main profile (8-bit).
+const NVENC_HEVC: &[OptionSet] = &[OptionSet {
+    label: "main+p1+ull",
+    options: &[
+        (c"profile", c"main"),
+        (c"preset", c"p1"),
+        (c"tune", c"ull"),
+        (c"rc", c"cbr"),
+        (c"zerolatency", c"1"),
+        (c"delay", c"0"),
+        (c"rc-lookahead", c"0"),
+        (c"forced-idr", c"1"),
+    ],
+}];
+
 /// AMD. `forced_idr` defaults to off in FFmpeg's AMF wrapper, so without it a
 /// requested keyframe may be a plain I-frame, which a new epoch can't start
 /// from. Rate control stays CBR: our rate controller sets the bitrate.
@@ -203,6 +218,7 @@ const SOFTWARE: &[OptionSet] = &[OptionSet {
 pub fn option_sets(name: &str) -> &'static [OptionSet] {
     match name {
         "h264_nvenc" => NVENC,
+        "hevc_nvenc" => NVENC_HEVC,
         "h264_amf" => AMF,
         "h264_qsv" => QSV,
         "h264_mf" => MEDIA_FOUNDATION,
@@ -251,6 +267,23 @@ mod tests {
             assert_eq!(sets.last().unwrap().options, before_m9a(name), "{name}");
             assert!(sets.iter().all(|s| !s.options.is_empty()), "{name}");
         }
+    }
+
+    #[test]
+    fn nvidias_hevc_is_its_h264_with_the_main_profile() {
+        let hevc = option_sets("hevc_nvenc");
+        assert_eq!(hevc.len(), 1);
+        assert!(has(&hevc[0], c"profile", c"main"));
+        assert!(has(&hevc[0], c"forced-idr", c"1"));
+        // Everything but the profile is H.264's: the same latency tuning.
+        let rest = |set: &OptionSet| -> Vec<_> {
+            set.options
+                .iter()
+                .filter(|(k, _)| *k != c"profile")
+                .copied()
+                .collect()
+        };
+        assert_eq!(rest(&hevc[0]), rest(&option_sets("h264_nvenc")[0]));
     }
 
     #[test]

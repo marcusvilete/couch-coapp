@@ -1,6 +1,8 @@
 //! `couch-cli capture-test`: the host-side pipeline without a network.
 //! Captures a window, encodes it, decodes it again and reads the latency
-//! clock's barcode, reporting how long each stage takes.
+//! clock's barcode, reporting how long each stage takes. With `--psnr`, also
+//! how close each decoded picture is to what was captured (M12c: H.264
+//! against HEVC at the same bitrate).
 
 use std::{
     fs::File,
@@ -12,8 +14,8 @@ use std::{
 use anyhow::{Context, bail};
 use couch_codec_ffmpeg::{FfmpegDecoder, FfmpegEncoder};
 use couch_media::{
-    CaptureEvent, Capturer, Codec, DecodedFrame, EncoderConfig, EncoderInput, VideoDecoder,
-    VideoEncoder, barcode, clock::LATENCY_CLOCK_TITLE,
+    BgraFrame, CaptureEvent, Capturer, Codec, DecodedFrame, EncoderConfig, EncoderInput, Nv12Frame,
+    VideoDecoder, VideoEncoder, barcode, clock::LATENCY_CLOCK_TITLE,
 };
 use couch_platform_win::{
     capture::{CaptureOptions, CaptureSource, FrameOutput, WgcCapturer},
@@ -28,6 +30,9 @@ pub struct Args {
     pub secs: u64,
     pub fps: u32,
     pub bitrate_mbps: u32,
+    pub codec: Codec,
+    /// Measure each decoded picture against the captured one.
+    pub psnr: bool,
     pub out: Option<PathBuf>,
 }
 
@@ -56,14 +61,14 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         }
     };
     let config = EncoderConfig {
-        codec: Codec::H264,
+        codec: args.codec,
         width: first.width,
         height: first.height,
         fps: args.fps,
         bitrate_bps: args.bitrate_mbps * 1_000_000,
     };
     let mut encoder = FfmpegEncoder::open_best(config)?;
-    let mut decoder = FfmpegDecoder::new(true)?;
+    let mut decoder = FfmpegDecoder::new(config.codec, true)?;
     let mut out = args.out.as_ref().map(File::create).transpose()?;
     println!(
         "capturing {}x{} with {}, decoding with {}",
@@ -82,6 +87,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let mut decode = Samples::default();
     let mut clock_to_capture = Samples::default();
     let mut clock_to_decoded = Samples::default();
+    let mut psnr = Samples::default();
     let (mut frames, mut bytes) = (0u64, 0u64);
     let mut barcode_at: Option<(u32, u32)> = None;
     let started = Instant::now();
@@ -119,6 +125,9 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                 };
                 let done = clock::now();
                 decode.push(ms(done.0, encoded.0));
+                if args.psnr {
+                    psnr.push(luma_psnr(&frame, &nv12));
+                }
                 let size = (nv12.width, nv12.height);
                 let stride = nv12.y_stride as usize;
                 let value = match barcode_at {
@@ -149,10 +158,52 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     println!("decode              {}", decode.summary_ms());
     println!("clock -> captured   {}", clock_to_capture.summary_ms());
     println!("clock -> decoded    {}", clock_to_decoded.summary_ms());
+    if args.psnr {
+        // Over 99 dB counts as identical (a still picture).
+        println!(
+            "PSNR (luma, dB)     p5 {:.2}  p50 {:.2}  min {:.2}  (n={})",
+            psnr.percentile(5.0).unwrap_or(f64::NAN),
+            psnr.percentile(50.0).unwrap_or(f64::NAN),
+            psnr.percentile(0.0).unwrap_or(f64::NAN),
+            psnr.len()
+        );
+    }
     if let Some(path) = args.out {
         println!("wrote {}", path.display());
     }
     Ok(())
+}
+
+/// Peak signal-to-noise ratio of the decoded luma against the captured
+/// picture's, in dB (capped at 99 for identical pictures). The captured BGRA
+/// becomes luma as the encoder did, with the matrix the stream declares
+/// (NVENC's BT.601, the others' BT.709), limited range (`Y = 16 + 219 x
+/// (wr R + wg G + wb B) / 255`), so rounding alone keeps it below about
+/// 50 dB; the comparison between codecs is what counts.
+fn luma_psnr(source: &BgraFrame, decoded: &Nv12Frame) -> f64 {
+    let [wr, wg, wb] = decoded.matrix.luma_weights();
+    let (w, h) = (
+        source.width.min(decoded.width) as usize,
+        source.height.min(decoded.height) as usize,
+    );
+    let mut sum = 0.0f64;
+    for y in 0..h {
+        let src = &source.data[y * source.stride as usize..][..w * 4];
+        let dec = &decoded.y[y * decoded.y_stride as usize..][..w];
+        let (pixels, _) = src.as_chunks::<4>();
+        for (px, &out) in pixels.iter().zip(dec) {
+            let (b, g, r) = (f64::from(px[0]), f64::from(px[1]), f64::from(px[2]));
+            let luma = 16.0 + 219.0 * (wr * r + wg * g + wb * b) / 255.0;
+            let d = luma - f64::from(out);
+            sum += d * d;
+        }
+    }
+    let mse = sum / (w * h) as f64;
+    if mse < 1e-10 {
+        99.0
+    } else {
+        (10.0 * (255.0 * 255.0 / mse).log10()).min(99.0)
+    }
 }
 
 fn ms(later_us: u64, earlier_us: u64) -> f64 {

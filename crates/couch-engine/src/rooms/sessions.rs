@@ -56,6 +56,9 @@ struct Hosting {
     /// The connection each viewer joined on. When it closes, the viewer
     /// has gone: its stream and input were bound to it.
     viewer_conns: BTreeMap<MemberId, ConnId>,
+    /// What each viewer said it decodes when it joined (`couch_proto::codec`
+    /// bits, M12c).
+    viewer_codecs: BTreeMap<MemberId, u8>,
     /// The host keys' hook, in place while the stream runs, with the panic
     /// key it listens for ("Ctrl+Alt+Shift+Backspace"); `None` if it
     /// couldn't be installed.
@@ -351,9 +354,10 @@ impl Actor {
         w.attempt += 1;
         let attempt = w.attempt;
         tracing::info!(room = ?room, "the host is back; joining its stream again");
+        let codecs = self.backend.decodes();
         self.send(
             conn,
-            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session })),
+            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session, codecs })),
         );
         self.join_timer(session, attempt);
         self.send_hud();
@@ -397,6 +401,11 @@ impl Actor {
                     if stale {
                         let fx = self.hosting_mut().map(|h| h.session.leave(peer));
                         self.apply_session(room, fx.unwrap_or_default(), now);
+                    }
+                    // What its PC decodes: the host picks its stream's
+                    // codec from it (M12c).
+                    if let Some(h) = self.hosting_mut() {
+                        h.viewer_codecs.insert(peer, m.codecs);
                     }
                     let fx = self.hosting_mut().map(|h| h.session.join(peer));
                     self.apply_session(room, fx.unwrap_or_default(), now);
@@ -665,8 +674,10 @@ impl Actor {
                     let started = conn.and_then(|id| {
                         let c = self.conns.get(&id)?;
                         let h = self.sessions.hosting.as_ref()?;
+                        let codecs = h.viewer_codecs.get(&member).copied().unwrap_or(0);
                         h.stream.as_ref()?.add_viewer(
                             member,
+                            codecs,
                             c.conn.clone(),
                             &c.datagrams,
                             &c.streams,
@@ -696,6 +707,7 @@ impl Actor {
                 SessionEffect::StopViewer(member) => {
                     if let Some(h) = self.sessions.hosting.as_mut() {
                         h.viewer_conns.remove(&member);
+                        h.viewer_codecs.remove(&member);
                         if let Some(stream) = &h.stream {
                             stream.remove_viewer(member);
                         }
@@ -877,6 +889,7 @@ impl Actor {
             session: host_session,
             stream: None,
             viewer_conns: BTreeMap::new(),
+            viewer_codecs: BTreeMap::new(),
             panic_key: None,
             answer_keys: None,
             first: None,
@@ -1341,9 +1354,10 @@ impl Actor {
             }
         });
         self.join_timer(session, 0);
+        let codecs = self.backend.decodes();
         self.send(
             conn,
-            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session })),
+            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session, codecs })),
         );
         self.sessions.watching = Some(Watching {
             room,

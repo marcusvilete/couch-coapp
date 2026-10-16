@@ -477,7 +477,10 @@ mod tests {
                 session,
                 reason: EndReason::SourceLost,
             }),
-            ControlMessage::SessionJoin(SessionJoin { session }),
+            ControlMessage::SessionJoin(SessionJoin {
+                session,
+                codecs: crate::codec::DECODES_H264 | crate::codec::DECODES_HEVC,
+            }),
             ControlMessage::SessionJoinReply(SessionJoinReply {
                 session,
                 result: JoinResult::Full,

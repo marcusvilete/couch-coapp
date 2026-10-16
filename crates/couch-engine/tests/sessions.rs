@@ -29,7 +29,7 @@ use couch_input::{
     shortcuts::Shortcut,
 };
 use couch_media::{
-    AudioSource, Capturer, EncoderConfig, GpuFrame, MediaError, VideoEncoder,
+    AudioSource, Capturer, Codec, EncoderConfig, GpuFrame, MediaError, VideoEncoder,
     audio::ToneSource,
     clock::{Clock, ProcessClock},
 };
@@ -86,6 +86,12 @@ struct Fake {
     capture_fps: AtomicU32,
     /// Every capture started, as asked for.
     captures: Mutex<Vec<CaptureRequest>>,
+    /// This PC decodes HEVC in hardware (M12c), for watching.
+    decodes_hevc: AtomicBool,
+    /// HEVC encoders fail to open (another GPU's, or a broken driver).
+    hevc_fails: AtomicBool,
+    /// The codec of every encoder opened, in order.
+    codecs: Mutex<Vec<Codec>>,
 }
 
 /// GPU frames on the fake machine: off unless a scenario turns them on.
@@ -328,9 +334,13 @@ impl Backend for Fake {
 
     fn encoder(
         &self,
-        _config: EncoderConfig,
+        config: EncoderConfig,
         gpu: Option<&GpuFrame>,
     ) -> Result<Box<dyn VideoEncoder>, MediaError> {
+        self.codecs.lock().unwrap().push(config.codec);
+        if config.codec == Codec::Hevc && self.hevc_fails.load(Ordering::SeqCst) {
+            return Err(MediaError::Unsupported("no HEVC encoder here".into()));
+        }
         let gpu_input = gpu.is_some() && self.gpu.encoders_take_it.load(Ordering::SeqCst);
         self.gpu
             .opened
@@ -346,6 +356,14 @@ impl Backend for Fake {
 
     fn audio(&self, _kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
         Ok(Box::new(ToneSource::new(self.clock.clone())))
+    }
+
+    fn decodes(&self) -> u8 {
+        if self.decodes_hevc.load(Ordering::SeqCst) {
+            Codec::H264.bit() | Codec::Hevc.bit()
+        } else {
+            Codec::H264.bit()
+        }
     }
 
     fn plug_pad(&self, _real_ids: bool) -> Result<Box<dyn VirtualPad>, InputError> {
@@ -466,6 +484,8 @@ struct FakeViewer {
     /// The kinds of the first frames from the main process, in order.
     first_kinds: Arc<Mutex<Vec<u8>>>,
     shortcuts: Arc<Mutex<Option<ShortcutKeys>>>,
+    /// The codec of the last frame received (`couch_proto::codec`).
+    codec: Arc<AtomicU32>,
 }
 
 impl FakeViewer {
@@ -498,6 +518,7 @@ impl FakeViewer {
                                     v.first_was_key.lock().unwrap().get_or_insert(header.keyframe);
                                     v.frames.fetch_add(1, Ordering::SeqCst);
                                     v.keyframes.fetch_add(u64::from(header.keyframe), Ordering::SeqCst);
+                                    v.codec.store(u32::from(header.codec), Ordering::SeqCst);
                                 }
                             }
                             couch_proto::ipc::kinds::SEAT => {
@@ -587,6 +608,11 @@ impl FakeViewer {
 
     fn keyframes(&self) -> u64 {
         self.keyframes.load(Ordering::SeqCst)
+    }
+
+    /// The codec frames come in, once any came.
+    fn codec(&self) -> Option<Codec> {
+        Codec::from_wire(self.codec.load(Ordering::SeqCst) as u8)
     }
 
     fn holding(&self) -> bool {
@@ -1624,6 +1650,116 @@ async fn a_capture_faster_than_the_stream_is_paced_to_its_rate() {
             .unwrap()
             .iter()
             .all(|r| r.paced && r.fps == 30)
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M12c: each viewer gets the best codec it decodes. B decodes HEVC and gets
+/// it; C doesn't and gets H.264, in the same session.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_viewer_gets_the_best_codec_it_decodes() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    a.fake.gpu.encoders_take_it.store(true, Ordering::SeqCst);
+    b.fake.decodes_hevc.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    wait("frames in each viewer's codec", || {
+        b_window.codec() == Some(Codec::Hevc) && c_window.codec() == Some(Codec::H264)
+    })
+    .await;
+    assert_eq!(*a.fake.codecs.lock().unwrap(), [Codec::Hevc, Codec::H264]);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M12c: a host whose HEVC encoder won't open streams H.264 to a viewer that
+/// decodes HEVC, rather than lose it; and its other viewers keep GPU frames.
+#[tokio::test(flavor = "multi_thread")]
+async fn hevc_that_wont_open_falls_back_to_h264() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let gpu = &a.fake.gpu;
+    gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    gpu.encoders_take_it.store(true, Ordering::SeqCst);
+    gpu.frames.source.store(1, Ordering::SeqCst);
+    a.fake.hevc_fails.store(true, Ordering::SeqCst);
+    b.fake.decodes_hevc.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    wait("B's frames in H.264", || {
+        b_window.codec() == Some(Codec::H264)
+    })
+    .await;
+    assert_eq!(*a.fake.codecs.lock().unwrap(), [Codec::Hevc, Codec::H264]);
+    let c_window = watching(&room, &a, &c).await;
+    wait("C's frames", || c_window.frames() > 0).await;
+    // HEVC's failure didn't turn GPU frames off: both encoders read them.
+    assert_eq!(*gpu.opened.lock().unwrap(), [Some(1), Some(1)]);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M12c: with frames in memory (a test pattern, `COUCH_HOST_ZERO_COPY=0`),
+/// HEVC isn't even tried: a viewer that decodes it gets H.264.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_hevc_with_frames_in_memory() {
+    let (mut a, mut b, mut c, room) = three().await;
+    b.fake.decodes_hevc.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    wait("B's frames", || b_window.frames() > 0).await;
+    assert_eq!(b_window.codec(), Some(Codec::H264));
+    assert_eq!(*a.fake.codecs.lock().unwrap(), [Codec::H264]);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M12c: an HEVC encoder that opens but can't read the GPU frames (another
+/// GPU's, as on a laptop) gives way to H.264 for that viewer.
+#[tokio::test(flavor = "multi_thread")]
+async fn hevc_that_cant_read_gpu_frames_gives_h264() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    b.fake.decodes_hevc.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    wait("B's frames in H.264", || {
+        b_window.codec() == Some(Codec::H264)
+    })
+    .await;
+    assert_eq!(*a.fake.codecs.lock().unwrap(), [Codec::Hevc, Codec::H264]);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M12c: HEVC failing mid-stream gives that viewer H.264 from a keyframe,
+/// and it keeps watching (here GPU encoding keeps failing, so H.264 then
+/// goes to frames in memory, as in M9b).
+#[tokio::test(flavor = "multi_thread")]
+async fn hevc_failing_mid_stream_falls_back_to_h264() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let gpu = &a.fake.gpu;
+    gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    gpu.encoders_take_it.store(true, Ordering::SeqCst);
+    b.fake.decodes_hevc.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    wait("B's frames in HEVC", || {
+        b_window.codec() == Some(Codec::Hevc)
+    })
+    .await;
+    let keyframes = b_window.keyframes();
+    gpu.fail.store(true, Ordering::SeqCst);
+    wait("B's frames in H.264", || {
+        b_window.codec() == Some(Codec::H264)
+    })
+    .await;
+    let frames = b_window.frames();
+    wait("B still watching", || b_window.frames() > frames + 10).await;
+    assert!(
+        b_window.keyframes() > keyframes,
+        "started again from a keyframe"
+    );
+    assert_eq!(
+        a.fake.codecs.lock().unwrap()[..2],
+        [Codec::Hevc, Codec::H264]
     );
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

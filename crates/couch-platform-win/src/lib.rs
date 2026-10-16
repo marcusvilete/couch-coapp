@@ -29,6 +29,7 @@ pub mod process;
 pub mod sendinput;
 pub mod timer;
 pub mod top_windows;
+pub mod video_caps;
 pub mod vigem;
 pub mod virtual_pads;
 pub mod wgc;

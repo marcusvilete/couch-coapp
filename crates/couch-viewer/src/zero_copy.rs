@@ -34,6 +34,8 @@ use windows::{
 
 /// The `ID3D12Device` under a wgpu device on the DX12 backend, with a
 /// reference of its own, for the decoder thread. Released if never used.
+/// A clone is another reference (for a decoder reopened for another codec).
+#[derive(Clone)]
 pub struct DecoderDevice(ID3D12Device);
 
 impl DecoderDevice {
@@ -110,9 +112,12 @@ impl FrameImporter {
             .clone();
         // SAFETY: a plain query of the resource's description.
         let desc = unsafe { resource.GetDesc() };
-        if (desc.Width, desc.Height) != (u64::from(width), height) {
+        // The resource may be larger than the picture (an HEVC pool rounded
+        // up, M12c); only the picture is copied.
+        let fits = u32::try_from(desc.Width).is_ok_and(|w| w >= width) && desc.Height >= height;
+        if !fits {
             bail!(
-                "decoded resource is {}x{}, the frame {width}x{height}",
+                "decoded resource is {}x{}, smaller than the frame {width}x{height}",
                 desc.Width,
                 desc.Height
             );
@@ -122,21 +127,27 @@ impl FrameImporter {
             height,
             depth_or_array_layers: 1,
         };
-        // SAFETY: the resource is a 2D NV12 texture of `size` on this device
-        // (FFmpeg's decoder was given wgpu's device), one mip, one sample.
+        let resource_size = wgpu::Extent3d {
+            width: desc.Width as u32,
+            height: desc.Height,
+            depth_or_array_layers: 1,
+        };
+        // SAFETY: the resource is a 2D NV12 texture of `resource_size` on
+        // this device (FFmpeg's decoder was given wgpu's device), one mip,
+        // one sample.
         let hal = unsafe {
             dx12::Device::texture_from_raw(
                 resource,
                 wgpu::TextureFormat::NV12,
                 wgpu::TextureDimension::D2,
-                size,
+                resource_size,
                 1,
                 1,
             )
         };
         let desc = wgpu::TextureDescriptor {
             label: Some("decoded"),
-            size,
+            size: resource_size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -399,10 +410,12 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    use couch_codec_ffmpeg::{DecoderKind, FfmpegDecoder, FfmpegEncoder};
+    use couch_codec_ffmpeg::{
+        DecoderKind, FfmpegDecoder, FfmpegEncoder, encoder::gpu_input_encoder,
+    };
     use couch_media::{
         Codec, DecodedFrame, EncoderConfig, EncoderInput, Nv12Frame, VideoDecoder, VideoEncoder,
-        barcode,
+        YuvMatrix, barcode,
         clock::ProcessClock,
         testpattern::{BARCODE_CELL, BARCODE_X, BARCODE_Y, TestPattern},
     };
@@ -523,9 +536,9 @@ mod tests {
         out
     }
 
-    fn config(width: u32, height: u32) -> EncoderConfig {
+    fn config(codec: Codec, width: u32, height: u32) -> EncoderConfig {
         EncoderConfig {
-            codec: Codec::H264,
+            codec,
             width,
             height,
             fps: 60,
@@ -541,8 +554,19 @@ mod tests {
     #[test]
     #[ignore = "needs a GPU with D3D12 video decoding and NVENC"]
     fn d3d12va_frames_match_d3d11va() {
+        frames_match(Codec::H264);
+    }
+
+    /// The same for HEVC (M12c).
+    #[test]
+    #[ignore = "needs a GPU with D3D12 video decoding and NVENC"]
+    fn hevc_d3d12va_frames_match_d3d11va() {
+        frames_match(Codec::Hevc);
+    }
+
+    fn frames_match(codec: Codec) {
         let gpu = headless();
-        let mut d3d11 = FfmpegDecoder::new(true).expect("D3D11VA decoder");
+        let mut d3d11 = FfmpegDecoder::new(codec, true).expect("D3D11VA decoder");
         assert_eq!(d3d11.kind(), DecoderKind::D3d11);
         let raw_device = unsafe { gpu.device.as_hal::<Dx12>() }
             .unwrap()
@@ -554,7 +578,7 @@ mod tests {
         // included, each hold a reference too.
         let refs_before = com_refs(raw_device);
         let device = DecoderDevice::of(&gpu.device).expect("a D3D12 device");
-        drop(FfmpegDecoder::new_d3d12(device.into_raw()).expect("D3D12VA decoder"));
+        drop(FfmpegDecoder::new_d3d12(codec, device.into_raw()).expect("D3D12VA decoder"));
         let refs_after = com_refs(raw_device);
         eprintln!("device references: {refs_before} before a decoder, {refs_after} after");
         assert_eq!(
@@ -562,15 +586,19 @@ mod tests {
             "the decoder leaked a device reference"
         );
         let device = DecoderDevice::of(&gpu.device).expect("a D3D12 device");
-        let mut d3d12 = FfmpegDecoder::new_d3d12(device.into_raw()).expect("D3D12VA decoder");
+        let mut d3d12 =
+            FfmpegDecoder::new_d3d12(codec, device.into_raw()).expect("D3D12VA decoder");
         let mut importer = FrameImporter::new();
         let mut strips = BarcodeStrips::default();
         let clock = Arc::new(ProcessClock::new());
         let (mut compared, mut different, mut barcodes, mut most_held) = (0, 0usize, 0, 0);
         let mut held: VecDeque<(GpuNv12Frame, Nv12Frame)> = VecDeque::new();
 
-        for (w, h) in [(1280, 720), (1920, 1080)] {
-            let mut encoder = FfmpegEncoder::open("h264_nvenc", config(w, h)).expect("NVENC");
+        // 720 and 1070 high: sizes D3D12VA couldn't decode as HEVC until
+        // its pool was rounded up (M12c; 1682x1070 is a real game window).
+        for (w, h) in [(1280, 720), (1920, 1080), (1682, 1070)] {
+            let mut encoder =
+                FfmpegEncoder::open(gpu_input_encoder(codec), config(codec, w, h)).expect("NVENC");
             let mut pattern = TestPattern::new(w, h, 60, clock.clone());
             let luma = plane_texture(&gpu.device, wgpu::TextureFormat::R8Unorm, w, h);
             let chroma = plane_texture(&gpu.device, wgpu::TextureFormat::Rg8Unorm, w / 2, h / 2);
@@ -589,6 +617,11 @@ mod tests {
                         _ => panic!("D3D12VA gave no GPU frame"),
                     };
                     assert_eq!((on_gpu.width, on_gpu.height), (w, h));
+                    // NVENC's matrix, declared and read on both paths.
+                    assert_eq!(
+                        (on_gpu.matrix, cpu.matrix),
+                        (YuvMatrix::Bt601, YuvMatrix::Bt601)
+                    );
                     held.push_back((on_gpu, cpu));
                     most_held = most_held.max(held.len() + importer.held());
                     if held.len() < 4 {

@@ -4,15 +4,15 @@
 
 use std::{any::Any, process::Stdio, sync::Arc, time::Duration};
 
-use couch_codec_ffmpeg::{FfmpegEncoder, encoder::GPU_INPUT_ENCODER};
+use couch_codec_ffmpeg::{FfmpegEncoder, encoder::gpu_input_encoder};
 use couch_input::{
     DEV_PAD_IDS, HidUsage, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
     local::{ControllerIds, LocalPads},
     shortcuts::Shortcut,
 };
 use couch_media::{
-    AudioSource, Capturer, EncoderConfig, GpuFrame, MediaError, VideoEncoder, audio::ToneSource,
-    clock::Clock, testpattern::TestPattern,
+    AudioSource, Capturer, Codec, EncoderConfig, GpuFrame, MediaError, VideoEncoder,
+    audio::ToneSource, clock::Clock, testpattern::TestPattern,
 };
 use couch_platform_win::{
     audio::{LoopbackCapture, LoopbackTarget},
@@ -181,8 +181,9 @@ impl Backend for WindowsBackend {
                 // Not NVIDIA, or the capture runs on another GPU (a laptop's
                 // integrated graphics): frames go through memory, as before M9b.
                 Err(e) => tracing::info!(
-                    "{GPU_INPUT_ENCODER} can't read the captured frames on the GPU ({e}); \
-                     copying them to memory"
+                    "{} can't read the captured frames on the GPU ({e}); \
+                     copying them to memory",
+                    gpu_input_encoder(config.codec)
                 ),
             }
         }
@@ -353,6 +354,17 @@ impl Backend for WindowsBackend {
             width: area.width,
             height: area.height,
         })
+    }
+
+    fn decodes(&self) -> u8 {
+        let h264 = Codec::H264.bit();
+        // `COUCH_VIEWER_HEVC=0`: H.264 only, for measuring.
+        let refused = std::env::var("COUCH_VIEWER_HEVC").is_ok_and(|v| v.trim() == "0");
+        if !refused && couch_platform_win::video_caps::hevc_decode() {
+            h264 | Codec::Hevc.bit()
+        } else {
+            h264
+        }
     }
 
     fn host_keys(

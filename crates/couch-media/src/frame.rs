@@ -60,6 +60,27 @@ impl std::fmt::Debug for BgraFrame {
     }
 }
 
+/// The matrix a decoded picture's YUV was made with, as its stream declares
+/// (limited range either way). FFmpeg's NVENC wrapper converts RGB with
+/// BT.601 whatever colorspace is asked for; our converter for the other
+/// encoders uses BT.709.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum YuvMatrix {
+    Bt601,
+    #[default]
+    Bt709,
+}
+
+impl YuvMatrix {
+    /// Luma's weights for R, G and B.
+    pub const fn luma_weights(self) -> [f64; 3] {
+        match self {
+            Self::Bt601 => [0.299, 0.587, 0.114],
+            Self::Bt709 => [0.2126, 0.7152, 0.0722],
+        }
+    }
+}
+
 /// A decoded frame in system memory: a full-resolution Y plane followed by
 /// an interleaved UV plane at half resolution.
 #[derive(Clone)]
@@ -70,6 +91,7 @@ pub struct Nv12Frame {
     pub uv_stride: u32,
     pub y: Bytes,
     pub uv: Bytes,
+    pub matrix: YuvMatrix,
     pub captured_at: Micros,
 }
 
@@ -258,6 +280,7 @@ pub trait DecodedSurface: Send {
 pub struct GpuNv12Frame {
     pub width: u32,
     pub height: u32,
+    pub matrix: YuvMatrix,
     pub captured_at: Micros,
     pub surface: Box<dyn DecodedSurface>,
 }
@@ -284,9 +307,37 @@ pub enum DecodedFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Codec {
     H264,
+    /// HEVC (H.265) Main, 8-bit (M12c): a better picture at the same
+    /// bitrate. Only on NVIDIA hosts, for viewers that decode it in
+    /// hardware.
+    Hevc,
 }
 
-/// One encoded access unit (Annex-B H.264 for [`Codec::H264`]).
+impl Codec {
+    /// Its number on the wire and the viewer's pipe (`couch_proto::codec`;
+    /// `couch-net`'s tests check they agree).
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::H264 => 1,
+            Self::Hevc => 2,
+        }
+    }
+
+    pub const fn from_wire(byte: u8) -> Option<Self> {
+        match byte {
+            1 => Some(Self::H264),
+            2 => Some(Self::Hevc),
+            _ => None,
+        }
+    }
+
+    /// Its bit in what a viewer decodes (`couch_proto::codec::DECODES_*`).
+    pub const fn bit(self) -> u8 {
+        1 << (self.wire() - 1)
+    }
+}
+
+/// One encoded access unit (Annex-B, of the stream's [`Codec`]).
 #[derive(Debug, Clone)]
 pub struct EncodedFrame {
     pub data: Bytes,

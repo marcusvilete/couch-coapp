@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 7;
+pub const IPC_VERSION: u16 = 8;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -60,6 +60,9 @@ pub struct VideoFrameHeader {
     pub epoch: u32,
     pub seq: u32,
     pub keyframe: bool,
+    /// The stream's codec ([`crate::codec`]): the viewer opens a decoder
+    /// for it, and reopens at a keyframe of another (M12c).
+    pub codec: u8,
     /// Capture time on the host's clock.
     pub capture_us: u64,
     pub encode_us: u32,
@@ -68,7 +71,7 @@ pub struct VideoFrameHeader {
 }
 
 impl VideoFrameHeader {
-    pub const LEN: usize = 4 + 4 + 1 + 8 + 4 + 8;
+    pub const LEN: usize = 4 + 4 + 1 + 1 + 8 + 4 + 8;
 
     /// Appends the header and then `access_unit`, forming a complete payload.
     pub fn write(&self, access_unit: &[u8], out: &mut Vec<u8>) {
@@ -77,6 +80,7 @@ impl VideoFrameHeader {
             .u32(self.epoch)
             .u32(self.seq)
             .u8(u8::from(self.keyframe))
+            .u8(self.codec)
             .u64(self.capture_us)
             .u32(self.encode_us)
             .u64(self.arrived_us);
@@ -90,6 +94,7 @@ impl VideoFrameHeader {
             epoch: r.u32()?,
             seq: r.u32()?,
             keyframe: r.u8()? != 0,
+            codec: r.u8()?,
             capture_us: r.u64()?,
             encode_us: r.u32()?,
             arrived_us: r.u64()?,
@@ -452,12 +457,14 @@ mod tests {
             epoch: 2,
             seq: 77,
             keyframe: true,
+            codec: crate::codec::HEVC,
             capture_us: 1_000,
             encode_us: 1_500,
             arrived_us: 9_000,
         };
         let mut payload = Vec::new();
         header.write(b"annex-b", &mut payload);
+        assert_eq!(payload.len(), VideoFrameHeader::LEN + 7);
         assert_eq!(
             VideoFrameHeader::read(&payload),
             Some((header, &b"annex-b"[..]))

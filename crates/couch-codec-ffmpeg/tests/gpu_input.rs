@@ -1,12 +1,13 @@
 //! NVENC fed D3D11 textures (M9b) against NVENC fed the same frames from
 //! memory: the pictures must match, textures must come back to their pool,
-//! and a new pool must work with a reopened encoder. Needs an NVIDIA GPU.
+//! and a new pool must work with a reopened encoder. For H.264 and HEVC
+//! (M12c). Needs an NVIDIA GPU.
 
 #![cfg(all(windows, feature = "gpu-tests"))]
 
 use std::sync::Arc;
 
-use couch_codec_ffmpeg::{FfmpegDecoder, FfmpegEncoder};
+use couch_codec_ffmpeg::{FfmpegDecoder, FfmpegEncoder, encoder::gpu_input_encoder};
 use couch_media::{
     BgraFrame, Codec, DecodedFrame, EncoderConfig, EncoderInput, Nv12Frame, VideoDecoder,
     VideoEncoder, barcode,
@@ -18,9 +19,11 @@ use couch_platform_win::gpu_frames::Uploader;
 const W: u32 = 1280;
 const H: u32 = 720;
 
-fn config() -> EncoderConfig {
+const CODECS: [Codec; 2] = [Codec::H264, Codec::Hevc];
+
+fn config(codec: Codec) -> EncoderConfig {
     EncoderConfig {
-        codec: Codec::H264,
+        codec,
         width: W,
         height: H,
         fps: 60,
@@ -58,17 +61,25 @@ fn psnr(a: &Nv12Frame, b: &Nv12Frame) -> f64 {
 
 #[test]
 fn gpu_frames_encode_like_frames_from_memory() {
+    for codec in CODECS {
+        gpu_frames_encode_like_frames_from_memory_in(codec);
+    }
+}
+
+fn gpu_frames_encode_like_frames_from_memory_in(codec: Codec) {
     let mut uploader = Uploader::new(W, H).expect("D3D11 device");
     let mut pattern = TestPattern::new(W, H, 60, Arc::new(ProcessClock::new()));
     let first = pattern.render();
     let gpu_first = uploader.upload(&first).unwrap().expect("a free texture");
-    let mut gpu = FfmpegEncoder::open_gpu(config(), &gpu_first).expect("NVENC with D3D11 frames");
+    let mut gpu =
+        FfmpegEncoder::open_gpu(config(codec), &gpu_first).expect("NVENC with D3D11 frames");
     assert!(gpu.caps().gpu_input);
-    let mut cpu = FfmpegEncoder::open("h264_nvenc", config()).expect("NVENC from memory");
+    let mut cpu =
+        FfmpegEncoder::open(gpu_input_encoder(codec), config(codec)).expect("NVENC from memory");
     assert!(!cpu.caps().gpu_input);
     let (mut dec_gpu, mut dec_cpu) = (
-        FfmpegDecoder::new(false).unwrap(),
-        FfmpegDecoder::new(false).unwrap(),
+        FfmpegDecoder::new(codec, false).unwrap(),
+        FfmpegDecoder::new(codec, false).unwrap(),
     );
 
     let (mut worst, mut barcodes) = (f64::INFINITY, 0);
@@ -105,33 +116,42 @@ fn gpu_frames_encode_like_frames_from_memory() {
         );
         barcodes += u32::from(value == Some(frame.captured_at.0 & barcode::MAX_VALUE));
     }
-    println!("GPU against memory: worst PSNR {worst:.1} dB, barcodes {barcodes}/30");
+    println!("{codec:?}, GPU against memory: worst PSNR {worst:.1} dB, barcodes {barcodes}/30");
     assert!(
         worst > 45.0,
-        "GPU and memory pictures differ: {worst:.1} dB"
+        "{codec:?}: GPU and memory pictures differ: {worst:.1} dB"
     );
-    assert!(barcodes >= 28, "barcode read in {barcodes}/30");
+    assert!(barcodes >= 28, "{codec:?}: barcode read in {barcodes}/30");
 }
 
 #[test]
 fn an_encoder_refuses_frames_from_another_pool() {
-    let mut uploader = Uploader::new(W, H).expect("D3D11 device");
-    let mut pattern = TestPattern::new(W, H, 60, Arc::new(ProcessClock::new()));
-    let first = uploader.upload(&pattern.render()).unwrap().unwrap();
-    let mut encoder = FfmpegEncoder::open_gpu(config(), &first).expect("NVENC with D3D11 frames");
-    encoder
-        .encode(EncoderInput::Gpu(&first), true)
-        .expect("encode");
-    uploader.new_pool().unwrap();
-    let other = uploader.upload(&pattern.render()).unwrap().unwrap();
-    assert!(encoder.encode(EncoderInput::Gpu(&other), false).is_err());
+    for codec in CODECS {
+        let mut uploader = Uploader::new(W, H).expect("D3D11 device");
+        let mut pattern = TestPattern::new(W, H, 60, Arc::new(ProcessClock::new()));
+        let first = uploader.upload(&pattern.render()).unwrap().unwrap();
+        let mut encoder =
+            FfmpegEncoder::open_gpu(config(codec), &first).expect("NVENC with D3D11 frames");
+        encoder
+            .encode(EncoderInput::Gpu(&first), true)
+            .expect("encode");
+        uploader.new_pool().unwrap();
+        let other = uploader.upload(&pattern.render()).unwrap().unwrap();
+        assert!(encoder.encode(EncoderInput::Gpu(&other), false).is_err());
+    }
 }
 
 #[test]
 fn textures_return_to_the_pool_and_a_new_pool_reopens_cleanly() {
+    for codec in CODECS {
+        textures_return_to_the_pool_in(codec);
+    }
+}
+
+fn textures_return_to_the_pool_in(codec: Codec) {
     let mut uploader = Uploader::new(W, H).expect("D3D11 device");
     let mut pattern = TestPattern::new(W, H, 60, Arc::new(ProcessClock::new()));
-    let mut decoder = FfmpegDecoder::new(false).unwrap();
+    let mut decoder = FfmpegDecoder::new(codec, false).unwrap();
     let mut encoder: Option<(u64, FfmpegEncoder)> = None;
     for i in 0..300 {
         if i == 150 {
@@ -146,7 +166,7 @@ fn textures_return_to_the_pool_and_a_new_pool_reopens_cleanly() {
         if reopen {
             encoder = Some((
                 on_gpu.source,
-                FfmpegEncoder::open_gpu(config(), &on_gpu).expect("NVENC with D3D11 frames"),
+                FfmpegEncoder::open_gpu(config(codec), &on_gpu).expect("NVENC with D3D11 frames"),
             ));
         }
         let (_, enc) = encoder.as_mut().unwrap();

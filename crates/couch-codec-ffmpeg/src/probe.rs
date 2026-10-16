@@ -15,6 +15,10 @@ pub const H264_ENCODERS: &[&str] = &[
     "libopenh264",
 ];
 
+/// HEVC encoders worth trying (M12c): NVIDIA's only, for now. AMD's and
+/// Intel's (`hevc_amf`, `hevc_qsv`) wait for testing on their hardware.
+pub const HEVC_ENCODERS: &[&str] = &["hevc_nvenc"];
+
 #[derive(Debug, Clone)]
 pub struct EncoderProbe {
     pub name: &'static str,
@@ -37,7 +41,7 @@ impl FfmpegProbe {
     pub fn best_hardware_encoder(&self) -> Option<&'static str> {
         self.encoders
             .iter()
-            .find(|e| e.hardware && e.result.is_ok())
+            .find(|e| e.hardware && e.result.is_ok() && H264_ENCODERS.contains(&e.name))
             .map(|e| e.name)
     }
 }
@@ -51,10 +55,12 @@ pub fn probe() -> FfmpegProbe {
         .into_owned();
     let encoders = H264_ENCODERS
         .iter()
-        .map(|&name| EncoderProbe {
+        .map(|&name| (Codec::H264, name))
+        .chain(HEVC_ENCODERS.iter().map(|&name| (Codec::Hevc, name)))
+        .map(|(codec, name)| EncoderProbe {
             name,
             hardware: name != "libopenh264",
-            result: try_open_encoder(name),
+            result: try_open_encoder(codec, name),
         })
         .collect();
     let d3d11va = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_D3D11VA, None, None, 0)
@@ -71,9 +77,9 @@ pub fn probe() -> FfmpegProbe {
 
 /// Opens `name` exactly as a stream would (`FfmpegEncoder::open`, with its
 /// option sets) at 1080p60, and says which option set it took.
-fn try_open_encoder(name: &str) -> Result<String, String> {
+fn try_open_encoder(codec: Codec, name: &str) -> Result<String, String> {
     let config = EncoderConfig {
-        codec: Codec::H264,
+        codec,
         width: 1920,
         height: 1080,
         fps: 60,

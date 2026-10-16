@@ -74,6 +74,10 @@ pub struct Args {
     pub gpu_load: Option<u32>,
     /// The host's pacing trace (`host --pacing-trace`).
     pub pacing_trace: Option<PathBuf>,
+    /// H.264 for every viewer (`COUCH_HOST_CODEC=h264` for the host), as
+    /// the gates need: HEVC on the clock sends so little that throttles
+    /// never touch it (M12c).
+    pub h264: bool,
     pub net: NetArgs,
 }
 
@@ -295,6 +299,9 @@ pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
     }
     if let Some(trace) = &args.pacing_trace {
         host.arg("--pacing-trace").arg(trace);
+    }
+    if args.h264 {
+        host.env("COUCH_HOST_CODEC", "h264");
     }
     let mut host = host
         .stdout(Stdio::piped())
