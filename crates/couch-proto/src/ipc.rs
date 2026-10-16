@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 8;
+pub const IPC_VERSION: u16 = 9;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -234,6 +234,9 @@ pub struct HudState {
     /// The streamed window is in front on the host. While it isn't, keyboard
     /// and mouse don't reach the game, and many games ignore controllers.
     pub game_in_front: bool,
+    /// Whether anything is streamed (M19). While not, the window shows black
+    /// and says so; seats stay, and input is held off on the host.
+    pub stream: crate::session::StreamState,
     /// A short line to show for a few seconds, such as "request declined";
     /// empty for none.
     pub note: String,
@@ -557,6 +560,7 @@ mod tests {
             viewers: 3,
             control_paused: false,
             game_in_front: false,
+            stream: crate::session::StreamState::Stopped(crate::session::EndReason::GameExited),
             note: "request declined".into(),
         };
         assert_eq!(from_payload(&to_payload(&hud)), Some(hud));

@@ -57,6 +57,9 @@ enum WriterCmd {
     },
     /// Reset the current epoch's stream with this code and stop.
     End(u32),
+    /// Reset the current epoch's stream with this code; a new epoch may
+    /// follow.
+    EndEpoch(u32),
 }
 
 /// Host side of one viewer's video.
@@ -117,6 +120,19 @@ impl HostVideo {
         let _ = self.commands.send(WriterCmd::End(code));
         // Abort a write still blocked on the stream.
         self.epoch_tx.send_replace(u32::MAX);
+    }
+
+    /// Ends the current epoch with `code` (`reset_code::STREAM_END`: the host
+    /// stopped streaming, the session goes on, M19) but keeps sending: the
+    /// next [`VideoSender::start_epoch`] counts on, so the viewer, which
+    /// drops older epochs, takes it. Nothing without a current epoch.
+    pub fn end_epoch(&mut self, code: u32) {
+        if self.epoch.take().is_none() {
+            return;
+        }
+        let _ = self.commands.send(WriterCmd::EndEpoch(code));
+        // Abort a write still blocked on the epoch's stream.
+        self.epoch_tx.send_replace(0);
     }
 }
 
@@ -232,6 +248,11 @@ async fn write_video(
                     let _ = s.reset(VarInt::from_u32(code));
                 }
                 return;
+            }
+            WriterCmd::EndEpoch(code) => {
+                if let Some((_, mut s)) = stream.take() {
+                    let _ = s.reset(VarInt::from_u32(code));
+                }
             }
         }
     }

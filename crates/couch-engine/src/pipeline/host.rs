@@ -2,6 +2,14 @@
 //! one sound capture sent to every viewer, and one seat router taking every
 //! viewer's input.
 //!
+//! **Two levels** (M19). The session ([`HostPipeline`]) owns the pads, the
+//! host's controller and its hiding, the input task and the viewers. Streams
+//! start and stop inside it ([`HostPipeline::start_stream`]): each has its
+//! own source, frame rate, rates, capture and sound. While nothing is
+//! streamed, viewers keep their seats but their input is held off (the
+//! router's hold); each viewer's video keeps counting epochs, so the next
+//! stream is a new epoch on it.
+//!
 //! Threads and tasks:
 //! - **capture**, a thread that runs while anyone watches. It paces frames
 //!   to the stream's rate (M9d, [`Pacer`]) and hands each to every viewer's
@@ -143,14 +151,9 @@ impl Default for Rates {
 /// A trace writer's clock for the netem link (`couch-cli host --netem`).
 pub type NetemElapsed = Arc<dyn Fn() -> Option<Duration> + Send + Sync>;
 
+/// The session's own choices; each stream's are [`StreamOptions`] (M19).
 #[derive(Clone)]
 pub struct HostOptions {
-    pub source: Source,
-    pub fps: u32,
-    pub rates: Rates,
-    /// The host's upload cap, split between its viewers.
-    pub upload_bps: Option<u32>,
-    pub audio: AudioChoice,
     /// The seats, by seat id; one virtual pad is plugged in for each that
     /// has one, in seat order.
     pub seats: Vec<SeatKind>,
@@ -163,9 +166,6 @@ pub struct HostOptions {
     /// One CSV of rate-controller ticks per viewer: the first viewer's at
     /// this path, the next ones numbered (`couch-cli host --rc-trace`).
     pub rc_trace: Option<PathBuf>,
-    /// A CSV of every captured frame and what pacing did with it
-    /// (`couch-cli host --pacing-trace`, M9e).
-    pub pacing_trace: Option<PathBuf>,
     /// The netem link's age, for the trace's `netem_us` column.
     pub netem_elapsed: Option<NetemElapsed>,
     /// How long a game may take to show a new window before the stream ends
@@ -175,9 +175,23 @@ pub struct HostOptions {
     pub local: Option<LocalSeat>,
 }
 
+/// One stream inside a session (M19): what to capture, and how.
+#[derive(Clone)]
+pub struct StreamOptions {
+    pub source: Source,
+    pub fps: u32,
+    pub rates: Rates,
+    /// The host's upload cap, split between its viewers.
+    pub upload_bps: Option<u32>,
+    pub audio: AudioChoice,
+    /// A CSV of every captured frame and what pacing did with it
+    /// (`couch-cli host --pacing-trace`, M9e).
+    pub pacing_trace: Option<PathBuf>,
+}
+
 /// The host's own controller, read on this PC and played through a seat like
 /// a viewer's: its input goes through the seat router as `member`'s, which
-/// [`HostStream::claim`] and [`HostStream::grant`] give a seat.
+/// [`HostPipeline::claim`] and [`HostPipeline::grant`] give a seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalSeat {
     /// The host's own id, as the router's holder.
@@ -224,14 +238,19 @@ pub enum HostEvent {
     /// The game set its rumble (`couch-cli host` prints it).
     Rumble(Rumble),
     /// The captured window or screen went away, and no new window of the
-    /// game took its place within the grace.
-    SourceClosed,
+    /// game took its place within the grace. `stream` is its number
+    /// ([`HostPipeline::start_stream`]): one already stopped says nothing.
+    SourceClosed { stream: u32 },
     /// The game's process exited.
-    GameExited,
+    GameExited { stream: u32 },
     /// The game replaced its window, and the capture follows the new one.
-    SourceFollowed { window: NativeId, at: Micros },
+    SourceFollowed {
+        stream: u32,
+        window: NativeId,
+        at: Micros,
+    },
     /// The capture failed: the stream can't go on.
-    CaptureFailed(String),
+    CaptureFailed { stream: u32, error: String },
     /// Something worth a line in a log.
     Note(String),
 }
@@ -258,12 +277,14 @@ pub struct ViewerStats {
     pub paced_replaced: u64,
 }
 
-/// One session's stream, to however many viewers. Dropping it stops
-/// everything and releases all input; [`HostStream::stop`] does it in order
-/// and waits.
-pub struct HostStream {
+/// One session's pipeline, to however many viewers, with a stream at a time
+/// inside it (M19). Dropping it stops everything and releases all input;
+/// [`HostPipeline::stop`] does it in order and waits.
+pub struct HostPipeline {
     shared: Arc<Shared>,
     input: mpsc::UnboundedSender<InputCmd>,
+    /// Stream starts and stops, run one at a time in order (M19).
+    stream_ops: mpsc::UnboundedSender<StreamOp>,
     input_task: Option<tokio::task::JoinHandle<()>>,
     housekeeping: AbortHandle,
     /// Whether the host's controller plays through a seat, or why not.
@@ -278,6 +299,31 @@ struct Shared {
     clock: Arc<dyn Clock>,
     options: HostOptions,
     events: mpsc::UnboundedSender<HostEvent>,
+    /// The stream now, if any (M19). Locked after `state`, never before.
+    stream: Mutex<Option<Arc<Stream>>>,
+    /// Streams started so far, to number them.
+    streams: AtomicU32,
+    state: Mutex<State>,
+    /// Every viewer's mailbox and flags, for the capture thread.
+    feeds: Mutex<Vec<Arc<Feed>>>,
+    /// Every viewer's connection, for the sound.
+    audio_to: Mutex<Vec<Connection>>,
+    audio_sent: AtomicU64,
+    /// The next sound packet's number, counting on across streams (M19):
+    /// viewers stay, and their jitter buffer reads a jump back as old.
+    audio_seq: AtomicU32,
+    /// Set by the panic key: grants are refused until the host allows
+    /// control again.
+    grants_paused: Arc<AtomicBool>,
+}
+
+/// One stream's own state (M19), replaced as a whole by the next stream's.
+struct Stream {
+    options: StreamOptions,
+    /// The session's streams count from 1; events name theirs.
+    number: u32,
+    /// It stopped: encoders drop what is left of it, and its frames.
+    ended: AtomicBool,
     /// The captured window: from the source, or once the capture finds it,
     /// and the game's next window when it replaces it.
     window: AtomicIsize,
@@ -285,15 +331,8 @@ struct Shared {
     game: Mutex<Option<Box<dyn GameProcess>>>,
     /// The game's other windows, which are never taken for its new one.
     known: Mutex<Known>,
-    state: Mutex<State>,
-    /// Every viewer's mailbox and flags, for the capture thread.
-    feeds: Mutex<Vec<Arc<Feed>>>,
-    /// Every viewer's connection, for the sound.
-    audio_to: Mutex<Vec<Connection>>,
-    audio_sent: AtomicU64,
-    /// Set by the panic key: grants are refused until the host allows
-    /// control again.
-    grants_paused: Arc<AtomicBool>,
+    /// Whether the window went, and what came of it.
+    source: Mutex<SourceWatch>,
     /// No encoder reads GPU frames in this stream (M9b): one opened for a
     /// GPU frame couldn't take it (not NVIDIA, or another GPU than the
     /// capture's), or one reading them failed. Encoders opened from then on
@@ -303,7 +342,7 @@ struct Shared {
     /// The pacer's counts over the stream's captures ([`ViewerStats`]).
     paced_held: AtomicU64,
     paced_replaced: AtomicU64,
-    /// `HostOptions::pacing_trace`, written by the capture thread.
+    /// `StreamOptions::pacing_trace`, written by the capture thread.
     pacing_trace: Mutex<Option<PacingTrace>>,
 }
 
@@ -319,16 +358,15 @@ struct Known {
 
 struct State {
     viewers: BTreeMap<MemberId, Viewer>,
-    /// The capture and sound threads, while anyone watches.
+    /// The stream's capture and sound threads, while anyone watches.
     running: Option<Running>,
+    /// The stream's upload cap, split between viewers.
     share: Option<UploadShare<MemberId>>,
     /// Viewers so far, to number their traces.
     traces: u32,
     /// Threads told to stop that may still be finishing: removed viewers'
-    /// encoders, a capture nobody watches any more.
+    /// encoders, a capture nobody watches any more, a stopped stream's.
     retired: Vec<JoinHandle<()>>,
-    /// Whether the window went, and what came of it.
-    source: SourceWatch,
     stopped: bool,
 }
 
@@ -339,7 +377,9 @@ struct Viewer {
 
 /// What the capture thread and a viewer's encoder thread share.
 struct Feed {
-    frames: Mailbox<VideoFrame>,
+    /// Each frame with the stream it came from: a new one starts a new
+    /// epoch, and an ended one's frames are dropped.
+    frames: Mailbox<(Arc<Stream>, VideoFrame)>,
     keyframe: AtomicBool,
     stop: AtomicBool,
     /// How its epoch stream ends: `VIEWER_REMOVED` or `SESSION_END`.
@@ -401,11 +441,56 @@ impl Shared {
         self.event(HostEvent::Note(text));
     }
 
+    /// The stream now, if any.
+    fn current(&self) -> Option<Arc<Stream>> {
+        lock(&self.stream).clone()
+    }
+
+    /// The streamed window, once known; 0 for none (or no stream).
+    fn window(&self) -> NativeId {
+        self.current()
+            .map_or(0, |s| s.window.load(Ordering::Acquire))
+    }
+}
+
+impl Stream {
+    fn new(options: StreamOptions, number: u32, replace_grace: Duration) -> Self {
+        let window = match options.source {
+            Source::Window(id) => id,
+            _ => 0,
+        };
+        // The first stream's at the path, the next ones numbered.
+        let pacing_trace = options
+            .pacing_trace
+            .as_deref()
+            .map(|path| numbered(path, number.saturating_sub(1)))
+            .and_then(|path| match PacingTrace::create(&path) {
+                Ok(trace) => Some(trace),
+                Err(e) => {
+                    tracing::warn!("no pacing trace at {}: {e}", path.display());
+                    None
+                }
+            });
+        Self {
+            options,
+            number,
+            ended: AtomicBool::new(false),
+            window: AtomicIsize::new(window),
+            game: Mutex::new(None),
+            known: Mutex::new(Known::default()),
+            source: Mutex::new(SourceWatch::new(replace_grace)),
+            gpu_input_off: AtomicBool::new(false),
+            paced_held: AtomicU64::new(0),
+            paced_replaced: AtomicU64::new(0),
+            pacing_trace: Mutex::new(pacing_trace),
+        }
+    }
+
     /// Starts watching the process behind `window`, if not yet.
-    fn watch_game(&self, window: NativeId) {
+    fn watch_game(&self, backend: &dyn Backend, window: NativeId) {
         let mut game = lock(&self.game);
         if game.is_none() {
-            *game = self.backend.game_process(window);
+            *game = backend.game_process(window);
             let windows = game.as_ref().map(|g| g.windows()).unwrap_or_default();
             *lock(&self.known) = Known {
                 known: windows.clone(),
@@ -420,7 +505,7 @@ impl Shared {
     /// a row: a game's new window, opened a moment before it closes the old
     /// one, must stay followable. Lists windows: call without holding
     /// `state`, and off the async workers.
-    fn remember_windows(&self) {
+    fn remember_windows(&self, backend: &dyn Backend) {
         let game = lock(&self.game);
         let Some(g) = game.as_ref() else {
             return;
@@ -429,7 +514,7 @@ impl Shared {
         // The captured window went meanwhile: what was listed may include
         // its replacement.
         let captured = self.window.load(Ordering::Acquire);
-        if captured == 0 || !self.backend.window_exists(captured) {
+        if captured == 0 || !backend.window_exists(captured) {
             return;
         }
         let mut k = lock(&self.known);
@@ -467,10 +552,10 @@ impl Shared {
     }
 
     /// The capture follows `window`: from now on its process is the game.
-    fn follow(&self, window: NativeId) {
+    fn follow(&self, backend: &dyn Backend, window: NativeId) {
         self.window.store(window, Ordering::Release);
         let mut game = lock(&self.game);
-        if let Some(next) = self.backend.game_process(window) {
+        if let Some(next) = backend.game_process(window) {
             *game = Some(next);
         }
         let windows = game.as_ref().map(|g| g.windows()).unwrap_or_default();
@@ -482,25 +567,27 @@ impl Shared {
 
     /// One look while the window is gone: what the source watch says, done.
     /// Returns the window to capture from now on, if the game showed one.
-    fn look_for_window(&self) -> (Verdict, Option<NativeId>) {
+    fn look_for_window(&self, shared: &Shared) -> (Verdict, Option<NativeId>) {
         let game = self.game_now();
-        let verdict = lock(&self.state).source.check(&game, Instant::now());
+        let verdict = lock(&self.source).check(&game, Instant::now());
+        let stream = self.number;
         let follow = match verdict {
             Verdict::Wait => None,
             Verdict::Follow(window) => {
-                self.follow(window);
-                self.event(HostEvent::SourceFollowed {
+                self.follow(&*shared.backend, window);
+                shared.event(HostEvent::SourceFollowed {
+                    stream,
                     window,
-                    at: self.now(),
+                    at: shared.now(),
                 });
                 Some(window)
             }
             Verdict::GameExited => {
-                self.event(HostEvent::GameExited);
+                shared.event(HostEvent::GameExited { stream });
                 None
             }
             Verdict::SourceLost => {
-                self.event(HostEvent::SourceClosed);
+                shared.event(HostEvent::SourceClosed { stream });
                 None
             }
         };
@@ -508,10 +595,11 @@ impl Shared {
     }
 }
 
-impl HostStream {
+impl HostPipeline {
     /// Plugs in a virtual pad for each seat that has one, in seat order
-    /// (which can take seconds), and starts the input task. Capture and
-    /// sound start with the first viewer.
+    /// (which can take seconds), hides the host's controller if asked, and
+    /// starts the input task, with viewers' input held off: nothing is
+    /// streamed until [`Self::start_stream`].
     pub async fn start(
         backend: Arc<dyn Backend>,
         options: HostOptions,
@@ -546,50 +634,26 @@ impl HostStream {
                 None,
             ),
         };
-        let window = match options.source {
-            Source::Window(id) => id,
-            _ => 0,
-        };
-        let share = options.upload_bps.map(UploadShare::new);
-        let source = SourceWatch::new(options.replace_grace);
-        // Once per stream, so a capture started again (a viewer joining
-        // after the last left) adds to it.
-        let pacing_trace =
-            options
-                .pacing_trace
-                .as_deref()
-                .and_then(|path| match PacingTrace::create(path) {
-                    Ok(trace) => Some(trace),
-                    Err(e) => {
-                        tracing::warn!("no pacing trace at {}: {e}", path.display());
-                        None
-                    }
-                });
         let shared = Arc::new(Shared {
             clock: backend.clock(),
             backend,
             options,
             events,
-            window: AtomicIsize::new(window),
-            game: Mutex::new(None),
-            known: Mutex::new(Known::default()),
+            stream: Mutex::new(None),
+            streams: AtomicU32::new(0),
             state: Mutex::new(State {
                 viewers: BTreeMap::new(),
                 running: None,
-                share,
+                share: None,
                 traces: 0,
                 retired: Vec::new(),
-                source,
                 stopped: false,
             }),
             feeds: Mutex::default(),
             audio_to: Mutex::default(),
             audio_sent: AtomicU64::new(0),
+            audio_seq: AtomicU32::new(0),
             grants_paused: Arc::new(AtomicBool::new(false)),
-            gpu_input_off: AtomicBool::new(false),
-            paced_held: AtomicU64::new(0),
-            paced_replaced: AtomicU64::new(0),
-            pacing_trace: Mutex::new(pacing_trace),
         });
         // By seat: a seat without a pad (a keyboard seat, or one whose pad
         // failed) drops gamepad input.
@@ -616,10 +680,6 @@ impl HostStream {
                 Vec::new()
             }
         };
-        if window != 0 {
-            let sh = shared.clone();
-            let _ = tokio::task::spawn_blocking(move || sh.watch_game(window)).await;
-        }
         let local_seat = shared.options.local;
         match (local_seat, &local_status) {
             (Some(l), Some(Ok(()))) => shared.note(format!(
@@ -645,11 +705,14 @@ impl HostStream {
         let (input, cmds) = mpsc::unbounded_channel();
         let input_task = tokio::spawn(input_loop(shared.clone(), pads, local, hidden, cmds));
         let housekeeping = tokio::spawn(housekeeping(Arc::downgrade(&shared))).abort_handle();
+        let (stream_ops_tx, ops) = mpsc::unbounded_channel();
+        tokio::spawn(stream_ops(Arc::downgrade(&shared), input.clone(), ops));
         let network = shared.backend.low_latency_network();
         (
             Self {
                 shared,
                 input,
+                stream_ops: stream_ops_tx,
                 input_task: Some(input_task),
                 housekeeping,
                 local: local_status,
@@ -672,17 +735,172 @@ impl HostStream {
         let _ = self.input.send(InputCmd::Claim { seat, member });
     }
 
-    /// The captured window, once known.
+    /// The stream's captured window, once known; `None` without a stream.
     pub fn window(&self) -> Option<NativeId> {
-        match self.shared.window.load(Ordering::Acquire) {
+        match self.shared.window() {
             0 => None,
             window => Some(window),
         }
     }
 
+    /// The stream now, by its number (M19); `None` while nothing is
+    /// streamed.
+    pub fn stream(&self) -> Option<u32> {
+        self.shared.current().map(|s| s.number)
+    }
+
+    /// Starts and stops streams from a task of its own (M19).
+    pub fn control(&self) -> StreamControl {
+        StreamControl {
+            ops: self.stream_ops.clone(),
+        }
+    }
+
+    /// See [`StreamControl::start_stream`].
+    pub async fn start_stream(&self, options: StreamOptions) -> u32 {
+        self.control().start_stream(options).await
+    }
+
+    /// See [`StreamControl::stop_stream`].
+    pub async fn stop_stream(&self) {
+        self.control().stop_stream().await;
+    }
+}
+
+/// Starts and stops a session's streams (M19), as [`HostPipeline`] does,
+/// from a task that doesn't own the pipeline. Every start and stop runs in
+/// one task of the session's, one after the other, **in the order they were
+/// asked for** (when [`Self::start_stream`] or [`Self::stop_stream`] was
+/// called, not when its future first ran): a stop asked for after a start
+/// always stops that start's stream, and two streams never start at once.
+#[derive(Clone)]
+pub struct StreamControl {
+    ops: mpsc::UnboundedSender<StreamOp>,
+}
+
+enum StreamOp {
+    Start(StreamOptions, oneshot::Sender<u32>),
+    Stop(oneshot::Sender<()>),
+}
+
+impl StreamControl {
+    /// Starts a stream in the session (M19), stopping one still running
+    /// first. Capture and sound start if anyone watches; each viewer's
+    /// encoder opens on its first frame, in the best codec it decodes, with
+    /// a new epoch and a keyframe; and viewers' input goes in again. The
+    /// future gives the stream's number, which its events carry (0 if the
+    /// session ended first). Queued at once, in order with the others.
+    pub fn start_stream(
+        &self,
+        options: StreamOptions,
+    ) -> impl Future<Output = u32> + Send + 'static {
+        let (done, number) = oneshot::channel();
+        let _ = self.ops.send(StreamOp::Start(options, done));
+        async move { number.await.unwrap_or(0) }
+    }
+
+    /// Stops the stream, the session going on (M19), in order: viewers'
+    /// input held off (what they held is released at once), then each
+    /// viewer's epoch ends with `STREAM_END` and its encoder closes, then
+    /// capture and sound stop. The pads, seats and hiding stay. Nothing
+    /// without a stream. Queued at once, in order with the others.
+    pub fn stop_stream(&self) -> impl Future<Output = ()> + Send + 'static {
+        let (done, stopped) = oneshot::channel();
+        let _ = self.ops.send(StreamOp::Stop(done));
+        async move {
+            let _ = stopped.await;
+        }
+    }
+}
+
+/// Runs a session's stream starts and stops, one at a time, in order.
+async fn stream_ops(
+    shared: Weak<Shared>,
+    input: mpsc::UnboundedSender<InputCmd>,
+    mut ops: mpsc::UnboundedReceiver<StreamOp>,
+) {
+    while let Some(op) = ops.recv().await {
+        let Some(sh) = shared.upgrade() else {
+            return;
+        };
+        match op {
+            StreamOp::Start(options, done) => {
+                let number = start_now(&sh, &input, options).await;
+                let _ = done.send(number);
+            }
+            StreamOp::Stop(done) => {
+                stop_now(&sh, &input).await;
+                let _ = done.send(());
+            }
+        }
+    }
+}
+
+async fn start_now(
+    sh: &Arc<Shared>,
+    input: &mpsc::UnboundedSender<InputCmd>,
+    options: StreamOptions,
+) -> u32 {
+    stop_now(sh, input).await;
+    let number = sh.streams.fetch_add(1, Ordering::SeqCst) + 1;
+    let stream = Arc::new(Stream::new(options, number, sh.options.replace_grace));
+    let window = stream.window.load(Ordering::Acquire);
+    if window != 0 {
+        let (backend, s) = (sh.backend.clone(), stream.clone());
+        let _ = tokio::task::spawn_blocking(move || s.watch_game(&*backend, window)).await;
+    }
+    {
+        let mut state = lock(&sh.state);
+        if state.stopped {
+            return number;
+        }
+        // (Only this task installs streams, and it stopped the last one
+        // above: nothing to end here.)
+        state.share = stream.options.upload_bps.map(UploadShare::new);
+        *lock(&sh.stream) = Some(stream.clone());
+        reshare(&mut state);
+        if !state.viewers.is_empty() {
+            state.running = Some(start_capture(sh, &stream));
+        }
+    }
+    let _ = input.send(InputCmd::Hold {
+        on: false,
+        ack: None,
+    });
+    number
+}
+
+async fn stop_now(sh: &Shared, input: &mpsc::UnboundedSender<InputCmd>) {
+    let (ack, held) = oneshot::channel();
+    let hold = InputCmd::Hold {
+        on: true,
+        ack: Some(ack),
+    };
+    if input.send(hold).is_ok() {
+        let _ = held.await;
+    }
+    let mut state = lock(&sh.state);
+    let Some(stream) = lock(&sh.stream).take() else {
+        return;
+    };
+    // The encoders see it within a tick, and end their epochs.
+    stream.ended.store(true, Ordering::SeqCst);
+    if let Some(running) = state.running.take() {
+        running.stop.store(true, Ordering::SeqCst);
+        state.retired.extend(running.threads);
+    }
+    state.share = None;
+    for viewer in state.viewers.values() {
+        viewer.feed.share.store(NO_SHARE, Ordering::Relaxed);
+    }
+}
+
+impl HostPipeline {
     /// Starts streaming to `member` on `conn`, whose datagram reader and
     /// stream acceptor these are, in the best codec of those it decodes
-    /// (`codecs`, `couch_proto::codec` bits; [`choose_codec`]). Call inside a
+    /// (`codecs`, `couch_proto::codec` bits; [`choose_codec`], again for
+    /// each stream). With nothing streamed, the viewer waits: its input is
+    /// held off, and its video starts with the next stream. Call inside a
     /// tokio runtime.
     pub fn add_viewer(
         &self,
@@ -697,21 +915,20 @@ impl HostStream {
         if state.stopped || state.viewers.contains_key(&member) {
             return;
         }
-        let feed = Arc::new(Feed::new(sh.options.rates.start_bps));
+        let stream = sh.current();
+        let start_bps = stream
+            .as_ref()
+            .map_or(Rates::default().start_bps, |s| s.options.rates.start_bps);
+        let feed = Arc::new(Feed::new(start_bps));
         let trace = sh
             .options
             .rc_trace
             .as_deref()
             .map(|path| numbered(path, state.traces));
         state.traces += 1;
-        let codec = choose_codec(
-            codecs,
-            sh.gpu_input_off.load(Ordering::SeqCst),
-            forced_h264(),
-        );
         let ctx = EncodeCtx {
             member,
-            codec,
+            codecs,
             video: HostVideo::start(
                 conn.clone(),
                 sh.options.session,
@@ -750,8 +967,10 @@ impl HostStream {
             conn,
         });
         reshare(&mut state);
-        if state.running.is_none() {
-            state.running = Some(start_capture(sh));
+        if let Some(stream) = stream
+            && state.running.is_none()
+        {
+            state.running = Some(start_capture(sh, &stream));
         }
     }
 
@@ -815,7 +1034,7 @@ impl HostStream {
 
     /// The panic key: every seat a viewer holds back to the host (their own
     /// controller keeps the seat it plays), and no grant to a viewer, nor any
-    /// claim, goes through until [`HostStream::allow_grants`], even one
+    /// claim, goes through until [`HostPipeline::allow_grants`], even one
     /// already on its way.
     pub fn panic(&self) {
         self.panic_handle().panic();
@@ -826,7 +1045,7 @@ impl HostStream {
         self.shared.grants_paused.store(false, Ordering::SeqCst);
     }
 
-    /// For the panic key's hook: [`HostStream::panic`] without going through
+    /// For the panic key's hook: [`HostPipeline::panic`] without going through
     /// whoever owns the stream.
     pub fn panic_handle(&self) -> PanicHandle {
         PanicHandle {
@@ -865,6 +1084,9 @@ impl HostStream {
         self.housekeeping.abort();
         let mut state = lock(&self.shared.state);
         state.stopped = true;
+        if let Some(stream) = lock(&self.shared.stream).take() {
+            stream.ended.store(true, Ordering::SeqCst);
+        }
         let mut threads = std::mem::take(&mut state.retired);
         for (_, mut viewer) in std::mem::take(&mut state.viewers) {
             viewer.feed.finish(reset_code::SESSION_END);
@@ -880,7 +1102,7 @@ impl HostStream {
     }
 }
 
-impl Drop for HostStream {
+impl Drop for HostPipeline {
     fn drop(&mut self) {
         // The input task releases everything as it ends. Told explicitly: a
         // panic handle may still hold its channel open. The threads stop on
@@ -891,7 +1113,7 @@ impl Drop for HostStream {
     }
 }
 
-/// The panic key for a stream: see [`HostStream::panic_handle`].
+/// The panic key for a stream: see [`HostPipeline::panic_handle`].
 #[derive(Clone)]
 pub struct PanicHandle {
     input: mpsc::UnboundedSender<InputCmd>,
@@ -946,25 +1168,36 @@ async fn housekeeping(shared: Weak<Shared>) {
         let Some(sh) = shared.upgrade() else {
             return;
         };
+        let stream = sh.current();
         let (looking, watching_game) = {
             let mut state = lock(&sh.state);
             reshare(&mut state);
             state.retired.retain(|t| !t.is_finished());
-            // While capturing, the capture watches the window itself.
-            let window = sh.window.load(Ordering::Acquire);
-            if state.running.is_none()
-                && !state.source.ended()
-                && sh.options.source.is_window()
-                && window != 0
-                && !state.source.looking()
-                && !sh.backend.window_exists(window)
-            {
-                state.source.lost(Instant::now());
+            match &stream {
+                // Nothing streamed: no window to watch.
+                None => (false, false),
+                Some(st) => {
+                    // While capturing, the capture watches the window itself.
+                    let window = st.window.load(Ordering::Acquire);
+                    let mut source = lock(&st.source);
+                    if state.running.is_none()
+                        && !source.ended()
+                        && st.options.source.is_window()
+                        && window != 0
+                        && !source.looking()
+                        && !sh.backend.window_exists(window)
+                    {
+                        source.lost(Instant::now());
+                    }
+                    (
+                        state.running.is_none() && source.looking(),
+                        !source.looking() && !source.ended(),
+                    )
+                }
             }
-            (
-                state.running.is_none() && state.source.looking(),
-                !state.source.looking() && !state.source.ended(),
-            )
+        };
+        let Some(stream) = stream.filter(|_| looking || watching_game) else {
+            continue;
         };
         // Listing windows blocks for a moment: not on an async worker.
         let sh2 = sh.clone();
@@ -973,9 +1206,9 @@ async fn housekeeping(shared: Weak<Shared>) {
                 // Nobody watches: once a second is soon enough. The
                 // capture, when someone comes, starts on whatever window
                 // this found.
-                sh2.look_for_window();
+                stream.look_for_window(&sh2);
             } else if watching_game {
-                sh2.remember_windows();
+                stream.remember_windows(&*sh2.backend);
             }
         })
         .await;
@@ -984,22 +1217,25 @@ async fn housekeeping(shared: Weak<Shared>) {
 
 // ---- Capture and sound ----
 
-fn start_capture(shared: &Arc<Shared>) -> Running {
+fn start_capture(shared: &Arc<Shared>, stream: &Arc<Stream>) -> Running {
     let stop = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::new();
-    let (sh, halt) = (shared.clone(), stop.clone());
+    let (sh, st, halt) = (shared.clone(), stream.clone(), stop.clone());
     match std::thread::Builder::new()
         .name("capture".into())
-        .spawn(move || capture_loop(&sh, &halt))
+        .spawn(move || capture_loop(&sh, &st, &halt))
     {
         Ok(thread) => threads.push(thread),
-        Err(e) => shared.event(HostEvent::CaptureFailed(e.to_string())),
+        Err(e) => shared.event(HostEvent::CaptureFailed {
+            stream: stream.number,
+            error: e.to_string(),
+        }),
     }
-    if shared.options.audio != AudioChoice::Off {
-        let (sh, halt) = (shared.clone(), stop.clone());
+    if stream.options.audio != AudioChoice::Off {
+        let (sh, st, halt) = (shared.clone(), stream.clone(), stop.clone());
         match std::thread::Builder::new()
             .name("audio".into())
-            .spawn(move || audio_loop(&sh, &halt))
+            .spawn(move || audio_loop(&sh, &st, &halt))
         {
             Ok(thread) => threads.push(thread),
             Err(e) => shared.note(format!("no audio thread: {e}")),
@@ -1008,12 +1244,12 @@ fn start_capture(shared: &Arc<Shared>) -> Running {
     Running { stop, threads }
 }
 
-fn capture_loop(shared: &Shared, stop: &AtomicBool) {
-    let options = &shared.options;
+fn capture_loop(shared: &Shared, stream: &Arc<Stream>, stop: &AtomicBool) {
+    let options = &stream.options;
     let paced = pacing();
     // A window found earlier (or followed while nobody watched) wins over
     // the source as first given.
-    let mut source = match shared.window.load(Ordering::Acquire) {
+    let mut source = match stream.window.load(Ordering::Acquire) {
         0 => options.source.clone(),
         window if options.source.is_window() => Source::Window(window),
         _ => options.source.clone(),
@@ -1021,7 +1257,7 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
     // Starting again with frames in memory (`Next::InMemory`).
     let mut restarting = false;
     loop {
-        if stop.load(Ordering::SeqCst) || lock(&shared.state).source.ended() {
+        if stop.load(Ordering::SeqCst) || lock(&stream.source).ended() {
             return;
         }
         // The window may be gone already (someone came to watch during the
@@ -1029,12 +1265,12 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
         // rather than fail to capture it.
         let gone = match source {
             Source::Window(window) => {
-                lock(&shared.state).source.looking() || !shared.backend.window_exists(window)
+                lock(&stream.source).looking() || !shared.backend.window_exists(window)
             }
             _ => false,
         };
         if gone {
-            match follow_game(shared, stop) {
+            match follow_game(shared, stream, stop) {
                 Some(window) => {
                     source = Source::Window(window);
                     continue;
@@ -1044,7 +1280,7 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
         }
         let request = CaptureRequest {
             fps: options.fps,
-            in_memory: shared.gpu_input_off.load(Ordering::SeqCst),
+            in_memory: stream.gpu_input_off.load(Ordering::SeqCst),
             paced,
         };
         let mut started = shared.backend.capture(&source, request);
@@ -1056,16 +1292,19 @@ fn capture_loop(shared: &Shared, stop: &AtomicBool) {
         let (capturer, window) = match started {
             Ok(capture) => capture,
             Err(e) => {
-                shared.event(HostEvent::CaptureFailed(e.to_string()));
+                shared.event(HostEvent::CaptureFailed {
+                    stream: stream.number,
+                    error: e.to_string(),
+                });
                 return;
             }
         };
         if let Some(window) = window {
-            shared.window.store(window, Ordering::Release);
-            shared.watch_game(window);
+            stream.window.store(window, Ordering::Release);
+            stream.watch_game(&*shared.backend, window);
         }
         restarting = false;
-        match capture_frames(shared, capturer, stop, request) {
+        match capture_frames(shared, stream, capturer, stop, request) {
             Next::Follow(window) => source = Source::Window(window),
             Next::InMemory => restarting = true,
             Next::Stop => return,
@@ -1089,11 +1328,12 @@ enum Next {
 /// goes or frames must move to memory.
 fn capture_frames(
     shared: &Shared,
+    stream: &Arc<Stream>,
     mut capturer: Box<dyn couch_media::Capturer>,
     stop: &AtomicBool,
     request: CaptureRequest,
 ) -> Next {
-    let mut pacer = request.paced.then(|| Pacer::new(shared.options.fps));
+    let mut pacer = request.paced.then(|| Pacer::new(stream.options.fps));
     let mut counted = (0, 0);
     while !stop.load(Ordering::SeqCst) {
         // A held frame goes at its time if nothing newer comes first (the
@@ -1109,7 +1349,7 @@ fn capture_frames(
                 // (Once only: a capture asked for memory that still gives
                 // GPU frames has them copied by the encoders instead.)
                 if matches!(frame, VideoFrame::Gpu(_))
-                    && shared.gpu_input_off.load(Ordering::SeqCst)
+                    && stream.gpu_input_off.load(Ordering::SeqCst)
                     && !request.in_memory
                 {
                     return Next::InMemory;
@@ -1122,43 +1362,46 @@ fn capture_frames(
                     Some(pacer) => pacer.offer(frame, at, arrived),
                     None => Some(frame),
                 };
-                if let Some(trace) = lock(&shared.pacing_trace).as_mut() {
+                if let Some(trace) = lock(&stream.pacing_trace).as_mut() {
                     let event = if frame.is_some() { "sent" } else { "held" };
                     trace.row(arrived, at, event);
                 }
                 if let Some(frame) = frame {
-                    hand_out(shared, frame);
+                    hand_out(shared, stream, frame);
                 }
             }
             Ok(Some(CaptureEvent::GpuFramesFailed)) => {
-                shared.gpu_input_off.store(true, Ordering::SeqCst);
+                stream.gpu_input_off.store(true, Ordering::SeqCst);
                 if !request.in_memory {
                     return Next::InMemory;
                 }
             }
             Ok(Some(CaptureEvent::SourceClosed)) => {
                 drop(capturer);
-                return follow_game(shared, stop).map_or(Next::Stop, Next::Follow);
+                return follow_game(shared, stream, stop).map_or(Next::Stop, Next::Follow);
             }
             Ok(None) => {}
             Err(e) => {
-                shared.event(HostEvent::CaptureFailed(e.to_string()));
+                shared.event(HostEvent::CaptureFailed {
+                    stream: stream.number,
+                    error: e.to_string(),
+                });
                 return Next::Stop;
             }
         }
         if let Some(pacer) = pacer.as_mut() {
             let now = shared.now();
             if let Some(frame) = pacer.take_due(now) {
-                if let Some(trace) = lock(&shared.pacing_trace).as_mut() {
+                if let Some(trace) = lock(&stream.pacing_trace).as_mut() {
                     trace.row(now, frame.captured_at(), "released");
                 }
-                hand_out(shared, frame);
+                hand_out(shared, stream, frame);
             }
             let (held, replaced) = pacer.counts();
-            shared
+            stream
                 .paced_held
                 .fetch_add(held - counted.0, Ordering::Relaxed);
-            shared
+            stream
                 .paced_replaced
                 .fetch_add(replaced - counted.1, Ordering::Relaxed);
             counted = (held, replaced);
@@ -1167,19 +1410,19 @@ fn capture_frames(
     Next::Stop
 }
 
-fn hand_out(shared: &Shared, frame: VideoFrame) {
+fn hand_out(shared: &Shared, stream: &Arc<Stream>, frame: VideoFrame) {
     for feed in lock(&shared.feeds).iter() {
-        feed.frames.put(frame.clone());
+        feed.frames.put((stream.clone(), frame.clone()));
     }
 }
 
 /// The captured window went. Looks for the game's next window until the
 /// source watch decides, or the capture is stopped (housekeeping then goes on
 /// looking, if the window is still being looked for).
-fn follow_game(shared: &Shared, stop: &AtomicBool) -> Option<NativeId> {
-    lock(&shared.state).source.lost(Instant::now());
+fn follow_game(shared: &Shared, stream: &Stream, stop: &AtomicBool) -> Option<NativeId> {
+    lock(&stream.source).lost(Instant::now());
     while !stop.load(Ordering::SeqCst) {
-        match shared.look_for_window() {
+        match stream.look_for_window(shared) {
             (Verdict::Wait, _) => std::thread::sleep(source::REPLACE_POLL),
             (_, follow) => return follow,
         }
@@ -1187,8 +1430,8 @@ fn follow_game(shared: &Shared, stop: &AtomicBool) -> Option<NativeId> {
     None
 }
 
-fn audio_loop(shared: &Shared, stop: &AtomicBool) {
-    let result = audio_kind(shared, stop)
+fn audio_loop(shared: &Shared, stream: &Stream, stop: &AtomicBool) {
+    let result = audio_kind(stream, stop)
         .and_then(|kind| shared.backend.audio(kind))
         .and_then(|source| send_sound(source, shared, stop));
     if let Err(e) = result {
@@ -1197,11 +1440,11 @@ fn audio_loop(shared: &Shared, stop: &AtomicBool) {
 }
 
 /// Which sound `--audio` and the source mean.
-fn audio_kind(shared: &Shared, stop: &AtomicBool) -> Result<AudioKind, MediaError> {
-    let source = &shared.options.source;
-    Ok(match shared.options.audio {
-        AudioChoice::Game => AudioKind::Game(wait_for_window(shared, stop)?),
-        AudioChoice::Auto if source.is_window() => AudioKind::Game(wait_for_window(shared, stop)?),
+fn audio_kind(stream: &Stream, stop: &AtomicBool) -> Result<AudioKind, MediaError> {
+    let source = &stream.options.source;
+    Ok(match stream.options.audio {
+        AudioChoice::Game => AudioKind::Game(wait_for_window(stream, stop)?),
+        AudioChoice::Auto if source.is_window() => AudioKind::Game(wait_for_window(stream, stop)?),
         AudioChoice::Auto if matches!(source, Source::TestPattern { .. }) => AudioKind::Tone,
         AudioChoice::Auto | AudioChoice::System => AudioKind::System,
         AudioChoice::Tone => AudioKind::Tone,
@@ -1210,13 +1453,13 @@ fn audio_kind(shared: &Shared, stop: &AtomicBool) -> Result<AudioKind, MediaErro
 }
 
 /// The captured window, which the capture thread publishes once it has it.
-fn wait_for_window(shared: &Shared, stop: &AtomicBool) -> Result<NativeId, MediaError> {
+fn wait_for_window(stream: &Stream, stop: &AtomicBool) -> Result<NativeId, MediaError> {
     let started = Instant::now();
     loop {
         if stop.load(Ordering::SeqCst) {
             return Err(MediaError::Closed);
         }
-        match shared.window.load(Ordering::Acquire) {
+        match stream.window.load(Ordering::Acquire) {
             0 if started.elapsed() < WINDOW_WAIT => {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -1238,7 +1481,6 @@ fn send_sound(
     let mut framer = Framer::new();
     let mut encoder = OpusEncoder::new()?;
     let mut frames = Vec::new();
-    let mut seq = 0u32;
     while !stop.load(Ordering::SeqCst) {
         match source.next_chunk(Duration::from_millis(100)) {
             Ok(Some(chunk)) => framer.push(&chunk, &mut frames)?,
@@ -1248,14 +1490,14 @@ fn send_sound(
         }
         for frame in frames.drain(..) {
             let packet = AudioDatagram {
-                seq,
+                // (Wraps, as viewers expect.)
+                seq: shared.audio_seq.fetch_add(1, Ordering::Relaxed),
                 capture_us: frame.captured_at.0,
                 packet: encoder.encode(&frame.samples)?.to_vec(),
             };
             for conn in lock(&shared.audio_to).iter() {
                 send_audio(conn, &packet);
             }
-            seq = seq.wrapping_add(1);
             shared.audio_sent.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1266,8 +1508,11 @@ fn send_sound(
 
 struct EncodeCtx {
     member: MemberId,
-    /// The viewer's codec, chosen at join; H.264 from then on if HEVC fails.
-    codec: Codec,
+    /// What the viewer decodes (`couch_proto::codec` bits): its codec is
+    /// chosen from them for each stream.
+    codecs: u8,
+    /// Lives as long as the viewer watches, across streams, so its epochs
+    /// keep counting: the viewer drops older ones (M19).
     video: HostVideo,
     feed: Arc<Feed>,
     shared: Arc<Shared>,
@@ -1277,13 +1522,13 @@ struct EncodeCtx {
 fn encode_loop(ctx: EncodeCtx) {
     let EncodeCtx {
         member,
-        codec,
+        codecs,
         mut video,
         feed,
         shared,
         trace,
     } = ctx;
-    match encode(member, codec, &mut video, &feed, &shared, trace.as_deref()) {
+    match encode(member, codecs, &mut video, &feed, &shared, trace.as_deref()) {
         // The connection went: the viewer is gone, nothing failed.
         Ok(()) | Err(MediaError::Closed) => {}
         Err(e) => shared.event(HostEvent::ViewerFailed {
@@ -1294,16 +1539,20 @@ fn encode_loop(ctx: EncodeCtx) {
     video.end(feed.end_code.load(Ordering::SeqCst));
 }
 
+/// One viewer's video for as long as it watches: for each stream, its codec,
+/// encoder, rate controller and epochs; between streams, nothing (M19).
 fn encode(
     member: MemberId,
-    mut codec: Codec,
+    codecs: u8,
     video: &mut HostVideo,
     feed: &Feed,
     shared: &Shared,
     trace: Option<&Path>,
 ) -> Result<(), MediaError> {
-    let options = &shared.options;
     let mut trace = trace.map(RcTrace::create).transpose()?;
+    // The stream being encoded, and the codec chosen for it.
+    let mut current: Option<Arc<Stream>> = None;
+    let mut codec = Codec::H264;
     let mut encoder: Option<Box<dyn VideoEncoder>> = None;
     let mut controller: Option<RateController> = None;
     let mut params: Option<VideoParams> = None;
@@ -1314,6 +1563,18 @@ fn encode(
     let mut stats = PeriodStats::new();
 
     while !feed.stop.load(Ordering::SeqCst) {
+        // The stream stopped: its epoch ends, its encoder closes (with its
+        // NVENC session and the pool's textures), and the viewer waits for
+        // the next one.
+        if current
+            .as_ref()
+            .is_some_and(|s| s.ended.load(Ordering::SeqCst))
+        {
+            current = None;
+            drop(encoder.take());
+            (controller, params, gpu_pool) = (None, None, None);
+            video.end_epoch(reset_code::STREAM_END);
+        }
         if let (Some(c), Some(enc), Some(p)) = (controller.as_mut(), encoder.as_mut(), params)
             && last_tick.elapsed() >= RATE_TICK
         {
@@ -1323,7 +1584,7 @@ fn encode(
             let action = c.tick(last_tick, &fb);
             feed.target.store(c.target_bps(), Ordering::Relaxed);
             if let Some(trace) = trace.as_mut() {
-                let netem = options.netem_elapsed.as_ref().and_then(|f| f());
+                let netem = shared.options.netem_elapsed.as_ref().and_then(|f| f());
                 trace.write(shared.now(), &fb, c, action, netem)?;
             }
             match action {
@@ -1353,11 +1614,27 @@ fn encode(
             stats.last_feedback = Some(fb);
         }
 
-        let frame = match feed.frames.take_timeout(Duration::from_millis(10)) {
-            Ok(Some(frame)) => frame,
+        let (stream, frame) = match feed.frames.take_timeout(Duration::from_millis(10)) {
+            Ok(Some(item)) => item,
             Ok(None) => continue,
             Err(_closed) => break,
         };
+        // Left over from a stream that stopped.
+        if stream.ended.load(Ordering::SeqCst) {
+            continue;
+        }
+        // A new stream: its own codec, encoder, controller and epoch.
+        if !current.as_ref().is_some_and(|c| Arc::ptr_eq(c, &stream)) {
+            drop(encoder.take());
+            (controller, params, gpu_pool) = (None, None, None);
+            codec = choose_codec(
+                codecs,
+                stream.gpu_input_off.load(Ordering::SeqCst),
+                forced_h264(),
+            );
+            current = Some(stream.clone());
+        }
+        let options = &stream.options;
 
         // Nothing goes out while the viewer is silent, not even a new size:
         // the first frame after resuming reopens the encoder if it changed.
@@ -1367,7 +1644,7 @@ fn encode(
 
         // A GPU frame goes to the encoder as it is, unless GPU input failed.
         let gpu = match &frame {
-            VideoFrame::Gpu(f) if !shared.gpu_input_off.load(Ordering::SeqCst) => Some(f),
+            VideoFrame::Gpu(f) if !stream.gpu_input_off.load(Ordering::SeqCst) => Some(f),
             _ => None,
         };
         let size_changed =
@@ -1432,7 +1709,7 @@ fn encode(
             if gpu.is_some() && !enc.caps().gpu_input {
                 // This machine's encoder can't read them: copying each frame
                 // back from the GPU would cost more than capturing to memory.
-                shared.gpu_input_off.store(true, Ordering::SeqCst);
+                stream.gpu_input_off.store(true, Ordering::SeqCst);
             }
             shared.note(format!(
                 "encoding {width}x{height} with {} (options: {}, {}) at {:.1} Mbit/s",
@@ -1484,7 +1761,7 @@ fn encode(
             // every encoder opened in this stream. The reopen sends a keyframe.
             Err(e) if enc.caps().gpu_input => {
                 tracing::warn!("encoding GPU frames failed ({e}); copying frames to memory");
-                shared.gpu_input_off.store(true, Ordering::SeqCst);
+                stream.gpu_input_off.store(true, Ordering::SeqCst);
                 params = None;
                 continue;
             }
@@ -1511,8 +1788,8 @@ fn encode(
                 feedback: stats.last_feedback.unwrap_or_default(),
                 audio_packets: shared.audio_sent.swap(0, Ordering::Relaxed),
                 encode_us_max: stats.encode_us_max,
-                paced_held: shared.paced_held.load(Ordering::Relaxed),
-                paced_replaced: shared.paced_replaced.load(Ordering::Relaxed),
+                paced_held: stream.paced_held.load(Ordering::Relaxed),
+                paced_replaced: stream.paced_replaced.load(Ordering::Relaxed),
             }));
             stats = PeriodStats::new();
         }
@@ -1699,6 +1976,13 @@ enum InputCmd {
         seat: SeatId,
         member: MemberId,
     },
+    /// Holds every viewer's input off (releasing what they held), or lets it
+    /// through again, then answers if asked (M19: while nothing is
+    /// streamed). The host's own controller keeps playing.
+    Hold {
+        on: bool,
+        ack: Option<oneshot::Sender<()>>,
+    },
     /// Release everything, then answer: the first step of stopping.
     ReleaseAll(oneshot::Sender<()>),
     /// Unplug the pads and end, then answer: the last step.
@@ -1727,8 +2011,8 @@ struct Inputs {
     status: Vec<Option<SeatStatus>>,
     rumble: Vec<SeatRumble>,
     /// Whether the game window is in front now, and what was last reported
-    /// and when. `None` for a screen: nothing to report.
-    focus: Option<FocusReport>,
+    /// and when, for the stream now.
+    focus: FocusReport,
     /// The host's controller, while it plays through a seat.
     local: Option<Local>,
 }
@@ -1745,6 +2029,8 @@ struct FocusReport {
     now: bool,
     reported: Option<bool>,
     at: Instant,
+    /// The stream it was reported for: a new one is told afresh.
+    stream: u32,
 }
 
 impl Inputs {
@@ -1756,23 +2042,34 @@ impl Inputs {
     /// Called right before every input, not just on the tick: a window that
     /// just took the foreground must not get a key meant for the game.
     fn refresh_focus(&mut self) -> Vec<Effect> {
-        let focus = match self.shared.window.load(Ordering::Acquire) {
+        // No stream, no window: nothing of the keyboard's reaches anything.
+        let focus = match self.shared.window() {
             0 => Focus::default(),
             window => self.shared.backend.focus(window),
         };
-        if let Some(report) = &mut self.focus {
-            report.now = focus.foreground;
-        }
+        self.focus.now = focus.foreground;
         self.router.set_pointer_inside(focus.pointer_inside);
         self.router.set_foreground(focus.foreground)
     }
 
-    /// Reports the game window's focus when it changed, at most once per
-    /// [`FOCUS_COALESCE`]; the tick catches up with the latest.
+    /// Reports the streamed window's focus when it changed, at most once per
+    /// [`FOCUS_COALESCE`]; the tick catches up with the latest. Never for a
+    /// screen, nor with nothing streamed.
     fn report_focus(&mut self, now: Instant) {
-        let Some(report) = &mut self.focus else {
+        let Some(stream) = self
+            .shared
+            .current()
+            .filter(|s| s.options.source.is_window())
+        else {
             return;
         };
+        let report = &mut self.focus;
+        if report.stream != stream.number {
+            // The first report for a stream may go at once.
+            report.stream = stream.number;
+            report.reported = None;
+            report.at = now.checked_sub(FOCUS_COALESCE).unwrap_or(now);
+        }
         if report.reported == Some(report.now) || now.duration_since(report.at) < FOCUS_COALESCE {
             return;
         }
@@ -1963,12 +2260,12 @@ async fn input_loop(
             };
             seats
         ],
-        focus: shared.options.source.is_window().then(|| FocusReport {
+        focus: FocusReport {
             now: false,
             reported: None,
-            // The first report may go at once.
-            at: start.checked_sub(FOCUS_COALESCE).unwrap_or(start),
-        }),
+            at: start,
+            stream: 0,
+        },
         local,
         shared,
     };
@@ -1976,6 +2273,9 @@ async fn input_loop(
         st.status[usize::from(seat.0)] = st.router.seat(seat).map(|s| s.2);
     }
     let host = st.local.as_ref().map(|l| l.member);
+    // Nothing is streamed yet: viewers' input waits for the first stream.
+    let effects = st.router.hold(Some(host));
+    st.deliver(effects);
     let mut tick = tokio::time::interval(INPUT_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut done = None;
@@ -2047,6 +2347,13 @@ async fn input_loop(
                     if !released && !paused && host == Some(member) && free && st.seat_of(member).is_none() {
                         let effects = st.router.grant(seat, member, Permissions::GAMEPAD, Instant::now());
                         st.deliver(effects);
+                    }
+                }
+                Some(InputCmd::Hold { on, ack }) => {
+                    let effects = st.router.hold(on.then_some(host));
+                    st.deliver(effects);
+                    if let Some(ack) = ack {
+                        let _ = ack.send(());
                     }
                 }
                 Some(InputCmd::ReleaseAll(ack)) => {

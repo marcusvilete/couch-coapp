@@ -173,6 +173,11 @@ enum Cmd {
         /// Whose sound to stream.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// Stop the stream after this many seconds and start it again two
+        /// seconds later, once, in the same session (M19): viewers stay and
+        /// see the second stream.
+        #[arg(long)]
+        restart_stream_after: Option<u64>,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -388,6 +393,7 @@ async fn main() -> ExitCode {
             host_pad,
             show_host_pad,
             audio,
+            restart_stream_after,
             net,
         } => {
             use couch_engine::pipeline::{AudioChoice, Source};
@@ -428,6 +434,7 @@ async fn main() -> ExitCode {
                     AudioArg::Tone => AudioChoice::Tone,
                     AudioArg::Off => AudioChoice::Off,
                 },
+                restart_stream_after,
                 net,
             })
             .await

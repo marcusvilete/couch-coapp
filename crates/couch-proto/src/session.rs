@@ -135,6 +135,20 @@ pub struct SessionStatus {
     /// The host took control back with the panic key; requests are declined
     /// until the host allows control again.
     pub control_paused: bool,
+    /// Whether anything is streamed (M19): a session starts with nothing,
+    /// and streams start and stop inside it.
+    pub stream: StreamState,
+}
+
+/// Whether a session streams anything (M19). While it doesn't, viewers stay,
+/// keep their seats, and their input is held off: they can't see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamState {
+    /// Nothing streamed yet in this session.
+    Waiting,
+    Live,
+    /// The last stream ended, and why; the session goes on.
+    Stopped(EndReason),
 }
 
 impl SessionStatus {
@@ -170,7 +184,8 @@ pub struct GameFocus {
     pub in_front: bool,
 }
 
-/// Why a session ended.
+/// Why a session or a stream ended. Since M19 the game exiting and its
+/// window or screen going end only the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EndReason {
     HostStopped,
@@ -331,6 +346,7 @@ mod tests {
             host_seat: Some(SeatId(1)),
             host_on_seats: true,
             control_paused: false,
+            stream: StreamState::Waiting,
         };
         assert!(status.is_valid());
         assert!(
@@ -410,6 +426,7 @@ mod tests {
             host_seat: Some(SeatId(u8::MAX)),
             host_on_seats: true,
             control_paused: true,
+            stream: StreamState::Stopped(EndReason::GameExited),
         };
         let len = postcard::to_stdvec(&status).unwrap().len();
         assert!(len + 2 <= crate::envelope::MAX_FRAME_LEN, "{len} bytes");

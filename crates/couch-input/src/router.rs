@@ -9,7 +9,9 @@
 //!   mouse button press, the pointer is over it too;
 //! - it isn't a blocked key ([`crate::filter`]) or the Guide button. Blocked
 //!   combinations count the modifiers injected for every seat: two holders
-//!   could otherwise build Alt+Tab between them.
+//!   could otherwise build Alt+Tab between them;
+//! - the holder's input isn't held off ([`SeatRouter::hold`]: while nothing
+//!   is streamed, only the host's own controller plays).
 //!
 //! Only one holder at a time has keyboard or mouse ([`SeatRouter::grant`]).
 //!
@@ -193,6 +195,9 @@ pub struct SeatRouter {
     /// Whether the pointer is over the game window. A click anywhere else
     /// would reach another window (the taskbar, another app).
     pointer_inside: bool,
+    /// While nothing is streamed (M19): `Some(except)`, and input from every
+    /// holder but `except` (the host's own controller) is dropped.
+    held: Option<Option<MemberId>>,
 }
 
 impl SeatRouter {
@@ -207,6 +212,7 @@ impl SeatRouter {
                 .collect(),
             foreground: false,
             pointer_inside: false,
+            held: None,
         }
     }
 
@@ -320,6 +326,25 @@ impl SeatRouter {
         effects
     }
 
+    /// Holds every holder's input off but `except`'s (the host's own
+    /// controller), or lets it through again with `None` (M19: while nothing
+    /// is streamed, guests can't see what they would do). Holding releases
+    /// what they held at once. Their seats stay, and their input still counts
+    /// as heard, so a held seat is never suspended or returned; mouse totals
+    /// keep up, so the pointer doesn't jump when input comes back.
+    pub fn hold(&mut self, except: Option<Option<MemberId>>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if let Some(except) = except {
+            for (i, s) in self.seats.iter_mut().enumerate() {
+                if let Some(h) = s.holder.as_mut().filter(|h| Some(h.member) != except) {
+                    h.release_all(SeatId(i as u8), &mut effects);
+                }
+            }
+        }
+        self.held = except;
+        effects
+    }
+
     pub fn handle(&mut self, from: MemberId, input: Input, now: Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
         let (seat, epoch) = input.target();
@@ -345,7 +370,9 @@ impl SeatRouter {
         }
         h.last_heard = Some(now);
         h.suspended_since = None;
-        let kbm = self.foreground;
+        // Held off (M19): nothing goes in, but what is tracked keeps up.
+        let held = self.held.is_some_and(|except| except != Some(from));
+        let kbm = self.foreground && !held;
 
         match input {
             Input::Pad(d) => {
@@ -353,7 +380,7 @@ impl SeatRouter {
                     return effects;
                 }
                 h.pad_seq = Some(d.seq);
-                if h.may(Permissions::GAMEPAD) {
+                if h.may(Permissions::GAMEPAD) && !held {
                     let mut state = PadState::from(d.pad);
                     state.buttons.remove(PadButtons::GUIDE);
                     if state != h.pad {
@@ -1056,5 +1083,110 @@ mod tests {
         ];
         assert!(apply(&effects, &mut log, &mut []).is_err());
         assert_eq!(log.0, vec!["key 0x1a false", "Left false"]);
+    }
+
+    /// M19: holding releases at once what the guest held, and drops their
+    /// input while it lasts; their seat stays.
+    #[test]
+    fn holding_releases_and_drops_a_guests_input_but_keeps_the_seat() {
+        let mut f = Fixture::new(ALL);
+        f.send(f.key(W, true), 10);
+        f.send(f.pad(1, PadButtons::A), 20);
+        let effects = f.router.hold(Some(None));
+        assert!(effects.contains(&Effect::Key(HidUsage(W), false)));
+        assert!(effects.contains(&Effect::Pad(SEAT, PadState::NEUTRAL)));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Revoked { .. })));
+        assert_eq!(f.send(f.key(W, true), 30), vec![]);
+        assert_eq!(f.send(f.pad(2, PadButtons::B), 40), vec![]);
+        let click = Input::MouseButton(MouseButtonEvent {
+            seat: SEAT,
+            seat_epoch: f.epoch,
+            button: mouse_button::LEFT,
+            down: true,
+            totals: f.motion(1, 5, 5),
+        });
+        assert_eq!(f.send(click, 50), vec![]);
+        assert_eq!(f.router.seat(SEAT).unwrap().1, Some(GUEST));
+        // Let through again: input goes in from the next event on.
+        assert_eq!(f.router.hold(None), vec![]);
+        assert_eq!(
+            f.send(f.pad(3, PadButtons::B), 60),
+            vec![Effect::Pad(SEAT, pressed(PadButtons::B))]
+        );
+        assert_eq!(
+            f.send(f.key(W, true), 70),
+            vec![Effect::Key(HidUsage(W), true)]
+        );
+    }
+
+    /// M19: input held off still counts as heard, so a held seat is never
+    /// suspended or handed back, however long nothing is streamed.
+    #[test]
+    fn a_held_seat_is_never_suspended_while_its_holder_is_heard() {
+        let mut f = Fixture::new(ALL);
+        f.router.hold(Some(None));
+        for i in 1..200u32 {
+            let ms = u64::from(i) * 100;
+            f.send(f.pad(i, PadButtons::A), ms);
+            assert_eq!(f.router.tick(f.at(ms + 50)), vec![], "at {ms} ms");
+        }
+        assert_eq!(f.router.seat(SEAT).unwrap().2, SeatStatus::Active);
+        // Silence still suspends it, as any seat.
+        let effects = f.router.tick(f.at(200 * 100 + DEAD_MAN.as_millis() as u64));
+        assert!(effects.contains(&Effect::Pad(SEAT, PadState::NEUTRAL)));
+        assert_eq!(f.router.seat(SEAT).unwrap().2, SeatStatus::Suspended);
+    }
+
+    /// M19: mouse motion while held moves nothing, and the pointer doesn't
+    /// jump by it when input comes back.
+    #[test]
+    fn motion_while_held_moves_nothing_later() {
+        let mut f = Fixture::new(ALL);
+        let mouse = |f: &Fixture, version, x, y| {
+            Input::Mouse(MouseDatagram {
+                seat: SEAT,
+                seat_epoch: f.epoch,
+                totals: f.motion(version, x, y),
+            })
+        };
+        f.router.hold(Some(None));
+        assert_eq!(f.send(mouse(&f, 1, 500, 300), 10), vec![]);
+        f.router.hold(None);
+        assert_eq!(
+            f.send(mouse(&f, 2, 510, 300), 20),
+            vec![Effect::MouseMove(10, 0)]
+        );
+    }
+
+    /// M19: the host's own controller, the hold's exception, keeps playing.
+    #[test]
+    fn the_hosts_own_controller_plays_through_a_hold() {
+        const HOST: MemberId = MemberId([9; 32]);
+        let now = Instant::now();
+        let mut router = SeatRouter::new(2);
+        router.grant(SeatId(0), HOST, Permissions::GAMEPAD, now);
+        router.grant(SeatId(1), GUEST, Permissions::GAMEPAD, now);
+        let pad = |router: &SeatRouter, seat: SeatId, seq| {
+            Input::Pad(PadDatagram {
+                seat,
+                seat_epoch: router.seat(seat).unwrap().0,
+                seq,
+                pad: PadSnapshot {
+                    buttons: PadButtons::A.bits(),
+                    ..Default::default()
+                },
+            })
+        };
+        let held = router.hold(Some(Some(HOST)));
+        // Only the guest's seat was released.
+        assert!(held.contains(&Effect::Pad(SeatId(1), PadState::NEUTRAL)));
+        assert!(!held.contains(&Effect::Pad(SeatId(0), PadState::NEUTRAL)));
+        let input = pad(&router, SeatId(0), 1);
+        assert_eq!(
+            router.handle(HOST, input, now),
+            vec![Effect::Pad(SeatId(0), pressed(PadButtons::A))]
+        );
+        let input = pad(&router, SeatId(1), 1);
+        assert_eq!(router.handle(GUEST, input, now), vec![]);
     }
 }

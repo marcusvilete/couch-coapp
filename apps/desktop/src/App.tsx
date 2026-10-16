@@ -5,7 +5,7 @@ import { ChangePasswordDialog, ConfirmDialog, CreateRoomDialog, InviteDialog, Jo
 import { request } from "./engine";
 import { useLobby } from "./lobby";
 import { RoomColumn, RoomRail, Welcome, type RoomActions } from "./rooms";
-import { GoLiveDialog, Stage, busyIn } from "./sessions";
+import { Stage, StartSessionDialog, busyIn } from "./sessions";
 import { SettingsDialog } from "./settings";
 import { Splash } from "./splash";
 import { Modal } from "./ui";
@@ -18,7 +18,7 @@ type Dialog =
   | { kind: "join"; invite: string }
   | { kind: "invite"; room: RoomView }
   | { kind: "name" }
-  | { kind: "goLive"; room: RoomView }
+  | { kind: "startSession"; room: RoomView }
   | { kind: "settings" }
   | { kind: "password"; room: RoomView }
   | { kind: "confirm"; title: string; body: string; action: string; danger?: boolean; run: () => Promise<unknown> };
@@ -198,7 +198,7 @@ function App() {
         <Stage
           room={room}
           busy={busyIn(rooms)}
-          onGoLive={() => setDialog({ kind: "goLive", room })}
+          onStartSession={() => setDialog({ kind: "startSession", room })}
           onInvite={actions.invite}
           onRoom={lobby.putRoom}
           notify={lobby.notify}
@@ -269,12 +269,12 @@ function App() {
           }}
         />
       )}
-      {dialog?.kind === "goLive" && (
-        <GoLiveDialog
+      {dialog?.kind === "startSession" && (
+        <StartSessionDialog
           room={dialog.room}
           onClose={close}
-          onLive={(live) => {
-            lobby.putRoom(live);
+          onStarted={(started) => {
+            lobby.putRoom(started);
             setDialog(null);
           }}
         />

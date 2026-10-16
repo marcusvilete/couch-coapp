@@ -472,6 +472,7 @@ mod tests {
                 host_seat: Some(SeatId(0)),
                 host_on_seats: true,
                 control_paused: true,
+                stream: crate::session::StreamState::Stopped(EndReason::SourceLost),
             }),
             ControlMessage::SessionEnded(SessionEnded {
                 session,

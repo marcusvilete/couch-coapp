@@ -4,6 +4,8 @@ import type { RequestView } from "./RequestView";
 import type { ScreenArea } from "./ScreenArea";
 import type { SeatView } from "./SeatView";
 import type { SessionRole } from "./SessionRole";
+import type { StreamStateView } from "./StreamStateView";
+import type { StreamView } from "./StreamView";
 
 /**
  * A live session in a room, as this profile sees it.
@@ -63,4 +65,12 @@ hostController: string | null,
  * For the host: why the controller they chose doesn't play through a
  * seat (they play outside the seats instead).
  */
-hostControllerProblem: string | null, };
+hostControllerProblem: string | null, 
+/**
+ * Whether anything is streamed (M19).
+ */
+stream: StreamStateView, 
+/**
+ * For the host: what is streamed, while it is.
+ */
+streaming: StreamView | null, };

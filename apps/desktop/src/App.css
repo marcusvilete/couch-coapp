@@ -778,12 +778,39 @@ button.big:not(.primary) span {
   line-height: 1.5;
 }
 
-.member .live-badge {
+/* A session with nothing streamed (M19). */
+.session-badge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.4;
+}
+
+.member .live-badge,
+.member .session-badge {
   margin-left: -4px;
 }
 
-.member:hover .live-badge {
+.member:hover .live-badge,
+.member:hover .session-badge {
   display: none;
+}
+
+/* The host panel's Stream section. */
+.stream-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.stream-section h4 {
+  margin: 0;
 }
 
 .host-head {
@@ -953,7 +980,7 @@ select {
   font-size: 0.8rem;
 }
 
-/* The input setup: single player or multiplayer, then its seats. */
+/* The input setup: the session's seats. */
 .input-setup {
   border: none;
   margin: 0;
@@ -969,37 +996,6 @@ select {
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--fg-muted);
-}
-
-.segmented {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.form .segmented label {
-  flex-direction: row;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border-quiet);
-  border-radius: var(--radius);
-  color: var(--fg);
-  font-weight: 400;
-  cursor: pointer;
-}
-
-.form .segmented label:hover {
-  background: var(--bg-hover);
-}
-
-.form .segmented label.picked {
-  border-color: var(--accent);
-}
-
-.segmented input {
-  width: auto;
 }
 
 /* The host panel's seats. */

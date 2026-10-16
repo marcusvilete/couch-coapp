@@ -19,7 +19,7 @@ use std::{
 use couch_input::shortcuts::{Shortcut, Shortcuts};
 use couch_proto::{
     ipc::{HudRole, HudSeat, HudState, UserAction},
-    session::seat_phrase,
+    session::{EndReason, StreamState, seat_phrase},
 };
 use egui::{Align2, Color32, Pos2, Rect, RichText};
 
@@ -104,13 +104,19 @@ impl Hud {
             self.note = Some((state.note.clone(), now + SHOW_AFTER_CHANGE));
         }
         let changed = old.is_none_or(|o| {
-            (o.role, &o.seats, o.control_paused, o.game_in_front)
-                != (
-                    state.role,
-                    &state.seats,
-                    state.control_paused,
-                    state.game_in_front,
-                )
+            (
+                o.role,
+                &o.seats,
+                o.control_paused,
+                o.game_in_front,
+                o.stream,
+            ) != (
+                state.role,
+                &state.seats,
+                state.control_paused,
+                state.game_in_front,
+                state.stream,
+            )
         });
         if changed {
             self.changed_at = Some(now);
@@ -254,18 +260,19 @@ impl Hud {
         let mut actions = Vec::new();
         let mut output = self.ctx.run_ui(input, |root| {
             let ctx = root.ctx().clone();
-            if self.waiting
-                && let Some(session) = &self.session
+            if let Some(session) = &self.session
+                && let Some(lines) = centre_message(session, self.waiting)
             {
                 egui::Area::new(egui::Id::new("waiting"))
                     .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
                     .interactable(false)
                     .show(&ctx, |ui| {
-                        ui.label(
-                            RichText::new(format!("Waiting for {}'s picture…", session.host))
-                                .size(18.0)
-                                .color(Color32::GRAY),
-                        );
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new(lines.0).size(18.0).color(Color32::GRAY));
+                            if let Some(more) = lines.1 {
+                                ui.label(RichText::new(more).color(Color32::GRAY));
+                            }
+                        });
                     });
             }
             if self.show_stats {
@@ -354,6 +361,26 @@ impl Hud {
 enum BarClick {
     Action(HudAction),
     Stats,
+}
+
+/// What the middle of the window says, if anything: why nothing is shown
+/// (M19: nothing streamed, or the last stream ended), or that the picture
+/// hasn't come yet. A second, smaller line with it.
+fn centre_message(s: &HudState, waiting: bool) -> Option<(String, Option<&'static str>)> {
+    let wait = "Your seat stays yours; the next stream shows here.";
+    let first = match s.stream {
+        StreamState::Live if waiting => format!("Waiting for {}'s picture…", s.host),
+        StreamState::Live => return None,
+        StreamState::Waiting => format!("{} isn't streaming anything yet", s.host),
+        StreamState::Stopped(EndReason::GameExited) => "The game closed".into(),
+        StreamState::Stopped(EndReason::SourceLost) => {
+            "The window or screen being streamed went away".into()
+        }
+        StreamState::Stopped(EndReason::Error) => "The stream failed".into(),
+        StreamState::Stopped(_) => format!("{} stopped streaming", s.host),
+    };
+    let more = (s.stream != StreamState::Live).then_some(wait);
+    Some((first, more))
 }
 
 /// Background of the bar: dark enough to read over any game.
@@ -563,8 +590,28 @@ mod tests {
             viewers: 1,
             control_paused: false,
             game_in_front: true,
+            stream: StreamState::Live,
             note: String::new(),
         }
+    }
+
+    /// M19: the middle of the window says why nothing is shown.
+    #[test]
+    fn the_window_says_why_nothing_is_shown() {
+        let mut s = session(vec![seat("Controller 1", None, false)], false);
+        assert_eq!(centre_message(&s, false), None, "a picture is shown");
+        assert_eq!(
+            centre_message(&s, true).map(|m| m.0),
+            Some("Waiting for Ana's picture…".into())
+        );
+        s.stream = StreamState::Waiting;
+        let (first, more) = centre_message(&s, true).unwrap();
+        assert_eq!(first, "Ana isn't streaming anything yet");
+        assert!(more.is_some(), "and the seat stays");
+        s.stream = StreamState::Stopped(EndReason::GameExited);
+        assert_eq!(centre_message(&s, true).unwrap().0, "The game closed");
+        s.stream = StreamState::Stopped(EndReason::HostStopped);
+        assert_eq!(centre_message(&s, true).unwrap().0, "Ana stopped streaming");
     }
 
     #[test]

@@ -23,6 +23,9 @@ pub mod reset_code {
     pub const SKIP_AHEAD: u32 = 1;
     pub const SESSION_END: u32 = 2;
     pub const VIEWER_REMOVED: u32 = 3;
+    /// The host stopped streaming; the session goes on, and the next stream
+    /// starts a new epoch (M19).
+    pub const STREAM_END: u32 = 4;
 }
 
 /// Opens a video epoch stream.

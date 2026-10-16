@@ -9,11 +9,33 @@ import type { SourceChoice } from "./SourceChoice";
  * Everything the UI can ask of the engine. Its `Debug` leaves out passwords
  * and invites.
  */
-export type Command = { "type": "getInfo" } | { "type": "ping", nonce: number, } | { "type": "getProfile" } | { "type": "setDisplayName", name: string, } | { "type": "listRooms" } | { "type": "createRoom", name: string, password: string, } | { "type": "previewInvite", invite: string, } | { "type": "takeOpenedInvite" } | { "type": "joinRoom", invite: string, password: string, } | { "type": "getInvite", room: string, } | { "type": "changePassword", room: string, password: string, } | { "type": "revokeInvites", room: string, } | { "type": "leaveRoom", room: string, } | { "type": "banMember", room: string, member: string, } | { "type": "getShortcuts" } | { "type": "setShortcut", id: string, code: string, } | { "type": "resetShortcuts", id: string | null, } | { "type": "getNetwork" } | { "type": "setNetwork", relay: RelaySetting, } | { "type": "getDrivers" } | { "type": "getNotices" } | { "type": "installDriver", driver: DriverName, } | { "type": "listSources" } | { "type": "goLive", room: string, source: SourceChoice, 
+export type Command = { "type": "getInfo" } | { "type": "ping", nonce: number, } | { "type": "getProfile" } | { "type": "setDisplayName", name: string, } | { "type": "listRooms" } | { "type": "createRoom", name: string, password: string, } | { "type": "previewInvite", invite: string, } | { "type": "takeOpenedInvite" } | { "type": "joinRoom", invite: string, password: string, } | { "type": "getInvite", room: string, } | { "type": "changePassword", room: string, password: string, } | { "type": "revokeInvites", room: string, } | { "type": "leaveRoom", room: string, } | { "type": "banMember", room: string, member: string, } | { "type": "getShortcuts" } | { "type": "setShortcut", id: string, code: string, } | { "type": "resetShortcuts", id: string | null, } | { "type": "getNetwork" } | { "type": "setNetwork", relay: RelaySetting, } | { "type": "getDrivers" } | { "type": "getNotices" } | { "type": "installDriver", driver: DriverName, } | { "type": "listSources" } | { "type": "startSession", room: string, 
 /**
  * What the room sees it called (1 to 96 bytes).
  */
-title: string, fps: number, 
+title: string, 
+/**
+ * 1 to 7.
+ */
+max_viewers: number, 
+/**
+ * How the game takes input: its seats, fixed for the session.
+ * Keyboard and mouse need a window as the stream's source; they go
+ * in only while it is in front.
+ */
+input: InputSetup, 
+/**
+ * The host's own controller, to play through a seat: hidden from
+ * games for the session, it drives the first seat with a pad.
+ * `None` plays outside the seats, with whatever the game sees
+ * directly.
+ */
+controller: HostController | null, } | { "type": "startStream", source: SourceChoice, 
+/**
+ * What the host's panel calls it (a window's title): shown only
+ * here, and kept out of logs.
+ */
+name: string, fps: number, 
 /**
  * The most each viewer's stream may use, Mbit/s.
  */
@@ -21,20 +43,4 @@ max_mbps: number,
 /**
  * This PC's upload cap, split between viewers, Mbit/s.
  */
-upload_mbps: number | null, 
-/**
- * 1 to 7.
- */
-max_viewers: number, 
-/**
- * How the game takes input: its seats. Keyboard and mouse need a
- * window source; they go in only while it is in front. Remembered
- * for the window's program.
- */
-input: InputSetup, 
-/**
- * The host's own controller, to play through a seat: hidden from
- * games while live, it drives the first seat with a pad. `None`
- * plays outside the seats, with whatever the game sees directly.
- */
-controller: HostController | null, } | { "type": "stopLive" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, } | { "type": "allowControl" };
+upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, } | { "type": "allowControl" };

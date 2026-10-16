@@ -60,12 +60,26 @@ function goneText(room: RoomView, reason: RoomGone): Notice {
 /** Why our stream ended, unless we ended it ourselves. */
 function sessionEndText(reason: SessionEnd): string | null {
   switch (reason) {
-    case "gameExited":
-      return "The game closed, so your stream ended.";
-    case "sourceLost":
-      return "The window or screen you were streaming went away, so your stream ended.";
     case "error":
-      return "Your stream stopped after an error.";
+      return "Your session stopped after an error.";
+    case "gameExited":
+    case "sourceLost":
+    case "hostStopped":
+    case "hostLeftRoom":
+    case "hostShutdown":
+      return null;
+  }
+}
+
+/** Why our stream ended inside our session (M19), unless we stopped it. */
+function streamEndText(reason: SessionEnd): string | null {
+  switch (reason) {
+    case "gameExited":
+      return "The game closed, so the stream stopped. The session goes on: stream again when you're ready.";
+    case "sourceLost":
+      return "The window or screen you were streaming went away, so the stream stopped. The session goes on.";
+    case "error":
+      return "The stream stopped after an error. The session goes on.";
     case "hostStopped":
     case "hostLeftRoom":
     case "hostShutdown":
@@ -204,6 +218,12 @@ export function useLobby(): Lobby {
         case "sessionEnded": {
           const text = sessionEndText(event.reason);
           if (text) notify(text, "warn");
+          break;
+        }
+        case "streamEnded": {
+          const text = streamEndText(event.reason);
+          if (text) notify(text, "warn");
+          refreshRooms().catch(() => {});
           break;
         }
         case "watchEnded": {

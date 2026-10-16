@@ -42,7 +42,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// 1: the first installer (0.8.0). Builds before it sent 0 and didn't check.
 /// 2: HEVC (M12c): `SessionJoin` says which codecs the viewer decodes, and an
 /// epoch's preamble may name HEVC.
-pub const PROTOCOL_MINOR: u16 = 2;
+/// 3: sessions before streams (M19): `SessionStatus` says whether anything is
+/// streamed, and an epoch may end with `STREAM_END`.
+pub const PROTOCOL_MINOR: u16 = 3;
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC
 /// frame header, and as bits in what a viewer decodes (`SessionJoin`).

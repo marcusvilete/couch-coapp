@@ -10,7 +10,10 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use anyhow::Context;
 use couch_engine::pipeline::{
     AudioChoice, Source,
-    host::{HostEvent, HostOptions, HostStream, LocalSeat, NetemElapsed, Rates, ViewerStats},
+    host::{
+        HostEvent, HostOptions, HostPipeline, LocalSeat, NetemElapsed, Rates, StreamOptions,
+        ViewerStats,
+    },
     platform_backend,
     source::REPLACE_GRACE,
 };
@@ -53,6 +56,9 @@ pub struct Args {
     pub host_pad: Option<usize>,
     pub hide_host_pad: bool,
     pub audio: AudioChoice,
+    /// Stop the stream after this long and start it again, once, in the same
+    /// session (M19): viewers stay, and see a second stream.
+    pub restart_stream_after: Option<u64>,
     pub net: NetArgs,
 }
 
@@ -132,31 +138,40 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         None => None,
     };
     event_line("started", qpc_now());
-    let (stream, mut events) = HostStream::start(
+    // A session and one stream in it at once; the host ends with the stream.
+    let (stream, mut events) = HostPipeline::start(
         backend,
         HostOptions {
-            source: args.source.clone(),
-            fps: args.fps,
-            rates: Rates {
-                min_bps: mbps(args.min_mbps),
-                start_bps: mbps(args.start_mbps),
-                max_bps: mbps(args.max_mbps),
-                relay_max_bps: mbps(args.relay_max_mbps),
-            },
-            upload_bps: args.upload_mbps.map(mbps),
-            audio: args.audio,
             seats: vec![SeatKind::Controller; usize::from(args.pads.max(1))],
             real_pad_ids: args.real_pad_ids,
             session: 1,
             first_epoch: SeatEpoch(0),
             rc_trace: args.rc_trace.clone(),
-            pacing_trace: args.pacing_trace.clone(),
             netem_elapsed,
             replace_grace: REPLACE_GRACE,
             local,
         },
     )
     .await;
+    let stream_options = StreamOptions {
+        source: args.source.clone(),
+        fps: args.fps,
+        rates: Rates {
+            min_bps: mbps(args.min_mbps),
+            start_bps: mbps(args.start_mbps),
+            max_bps: mbps(args.max_mbps),
+            relay_max_bps: mbps(args.relay_max_mbps),
+        },
+        upload_bps: args.upload_mbps.map(mbps),
+        audio: args.audio,
+        pacing_trace: args.pacing_trace.clone(),
+    };
+    let mut current = stream.start_stream(stream_options.clone()).await;
+    let restart = tokio::time::sleep(std::time::Duration::from_secs(
+        args.restart_stream_after.unwrap_or(u64::MAX / 4),
+    ));
+    tokio::pin!(restart);
+    let mut restarted = args.restart_stream_after.is_none();
     if args
         .permissions
         .intersects(Permissions::KEYBOARD | Permissions::MOUSE)
@@ -229,9 +244,19 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 {
                     stream.claim(*seat, *member);
                 }
-                if let Some(ended) = on_event(event, &viewers, since()) {
+                if let Some(ended) = on_event(event, &viewers, current, since()) {
                     break ended;
                 }
+            }
+            () = &mut restart, if !restarted => {
+                restarted = true;
+                println!("{:8.3}s  stopping the stream", since());
+                stream.stop_stream().await;
+                event_line("stream-stopped", qpc_now());
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                current = stream.start_stream(stream_options.clone()).await;
+                println!("{:8.3}s  streaming again (stream {current})", since());
+                event_line("stream-started", qpc_now());
             }
             () = &mut stop => {
                 println!("stopping");
@@ -243,7 +268,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // Releases everything first; the events that says so are printed below.
     stream.stop().await;
     while let Ok(event) = events.try_recv() {
-        on_event(event, &viewers, since());
+        on_event(event, &viewers, current, since());
     }
     for viewer in viewers.values() {
         viewer.conn.close(0u32.into(), b"bye");
@@ -252,10 +277,12 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     ended
 }
 
-/// Prints an event; `Some` when the stream must end.
+/// Prints an event; `Some` when the host must end (the stream now, `current`,
+/// ended: one stopped before says nothing).
 fn on_event(
     event: HostEvent,
     viewers: &HashMap<MemberId, Viewer>,
+    current: u32,
     secs: f64,
 ) -> Option<anyhow::Result<()>> {
     match event {
@@ -314,12 +341,12 @@ fn on_event(
             "{secs:8.3}s  rumble from the game: low {} high {}",
             r.low_frequency, r.high_frequency
         ),
-        HostEvent::SourceClosed => {
+        HostEvent::SourceClosed { stream } if stream == current => {
             println!("{secs:8.3}s  the captured source closed");
             event_line("source-lost", qpc_now());
             return Some(Ok(()));
         }
-        HostEvent::GameExited => {
+        HostEvent::GameExited { stream } if stream == current => {
             println!("{secs:8.3}s  the game exited");
             event_line("game-exited", qpc_now());
             return Some(Ok(()));
@@ -328,7 +355,12 @@ fn on_event(
             println!("{secs:8.3}s  the game opened a new window; capturing that one");
             event_line("followed", at.0);
         }
-        HostEvent::CaptureFailed(e) => return Some(Err(anyhow::anyhow!("capture failed: {e}"))),
+        HostEvent::CaptureFailed { stream, error } if stream == current => {
+            return Some(Err(anyhow::anyhow!("capture failed: {error}")));
+        }
+        HostEvent::SourceClosed { .. }
+        | HostEvent::GameExited { .. }
+        | HostEvent::CaptureFailed { .. } => {}
         HostEvent::GameFocus(in_front) => {
             let (what, event) = if in_front {
                 ("in front", "game-front")
