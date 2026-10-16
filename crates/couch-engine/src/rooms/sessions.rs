@@ -10,7 +10,10 @@
 //! module decides who gets them. Who holds the seat is the seat router's
 //! call; `couch_room::session` mirrors it.
 
-use std::{any::Any, collections::BTreeMap};
+use std::{
+    any::Any,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use couch_input::{HidUsage, local::ControllerIds, shortcuts::Shortcut};
 use couch_proto::{
@@ -19,8 +22,8 @@ use couch_proto::{
     ipc::{HudRole, HudSeat, HudState, ShortcutKeys, UserAction},
     session::{
         Cancel, ControlCancel, ControlRequest, EndReason, GameFocus, JoinResult, SeatKind,
-        SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, StreamState, seat_labels,
-        seat_phrase,
+        SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, StreamState, ViewerControllers,
+        seat_labels, seat_phrase,
     },
 };
 use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
@@ -109,23 +112,45 @@ struct Watching {
     /// Whether the host's game window is in front, as the host last said
     /// (`GameFocus`); assumed so until it says otherwise.
     in_front: bool,
-    /// The seat we hold, from `SeatAssigned` to its `SeatReleased`. Never
-    /// kept across connections.
-    holding: Option<SeatId>,
+    /// The seats we hold, each from its `SeatAssigned` to its `SeatReleased`
+    /// (M18: as many as the host lets us). Never kept across connections.
+    holding: BTreeSet<SeatId>,
+    /// How many controllers the stream window has, as it last said; the
+    /// host hears it on every change and after each join (M18).
+    controllers: u8,
 }
 
 enum WatchState {
     /// Asked to watch; the reply waits for the host's answer.
     Joining(Option<Reply>),
     Watching,
-    /// Asked for this seat; may hold another meanwhile (asking to move).
+    /// Asked for this seat; may hold others meanwhile (to add it, or move).
     Asking(SeatId),
-    /// Holds this seat.
-    Controlling(SeatId),
+    /// Holds one seat or more (`Watching::holding`).
+    Controlling,
     /// The connection to the host went: the window stays open while the
     /// room redials, and watching resumes when the host announces the same
     /// session on the new connection.
     Reconnecting,
+}
+
+impl Watching {
+    /// Not asking: watching, or controlling what we hold.
+    fn settled(&self) -> WatchState {
+        if self.holding.is_empty() {
+            WatchState::Watching
+        } else {
+            WatchState::Controlling
+        }
+    }
+
+    /// Joined: the host may hear from us.
+    fn joined(&self) -> bool {
+        matches!(
+            self.state,
+            WatchState::Watching | WatchState::Asking(_) | WatchState::Controlling
+        )
+    }
 }
 
 struct Listing {
@@ -302,15 +327,15 @@ impl Actor {
             WatchState::Joining(None)
             | WatchState::Watching
             | WatchState::Asking(_)
-            | WatchState::Controlling(_) => {}
+            | WatchState::Controlling => {}
         }
         let (room, host, session) = (w.room, w.host, w.session);
         let note = format!("Reconnecting to {}…", self.member_name(room, host));
         let wait = self.reconnect_wait;
         let w = self.sessions.watching.as_mut().expect("checked above");
         w.state = WatchState::Reconnecting;
-        // The seat went with the connection.
-        w.holding = None;
+        // The seats went with the connection.
+        w.holding.clear();
         w.note = note;
         w.attempt += 1;
         let attempt = w.attempt;
@@ -464,7 +489,17 @@ impl Actor {
             ControlMessage::ControlCancel(m) if ours(&self.sessions, m.session) => {
                 let fx = self.hosting_mut().map(|h| match m.what {
                     Cancel::Request => h.session.withdraw(peer),
-                    Cancel::Seat => h.session.give_back(peer),
+                    Cancel::Seat(seat) => h.session.give_back(peer, seat),
+                });
+                self.apply_session(room, fx.unwrap_or_default(), now);
+            }
+            // How many controllers a viewer has (M18): only from the viewer
+            // itself, on the connection it joined on. It decides only whether
+            // a seat we grant it is added or replaces its others.
+            ControlMessage::ViewerControllers(m) if ours(&self.sessions, m.session) => {
+                let fx = self.hosting_mut().and_then(|h| {
+                    (h.session.is_viewer(peer) && h.viewer_conns.get(&peer) == Some(&conn))
+                        .then(|| h.session.set_controllers(peer, m.count))
                 });
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
@@ -583,6 +618,17 @@ impl Actor {
                         w.state = WatchState::Watching;
                         w.away_since = None;
                         tracing::info!(room = ?room, host = ?peer, "watching a stream");
+                        // A new viewer to the host each time: it hears how
+                        // many controllers we have (M18).
+                        let count = (w.controllers > 0).then_some(
+                            ControlMessage::ViewerControllers(ViewerControllers {
+                                session: w.session,
+                                count: w.controllers,
+                            }),
+                        );
+                        if let Some(count) = count {
+                            self.send(conn, Outgoing::Message(count));
+                        }
                         self.send_hud();
                         self.announce(room, now);
                         if let Some(reply) = reply {
@@ -613,10 +659,8 @@ impl Actor {
                 if let Some(w) = self.sessions.watching.as_mut()
                     && matches!(w.state, WatchState::Asking(_))
                 {
-                    // Back to the seat we hold, if we asked to move.
-                    w.state = w
-                        .holding
-                        .map_or(WatchState::Watching, WatchState::Controlling);
+                    // Back to the seats we hold, if any.
+                    w.state = w.settled();
                     w.note = "The host said no, for now".into();
                     self.send_hud();
                     self.announce(room, now);
@@ -638,9 +682,11 @@ impl Actor {
                 // a pass and a request cross.
                 w.state = match w.state {
                     WatchState::Asking(asked) if asked != s.seat => WatchState::Asking(asked),
-                    _ => WatchState::Controlling(s.seat),
+                    _ => WatchState::Controlling,
                 };
-                w.holding = Some(s.seat);
+                // Added to what we hold, or a move: the host releases the
+                // others first (M18).
+                w.holding.insert(s.seat);
                 let label = labels
                     .get(usize::from(s.seat.0))
                     .map_or("a seat", String::as_str);
@@ -663,21 +709,21 @@ impl Actor {
                 if let Some(watch) = &w.watch {
                     watch.seat_released(s);
                 }
-                if w.holding == Some(seat) {
-                    w.holding = None;
+                if !w.holding.remove(&seat) {
+                    return;
                 }
                 // While asking to move, the old seat goes first: still asking.
-                if matches!(w.state, WatchState::Controlling(held) if held == seat) {
-                    w.state = WatchState::Watching;
+                if matches!(w.state, WatchState::Controlling) {
+                    w.state = w.settled();
                     // Taken back, passed on or given back: the host may or
                     // may not play it now.
                     let label = labels
                         .get(usize::from(seat.0))
                         .map_or("a seat", String::as_str);
                     w.note = format!("You no longer have {}", seat_phrase(label));
-                    self.send_hud();
-                    self.announce(room, now);
                 }
+                self.send_hud();
+                self.announce(room, now);
             }
             _ => {}
         }
@@ -1637,7 +1683,8 @@ impl Actor {
             attempt: 0,
             away_since: None,
             in_front: true,
-            holding: None,
+            holding: BTreeSet::new(),
+            controllers: 0,
         });
         self.announce(room, now);
         Ok(None)
@@ -1716,8 +1763,9 @@ impl Actor {
         Ok(Response::Done)
     }
 
-    /// Asks for `seat`: free, someone else's, or another than the one we
-    /// hold (a move). Asking again for another seat replaces the request.
+    /// Asks for `seat`: free, someone else's, or another than those we hold
+    /// (added, or a move: the host decides by our controllers, M18). Asking
+    /// again for another seat replaces the request.
     pub(super) fn request_control(
         &mut self,
         seat: SeatId,
@@ -1739,11 +1787,11 @@ impl Actor {
                 return Err(EngineError::Refused("reconnecting to the host"));
             }
             WatchState::Asking(asked) if asked == seat => {}
-            WatchState::Controlling(held) if held == seat => {}
-            // Asking for the seat we hold while asking to move: staying
-            // put, so the move request is withdrawn.
-            WatchState::Asking(_) if w.holding == Some(seat) => return self.cancel_control(now),
-            WatchState::Watching | WatchState::Asking(_) | WatchState::Controlling(_) => {
+            WatchState::Controlling if w.holding.contains(&seat) => {}
+            // Asking for a seat we hold while asking for another: staying
+            // put, so the request is withdrawn.
+            WatchState::Asking(_) if w.holding.contains(&seat) => return self.cancel_control(now),
+            WatchState::Watching | WatchState::Asking(_) | WatchState::Controlling => {
                 w.state = WatchState::Asking(seat);
                 w.note = format!("Asked the host for {}", seat_phrase(&label));
                 let (room, conn, session) = (w.room, w.conn, w.session);
@@ -1768,20 +1816,37 @@ impl Actor {
             // Only the request goes: a guest asking to move keeps its seat,
             // even if the host has already declined.
             WatchState::Asking(_) => {
-                w.state = w
-                    .holding
-                    .map_or(WatchState::Watching, WatchState::Controlling);
+                w.state = w.settled();
                 w.note = String::new();
                 self.send(conn, Outgoing::Message(cancel(Cancel::Request)));
                 self.send_hud();
                 self.announce(room, now);
             }
-            // Given back once the host's release arrives.
-            WatchState::Controlling(_) => {
-                self.send(conn, Outgoing::Message(cancel(Cancel::Seat)));
+            // Every seat we hold, given back once the host's releases arrive.
+            WatchState::Controlling => {
+                self.send(conn, Outgoing::Message(cancel(Cancel::Seat(None))));
             }
             WatchState::Joining(_) | WatchState::Watching | WatchState::Reconnecting => {}
         }
+        Ok(Response::Done)
+    }
+
+    /// Gives back one of the seats we hold (M18), keeping the others and any
+    /// request; it goes once the host's release arrives.
+    pub(super) fn give_back_seat(&mut self, seat: SeatId) -> Result<Response, EngineError> {
+        let w = self
+            .sessions
+            .watching
+            .as_ref()
+            .ok_or(EngineError::NotWatching)?;
+        if !w.holding.contains(&seat) {
+            return Err(EngineError::Refused("you don't have that seat"));
+        }
+        let cancel = ControlMessage::ControlCancel(ControlCancel {
+            session: w.session,
+            what: Cancel::Seat(Some(seat)),
+        });
+        self.send(w.conn, Outgoing::Message(cancel));
         Ok(Response::Done)
     }
 
@@ -1807,6 +1872,21 @@ impl Actor {
             }
             WatchEvent::Action(UserAction::CancelControl) => {
                 let _ = self.cancel_control(now);
+            }
+            WatchEvent::Action(UserAction::GiveBack(seat)) => {
+                let _ = self.give_back_seat(SeatId(seat));
+            }
+            // The host hears it now if we have joined, or after joining.
+            WatchEvent::Controllers(count) => {
+                let (joined, conn, session) = (w.joined(), w.conn, w.session);
+                if let Some(w) = self.sessions.watching.as_mut() {
+                    w.controllers = count;
+                }
+                if joined {
+                    let count =
+                        ControlMessage::ViewerControllers(ViewerControllers { session, count });
+                    self.send(conn, Outgoing::Message(count));
+                }
             }
             // The user closed the viewer.
             WatchEvent::Action(UserAction::Leave) | WatchEvent::ViewerClosed => {
@@ -1858,7 +1938,7 @@ impl Actor {
                     keyboard_mouse: kind.has_keyboard_mouse(),
                     holder: holder.map(|h| self.member_name(w.room, h)),
                     host,
-                    mine: w.holding == Some(SeatId(i as u8)),
+                    mine: w.holding.contains(&SeatId(i as u8)),
                     asked: asked == Some(SeatId(i as u8)),
                 }
             })
@@ -1871,7 +1951,7 @@ impl Actor {
                     HudRole::Watching
                 }
                 WatchState::Asking(_) => HudRole::Asking,
-                WatchState::Controlling(_) => HudRole::Controlling,
+                WatchState::Controlling => HudRole::Controlling,
             },
             seats,
             host_on_seats: status.is_some_and(|s| s.host_on_seats),
@@ -2014,6 +2094,7 @@ impl Actor {
                 title: s.config().title.clone(),
                 max_viewers: s.config().max_viewers,
                 viewers: s.viewers().iter().map(MemberId::to_hex).collect(),
+                viewer_controllers: s.viewers().iter().map(|v| s.controllers_of(*v)).collect(),
                 seats: seat_views(&s.config().seats, s.holders(), self.me),
                 host_on_seats: s.host().is_some(),
                 control_paused: s.control_paused(),
@@ -2050,7 +2131,7 @@ impl Actor {
                         asked_seat = Some(seat.0);
                         SessionRole::Asking
                     }
-                    WatchState::Controlling(_) => SessionRole::Controlling,
+                    WatchState::Controlling => SessionRole::Controlling,
                     WatchState::Reconnecting => SessionRole::Reconnecting,
                 },
                 _ => SessionRole::None,
@@ -2072,6 +2153,7 @@ impl Actor {
                 viewers: status.map_or_else(Vec::new, |s| {
                     s.viewers.iter().map(MemberId::to_hex).collect()
                 }),
+                viewer_controllers: Vec::new(),
                 seats: seat_views(&listing.announce.seats, &holders, *host),
                 host_on_seats: status.is_some_and(|s| s.host_on_seats),
                 control_paused: status.is_some_and(|s| s.control_paused),

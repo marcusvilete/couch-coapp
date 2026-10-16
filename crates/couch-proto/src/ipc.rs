@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 9;
+pub const IPC_VERSION: u16 = 10;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -198,19 +198,55 @@ pub enum LocalInput {
         dx: i32,
         dy: i32,
     },
-    /// The local gamepad's whole state; neutral when it disconnects.
-    Pad(PadSnapshot),
+    /// One local controller's whole state, by its slot (M18): a controller
+    /// keeps its slot while connected, and one that connects takes the
+    /// lowest free slot, so the others never move. Each one counts as
+    /// touched, and as connected.
+    Pad {
+        controller: u8,
+        pad: PadSnapshot,
+    },
+    /// The slots with a controller connected now, as bits (bit n: slot n),
+    /// after every change (M18). A slot that went leaves its seat, if it
+    /// drove one of several.
+    ControllerSlots(u8),
     /// Sent every 100 ms from the viewer's window loop. While these stop (the
     /// viewer hung), the main process stops the heartbeat, so the host
     /// releases this member's input.
     Alive,
 }
 
-/// Payload of [`kinds::SEAT`] (postcard).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Payload of [`kinds::SEAT`] (postcard): every seat this member holds, in
+/// seat order (M18: possibly several), with what each lets it send. Empty
+/// while it holds none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeatState {
-    pub holding: bool,
+    pub seats: Vec<HeldSeat>,
+}
+
+/// One seat in [`SeatState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldSeat {
+    /// A [`crate::ids::SeatId`]'s number.
+    pub seat: u8,
     pub permissions: Permissions,
+    /// The controller slot driving its pad, as the main process decided
+    /// (`couch_input::forward`); `None` without a pad or a controller. The
+    /// window rumbles and shows by it.
+    pub controller: Option<u8>,
+}
+
+impl SeatState {
+    pub fn holding(&self) -> bool {
+        !self.seats.is_empty()
+    }
+
+    /// Whether some held seat lets this member send `permission`.
+    pub fn may(&self, permission: Permissions) -> bool {
+        self.seats
+            .iter()
+            .any(|s| s.permissions.contains(permission))
+    }
 }
 
 /// Payload of [`kinds::HUD_STATE`] (postcard): the session as the viewer's
@@ -276,15 +312,19 @@ pub enum HudRole {
 pub enum UserAction {
     /// Ask for this seat (by [`crate::ids::SeatId`]'s number).
     RequestControl(u8),
-    /// Withdraw the request, or give control back.
+    /// Withdraw the request, or give every seat back.
     CancelControl,
+    /// Give this seat back, keeping the others (M18).
+    GiveBack(u8),
     /// Stop watching.
     Leave,
 }
 
-/// Payload of [`kinds::RUMBLE`] (postcard): motor strengths, 0 to 255.
+/// Payload of [`kinds::RUMBLE`] (postcard): motor strengths, 0 to 255, for
+/// the controller that drives `seat` (M18).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RumbleState {
+    pub seat: u8,
     pub low: u8,
     pub high: u8,
 }
@@ -512,20 +552,40 @@ mod tests {
                 down: true,
             },
             LocalInput::MouseMotion { dx: -3, dy: 9 },
-            LocalInput::Pad(PadSnapshot {
-                buttons: 0x1000,
-                left_x: -32768,
-                ..Default::default()
-            }),
+            LocalInput::Pad {
+                controller: 1,
+                pad: PadSnapshot {
+                    buttons: 0x1000,
+                    left_x: -32768,
+                    ..Default::default()
+                },
+            },
+            LocalInput::ControllerSlots(0b101),
         ] {
             assert_eq!(from_payload(&to_payload(&input)), Some(input));
         }
         let seat = SeatState {
-            holding: true,
-            permissions: Permissions::GAMEPAD,
+            seats: vec![
+                HeldSeat {
+                    seat: 0,
+                    permissions: Permissions::GAMEPAD,
+                    controller: Some(2),
+                },
+                HeldSeat {
+                    seat: 2,
+                    permissions: Permissions::KEYBOARD | Permissions::MOUSE,
+                    controller: None,
+                },
+            ],
         };
-        assert_eq!(from_payload(&to_payload(&seat)), Some(seat));
-        let mut extra = to_payload(&RumbleState { low: 1, high: 2 });
+        assert_eq!(from_payload(&to_payload(&seat)), Some(seat.clone()));
+        assert!(seat.holding() && seat.may(Permissions::KEYBOARD));
+        assert!(!SeatState::default().holding());
+        let mut extra = to_payload(&RumbleState {
+            seat: 1,
+            low: 1,
+            high: 2,
+        });
         extra.push(0);
         assert_eq!(from_payload::<RumbleState>(&extra), None);
     }

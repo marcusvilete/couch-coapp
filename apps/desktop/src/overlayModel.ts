@@ -54,9 +54,11 @@ export function sessionEvents(
     const phrase = seatPhrase(seat.label);
     if (now != null && now !== after.host) notes.push(`${name(now)} now plays ${phrase}`);
     // Lost it, to nobody or to someone else. Someone who stopped watching
-    // was told of above, and someone who moved to another seat plays that.
-    const playsAnother = after.seats.some((s) => s.holder === old);
-    if (old != null && old !== after.host && !playsAnother && after.viewers.includes(old)) {
+    // was told of above, and someone who moved to another seat plays that
+    // (a seat they just got). One who gave back one of several seats (M18)
+    // hears of it.
+    const moved = after.seats.some((s, j) => s.holder === old && before.seats[j]?.holder !== old);
+    if (old != null && old !== after.host && !moved && after.viewers.includes(old)) {
       notes.push(`${name(old)} no longer plays ${phrase}`);
     }
   });

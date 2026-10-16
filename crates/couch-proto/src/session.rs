@@ -152,25 +152,30 @@ pub enum StreamState {
 }
 
 impl SessionStatus {
-    /// Every holder is a viewer, no viewer holds two seats, and the host's
-    /// seat is a seat no viewer holds, only while the host plays on seats.
+    /// Every holder is a viewer, and the host's seat is a seat no viewer
+    /// holds, only while the host plays on seats. A viewer may hold several
+    /// seats (M18: one per controller, and the keyboard seat).
     pub fn is_valid(&self) -> bool {
-        let held: Vec<MemberId> = self.holders.iter().flatten().copied().collect();
         self.viewers.len() <= MAX_VIEWERS_LISTED
             && self.holders.len() <= MAX_SEATS
-            && held.iter().all(|h| self.viewers.contains(h))
-            && held.iter().enumerate().all(|(i, h)| !held[..i].contains(h))
+            && self
+                .holders
+                .iter()
+                .flatten()
+                .all(|h| self.viewers.contains(h))
             && self.host_seat.is_none_or(|s| {
                 self.host_on_seats && self.holders.get(usize::from(s.0)) == Some(&None)
             })
     }
 
-    /// The seat `member` holds, if any.
-    pub fn seat_of(&self, member: MemberId) -> Option<SeatId> {
+    /// Every seat `member` holds, in seat order.
+    pub fn seats_of(&self, member: MemberId) -> Vec<SeatId> {
         self.holders
             .iter()
-            .position(|h| *h == Some(member))
-            .map(|i| SeatId(i as u8))
+            .enumerate()
+            .filter(|(_, h)| **h == Some(member))
+            .map(|(i, _)| SeatId(i as u8))
+            .collect()
     }
 }
 
@@ -259,10 +264,19 @@ pub struct ControlCancel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Cancel {
-    /// Withdraw the pending request, if any; the seat held stays.
+    /// Withdraw the pending request, if any; the seats held stay.
     Request,
-    /// Give back the seat held, if any.
-    Seat,
+    /// Give back this seat, or with `None` every seat held (M18).
+    Seat(Option<SeatId>),
+}
+
+/// Viewer to host, optional: how many controllers this viewer has (M18),
+/// after joining and on every change. A viewer holds one seat with a pad
+/// per controller; a seat beyond that moves it. Capped at 4 by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewerControllers {
+    pub session: SessionId,
+    pub count: u8,
 }
 
 /// Host to viewer: your request was declined (or dropped: the host took
@@ -381,8 +395,8 @@ mod tests {
             .is_valid(),
             "the host's seat is a seat"
         );
-        assert_eq!(status.seat_of(cai), Some(SeatId(2)));
-        assert_eq!(status.seat_of(MemberId([3; 32])), None);
+        assert_eq!(status.seats_of(cai), vec![SeatId(2)]);
+        assert_eq!(status.seats_of(MemberId([3; 32])), vec![]);
         assert!(
             !SessionStatus {
                 holders: vec![Some(MemberId([3; 32]))],
@@ -391,14 +405,13 @@ mod tests {
             .is_valid(),
             "a holder must be a viewer"
         );
-        assert!(
-            !SessionStatus {
-                holders: vec![Some(bia), Some(bia)],
-                ..status.clone()
-            }
-            .is_valid(),
-            "nobody holds two seats"
-        );
+        let two = SessionStatus {
+            holders: vec![Some(bia), Some(bia)],
+            host_seat: None,
+            ..status.clone()
+        };
+        assert!(two.is_valid(), "a viewer may hold two seats (M18)");
+        assert_eq!(two.seats_of(bia), vec![SeatId(0), SeatId(1)]);
         assert!(
             !SessionStatus {
                 holders: vec![None; MAX_SEATS + 1],

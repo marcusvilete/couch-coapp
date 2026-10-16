@@ -104,7 +104,16 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **The session dialog's seats** (M19: one setup). Controllers 0 to 4, each its own virtual pad, and keyboard and mouse: not for guests, a seat of their own, or with Controller 1 (one player on both, single player's old "both"). The last setup comes back (the profile's web storage). Fixed for the session.
 - **A controller plugged into the host** shows a warning when it isn't chosen as the host's: it may take a player's place.
 - **On this PC with profiles:** alice starts a session with 2 controllers and streams; bob and carol each ask for one. `xinput-watch.ps1` should show two virtual pads (after any physical ones), each moving only with its own guest. Steam announces each pad.
-- **Moving.** A guest holding Controller 1 who asks for Controller 2 keeps the first until the host accepts; then the first goes neutral and the second follows them. Host log: `seat` lines for both.
+- **Moving.** A guest with one controller holding Controller 1 who asks for Controller 2 keeps the first until the host accepts; then the first goes neutral and the second follows them. Host log: `seat` lines for both.
+
+## Several seats for one guest (M18): what to expect
+
+- **The guest's controller count** reaches the host when the guest's stream window opens its controllers: the host panel's Watching list says "bob · 2 controllers" (sessions with more than one seat). Plugging or unplugging one updates it.
+- **Added or moved.** With 2 controllers, a guest on Controller 1 who asks for Controller 2 keeps both; with 1 they move, as before. The keyboard-and-mouse seat is always added, and a move keeps it. The host's "Pass another seat…" menu says "— added" or "— moves them" per seat.
+- **Which controller drives which.** Each pad seat keeps the controller it got: a new seat goes to the lowest free controller, and when a second seat comes, the first keeps the controller driving it. With one pad seat, whichever controller they touch last.
+- **A controller disconnecting** (unplugged, battery, sleep) with several pad seats gives its seat back at once (the host panel shows it free, the host overlay notes it); the guest's other controllers stay on their seats. With one pad seat, the seat stays: another controller or the same one reconnected carries on. The stream window's stats panel (the bar's Stats button) has an input line saying "pad A → seat 1, pad B → seat 2"; rumble goes to the controller driving that seat.
+- **Giving back.** The guest's card and stream-window bar get "Give back Controller N" per seat and "Give all back"; the host's Take back stays per seat.
+- **On this PC:** two physical controllers both on this PC, alice hosting 2 controller seats, bob watching (alice's own controller not chosen, or HidHide hides one from bob too). bob's window shows 2 controllers; bob asks for both; `xinput-watch.ps1` shows each of bob's controllers moving only its own pad. A DualSense and an Xbox controller work; two Xbox 360 pads are skipped while a host here has pads plugged in (the viewer can't tell them from ours).
 - **The "game not in front" line.** With alice live and the game window behind another window, the guests' stream windows say "The game isn't in front on Ana's PC"; for a player the bar stays up until it comes back. On one PC the stream window itself takes the front, so expect the line while clicking in it: that is right.
 
 ## The host on a seat (P2): what to expect

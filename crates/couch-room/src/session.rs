@@ -12,11 +12,14 @@
 //! [`HostSession::seat_changed`], including those the router makes alone (a
 //! holder who went quiet too long).
 //!
-//! **Only viewers play, one seat each.** Requests come from viewers only. A
-//! grant goes only to a viewer, never while control is paused (the panic key)
-//! or after the end, and it is always preceded by revoking that viewer from
-//! every other seat, on the same ordered channel, so nobody ever holds two.
-//! A viewer who leaves loses its request and its seat at once.
+//! **Only viewers play, as many seats as they have controllers.** Requests
+//! come from viewers only. A grant goes only to a viewer, never while control
+//! is paused (the panic key) or after the end. A viewer may hold several
+//! seats (M18): one with a pad for each controller it says it has, plus the
+//! keyboard-and-mouse seat ([`HostSession::keeps`]). A grant beyond that
+//! moves the viewer, and is then preceded by revoking it from every other
+//! seat, on the same ordered channel, so it never holds more. A viewer who
+//! leaves loses its request and its seats at once.
 //!
 //! **The host may play a seat too** ([`SessionConfig::host`]): their own
 //! controller, read on the host, drives a seat's pad through the router like
@@ -30,7 +33,7 @@
 //! stays empty until they play one again.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
@@ -170,7 +173,27 @@ pub struct HostSession {
     ended: bool,
     /// Whether anything is streamed (M19): nothing at first.
     stream: StreamState,
+    /// How many controllers each viewer said it has (M18; 0 until told):
+    /// whether a seat with a pad is added to theirs or replaces it.
+    controllers: BTreeMap<MemberId, u8>,
+    /// Grants sent to the router and not yet reported back, in the order
+    /// sent: they count toward a viewer's seats too, so two quick grants
+    /// never give it more than its controllers allow.
+    pending: Vec<PendingGrant>,
 }
+
+/// A grant on its way to the router (M18).
+#[derive(Debug, Clone, Copy)]
+struct PendingGrant {
+    seat: SeatId,
+    member: MemberId,
+    /// It moves the member (its other pad seats revoked first), rather than
+    /// adding a seat.
+    moves: bool,
+}
+
+/// The most controllers a viewer counts as having: XInput's four slots.
+pub const MAX_CONTROLLERS: u8 = 4;
 
 impl HostSession {
     pub fn new(id: SessionId, config: SessionConfig) -> Result<Self, SessionError> {
@@ -204,6 +227,8 @@ impl HostSession {
             paused: false,
             ended: false,
             stream: StreamState::Waiting,
+            controllers: BTreeMap::new(),
+            pending: Vec::new(),
         })
     }
 
@@ -253,12 +278,54 @@ impl HostSession {
         self.permissions(seat).contains(Permissions::GAMEPAD)
     }
 
-    /// The seat `member` holds, if any.
+    /// The first seat `member` holds, if any (the host holds one at most).
     pub fn seat_of(&self, member: MemberId) -> Option<SeatId> {
+        self.seats_of(member).into_iter().next()
+    }
+
+    /// Every seat `member` holds, in seat order (M18: a viewer with several
+    /// controllers may hold several).
+    pub fn seats_of(&self, member: MemberId) -> Vec<SeatId> {
         self.holders
             .iter()
-            .position(|h| *h == Some(member))
-            .map(|i| SeatId(i as u8))
+            .enumerate()
+            .filter(|(_, h)| **h == Some(member))
+            .map(|(i, _)| SeatId(i as u8))
+            .collect()
+    }
+
+    /// How many controllers `member` said it has.
+    pub fn controllers_of(&self, member: MemberId) -> u8 {
+        self.controllers.get(&member).copied().unwrap_or(0)
+    }
+
+    /// Whether `member` would keep its other seats on being given `seat`
+    /// (M18), rather than move to it:
+    /// - a seat without a pad (keyboard and mouse) needs no controller: added;
+    /// - a seat with a pad is added while the viewer holds fewer seats with a
+    ///   pad than it has controllers; otherwise it moves, as before M18.
+    ///
+    /// The host's own controller holds one seat at most: never added.
+    pub fn keeps(&self, member: MemberId, seat: SeatId) -> bool {
+        if self.is_host(member) {
+            return false;
+        }
+        if !self.has_pad(seat) {
+            return true;
+        }
+        // The pad seats it holds, and those on their way to it.
+        let on_way = self
+            .pending
+            .iter()
+            .filter(|p| p.member == member)
+            .map(|p| p.seat);
+        let pads: BTreeSet<SeatId> = self
+            .seats_of(member)
+            .into_iter()
+            .chain(on_way)
+            .filter(|s| *s != seat && self.has_pad(*s))
+            .collect();
+        pads.len() < usize::from(self.controllers_of(member))
     }
 
     pub fn control_paused(&self) -> bool {
@@ -422,6 +489,8 @@ impl HostSession {
     fn drop_viewer(&mut self, member: MemberId) -> Vec<Effect> {
         self.viewers.retain(|v| *v != member);
         self.requests.retain(|(r, _)| *r != member);
+        self.controllers.remove(&member);
+        self.pending.retain(|p| p.member != member);
         // Stopping the viewer releases what it held; the router's own report
         // of that follows.
         for holder in &mut self.holders {
@@ -446,7 +515,7 @@ impl HostSession {
         if self.ended
             || !self.is_viewer(member)
             || !self.has_seat(seat)
-            || self.seat_of(member) == Some(seat)
+            || self.seats_of(member).contains(&seat)
             || self.requests.contains(&(member, seat))
         {
             return Vec::new();
@@ -475,16 +544,34 @@ impl HostSession {
         vec![Effect::Changed]
     }
 
-    /// A viewer gives its seat back. A pending request stays: only a
-    /// withdraw ends that.
-    pub fn give_back(&mut self, member: MemberId) -> Vec<Effect> {
-        match self.seat_of(member) {
-            Some(seat) if !self.ended => vec![Effect::Revoke {
-                seat,
-                holder: Some(member),
-            }],
-            _ => Vec::new(),
+    /// A viewer gives `seat` back, or with `None` every seat it holds. A
+    /// pending request stays: only a withdraw ends that.
+    pub fn give_back(&mut self, member: MemberId, seat: Option<SeatId>) -> Vec<Effect> {
+        if self.ended {
+            return Vec::new();
         }
+        self.seats_of(member)
+            .into_iter()
+            .filter(|s| seat.is_none_or(|one| one == *s))
+            .map(|s| Effect::Revoke {
+                seat: s,
+                holder: Some(member),
+            })
+            .collect()
+    }
+
+    /// A viewer says how many controllers it has (M18), capped at
+    /// [`MAX_CONTROLLERS`]. It decides only whether a seat is added or
+    /// replaces theirs; the host still decides who plays.
+    pub fn set_controllers(&mut self, member: MemberId, count: u8) -> Vec<Effect> {
+        if self.ended || !self.is_viewer(member) {
+            return Vec::new();
+        }
+        let count = count.min(MAX_CONTROLLERS);
+        if self.controllers.insert(member, count) == Some(count) {
+            return Vec::new();
+        }
+        vec![Effect::Changed]
     }
 
     /// The seat router handed `seat` to `holder`, or back to the host.
@@ -492,6 +579,24 @@ impl HostSession {
         if !self.has_seat(seat) {
             return Vec::new();
         }
+        // The router takes grants in order: a report of `holder` on this seat
+        // answers its grant, and any earlier one for the seat (overtaken).
+        // A release answers none: a grant may still follow it.
+        let answered = holder.and_then(|m| {
+            self.pending
+                .iter()
+                .position(|p| p.seat == seat && p.member == m)
+        });
+        let moved = answered.map(|i| {
+            let moves = self.pending[i].moves;
+            let mut at = 0;
+            self.pending.retain(|p| {
+                let keep = at > i || p.seat != seat;
+                at += 1;
+                keep
+            });
+            moves
+        });
         let host = holder.is_some_and(|h| self.is_host(h));
         match holder {
             // A grant that crossed a departure, the panic key or the end:
@@ -513,17 +618,24 @@ impl HostSession {
                     }];
                 }
                 // A request for this seat is answered; one for another seat
-                // stays, as a move, and the viewer keeps asking too.
+                // stays, and the viewer keeps asking too.
                 self.requests.retain(|r| *r != (member, seat));
-                // Never two seats: grants revoke the others first, so this
-                // only guards against a report out of order.
-                let mut fx: Vec<Effect> = self
-                    .holders
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, h)| *i != usize::from(seat.0) && **h == Some(member))
-                    .map(|(i, _)| Effect::Revoke {
-                        seat: SeatId(i as u8),
+                // Never more pad seats than the rule allows: a grant that
+                // moves revokes the others first, so this only guards against
+                // a report out of order. A grant that added keeps what is
+                // held, even if the viewer's count dropped meanwhile (a seat
+                // already held stays; its pad goes neutral).
+                let moves = moved.unwrap_or_else(|| !self.keeps(member, seat));
+                let extra = if moves {
+                    self.seats_of(member)
+                } else {
+                    Vec::new()
+                };
+                let mut fx: Vec<Effect> = extra
+                    .into_iter()
+                    .filter(|s| *s != seat && self.has_pad(*s))
+                    .map(|s| Effect::Revoke {
+                        seat: s,
                         holder: Some(member),
                     })
                     .collect();
@@ -679,6 +791,8 @@ impl HostSession {
         if self.ended {
             return fx;
         }
+        let host = self.host();
+        self.pending.retain(|p| Some(p.member) == host);
         self.everything_taken_back();
         let waiting = std::mem::take(&mut self.requests);
         fx.extend(waiting.into_iter().map(|(member, _)| self.declined(member)));
@@ -721,6 +835,7 @@ impl HostSession {
         }
         self.ended = true;
         self.requests.clear();
+        self.pending.clear();
         vec![
             Effect::Broadcast(ControlMessage::SessionEnded(SessionEnded {
                 session: self.id,
@@ -730,17 +845,28 @@ impl HostSession {
         ]
     }
 
-    /// Revokes `member` from every other seat, then grants `seat`: the
-    /// router takes them in order, so nobody ever holds two seats, even with
-    /// a grant still on its way.
+    /// Grants `seat`, after revoking `member` from every other seat with a
+    /// pad when it moves rather than adds ([`Self::keeps`]): the router takes
+    /// them in order, so a viewer that moves never holds more pad seats than
+    /// it may, even with a grant still on its way. A keyboard-and-mouse seat
+    /// stays: it needs no controller.
     fn grant(&mut self, member: MemberId, seat: SeatId) -> Vec<Effect> {
         // The host's seat passed on: it comes back when that viewer lets go.
         if !self.is_host(member) && self.host_home == Some(seat) {
             self.home = Home::Lent;
         }
+        let moves = !self.keeps(member, seat);
+        if moves {
+            self.pending.retain(|p| p.member != member);
+        }
+        self.pending.push(PendingGrant {
+            seat,
+            member,
+            moves,
+        });
         let mut fx: Vec<Effect> = (0..self.config.seats.len())
             .map(|i| SeatId(i as u8))
-            .filter(|s| *s != seat)
+            .filter(|s| moves && *s != seat && self.has_pad(*s))
             .map(|s| Effect::Revoke {
                 seat: s,
                 holder: Some(member),

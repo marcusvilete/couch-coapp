@@ -14,7 +14,7 @@ use crate::{
     room::{Goodbye, MemberRecord, Presence, RoomPolicy, RoomSnapshot, Signed},
     session::{
         ControlCancel, ControlDeclined, ControlRequest, GameFocus, SessionAnnounce, SessionEnded,
-        SessionJoin, SessionJoinReply, SessionLeave, SessionStatus,
+        SessionJoin, SessionJoinReply, SessionLeave, SessionStatus, ViewerControllers,
     },
 };
 
@@ -51,6 +51,9 @@ pub mod type_ids {
     pub const SESSION_LEAVE: u16 = MUST_UNDERSTAND | 0x0606;
     /// Optional: without it, players only miss the "not in front" note.
     pub const GAME_FOCUS: u16 = 0x0607;
+    /// Optional (M18): without it, a viewer counts as having no controller
+    /// to spare, and every seat it gets moves it.
+    pub const VIEWER_CONTROLLERS: u16 = 0x0608;
 }
 
 /// QUIC application close codes for connections between members.
@@ -157,6 +160,7 @@ pub enum ControlMessage {
     ControlCancel(ControlCancel),
     ControlDeclined(ControlDeclined),
     GameFocus(GameFocus),
+    ViewerControllers(ViewerControllers),
 }
 
 impl ControlMessage {
@@ -175,6 +179,7 @@ impl ControlMessage {
                 | Self::ControlCancel(_)
                 | Self::ControlDeclined(_)
                 | Self::GameFocus(_)
+                | Self::ViewerControllers(_)
                 | Self::SeatAssigned(_)
                 | Self::SeatReleased(_)
                 | Self::KeyframeRequest(_)
@@ -233,6 +238,7 @@ impl ControlMessage {
             Self::ControlCancel(_) => type_ids::CONTROL_CANCEL,
             Self::ControlDeclined(_) => type_ids::CONTROL_DECLINED,
             Self::GameFocus(_) => type_ids::GAME_FOCUS,
+            Self::ViewerControllers(_) => type_ids::VIEWER_CONTROLLERS,
         }
     }
 
@@ -263,6 +269,7 @@ impl ControlMessage {
             Self::ControlCancel(m) => postcard::to_stdvec(m)?,
             Self::ControlDeclined(m) => postcard::to_stdvec(m)?,
             Self::GameFocus(m) => postcard::to_stdvec(m)?,
+            Self::ViewerControllers(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -295,6 +302,7 @@ impl ControlMessage {
             type_ids::CONTROL_CANCEL => Self::ControlCancel(payload(frame)?),
             type_ids::CONTROL_DECLINED => Self::ControlDeclined(payload(frame)?),
             type_ids::GAME_FOCUS => Self::GameFocus(payload(frame)?),
+            type_ids::VIEWER_CONTROLLERS => Self::ViewerControllers(payload(frame)?),
             other if frame.must_understand() => return Err(DecodeError::UnknownRequired(other)),
             other => return Ok(Decoded::SkippedOptional(other)),
         };
@@ -493,13 +501,18 @@ mod tests {
             }),
             ControlMessage::ControlCancel(ControlCancel {
                 session,
-                what: crate::session::Cancel::Seat,
+                what: crate::session::Cancel::Seat(None),
+            }),
+            ControlMessage::ControlCancel(ControlCancel {
+                session,
+                what: crate::session::Cancel::Seat(Some(SeatId(2))),
             }),
             ControlMessage::ControlDeclined(ControlDeclined { session }),
             ControlMessage::GameFocus(GameFocus {
                 session,
                 in_front: false,
             }),
+            ControlMessage::ViewerControllers(ViewerControllers { session, count: 2 }),
         ] {
             assert!(message.is_session());
             roundtrip(message);
@@ -515,6 +528,7 @@ mod tests {
             type_ids::SESSION_STATUS,
             type_ids::SESSION_ENDED,
             type_ids::GAME_FOCUS,
+            type_ids::VIEWER_CONTROLLERS,
         ] {
             assert_eq!(id & MUST_UNDERSTAND, 0, "{id:#06x}");
         }

@@ -211,15 +211,20 @@ pub enum Command {
     RequestControl {
         seat: u8,
     },
-    /// While watching: withdraws the request, or gives the seat back.
+    /// While watching: withdraws the request, or gives every seat back.
     CancelControl,
+    /// While watching: gives back one of our seats, keeping the others (M18).
+    GiveBackSeat {
+        seat: u8,
+    },
     /// While streaming: accepts or declines a viewer's request.
     AnswerControl {
         member: String,
         accept: bool,
     },
-    /// While streaming: hands a seat to a viewer who didn't ask. A viewer
-    /// holding another seat moves.
+    /// While streaming: hands a seat to a viewer who didn't ask. It is added
+    /// to the viewer's seats if they have a controller to spare for it (or it
+    /// has no pad); otherwise the viewer moves (M18).
     PassControl {
         member: String,
         seat: u8,
@@ -540,6 +545,11 @@ pub struct SessionView {
     pub max_viewers: u8,
     /// Member ids, in the order they joined.
     pub viewers: Vec<String>,
+    /// For the host: how many controllers each viewer has, as it said, in
+    /// `viewers`' order (M18); empty for others' sessions. A seat with a pad
+    /// passed to a viewer is added to theirs while they hold fewer pad seats
+    /// than this, otherwise they move; a seat without one is always added.
+    pub viewer_controllers: Vec<u8>,
     /// The seats players can hold, by seat id; one is single player.
     pub seats: Vec<SeatView>,
     /// The host's own controller plays only through the seats (hidden from
@@ -832,6 +842,9 @@ impl fmt::Debug for Command {
                 .field("seat", seat)
                 .finish(),
             Self::CancelControl => f.write_str("CancelControl"),
+            Self::GiveBackSeat { seat } => {
+                f.debug_struct("GiveBackSeat").field("seat", seat).finish()
+            }
             Self::AnswerControl { member, accept } => f
                 .debug_struct("AnswerControl")
                 .field("member", member)

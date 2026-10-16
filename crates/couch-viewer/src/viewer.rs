@@ -586,8 +586,9 @@ fn preview_session(role: HudRole) -> HudState {
 }
 
 /// Ctrl+Alt+Shift+C: ask for a seat (the first free one), withdraw the
-/// request, or give the seat back, depending on where this viewer stands.
-/// Nothing without a session.
+/// request, or give the seats back, depending on where this viewer stands.
+/// Nothing without a session. Asking for one more seat while holding some
+/// is the bar's (M18).
 fn toggle_control(hud: &mut Hud, out: &mpsc::Sender<Outgoing>) {
     let Some(session) = hud.session() else {
         return;
