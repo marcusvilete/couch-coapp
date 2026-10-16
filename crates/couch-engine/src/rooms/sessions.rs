@@ -1647,6 +1647,7 @@ impl Actor {
             shortcuts: ShortcutKeys {
                 keys: crate::store::shortcuts(&self.data_dir).changed(),
             },
+            volume: crate::store::volume(&self.data_dir),
         };
         // The subscriptions are in place before the host is asked.
         let (watch, mut events) = Watch::start(
@@ -1851,6 +1852,15 @@ impl Actor {
     }
 
     pub(super) fn watch_event(&mut self, session: SessionId, event: WatchEvent, now: Instant) {
+        // Remembered for the profile's next stream windows (P6), even from a
+        // window whose watch just ended: its last change may come after its
+        // Leave.
+        if let WatchEvent::Volume(volume) = event {
+            if let Err(e) = crate::store::save_volume(&self.data_dir, volume) {
+                tracing::warn!("saving the stream volume: {e}");
+            }
+            return;
+        }
         let Some(w) = self
             .sessions
             .watching
@@ -1876,6 +1886,8 @@ impl Actor {
             WatchEvent::Action(UserAction::GiveBack(seat)) => {
                 let _ = self.give_back_seat(SeatId(seat));
             }
+            // Saved above, whatever the watch's state.
+            WatchEvent::Volume(_) => {}
             // The host hears it now if we have joined, or after joining.
             WatchEvent::Controllers(count) => {
                 let (joined, conn, session) = (w.joined(), w.conn, w.session);

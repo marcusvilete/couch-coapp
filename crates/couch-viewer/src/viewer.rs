@@ -20,7 +20,9 @@ use couch_media::{
     mailbox::Mailbox,
 };
 use couch_proto::{
-    ipc::{FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, UserAction},
+    ipc::{
+        FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, StreamVolume, UserAction,
+    },
     session::StreamState,
 };
 use sdl3::{
@@ -210,11 +212,22 @@ pub fn run(options: WindowOptions) -> Result<()> {
     // new frames.
     let mut shown: Option<(u32, u32)> = None;
     let mut redraw = false;
+    // The stream volume (P6): the profile's, once the main process sends
+    // it (the pipe reader has already set the sound to it). A change goes to
+    // the main process to remember: a shortcut or Mute at once, the slider
+    // once the user lets it rest (or the window closes), not at every step
+    // of a drag.
+    let mut volume = StreamVolume::default();
+    let mut volume_unsaved: Option<Instant> = None;
 
     'running: loop {
         for event in events.poll_iter() {
             match event {
                 Event::Quit { .. } => {
+                    // A volume change not yet remembered goes first.
+                    if volume_unsaved.take().is_some() {
+                        let _ = out_tx.send(Outgoing::Volume(volume));
+                    }
                     // The user closed the window: say so, so the main
                     // process doesn't take the exit for a crash and start
                     // the window again.
@@ -263,6 +276,22 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 Some(Shortcut::ToggleHud) => hud.visible = !hud.visible,
                 Some(Shortcut::ToggleControl) => toggle_control(&mut hud, &out_tx),
                 Some(Shortcut::Fullscreen) => toggle_fullscreen(&mut window, &mut hud),
+                Some(shortcut @ (Shortcut::VolumeDown | Shortcut::VolumeUp | Shortcut::Mute)) => {
+                    let new = match shortcut {
+                        Shortcut::VolumeDown => volume.stepped(-VOLUME_STEP),
+                        Shortcut::VolumeUp => volume.stepped(VOLUME_STEP),
+                        _ => StreamVolume {
+                            muted: !volume.muted,
+                            ..volume
+                        },
+                    };
+                    // One step at a time: remembered at once, so a session
+                    // ending right after can't lose it.
+                    change_volume(&mut volume, new, audio.as_ref(), &mut hud);
+                    volume_unsaved = None;
+                    let _ = out_tx.send(Outgoing::Volume(volume));
+                    hud.note(volume_note(volume));
+                }
                 // The host's keys are never the viewer's (scope Host).
                 Some(
                     Shortcut::FreeMouse
@@ -277,11 +306,31 @@ pub fn run(options: WindowOptions) -> Result<()> {
         for action in hud.take_actions() {
             match action {
                 HudAction::Session(action) => {
+                    // Leaving: a volume change not yet remembered goes first.
+                    if action == UserAction::Leave && volume_unsaved.take().is_some() {
+                        let _ = out_tx.send(Outgoing::Volume(volume));
+                    }
                     let _ = out_tx.send(Outgoing::Action(action));
                 }
                 HudAction::Fullscreen => toggle_fullscreen(&mut window, &mut hud),
+                // The mute button is remembered at once; the slider once
+                // the user lets it rest, not at every step of a drag.
+                HudAction::Volume(new) => {
+                    let muting = new.muted != volume.muted;
+                    change_volume(&mut volume, new, audio.as_ref(), &mut hud);
+                    if muting {
+                        volume_unsaved = None;
+                        let _ = out_tx.send(Outgoing::Volume(volume));
+                    } else {
+                        volume_unsaved = Some(Instant::now());
+                    }
+                }
             }
             redraw = true;
+        }
+        if volume_unsaved.is_some_and(|t| t.elapsed() >= VOLUME_SAVE_AFTER) {
+            volume_unsaved = None;
+            let _ = out_tx.send(Outgoing::Volume(volume));
         }
         while let Ok(message) = window_rx.try_recv() {
             match message {
@@ -297,6 +346,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     }
                     input.set_shortcuts(shortcuts.clone());
                     hud.shortcuts = shortcuts;
+                    redraw = true;
+                }
+                ForWindow::Volume(saved) => {
+                    change_volume(&mut volume, saved, audio.as_ref(), &mut hud);
                     redraw = true;
                 }
                 ForWindow::Hud(state) => {
@@ -582,6 +635,34 @@ fn preview_session(role: HudRole) -> HudState {
             HudRole::Asking => "Asked the host for Controller 2".into(),
             HudRole::Controlling => "You have Controller 2".into(),
         },
+    }
+}
+
+/// How much a volume shortcut moves the stream volume, in percent (P6).
+const VOLUME_STEP: i8 = 10;
+/// A volume change is remembered once nothing has changed it for this long.
+const VOLUME_SAVE_AFTER: Duration = Duration::from_millis(500);
+
+/// Plays at `new` from now on and shows it on the bar.
+fn change_volume(
+    volume: &mut StreamVolume,
+    new: StreamVolume,
+    audio: Option<&AudioOut>,
+    hud: &mut Hud,
+) {
+    *volume = new;
+    hud.volume = new;
+    if let Some(audio) = audio {
+        audio.set_volume(new);
+    }
+}
+
+/// The note a volume shortcut shows: "Volume 70%", "Muted".
+fn volume_note(volume: StreamVolume) -> String {
+    if volume.muted {
+        format!("Muted (volume {}%)", volume.percent)
+    } else {
+        format!("Volume {}%", volume.percent)
     }
 }
 

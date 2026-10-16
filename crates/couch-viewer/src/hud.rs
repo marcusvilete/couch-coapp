@@ -18,7 +18,7 @@ use std::{
 
 use couch_input::shortcuts::{Shortcut, Shortcuts};
 use couch_proto::{
-    ipc::{HudRole, HudSeat, HudState, UserAction},
+    ipc::{HudRole, HudSeat, HudState, StreamVolume, UserAction},
     session::{EndReason, StreamState, seat_phrase},
 };
 use egui::{Align2, Color32, Pos2, Rect, RichText};
@@ -33,6 +33,8 @@ const SHOW_AFTER_POINTER: Duration = Duration::from_secs(3);
 pub enum HudAction {
     Session(UserAction),
     Fullscreen,
+    /// The slider or the mute button (P6).
+    Volume(StreamVolume),
 }
 
 pub struct Hud {
@@ -48,6 +50,8 @@ pub struct Hud {
     pub waiting: bool,
     /// The keys the bar's hint names.
     pub shortcuts: Shortcuts,
+    /// The stream volume the bar shows (P6).
+    pub volume: StreamVolume,
     session: Option<HudState>,
     note: Option<(String, Instant)>,
     changed_at: Option<Instant>,
@@ -83,6 +87,7 @@ impl Hud {
             fullscreen: false,
             waiting: false,
             shortcuts: Shortcuts::default(),
+            volume: StreamVolume::default(),
             session: None,
             note: None,
             changed_at: None,
@@ -294,10 +299,13 @@ impl Hud {
                         session_bar(
                             ui,
                             session,
-                            self.note.as_ref().map(|(n, _)| n.as_str()),
-                            self.fullscreen,
-                            self.show_stats,
-                            &self.shortcuts,
+                            BarView {
+                                note: self.note.as_ref().map(|(n, _)| n.as_str()),
+                                fullscreen: self.fullscreen,
+                                stats: self.show_stats,
+                                volume: self.volume,
+                                shortcuts: &self.shortcuts,
+                            },
                             &mut actions,
                         )
                     });
@@ -388,15 +396,23 @@ const BAR_FILL: Color32 = Color32::from_rgba_premultiplied(16, 16, 20, 230);
 const LIVE_RED: Color32 = Color32::from_rgb(237, 66, 69);
 const NOTE_YELLOW: Color32 = Color32::from_rgb(250, 210, 90);
 
-fn session_bar(
-    ui: &mut egui::Ui,
-    s: &HudState,
-    note: Option<&str>,
+/// What the bar shows besides the session.
+struct BarView<'a> {
+    note: Option<&'a str>,
     fullscreen: bool,
     stats: bool,
-    shortcuts: &Shortcuts,
-    clicks: &mut Vec<BarClick>,
-) {
+    volume: StreamVolume,
+    shortcuts: &'a Shortcuts,
+}
+
+fn session_bar(ui: &mut egui::Ui, s: &HudState, view: BarView<'_>, clicks: &mut Vec<BarClick>) {
+    let BarView {
+        note,
+        fullscreen,
+        stats,
+        volume,
+        shortcuts,
+    } = view;
     egui::Frame::new()
         .fill(BAR_FILL)
         .corner_radius(8.0)
@@ -507,12 +523,36 @@ fn session_bar(
                     clicks.push(BarClick::Action(HudAction::Session(UserAction::Leave)));
                 }
             });
+            // The stream's volume, here only (P6): never louder than the
+            // host sent it.
+            ui.horizontal(|ui| {
+                let mute = if volume.muted { "Unmute" } else { "Mute" };
+                if ui.button(mute).clicked() {
+                    clicks.push(BarClick::Action(HudAction::Volume(StreamVolume {
+                        muted: !volume.muted,
+                        ..volume
+                    })));
+                }
+                let mut percent = volume.percent.min(StreamVolume::MAX);
+                let slider = egui::Slider::new(&mut percent, 0..=StreamVolume::MAX)
+                    .suffix("%")
+                    .text(if volume.muted { "volume, muted" } else { "volume" });
+                if ui.add_enabled(!volume.muted, slider).changed() {
+                    clicks.push(BarClick::Action(HudAction::Volume(StreamVolume {
+                        percent,
+                        ..volume
+                    })));
+                }
+            });
             ui.label(
                 RichText::new(format!(
-                    "{}: ask or give back · {}: full screen · {}: hide",
+                    "{}: ask or give back · {}: full screen · {}: hide · {} {} {}: volume down, up, mute",
                     shortcuts.binding(Shortcut::ToggleControl).keys(),
                     shortcuts.binding(Shortcut::Fullscreen).key_name(),
                     shortcuts.binding(Shortcut::ToggleHud).key_name(),
+                    shortcuts.binding(Shortcut::VolumeDown).key_name(),
+                    shortcuts.binding(Shortcut::VolumeUp).key_name(),
+                    shortcuts.binding(Shortcut::Mute).key_name(),
                 ))
                 .small()
                 .color(Color32::GRAY),

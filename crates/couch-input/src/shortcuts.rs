@@ -26,6 +26,12 @@ pub enum Shortcut {
     ToggleControl,
     /// Viewer: full screen, or back to a window.
     Fullscreen,
+    /// Viewer: the stream quieter (P6).
+    VolumeDown,
+    /// Viewer: the stream louder, up to as the host sent it (P6).
+    VolumeUp,
+    /// Viewer: mute the stream, or unmute it (P6).
+    Mute,
     /// Host: take the controller back from everyone and pause control.
     Panic,
     /// Host: accept the oldest request for a seat.
@@ -195,6 +201,9 @@ pub fn key_for_code(code: &str) -> Option<&'static Key> {
     KEYS.iter().find(|k| k.code == code)
 }
 
+const KEY_0: HidUsage = HidUsage(0x27);
+const KEY_MINUS: HidUsage = HidUsage(0x2D);
+const KEY_EQUAL: HidUsage = HidUsage(0x2E);
 const KEY_C: HidUsage = HidUsage(0x06);
 const KEY_F: HidUsage = HidUsage(0x09);
 const KEY_H: HidUsage = HidUsage(0x0B);
@@ -257,6 +266,33 @@ pub const SHORTCUTS: &[Binding] = &[
         chord: true,
         key: KEY_F,
         action: "Full screen, or back to a window",
+        scope: Scope::Viewer,
+        condition: "",
+    },
+    Binding {
+        id: "volumeDown",
+        shortcut: Shortcut::VolumeDown,
+        chord: true,
+        key: KEY_MINUS,
+        action: "Turn the stream down",
+        scope: Scope::Viewer,
+        condition: "",
+    },
+    Binding {
+        id: "volumeUp",
+        shortcut: Shortcut::VolumeUp,
+        chord: true,
+        key: KEY_EQUAL,
+        action: "Turn the stream up, to as loud as the host sends it",
+        scope: Scope::Viewer,
+        condition: "",
+    },
+    Binding {
+        id: "mute",
+        shortcut: Shortcut::Mute,
+        chord: true,
+        key: KEY_0,
+        action: "Mute the stream, or unmute it",
         scope: Scope::Viewer,
         condition: "",
     },
@@ -466,6 +502,9 @@ mod tests {
             Shortcut::FreeMouse,
             Shortcut::ToggleControl,
             Shortcut::Fullscreen,
+            Shortcut::VolumeDown,
+            Shortcut::VolumeUp,
+            Shortcut::Mute,
             Shortcut::Panic,
             Shortcut::AcceptRequest,
             Shortcut::DeclineRequest,

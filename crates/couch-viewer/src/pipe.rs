@@ -8,7 +8,7 @@ use std::{
 
 use couch_proto::ipc::{
     self, AudioPacket, AudioStats, FrameTiming, HudState, LocalInput, NetStats, RumbleState,
-    SeatState, ShortcutKeys, UserAction, VideoFrameHeader,
+    SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
 };
 
 use crate::audio::AudioFeed;
@@ -25,6 +25,8 @@ pub enum ForWindow {
     Rumble(RumbleState),
     Hud(HudState),
     Shortcuts(ShortcutKeys),
+    /// The profile's stream volume (P6).
+    Volume(StreamVolume),
 }
 
 /// What the viewer sends back.
@@ -34,6 +36,8 @@ pub enum Outgoing {
     Input(LocalInput),
     AudioStats(AudioStats),
     Action(UserAction),
+    /// The user changed the stream volume (P6).
+    Volume(StreamVolume),
     /// Write what is queued before this, then stop. Other threads (the
     /// decoder) still hold senders, so the channel alone never closes.
     Close,
@@ -88,7 +92,8 @@ pub fn spawn_reader(
                     ipc::kinds::SEAT
                     | ipc::kinds::RUMBLE
                     | ipc::kinds::HUD_STATE
-                    | ipc::kinds::SHORTCUTS => {
+                    | ipc::kinds::SHORTCUTS
+                    | ipc::kinds::VOLUME => {
                         let message = match frame.kind {
                             ipc::kinds::SEAT => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Seat)
@@ -99,6 +104,16 @@ pub fn spawn_reader(
                             ipc::kinds::SHORTCUTS => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Shortcuts)
                             }
+                            // Set here, before the sound it comes ahead of
+                            // plays; the window only shows it.
+                            ipc::kinds::VOLUME => ipc::from_payload::<StreamVolume>(&frame.payload)
+                                .map(|volume| {
+                                    let volume = volume.clamped();
+                                    if let Some(audio) = &audio {
+                                        audio.set_volume(volume);
+                                    }
+                                    ForWindow::Volume(volume)
+                                }),
                             _ => ipc::from_payload(&frame.payload).map(ForWindow::Hud),
                         };
                         match message {
@@ -168,6 +183,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>) -> JoinHandle<()> {
                     Outgoing::Action(action) => {
                         payload = ipc::to_payload(&action);
                         ipc::kinds::USER_ACTION
+                    }
+                    Outgoing::Volume(volume) => {
+                        payload = ipc::to_payload(&volume);
+                        ipc::kinds::VOLUME_CHANGED
                     }
                     Outgoing::Close => break,
                 };
