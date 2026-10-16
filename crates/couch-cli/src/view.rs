@@ -177,8 +177,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             // Off by default: `release-check` kills the window on purpose and
             // expects the connection to close.
             restart_viewer: args.restart_viewer,
-            // The default keys.
+            // The default keys, at full volume (the audio checks measure it).
             shortcuts: Default::default(),
+            volume: Default::default(),
         },
     )?;
     control_tx
@@ -247,6 +248,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 }
                 // `couch-cli host` seats each viewer once, by its connection.
                 Some(WatchEvent::Controllers(n)) => println!("the viewer has {n} controller(s)"),
+                Some(WatchEvent::Volume(v)) => {
+                    println!("stream volume {}%{}", v.percent, if v.muted { ", muted" } else { "" });
+                }
                 Some(WatchEvent::Action(action)) => println!("the viewer asked to {action:?}; no session here"),
                 Some(WatchEvent::ViewerRestarted) => {
                     println!("EVENT viewer-restarted {}", clock.now().0);

@@ -11,13 +11,16 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use anyhow::{Result, anyhow};
 use couch_codec_opus::OpusDecoder;
 use couch_media::audio::{CHANNELS, FRAME_LEN, JitterBuffer, JitterConfig, Pop, SAMPLE_RATE};
-use couch_proto::ipc::{AudioPacket, AudioStats};
+use couch_proto::ipc::{AudioPacket, AudioStats, StreamVolume};
 use sdl3::audio::{AudioCallback, AudioFormat, AudioSpec, AudioStream, AudioStreamWithCallback};
 
 use crate::now_us;
@@ -70,9 +73,14 @@ impl Shared {
     }
 }
 
-/// The pipe reader's end: adds arriving packets.
+/// The pipe reader's end: adds arriving packets, and sets the volume the
+/// main process sends before them, so the first sound already plays at the
+/// profile's level.
 #[derive(Clone)]
-pub struct AudioFeed(Arc<Mutex<Shared>>);
+pub struct AudioFeed {
+    shared: Arc<Mutex<Shared>>,
+    gain: Arc<AtomicU32>,
+}
 
 impl AudioFeed {
     pub fn push(&self, packet: AudioPacket) {
@@ -80,9 +88,15 @@ impl AudioFeed {
             packet: packet.packet,
             capture_us: packet.capture_us,
         };
-        lock(&self.0)
+        lock(&self.shared)
             .jitter
             .push(packet.seq, entry, packet.capture_us, now_us().0);
+    }
+
+    /// How loud to play from now on (P6); the audio thread ramps to it over
+    /// its next buffer.
+    pub fn set_volume(&self, volume: StreamVolume) {
+        self.gain.store(volume.gain().to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -96,6 +110,9 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
 pub struct AudioOut {
     stream: AudioStreamWithCallback<Player>,
     shared: Arc<Mutex<Shared>>,
+    /// The stream volume's gain (P6), an `f32`'s bits: the audio thread reads
+    /// it without a lock.
+    gain: Arc<AtomicU32>,
 }
 
 impl AudioOut {
@@ -108,12 +125,15 @@ impl AudioOut {
             recent: VecDeque::with_capacity(RECENT),
             histogram: vec![0; HISTOGRAM_MS + 1],
         }));
+        let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let player = Player {
             shared: shared.clone(),
             decoder: OpusDecoder::new()?,
             pcm: VecDeque::with_capacity(FRAME_LEN * 4),
             out: Vec::new(),
             ratio: 1.0,
+            gain: gain.clone(),
+            level: 1.0,
         };
         let spec = AudioSpec::new(
             Some(SAMPLE_RATE as i32),
@@ -126,8 +146,24 @@ impl AudioOut {
         stream
             .resume()
             .map_err(|e| anyhow!("starting audio playback: {e}"))?;
-        let feed = AudioFeed(shared.clone());
-        Ok((Self { stream, shared }, feed))
+        let feed = AudioFeed {
+            shared: shared.clone(),
+            gain: gain.clone(),
+        };
+        Ok((
+            Self {
+                stream,
+                shared,
+                gain,
+            },
+            feed,
+        ))
+    }
+
+    /// How loud to play from now on (P6); the audio thread ramps to it over
+    /// its next buffer.
+    pub fn set_volume(&self, volume: StreamVolume) {
+        self.gain.store(volume.gain().to_bits(), Ordering::Relaxed);
     }
 
     pub fn stats(&self) -> AudioStats {
@@ -182,6 +218,26 @@ struct Player {
     pcm: VecDeque<f32>,
     out: Vec<f32>,
     ratio: f64,
+    /// The gain asked for ([`AudioOut::set_volume`]) and the one applied to
+    /// the last sample.
+    gain: Arc<AtomicU32>,
+    level: f32,
+}
+
+/// Scales interleaved `samples` by a gain going from `from` (before the
+/// first frame) to `to` (at the last), so a change never clicks.
+fn apply_gain(samples: &mut [f32], from: f32, to: f32) {
+    let channels = usize::from(CHANNELS);
+    let frames = samples.len() / channels;
+    if frames == 0 || (from == 1.0 && to == 1.0) {
+        return;
+    }
+    for (i, frame) in samples.chunks_exact_mut(channels).enumerate() {
+        let gain = from + (to - from) * (i + 1) as f32 / frames as f32;
+        for sample in frame {
+            *sample *= gain;
+        }
+    }
 }
 
 impl Player {
@@ -223,6 +279,9 @@ impl AudioCallback<f32> for Player {
         }
         self.out.clear();
         self.out.extend(self.pcm.drain(..want));
+        let target = f32::from_bits(self.gain.load(Ordering::Relaxed));
+        apply_gain(&mut self.out, self.level, target);
+        self.level = target;
         if let Err(e) = stream.put_data_f32(&self.out) {
             tracing::debug!("audio data not queued: {e}");
         }
@@ -236,5 +295,29 @@ impl AudioCallback<f32> for Player {
                 sdl3::sys::audio::SDL_SetAudioStreamFrequencyRatio(stream.raw(), ratio as f32)
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P6: a volume change ramps over the buffer, both channels alike, and
+    /// ends exactly at the new level.
+    #[test]
+    fn the_gain_ramps_without_a_jump() {
+        let mut samples = vec![1.0f32; 8];
+        apply_gain(&mut samples, 1.0, 0.0);
+        let left: Vec<f32> = samples.iter().step_by(2).copied().collect();
+        assert_eq!(left, [0.75, 0.5, 0.25, 0.0]);
+        assert!(samples.chunks(2).all(|f| f[0] == f[1]));
+        // Held: every sample at the level.
+        let mut samples = vec![0.5f32; 4];
+        apply_gain(&mut samples, 0.5, 0.5);
+        assert_eq!(samples, [0.25; 4]);
+        // Full volume leaves the sound as it came.
+        let mut samples = vec![0.3f32; 4];
+        apply_gain(&mut samples, 1.0, 1.0);
+        assert_eq!(samples, [0.3; 4]);
     }
 }

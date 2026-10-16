@@ -3,6 +3,7 @@
 //! - `settings.json`: the display name. Nothing secret.
 //! - `shortcuts.json`: the shortcut keys the user moved off their defaults.
 //! - `network.json`: the relay to use (applies when the engine starts).
+//! - `audio.json`: the stream window's volume (P6).
 //!
 //! The room actor rewrites `settings.json` whole, so what the engine itself
 //! writes has files of its own.
@@ -19,7 +20,7 @@ use std::{
 
 use couch_input::shortcuts::Shortcuts;
 use couch_net::SecretKey;
-use couch_proto::ids::RoomId;
+use couch_proto::{ids::RoomId, ipc::StreamVolume};
 use couch_room::room::SavedRoom;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,7 @@ const IDENTITY_FILE: &str = "identity.key";
 const SETTINGS_FILE: &str = "settings.json";
 const SHORTCUTS_FILE: &str = "shortcuts.json";
 const NETWORK_FILE: &str = "network.json";
+const AUDIO_FILE: &str = "audio.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread.
@@ -241,6 +243,26 @@ pub(crate) fn save_network(dir: &Path, network: &NetworkSettings) -> Result<(), 
     write_atomic(&dir.join(NETWORK_FILE), &bytes)
 }
 
+/// The stream window's volume (`audio.json`, P6); full volume if there is
+/// none or it can't be read. Only the engine writes it.
+pub(crate) fn volume(dir: &Path) -> StreamVolume {
+    let path = dir.join(AUDIO_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<StreamVolume>(&bytes)
+            .map(StreamVolume::clamped)
+            .unwrap_or_else(|e| {
+                tracing::warn!("ignoring {}: {e}", path.display());
+                StreamVolume::default()
+            }),
+        Err(_) => StreamVolume::default(),
+    }
+}
+
+pub(crate) fn save_volume(dir: &Path, volume: StreamVolume) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(&volume).expect("volume serialize");
+    write_atomic(&dir.join(AUDIO_FILE), &bytes)
+}
+
 /// Writes a sibling temporary file and renames it over `path`, so a crash
 /// leaves the old file or the new one, never half of one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
@@ -338,6 +360,27 @@ mod tests {
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.settings(), settings);
+    }
+
+    #[test]
+    fn the_stream_volume_roundtrips_and_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(volume(dir.path()), StreamVolume::default());
+        let quiet = StreamVolume {
+            percent: 40,
+            muted: true,
+        };
+        save_volume(dir.path(), quiet).unwrap();
+        assert_eq!(volume(dir.path()), quiet);
+        fs::write(dir.path().join(AUDIO_FILE), b"{not json").unwrap();
+        assert_eq!(volume(dir.path()), StreamVolume::default());
+        // A hand-edited level above 100% plays at 100%.
+        fs::write(
+            dir.path().join(AUDIO_FILE),
+            br#"{"percent":250,"muted":false}"#,
+        )
+        .unwrap();
+        assert_eq!(volume(dir.path()).percent, 100);
     }
 
     #[test]

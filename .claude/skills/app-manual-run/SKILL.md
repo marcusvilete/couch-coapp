@@ -106,6 +106,12 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **On this PC with profiles:** alice starts a session with 2 controllers and streams; bob and carol each ask for one. `xinput-watch.ps1` should show two virtual pads (after any physical ones), each moving only with its own guest. Steam announces each pad.
 - **Moving.** A guest with one controller holding Controller 1 who asks for Controller 2 keeps the first until the host accepts; then the first goes neutral and the second follows them. Host log: `seat` lines for both.
 
+## The stream volume (P6): what to expect
+
+- **In the stream window's bar:** Mute and a volume slider (0 to 100%, never louder than the host sends). Ctrl+Alt+Shift+`-` / `=` / `0` turn it down, up (by 10%) and mute it, showing "Volume 70%" or "Muted"; turning it up unmutes. Settings → Shortcuts lists the three, movable like the others. Only this window's sound changes: the host and other watchers hear no difference.
+- **Remembered per profile** (`audio.json` in its folder): the next stream window plays at the same level, even after closing the window right after a change.
+- **On one PC**, every window plays through the same speakers: compare by muting one watcher's window.
+
 ## Several seats for one guest (M18): what to expect
 
 - **The guest's controller count** reaches the host when the guest's stream window opens its controllers: the host panel's Watching list says "bob · 2 controllers" (sessions with more than one seat). Plugging or unplugging one updates it.

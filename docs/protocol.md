@@ -451,22 +451,25 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], host_on_seats, viewers u8, control_paused, game_in_front, stream, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller; `host_on_seats` that the host's controller plays only through the seats (a free seat is empty); `stream` is `SessionStatus.stream` (M19): while it isn't `Live`, the window shows black and says why |
 | `0x05` | main to viewer | Shutdown |
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
-| `0x07` | main to viewer | Seat state (postcard): `{holding, permissions}`. The viewer captures the mouse only while holding with mouse permission |
-| `0x08` | main to viewer | Rumble (postcard): `{low u8, high u8}` |
+| `0x07` | main to viewer | Seat state (postcard): `{seats: [{seat, permissions, controller?}]}`, every seat held (M18), with the controller slot the main process chose to drive each (the window rumbles and shows by it). The viewer captures the mouse only while a held seat has mouse permission |
+| `0x08` | main to viewer | Rumble (postcard): `{seat u8, low u8, high u8}`, for the controller driving that seat |
 | `0x09` | main to viewer | Shortcut keys (postcard): `{keys: map of row id to HID usage}`, the rows the user moved off their defaults, sent right after Hello. The viewer checks them as the app does (`Shortcuts::with_keys`); rows that don't fit keep their defaults, which also apply until this frame arrives (P3) |
-| `0x81` | viewer to main | Local input (postcard `LocalInput`): `Key{usage, down}`, `MouseButton{button, down}`, `MouseMotion{dx, dy}`, `Wheel{dx, dy}`, `Pad(snapshot)` or `Alive` (every 100 ms). Deltas; the main process keeps the running totals |
+| `0x0A` | main to viewer | Stream volume (postcard): `{percent u8, muted}`, the profile's (`audio.json`), sent right after the shortcut keys, before any sound (P6). The pipe reader applies it to the sound at once, as a squared gain (50% is -12 dB) and never above 100%; full volume until it arrives |
+| `0x81` | viewer to main | Local input (postcard `LocalInput`): `Key{usage, down}`, `MouseButton{button, down}`, `MouseMotion{dx, dy}`, `Wheel{dx, dy}`, `Pad{controller, pad}` (a controller's state by its slot, kept while connected, M18), `ControllerSlots(bits)` (the slots connected, after every change) or `Alive` (every 100 ms). Deltas; the main process keeps the running totals |
 | `0x82` | viewer to main | Frame timing: `{epoch, seq, capture_us, arrived_us, decoded_us, presented_us, barcode_us}` |
-| `0x83` | viewer to main | User action (postcard): `RequestControl(seat u8)`, `CancelControl` (withdraw or give back), `Leave`. The viewer also sends `Leave` when its window is closed (M6): a viewer that exits without it crashed, and the app starts it again, at most once a minute |
+| `0x83` | viewer to main | User action (postcard): `RequestControl(seat u8)`, `CancelControl` (withdraw, or give every seat back), `GiveBack(seat u8)` (one seat, M18; also sent by the main process's forwarder when the controller driving one of several seats goes), `Leave`. The viewer also sends `Leave` when its window is closed (M6): a viewer that exits without it crashed, and the app starts it again, at most once a minute |
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 | `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
+| `0x86` | viewer to main | Stream volume changed (postcard, as `0x0A`), to save for the profile (P6): a shortcut or Mute at once, the slider once it rests for 0.5 s, and before `Leave` |
 
-`IPC_VERSION` (now 9: the stream's state in the HUD, M19) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 11: the stream volume, P6; 10 was M18's seats) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the host-keys hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;
 - F toggles full screen;
 - H shows or hides the HUD; F3 alone does too, unless the keyboard is being forwarded;
-- M frees the mouse; clicking the window captures it again.
+- M frees the mouse; clicking the window captures it again;
+- `-` and `=` turn the stream down and up by 10%, `0` mutes or unmutes it (P6); the HUD's bar has Mute and a slider.
 
 On the host, while streaming, with Ctrl+Alt+Shift held (`couch_platform_win::host_keys`, one low-level hook for all three; physical keys only, so a guest's injected keys never count and the game never sees them):
 - Backspace is the panic key;

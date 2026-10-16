@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 10;
+pub const IPC_VERSION: u16 = 11;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -41,6 +41,9 @@ pub mod kinds {
     /// main -> viewer, right after `HELLO`: the user's shortcut keys
     /// ([`super::ShortcutKeys`]). Until it arrives, the defaults apply.
     pub const SHORTCUTS: u8 = 0x09;
+    /// main -> viewer, right after `SHORTCUTS`: the profile's stream volume
+    /// ([`super::StreamVolume`], P6). Until it arrives, full volume.
+    pub const VOLUME: u8 = 0x0A;
 
     /// viewer -> main: a local input event for the host ([`super::LocalInput`]).
     pub const INPUT: u8 = 0x81;
@@ -52,6 +55,9 @@ pub mod kinds {
     pub const KEYFRAME_REQUEST: u8 = 0x84;
     /// viewer -> main: audio playback counters ([`super::AudioStats`]), every second.
     pub const AUDIO_STATS: u8 = 0x85;
+    /// viewer -> main: the user changed the stream volume
+    /// ([`super::StreamVolume`], P6), to remember for the profile.
+    pub const VOLUME_CHANGED: u8 = 0x86;
 }
 
 /// Header of a [`kinds::VIDEO_FRAME`] payload; the access unit follows it.
@@ -335,6 +341,60 @@ pub struct RumbleState {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortcutKeys {
     pub keys: std::collections::BTreeMap<String, u16>,
+}
+
+/// Payload of [`kinds::VOLUME`] and [`kinds::VOLUME_CHANGED`] (postcard,
+/// P6): how loud the stream window plays the stream, remembered per profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamVolume {
+    /// 0 to 100: never louder than the host sent it, so it can't clip.
+    pub percent: u8,
+    /// Silent, keeping `percent` for unmuting.
+    pub muted: bool,
+}
+
+impl StreamVolume {
+    pub const MAX: u8 = 100;
+
+    /// The factor applied to each sample: the square of the level, so that
+    /// equal steps sound about equal (50% is -12 dB); linear steps barely
+    /// change it near the top and halve it near the bottom.
+    pub fn gain(self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            let level = f32::from(self.percent.min(Self::MAX)) / f32::from(Self::MAX);
+            level * level
+        }
+    }
+
+    /// Within 0 to 100%: what a file or the other process said, made safe.
+    pub fn clamped(self) -> Self {
+        Self {
+            percent: self.percent.min(Self::MAX),
+            ..self
+        }
+    }
+
+    /// `percent` moved by `step` (either way), within 0 to 100. Turning it up
+    /// unmutes.
+    pub fn stepped(self, step: i8) -> Self {
+        let percent = (i16::from(self.percent.min(Self::MAX)) + i16::from(step))
+            .clamp(0, i16::from(Self::MAX)) as u8;
+        Self {
+            percent,
+            muted: self.muted && step <= 0,
+        }
+    }
+}
+
+impl Default for StreamVolume {
+    fn default() -> Self {
+        Self {
+            percent: Self::MAX,
+            muted: false,
+        }
+    }
 }
 
 /// Payload of [`kinds::AUDIO_PACKET`] (postcard): an audio datagram as it
@@ -658,5 +718,36 @@ mod tests {
     #[test]
     fn zero_length_is_rejected() {
         assert_eq!(decode(&[0, 0, 0, 0]), Err(IpcError::Empty));
+    }
+
+    /// P6: the stream volume stays within 0 to 100%, and muting keeps it.
+    #[test]
+    fn stream_volume_steps_and_mutes() {
+        let full = StreamVolume::default();
+        assert_eq!(full.gain(), 1.0);
+        assert_eq!(full.stepped(10).percent, 100, "never above 100");
+        let quiet = full.stepped(-30);
+        assert_eq!(quiet.percent, 70);
+        assert!((quiet.gain() - 0.49).abs() < 1e-6, "squared");
+        assert!(
+            (full.stepped(-50).gain() - 0.25).abs() < 1e-6,
+            "50% is -12 dB"
+        );
+        assert_eq!(quiet.stepped(-100).percent, 0);
+        let muted = StreamVolume {
+            muted: true,
+            ..quiet
+        };
+        assert_eq!(muted.gain(), 0.0);
+        assert!(muted.stepped(-10).muted, "turning down stays muted");
+        assert!(!muted.stepped(10).muted, "turning up unmutes");
+        // A peer can't make it louder than full.
+        let loud = StreamVolume {
+            percent: 250,
+            muted: false,
+        };
+        assert_eq!(loud.gain(), 1.0);
+        assert_eq!(loud.clamped().percent, 100);
+        assert_eq!(from_payload(&to_payload(&muted)), Some(muted));
     }
 }

@@ -40,7 +40,7 @@ use couch_proto::{
     input::RumbleDatagram,
     ipc::{
         self, AudioPacket, AudioStats, FrameTiming, HudState, IpcFrame, LocalInput, NetStats,
-        RumbleState, ShortcutKeys, UserAction, VideoFrameHeader,
+        RumbleState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
     },
     media::{AudioDatagram, datagram, decode_payload},
 };
@@ -70,6 +70,9 @@ pub struct WatchOptions {
     /// The user's shortcut keys, sent to every window right after `HELLO`;
     /// empty for the defaults.
     pub shortcuts: ShortcutKeys,
+    /// The stream volume, sent to every window after the shortcuts (P6). A
+    /// change in the window replaces it, so a restarted window keeps it.
+    pub volume: StreamVolume,
 }
 
 /// What watching reports.
@@ -91,6 +94,8 @@ pub enum WatchEvent {
     /// How many controllers the viewer window has changed (M18): tell the
     /// host (`ViewerControllers`).
     Controllers(u8),
+    /// The user changed the stream volume in the window (P6): remember it.
+    Volume(StreamVolume),
     /// The user closed the viewer window: watching is over.
     ViewerClosed,
     /// The viewer window crashed, and it can't (or may not yet) be started
@@ -404,6 +409,9 @@ async fn hello(ctx: &mut Ctx, forwarder: &Forwarder) -> bool {
                 &ipc::to_payload(&ctx.options.shortcuts),
             )
             .await
+        || !to
+            .send(ipc::kinds::VOLUME, &ipc::to_payload(&ctx.options.volume))
+            .await
     {
         return false;
     }
@@ -618,6 +626,12 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
                 link.video.note_decode_error();
                 let epoch = link.video.latest_epoch();
                 ctx.event(WatchEvent::KeyframeNeeded { epoch });
+            }
+        }
+        ipc::kinds::VOLUME_CHANGED => {
+            if let Some(volume) = ipc::from_payload::<StreamVolume>(&frame.payload) {
+                ctx.options.volume = volume;
+                ctx.event(WatchEvent::Volume(volume));
             }
         }
         ipc::kinds::USER_ACTION => {
