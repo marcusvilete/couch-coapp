@@ -358,7 +358,7 @@ fn the_hosts_seat_comes_back_when_a_viewer_lets_go() {
     assert_eq!(status_of(&s).host_seat, None);
 
     // Given back, or the viewer leaves: it goes back to the host.
-    s.give_back(ANA);
+    s.give_back(ANA, None);
     assert_eq!(claims(&s.seat_changed(S0, None)), vec![(S0, HOST)]);
     s.seat_changed(S0, Some(HOST));
     s.pass(ANA, S0).unwrap();
@@ -442,7 +442,7 @@ fn a_seat_taken_back_stays_empty() {
     // Held by a viewer again, it comes back to the host when let go.
     s.pass(ANA, S0).unwrap();
     s.seat_changed(S0, Some(ANA));
-    s.give_back(ANA);
+    s.give_back(ANA, None);
     assert_eq!(claims(&s.seat_changed(S0, None)), vec![(S0, HOST)]);
     s.seat_changed(S0, Some(HOST));
 
@@ -658,13 +658,150 @@ fn a_viewer_withdraws_or_gives_back() {
     // A withdraw with nothing pending never gives the seat back.
     assert!(s.withdraw(ANA).is_empty());
     assert_eq!(
-        s.give_back(ANA),
+        s.give_back(ANA, None),
         vec![Effect::Revoke {
             seat: S0,
             holder: Some(ANA)
         }]
     );
-    assert!(s.give_back(BIA).is_empty());
+    assert!(s.give_back(BIA, None).is_empty());
+}
+
+/// M18: a viewer with two controllers keeps its seat when given a second
+/// one with a pad; with one controller it moves, as before. The keyboard
+/// seat is always added. Giving back one seat keeps the others.
+#[test]
+fn seats_are_added_for_spare_controllers_and_moved_otherwise() {
+    let mut s = with_seats(&[
+        SeatKind::Controller,
+        SeatKind::Controller,
+        SeatKind::KeyboardMouse,
+    ]);
+    s.join(ANA);
+    let revokes = |fx: &[Effect]| {
+        fx.iter()
+            .filter(|e| matches!(e, Effect::Revoke { .. }))
+            .count()
+    };
+    // One controller (or none said): a second pad seat moves it.
+    s.set_controllers(ANA, 1);
+    s.pass(ANA, S0).unwrap();
+    s.seat_changed(S0, Some(ANA));
+    assert!(!s.keeps(ANA, S1));
+    assert!(revokes(&s.pass(ANA, S1).unwrap()) > 0, "moves");
+    s.seat_changed(S0, None);
+    s.seat_changed(S1, Some(ANA));
+    assert_eq!(s.seats_of(ANA), vec![S1]);
+    // The keyboard seat is always added.
+    assert!(s.keeps(ANA, SeatId(2)));
+    assert_eq!(revokes(&s.pass(ANA, SeatId(2)).unwrap()), 0, "adds");
+    s.seat_changed(SeatId(2), Some(ANA));
+    // Two controllers: the other pad seat is added too.
+    s.set_controllers(ANA, 2);
+    assert!(s.keeps(ANA, S0));
+    assert_eq!(revokes(&s.pass(ANA, S0).unwrap()), 0, "adds");
+    s.seat_changed(S0, Some(ANA));
+    assert_eq!(s.seats_of(ANA), vec![S0, S1, SeatId(2)]);
+    assert!(status_of(&s).is_valid(), "a viewer on several seats");
+    // Giving back one keeps the rest; all gives back every one.
+    assert_eq!(
+        s.give_back(ANA, Some(S1)),
+        vec![Effect::Revoke {
+            seat: S1,
+            holder: Some(ANA)
+        }]
+    );
+    assert_eq!(revokes(&s.give_back(ANA, None)), 3);
+}
+
+/// M18: two grants in quick succession, before the router answers the
+/// first, never give a viewer more pad seats than its controllers.
+#[test]
+fn grants_on_their_way_count_toward_a_viewers_seats() {
+    let mut s = with_seats(&[SeatKind::Controller, SeatKind::Controller]);
+    s.join(ANA);
+    s.set_controllers(ANA, 1);
+    s.pass(ANA, S0).unwrap();
+    // Not reported yet: the second must still move it.
+    assert!(!s.keeps(ANA, S1));
+}
+
+/// M18 review: a seat granted to one viewer and then another is pending for
+/// both; the router's report of the first never clears the second's, so the
+/// second still can't take a pad seat beyond its controllers.
+#[test]
+fn a_report_for_one_viewer_leaves_anothers_grant_pending() {
+    let mut s = with_seats(&[
+        SeatKind::Controller,
+        SeatKind::Controller,
+        SeatKind::KeyboardMouse,
+    ]);
+    s.join(ANA);
+    s.join(BIA);
+    s.set_controllers(BIA, 1);
+    s.pass(ANA, S0).unwrap();
+    s.pass(BIA, S0).unwrap();
+    // The router reports ANA's grant; BIA's is still on its way.
+    s.seat_changed(S0, Some(ANA));
+    assert!(!s.keeps(BIA, S1), "BIA's grant of S0 still counts");
+    let fx = s.pass(BIA, S1).unwrap();
+    assert!(fx.contains(&Effect::Revoke {
+        seat: S0,
+        holder: Some(BIA)
+    }));
+}
+
+/// M18 review: a move takes only the other pad seats; the keyboard seat
+/// needs no controller and stays.
+#[test]
+fn a_move_keeps_the_keyboard_seat() {
+    let kbm = SeatId(2);
+    let mut s = with_seats(&[
+        SeatKind::Controller,
+        SeatKind::Controller,
+        SeatKind::KeyboardMouse,
+    ]);
+    s.join(ANA);
+    s.set_controllers(ANA, 1);
+    s.pass(ANA, S0).unwrap();
+    s.seat_changed(S0, Some(ANA));
+    s.pass(ANA, kbm).unwrap();
+    s.seat_changed(kbm, Some(ANA));
+    let fx = s.pass(ANA, S1).unwrap();
+    assert!(fx.contains(&Effect::Revoke {
+        seat: S0,
+        holder: Some(ANA)
+    }));
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, Effect::Revoke { seat, .. } if *seat == kbm))
+    );
+    s.seat_changed(S0, None);
+    assert!(
+        s.seat_changed(S1, Some(ANA))
+            .iter()
+            .all(|e| !matches!(e, Effect::Revoke { .. }))
+    );
+    assert_eq!(s.seats_of(ANA), vec![S1, kbm]);
+}
+
+/// M18 review: a seat added while the viewer had two controllers stays with
+/// the one it held, even if it says it has one before the router answers.
+#[test]
+fn a_count_dropping_during_an_add_frees_nothing() {
+    let mut s = with_seats(&[SeatKind::Controller, SeatKind::Controller]);
+    s.join(ANA);
+    s.set_controllers(ANA, 2);
+    s.pass(ANA, S0).unwrap();
+    s.seat_changed(S0, Some(ANA));
+    s.pass(ANA, S1).unwrap();
+    s.set_controllers(ANA, 1);
+    let fx = s.seat_changed(S1, Some(ANA));
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Revoke { .. })),
+        "{fx:?}"
+    );
+    assert_eq!(s.seats_of(ANA), vec![S0, S1]);
 }
 
 /// A guest asking to move withdraws just as the host declines: it keeps
@@ -852,7 +989,10 @@ enum Op {
     Leave(u8),
     Request(u8, u8),
     Withdraw(u8),
-    GiveBack(u8),
+    /// Gives back one seat, or every seat.
+    GiveBack(u8, Option<u8>),
+    /// A viewer says how many controllers it has (M18).
+    Controllers(u8, u8),
     Answer(u8, bool),
     Pass(u8, u8),
     TakeBack(Option<u8>),
@@ -872,24 +1012,27 @@ fn op() -> impl Strategy<Value = Op> {
     let who = 0u8..4;
     // One past the last seat: requests and passes for a seat that isn't.
     let seat = 0u8..4;
+    // Weighted so a session lives long enough for a viewer to join, say it
+    // has controllers and be given several seats (M18): with every op
+    // equally likely, the end came after about 19 and no viewer ever held
+    // two.
     prop_oneof![
-        who.clone().prop_map(Op::Join),
-        who.clone().prop_map(Op::Leave),
-        (who.clone(), seat.clone()).prop_map(|(w, s)| Op::Request(w, s)),
-        who.clone().prop_map(Op::Withdraw),
-        who.clone().prop_map(Op::GiveBack),
-        (who.clone(), any::<bool>()).prop_map(|(w, a)| Op::Answer(w, a)),
-        (who, seat.clone()).prop_map(|(w, s)| Op::Pass(w, s)),
-        proptest::option::of(seat.clone()).prop_map(Op::TakeBack),
-        seat.clone().prop_map(Op::Play),
-        Just(Op::Panic),
-        Just(Op::Allow),
-        Just(Op::Deliver),
-        Just(Op::Deliver),
-        Just(Op::Deliver),
-        seat.prop_map(Op::Lapse),
-        (0u64..4000).prop_map(Op::Wait),
-        Just(Op::End),
+        3 => who.clone().prop_map(Op::Join),
+        1 => who.clone().prop_map(Op::Leave),
+        3 => (who.clone(), seat.clone()).prop_map(|(w, s)| Op::Request(w, s)),
+        1 => who.clone().prop_map(Op::Withdraw),
+        2 => (who.clone(), proptest::option::of(seat.clone())).prop_map(|(w, s)| Op::GiveBack(w, s)),
+        3 => (who.clone(), 0u8..4).prop_map(|(w, n)| Op::Controllers(w, n)),
+        3 => (who.clone(), any::<bool>()).prop_map(|(w, a)| Op::Answer(w, a)),
+        5 => (who, seat.clone()).prop_map(|(w, s)| Op::Pass(w, s)),
+        1 => proptest::option::of(seat.clone()).prop_map(Op::TakeBack),
+        1 => seat.clone().prop_map(Op::Play),
+        1 => Just(Op::Panic),
+        2 => Just(Op::Allow),
+        8 => Just(Op::Deliver),
+        1 => seat.prop_map(Op::Lapse),
+        1 => (0u64..4000).prop_map(Op::Wait),
+        1 => Just(Op::End),
     ]
 }
 
@@ -967,10 +1110,27 @@ impl Router {
         }
     }
 
-    /// Nobody holds two seats, at any moment.
-    fn one_seat_each(&self) -> bool {
-        let held: Vec<MemberId> = self.holders.iter().flatten().copied().collect();
-        held.iter().enumerate().all(|(i, h)| !held[..i].contains(h))
+    /// At any moment (M18): the host holds one seat at most; a viewer holds
+    /// at most one seat with a pad per controller it said it had (one with
+    /// none: a move), and at most the one keyboard-and-mouse seat beside.
+    fn within_controllers(&self, controllers: &BTreeMap<MemberId, u8>) -> bool {
+        let mut members: Vec<MemberId> = self.holders.iter().flatten().copied().collect();
+        members.sort();
+        members.dedup();
+        members.into_iter().all(|m| {
+            let seats: Vec<usize> = (0..self.holders.len())
+                .filter(|i| self.holders[*i] == Some(m))
+                .collect();
+            if m == HOST {
+                return seats.len() <= 1;
+            }
+            let pads = seats
+                .iter()
+                .filter(|i| SEATS[**i].permissions().contains(Permissions::GAMEPAD))
+                .count();
+            let allowed = usize::from(controllers.get(&m).copied().unwrap_or(0).max(1));
+            pads <= allowed && seats.len() - pads <= 1
+        })
     }
 }
 
@@ -982,7 +1142,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn only_viewers_and_the_host_play_and_one_seat_each(
+    fn only_viewers_and_the_host_play_within_their_controllers(
         host_plays in any::<bool>(),
         ops in proptest::collection::vec(op(), 1..100),
     ) {
@@ -999,6 +1159,8 @@ proptest! {
         .unwrap();
         let mut router = Router::new();
         let mut declined_at: BTreeMap<MemberId, Instant> = BTreeMap::new();
+        // The most controllers each viewer said it has, this time it watched.
+        let mut most_controllers: BTreeMap<MemberId, u8> = BTreeMap::new();
         let fx = s.start();
         prop_assert_eq!(fx.len(), usize::from(host_plays));
         router.apply(&fx);
@@ -1024,7 +1186,14 @@ proptest! {
                     );
                     fx
                 }
-                Op::GiveBack(i) => s.give_back(member(i)),
+                Op::GiveBack(i, seat) => s.give_back(member(i), seat.map(SeatId)),
+                Op::Controllers(i, n) => {
+                    if s.is_viewer(member(i)) {
+                        let most = most_controllers.entry(member(i)).or_insert(0);
+                        *most = (*most).max(n);
+                    }
+                    s.set_controllers(member(i), n)
+                }
                 Op::Answer(i, accept) => {
                     let fx = s.answer(member(i), accept, now).unwrap_or_default();
                     if !accept && declined(&fx, member(i)) {
@@ -1109,7 +1278,16 @@ proptest! {
                 }
             }
             router.apply(&fx);
-            prop_assert!(router.one_seat_each(), "a member holds two seats");
+            // A viewer that leaves forgets what it said.
+            if let Op::Leave(i) = op {
+                most_controllers.remove(&member(i));
+            }
+            prop_assert!(
+                router.within_controllers(&most_controllers),
+                "a member holds more seats than it may: {:?}, controllers {:?}",
+                router.holders,
+                most_controllers
+            );
 
             let viewers = s.viewers();
             prop_assert!(viewers.len() <= usize::from(s.config().max_viewers));
@@ -1149,7 +1327,7 @@ proptest! {
                 "a late report refills a seat the host left empty"
             );
             router.apply(&fx);
-            prop_assert!(router.one_seat_each());
+            prop_assert!(router.within_controllers(&most_controllers));
         }
         prop_assert!(router.reports.is_empty());
         prop_assert_eq!(&router.holders[..], s.holders());

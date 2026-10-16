@@ -12,12 +12,13 @@ use anyhow::{Result, anyhow};
 use couch_gamepad::{read_pad, rumble_strength};
 use couch_input::{
     DEV_PAD_IDS, HidUsage, XBOX_360_IDS,
+    forward::MAX_LOCAL_CONTROLLERS,
     shortcuts::{Shortcut, Shortcuts},
 };
 use couch_proto::{
     ids::Permissions,
     input::{PadSnapshot, mouse_button},
-    ipc::{LocalInput, RumbleState, SeatState},
+    ipc::{HeldSeat, LocalInput, RumbleState, SeatState},
 };
 use sdl3::{
     GamepadSubsystem,
@@ -38,10 +39,16 @@ pub struct InputCapture {
     pads: HashMap<JoystickId, Gamepad>,
     /// Open pads with Xbox 360 ids: dropped if a host here plugs one in.
     xbox_360: BTreeSet<JoystickId>,
-    /// The pad last touched; it drives the seat.
+    /// Each controller's slot, kept while it is connected (M18): the main
+    /// process pins seats to slots (`couch_input::forward`), so a controller
+    /// going never moves the others.
+    slots: [Option<JoystickId>; MAX_LOCAL_CONTROLLERS],
+    /// The pad last touched; with one seat, it drives it.
     active: Option<JoystickId>,
-    last_pad: PadSnapshot,
-    seat: Option<SeatState>,
+    /// Each pad's state as last sent.
+    last_pads: HashMap<JoystickId, PadSnapshot>,
+    /// The seats this member holds (M18: possibly several).
+    seats: SeatState,
     /// The table in use: the defaults until the main process sends the
     /// user's keys.
     shortcuts: Shortcuts,
@@ -73,9 +80,10 @@ impl InputCapture {
             gamepads,
             pads: HashMap::new(),
             xbox_360: BTreeSet::new(),
+            slots: [None; MAX_LOCAL_CONTROLLERS],
             active: None,
-            last_pad: PadSnapshot::default(),
-            seat: None,
+            last_pads: HashMap::new(),
+            seats: SeatState::default(),
             shortcuts: Shortcuts::default(),
             focused: false,
             mouse_freed: false,
@@ -90,22 +98,48 @@ impl InputCapture {
     }
 
     fn may(&self, permission: Permissions) -> bool {
-        self.seat
-            .is_some_and(|s| s.holding && s.permissions.contains(permission))
+        self.seats.may(permission)
     }
 
-    pub fn set_seat(&mut self, seat: SeatState) {
-        self.seat = Some(seat);
+    pub fn set_seat(&mut self, seats: SeatState) {
+        // A controller no longer driving a seat it drove (let go of, or
+        // driven by another now) stops shaking.
+        let stopped: Vec<u8> = self
+            .seats
+            .seats
+            .iter()
+            .filter(|old| !seats.seats.contains(old))
+            .filter_map(|old| old.controller)
+            .collect();
+        for slot in stopped {
+            self.shake(slot, 0, 0);
+        }
+        self.seats = seats;
         // While our keyboard goes to the game, Alt+F4 is the game's (the host
         // holds it back), never a way to close this window by accident. SDL
         // reads the hint at each key press.
-        let keyboard = seat.holding && seat.permissions.contains(Permissions::KEYBOARD);
+        let keyboard = self.may(Permissions::KEYBOARD);
         sdl3::hint::set(
             "SDL_WINDOWS_CLOSE_ON_ALT_F4",
             if keyboard { "0" } else { "1" },
         );
-        if !seat.holding {
-            self.rumble(RumbleState::default());
+    }
+
+    /// The controller slot driving `seat`, as the main process decided.
+    fn slot_for(&self, seat: u8) -> Option<u8> {
+        self.seats
+            .seats
+            .iter()
+            .find(|s| s.seat == seat)
+            .and_then(|s| s.controller)
+    }
+
+    fn shake(&mut self, slot: u8, low: u8, high: u8) {
+        let id = self.slots.get(usize::from(slot)).copied().flatten();
+        if let Some(pad) = id.and_then(|id| self.pads.get_mut(&id))
+            && let Err(e) = pad.set_rumble(rumble_strength(low), rumble_strength(high), RUMBLE_MS)
+        {
+            tracing::debug!("rumble failed: {e}");
         }
     }
 
@@ -115,35 +149,50 @@ impl InputCapture {
         self.shortcuts = shortcuts;
     }
 
+    /// The game shakes `rumble.seat`: the controller driving it shakes.
     pub fn rumble(&mut self, rumble: RumbleState) {
-        let id = self.active.or_else(|| self.pads.keys().next().copied());
-        if let Some(pad) = id.and_then(|id| self.pads.get_mut(&id))
-            && let Err(e) = pad.set_rumble(
-                rumble_strength(rumble.low),
-                rumble_strength(rumble.high),
-                RUMBLE_MS,
-            )
-        {
-            tracing::debug!("rumble failed: {e}");
+        if let Some(slot) = self.slot_for(rumble.seat) {
+            self.shake(slot, rumble.low, rumble.high);
         }
     }
 
-    /// One line for the HUD.
+    /// One line for the HUD. With several pad seats (M18), which controller
+    /// drives which: "pad A → seat 1, pad B → seat 3" (seats by number from 1,
+    /// pads by slot).
     pub fn hud_line(&self) -> String {
-        let pad = match self.active.and_then(|id| self.pads.get(&id)) {
-            Some(pad) => pad.name().unwrap_or_else(|| "gamepad".into()),
-            None if self.pads.is_empty() => "no gamepad".into(),
-            None => format!("{} gamepad(s)", self.pads.len()),
+        let pad_seats: Vec<&HeldSeat> = self
+            .seats
+            .seats
+            .iter()
+            .filter(|s| s.permissions.contains(Permissions::GAMEPAD))
+            .collect();
+        let pad = if pad_seats.len() > 1 {
+            pad_seats
+                .iter()
+                .map(|s| {
+                    let which = s.controller.map_or("no pad".to_string(), |c| {
+                        format!("pad {}", char::from(b'A' + c))
+                    });
+                    format!("{which} → seat {}", s.seat + 1)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            match self.active.and_then(|id| self.pads.get(&id)) {
+                Some(pad) => pad.name().unwrap_or_else(|| "gamepad".into()),
+                None if self.pads.is_empty() => "no gamepad".into(),
+                None => format!("{} gamepads", self.pads.len()),
+            }
         };
-        match self.seat {
-            Some(s) if s.holding => {
+        match &self.seats {
+            s if s.holding() => {
                 let mut what = Vec::new();
                 for (p, name) in [
                     (Permissions::GAMEPAD, "pad"),
                     (Permissions::KEYBOARD, "keyboard"),
                     (Permissions::MOUSE, "mouse"),
                 ] {
-                    if s.permissions.contains(p) {
+                    if s.may(p) {
                         what.push(name);
                     }
                 }
@@ -261,13 +310,14 @@ impl InputCapture {
                     out.push(LocalInput::Wheel { dx, dy });
                 }
             }
-            Event::GamepadAdded { which, .. } => self.open_pad(*which),
+            Event::GamepadAdded { which, .. } => {
+                if self.open_pad(*which) {
+                    out.push(self.controller_slots());
+                }
+            }
             Event::GamepadRemoved { which, .. } => {
-                self.pads.remove(which);
-                self.xbox_360.remove(which);
-                if self.active == Some(*which) {
-                    self.active = None;
-                    self.send_pad(PadSnapshot::default(), out);
+                if self.close_pad(*which) {
+                    out.push(self.controller_slots());
                 }
             }
             Event::GamepadButtonDown { which, .. }
@@ -276,7 +326,7 @@ impl InputCapture {
                 if let Some(pad) = self.pads.get(which) {
                     let snapshot = read_pad(pad);
                     self.active = Some(*which);
-                    self.send_pad(snapshot, out);
+                    self.send_pad(*which, snapshot, out);
                 }
             }
             _ => {}
@@ -313,12 +363,13 @@ impl InputCapture {
         }
     }
 
-    fn open_pad(&mut self, id: JoystickId) {
+    /// Opens a pad that connected; `false` if it is skipped.
+    fn open_pad(&mut self, id: JoystickId) -> bool {
         let pad = match self.gamepads.open(id) {
             Ok(pad) => pad,
             Err(e) => {
                 tracing::warn!("opening a gamepad failed: {e}");
-                return;
+                return false;
             }
         };
         let ids = (pad.vendor_id().unwrap_or(0), pad.product_id().unwrap_or(0));
@@ -328,13 +379,49 @@ impl InputCapture {
             tracing::info!(
                 "skipping {name:?}: a host on this PC has a virtual pad plugged in, and it may be this one"
             );
-            return;
+            return false;
         }
         tracing::info!("gamepad {name:?} ({:04x}:{:04x})", ids.0, ids.1);
+        // The lowest free slot; the others keep theirs.
+        if !self.slots.contains(&Some(id)) {
+            let Some(slot) = self.slots.iter_mut().find(|s| s.is_none()) else {
+                tracing::info!("skipping {name:?}: every controller slot is taken");
+                return false;
+            };
+            *slot = Some(id);
+        }
         if xbox_360 {
             self.xbox_360.insert(id);
         }
         self.pads.insert(id, pad);
+        true
+    }
+
+    /// Forgets a pad that went; `false` if it wasn't open. Its slot frees;
+    /// the others keep theirs.
+    fn close_pad(&mut self, id: JoystickId) -> bool {
+        self.xbox_360.remove(&id);
+        self.last_pads.remove(&id);
+        for slot in &mut self.slots {
+            if *slot == Some(id) {
+                *slot = None;
+            }
+        }
+        if self.active == Some(id) {
+            self.active = None;
+        }
+        self.pads.remove(&id).is_some()
+    }
+
+    /// The slots with a controller, for the main process (after each change).
+    fn controller_slots(&self) -> LocalInput {
+        let mask = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_some())
+            .fold(0u8, |mask, (i, _)| mask | 1 << i);
+        LocalInput::ControllerSlots(mask)
     }
 
     /// Drops Xbox 360 pads once a host on this PC has a virtual pad plugged
@@ -348,18 +435,21 @@ impl InputCapture {
             tracing::info!(
                 "skipping an Xbox 360 pad: a host on this PC has a virtual pad plugged in"
             );
-            self.pads.remove(&id);
-            if self.active == Some(id) {
-                self.active = None;
-                self.send_pad(PadSnapshot::default(), out);
-            }
+            self.close_pad(id);
         }
+        out.push(self.controller_slots());
     }
 
-    fn send_pad(&mut self, snapshot: PadSnapshot, out: &mut Vec<LocalInput>) {
-        if snapshot != self.last_pad {
-            self.last_pad = snapshot;
-            out.push(LocalInput::Pad(snapshot));
+    /// One pad's state, by its slot, if it changed.
+    fn send_pad(&mut self, id: JoystickId, snapshot: PadSnapshot, out: &mut Vec<LocalInput>) {
+        let Some(slot) = self.slots.iter().position(|s| *s == Some(id)) else {
+            return;
+        };
+        if self.last_pads.insert(id, snapshot) != Some(snapshot) {
+            out.push(LocalInput::Pad {
+                controller: slot as u8,
+                pad: snapshot,
+            });
         }
     }
 }

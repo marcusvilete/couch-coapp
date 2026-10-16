@@ -44,7 +44,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// epoch's preamble may name HEVC.
 /// 3: sessions before streams (M19): `SessionStatus` says whether anything is
 /// streamed, and an epoch may end with `STREAM_END`.
-pub const PROTOCOL_MINOR: u16 = 3;
+/// 4: several seats for one viewer (M18): `ViewerControllers`, a viewer on
+/// several seats in `SessionStatus`, and giving back one seat.
+pub const PROTOCOL_MINOR: u16 = 4;
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC
 /// frame header, and as bits in what a viewer decodes (`SessionJoin`).

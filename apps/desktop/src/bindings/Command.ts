@@ -43,4 +43,4 @@ max_mbps: number,
 /**
  * This PC's upload cap, split between viewers, Mbit/s.
  */
-upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, } | { "type": "allowControl" };
+upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "giveBackSeat", seat: number, } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, } | { "type": "allowControl" };

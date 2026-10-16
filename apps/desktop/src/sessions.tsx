@@ -32,17 +32,42 @@ export function nameOf(room: RoomView, member: string | null | undefined): strin
   return room.members.find((m) => m.id === member)?.name ?? "someone";
 }
 
-/** Who plays: each seat's holder (the host's own controller included), and
- * the host while a seat is free if they play outside the seats. */
+/** Who plays: each seat's holder once (the host's own controller included;
+ * a guest may hold several seats, M18), and the host while a seat is free if
+ * they play outside the seats. */
 export function playersOf(session: SessionView): string[] {
   const holders = session.seats.flatMap((s) => (s.holder ? [s.holder] : []));
   const outside = !session.hostOnSeats && holders.length < session.seats.length;
-  return outside ? [...holders, session.host] : holders;
+  const players = [...new Set(holders)];
+  return outside && !players.includes(session.host) ? [...players, session.host] : players;
 }
 
 /** A seat's label in a sentence: "the controller", "Controller 2". */
 export function seatPhrase(label: string): string {
   return /\d$/.test(label) ? label : `the ${label.toLowerCase()}`;
+}
+
+/** The seats `member` holds, by index (M18: a guest may hold several). */
+function seatsOf(s: SessionView, member: string | undefined): number[] {
+  return s.seats.flatMap((seat, i) => (member != null && seat.holder === member ? [i] : []));
+}
+
+/** "Controller 1", "Controller 1 and Controller 2", "A, B and C". */
+function listed(labels: string[]): string {
+  return labels.length <= 1 ? (labels[0] ?? "") : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
+
+/** Whether a guest holding `held`, with `controllers` controllers, keeps them
+ * on being passed seat `seat`, rather than moving to it: as the host's session
+ * decides (`HostSession::keeps` in couch-room). A seat without a pad needs no
+ * controller; one with a pad is added while they hold fewer pad seats than
+ * they have controllers. */
+function keeps(s: SessionView, held: number[], controllers: number, seat: number): boolean {
+  if (!s.seats[seat]?.pad) {
+    return true;
+  }
+  const pads = held.filter((i) => i !== seat && s.seats[i]?.pad).length;
+  return pads < controllers;
 }
 
 /** Whether a session streams something now. */
@@ -220,33 +245,46 @@ function StageCard(props: {
       actions = <StopWatching run={run} busy={busy} />;
       break;
     default: {
-      const mine = s.seats.findIndex((seat) => seat.holder != null && seat.holder === me);
+      // The seats we play (M18: several, one per controller we have).
+      const mine = seatsOf(s, me);
       const asked = s.askedSeat;
       const seatName = (i: number | null) => (i == null || i < 0 ? "a seat" : seatPhrase(s.seats[i].label));
+      const ours = listed(mine.map((i) => s.seats[i].label));
       state =
         s.role === "asking"
-          ? mine >= 0
-            ? `You're playing on ${s.seats[mine].label}, and asked ${host} for ${seatName(asked)}.`
+          ? mine.length > 0
+            ? `You're playing on ${ours}, and asked ${host} for ${seatName(asked)}.`
             : `You asked ${host} for ${seatName(asked)}.`
-          : mine >= 0
+          : mine.length > 0
             ? s.seats.length > 1
-              ? `You're playing, on ${s.seats[mine].label}.`
+              ? `You're playing, on ${ours}.`
               : "You're playing."
             : s.controlPaused
               ? `You're watching. ${host} paused control for now.`
               : "You're watching.";
       // Any seat but ours: a free one, someone else's (the host decides),
-      // or another than ours (a move).
+      // or another than ours (added if we have a controller to spare for
+      // it, else a move).
       const asks = s.seats.map((seat, i) =>
-        i === mine ? null : (
+        mine.includes(i) ? null : (
           <button key={i} disabled={busy != null || s.controlPaused || asked === i} onClick={() => run(`ask-${i}`, { type: "requestControl", seat: i })}>
             {asked === i ? `Asked for ${seatPhrase(seat.label)}` : `Ask for ${seatPhrase(seat.label)}`}
           </button>
         ),
       );
+      // With several seats, each can go back alone.
+      const giveBacks =
+        mine.length > 1
+          ? mine.map((i) => (
+              <button key={`back-${i}`} disabled={busy != null} onClick={() => run(`back-${i}`, { type: "giveBackSeat", seat: i })}>
+                Give back {s.seats[i].label}
+              </button>
+            ))
+          : null;
       actions = (
         <>
           {asks}
+          {giveBacks}
           {s.role === "asking" && (
             <button disabled={busy != null} onClick={() => run("cancel", { type: "cancelControl" })}>
               Withdraw the request
@@ -254,7 +292,7 @@ function StageCard(props: {
           )}
           {s.role === "controlling" && (
             <button disabled={busy != null} onClick={() => run("cancel", { type: "cancelControl" })}>
-              Give it back
+              {mine.length > 1 ? "Give all back" : "Give it back"}
             </button>
           )}
           <StopWatching run={run} busy={busy} />
@@ -304,8 +342,8 @@ function HostPanel(props: {
 }) {
   const { room, session: s } = props;
   const { busy, run } = useRun(props.notify, props.onRoom);
-  const seatOf = (member: string) => s.seats.findIndex((seat) => seat.holder === member);
   const single = s.seats.length === 1;
+  const controllersOf = (member: string) => s.viewerControllers[s.viewers.indexOf(member)] ?? 0;
   const pass = (member: string, seat: number) => run(`pass-${member}`, { type: "passControl", member, seat });
   // Our own controller plays through a seat (hidden from games), or we play
   // outside the seats on whatever the game sees directly.
@@ -436,7 +474,9 @@ function HostPanel(props: {
         ) : (
           <ul>
             {s.viewers.map((id) => {
-              const seat = seatOf(id);
+              const held = seatsOf(s, id);
+              const controllers = controllersOf(id);
+              const plays = listed(held.map((i) => s.seats[i].label));
               const blocked = busy != null || s.controlPaused;
               const why = s.controlPaused ? "Allow control first" : undefined;
               return (
@@ -444,15 +484,16 @@ function HostPanel(props: {
                   <Avatar name={nameOf(room, id)} />
                   <span className="member-name">
                     {nameOf(room, id)}
-                    {seat >= 0 && (
-                      <span className="playing" title={`Playing: ${s.seats[seat].label}`} aria-label="playing">
+                    {held.length > 0 && (
+                      <span className="playing" title={`Playing: ${plays}`} aria-label="playing">
                         {" "}
-                        🎮{!single && <span className="hint"> {s.seats[seat].label}</span>}
+                        🎮{!single && <span className="hint"> {plays}</span>}
                       </span>
                     )}
+                    {!single && <span className="hint"> · {controllers === 1 ? "1 controller" : `${controllers} controllers`}</span>}
                   </span>
                   {single ? (
-                    seat >= 0 ? (
+                    held.length > 0 ? (
                       <button disabled={busy != null} onClick={() => run("take", { type: "takeBackControl", seat: 0 })}>
                         Take back
                       </button>
@@ -471,13 +512,14 @@ function HostPanel(props: {
                       onChange={(e) => pass(id, Number(e.target.value))}
                     >
                       <option value="" disabled>
-                        {seat >= 0 ? "Move to…" : "Pass a seat…"}
+                        {held.length > 0 ? "Pass another seat…" : "Pass a seat…"}
                       </option>
                       {s.seats.map((other, i) =>
-                        i === seat ? null : (
+                        held.includes(i) ? null : (
                           <option key={i} value={i}>
                             {other.label}
                             {other.host ? " (yours)" : other.holder ? ` (${nameOf(room, other.holder)}'s)` : ""}
+                            {held.length > 0 && (keeps(s, held, controllers, i) ? " — added" : " — moves them")}
                           </option>
                         ),
                       )}

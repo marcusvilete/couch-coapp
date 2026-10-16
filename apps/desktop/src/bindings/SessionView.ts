@@ -20,6 +20,13 @@ host: string, title: string, maxViewers: number,
  */
 viewers: Array<string>, 
 /**
+ * For the host: how many controllers each viewer has, as it said, in
+ * `viewers`' order (M18); empty for others' sessions. A seat with a pad
+ * passed to a viewer is added to theirs while they hold fewer pad seats
+ * than this, otherwise they move; a seat without one is always added.
+ */
+viewerControllers: Array<number>, 
+/**
  * The seats players can hold, by seat id; one is single player.
  */
 seats: Array<SeatView>, 

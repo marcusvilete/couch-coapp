@@ -243,8 +243,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     net = Some(stats);
                 }
                 Some(WatchEvent::Rumble(r)) => {
-                    println!("rumble from the host: low {} high {}", r.low, r.high);
+                    println!("rumble from the host: seat {} low {} high {}", r.seat, r.low, r.high);
                 }
+                // `couch-cli host` seats each viewer once, by its connection.
+                Some(WatchEvent::Controllers(n)) => println!("the viewer has {n} controller(s)"),
                 Some(WatchEvent::Action(action)) => println!("the viewer asked to {action:?}; no session here"),
                 Some(WatchEvent::ViewerRestarted) => {
                     println!("EVENT viewer-restarted {}", clock.now().0);

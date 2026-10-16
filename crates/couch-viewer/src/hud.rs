@@ -420,21 +420,21 @@ fn session_bar(
             };
             ui.label(format!("{} · {watching}", who_plays(s)));
 
-            let mine = s.seats.iter().find(|seat| seat.mine);
+            let mine: Vec<&HudSeat> = s.seats.iter().filter(|seat| seat.mine).collect();
             let asked = s.seats.iter().find(|seat| seat.asked);
-            let (state, colour) = match (s.role, mine) {
-                // Playing, and maybe asking to move meanwhile.
-                (_, Some(seat)) => {
-                    let mut state = playing_with(s, seat);
+            let (state, colour) = match (s.role, mine.as_slice()) {
+                (HudRole::Asking, []) => (
+                    format!("Waiting for {} to answer…", s.host),
+                    Color32::LIGHT_BLUE,
+                ),
+                // Playing, and maybe asking for another seat meanwhile.
+                (_, [_, ..]) => {
+                    let mut state = playing_with(s, &mine);
                     if let Some(asked) = asked {
                         state.push_str(&format!(" · asked for {}", seat_phrase(&asked.label)));
                     }
                     (state, Color32::LIGHT_GREEN)
                 }
-                (HudRole::Asking, None) => (
-                    format!("Waiting for {} to answer…", s.host),
-                    Color32::LIGHT_BLUE,
-                ),
                 _ if s.control_paused => {
                     (format!("{} paused control for now", s.host), Color32::GRAY)
                 }
@@ -457,9 +457,18 @@ fn session_bar(
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 // Ask for any seat but our own: a free one, someone else's
-                // (the host decides), or another than ours (a move).
+                // (the host decides), or another than ours (added if we have
+                // a controller to spare for it, else a move: M18). With
+                // several seats, each can be given back alone.
                 for (i, seat) in s.seats.iter().enumerate() {
                     if seat.mine {
+                        if mine.len() > 1
+                            && ui.button(format!("Give back {}", seat.label)).clicked()
+                        {
+                            clicks.push(BarClick::Action(HudAction::Session(
+                                UserAction::GiveBack(i as u8),
+                            )));
+                        }
                         continue;
                     }
                     let text = if seat.asked {
@@ -476,6 +485,7 @@ fn session_bar(
                 }
                 let cancel = match s.role {
                     HudRole::Asking => Some("Withdraw the request"),
+                    HudRole::Controlling if mine.len() > 1 => Some("Give all back"),
                     HudRole::Controlling => Some("Give it back"),
                     HudRole::Watching => None,
                 };
@@ -539,17 +549,28 @@ fn who_plays(s: &HudState) -> String {
     }
 }
 
-/// What this viewer plays with, on `seat`.
-fn playing_with(s: &HudState, seat: &HudSeat) -> String {
-    let with = match (seat.pad, seat.keyboard_mouse) {
-        (true, true) => "your gamepad, keyboard and mouse",
-        (false, true) => "your keyboard and mouse",
-        _ => "your gamepad",
-    };
-    if s.seats.len() > 1 {
-        format!("You're playing as {}, with {with}", seat.label)
-    } else {
-        format!("You're playing, with {with}")
+/// What this viewer plays, on `mine` (at least one seat): with several (M18),
+/// "You're playing Controller 1 and Controller 2", the input line saying
+/// which controller drives which.
+fn playing_with(s: &HudState, mine: &[&HudSeat]) -> String {
+    match mine {
+        [seat] => {
+            let with = match (seat.pad, seat.keyboard_mouse) {
+                (true, true) => "your gamepad, keyboard and mouse",
+                (false, true) => "your keyboard and mouse",
+                _ => "your gamepad",
+            };
+            if s.seats.len() > 1 {
+                format!("You're playing as {}, with {with}", seat.label)
+            } else {
+                format!("You're playing, with {with}")
+            }
+        }
+        seats => {
+            let labels: Vec<&str> = seats.iter().map(|seat| seat.label.as_str()).collect();
+            let (last, rest) = labels.split_last().expect("several seats");
+            format!("You're playing {} and {last}", rest.join(", "))
+        }
     }
 }
 
@@ -657,5 +678,31 @@ mod tests {
         assert_eq!(who_plays(&empty), "Nobody is playing");
         // The free seat is the one to ask for, not the host's.
         assert_eq!(seat_to_ask(&on_a_seat), Some(1));
+    }
+
+    /// M18: a viewer on several seats hears all of them.
+    #[test]
+    fn several_seats_are_named_together() {
+        let mut one = seat("Controller 1", Some("Bia"), false);
+        one.mine = true;
+        let mut two = seat("Controller 2", Some("Bia"), false);
+        two.mine = true;
+        let mut keys = seat("Keyboard and mouse", Some("Bia"), false);
+        keys.mine = true;
+        keys.pad = false;
+        keys.keyboard_mouse = true;
+        let s = session(vec![one.clone(), two.clone(), keys.clone()], false);
+        assert_eq!(
+            playing_with(&s, &[&one]),
+            "You're playing as Controller 1, with your gamepad"
+        );
+        assert_eq!(
+            playing_with(&s, &[&one, &two]),
+            "You're playing Controller 1 and Controller 2"
+        );
+        assert_eq!(
+            playing_with(&s, &[&one, &two, &keys]),
+            "You're playing Controller 1, Controller 2 and Keyboard and mouse"
+        );
     }
 }
