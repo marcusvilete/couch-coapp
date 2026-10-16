@@ -293,6 +293,12 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// The codecs this PC decodes in hardware, as `couch_proto::codec` bits,
+    /// for watching (M12c): H.264 always, HEVC where the GPU has its decoder.
+    fn decodes(&self) -> u8 {
+        couch_media::Codec::H264.bit()
+    }
+
     /// Hooks the host's keys, Ctrl+Alt+Shift plus each key (the host rows
     /// of the user's `couch_input::shortcuts::Shortcuts`: the panic key,
     /// Accept and Decline), until the returned guard drops. Only physical
@@ -310,6 +316,10 @@ pub trait Backend: Send + Sync + 'static {
 pub fn platform_backend() -> Arc<dyn Backend> {
     #[cfg(windows)]
     {
+        // Whether this GPU decodes HEVC (M12c) takes a D3D11 device: asked
+        // now, on a thread of its own, so the first `SessionJoin` (built in
+        // the room actor) finds the answer cached.
+        std::thread::spawn(couch_platform_win::video_caps::hevc_decode);
         Arc::new(platform::WindowsBackend)
     }
     #[cfg(not(windows))]

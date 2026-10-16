@@ -10,13 +10,14 @@ The wire protocol between room members, and the pipe between the main process an
 - M5a added sessions: the session directory, watching, control requests, the per-connection stream acceptor, the control stream's priority, the upload share, and viewer IPC v3.
 - M5b put sessions on screen without changing the wire: the viewer's HUD bar and shortcuts, the shortcuts table, and the panic-key hook.
 - M6 added liveness (`Alive`, the `timed_out` close code), Alt+F4 to the blocked keys, following a game to a new window and telling that it exited, and watching that survives a dropped connection or a crashed viewer window.
+- M12c added HEVC: the codecs a viewer decodes in `SessionJoin`, codec 2 in the epoch preamble, and viewer IPC v8 (the codec in each video frame).
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 1). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 2, for HEVC in M12c). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -51,7 +52,7 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x0601` | `SessionAnnounce { session, title, seats [Controller \| KeyboardMouse \| Both], max_viewers u8 }` | Optional. Host to each connected member: a session is live, with these seats |
 | `0x0602` | `SessionStatus { session, viewers [member id], holders [member id?], host_seat SeatId?, host_on_seats bool, control_paused }` | Optional. Host to each connected member: who watches, which viewer holds each seat, the seat the host plays with their own controller, and whether that controller plays only through the seats |
 | `0x0603` | `SessionEnded { session, reason }` | Optional. Host to each connected member |
-| `0x8604` | `SessionJoin { session }` | Member to host: let me watch |
+| `0x8604` | `SessionJoin { session, codecs u8 }` | Member to host: let me watch. `codecs` is what this member decodes in hardware: bit 0 H.264 (always set), bit 1 HEVC (M12c) |
 | `0x8605` | `SessionJoinReply { session, result: Joined \| Full \| Ended \| Unavailable }` | Host to member |
 | `0x8606` | `SessionLeave { session }` | Viewer to host: I stopped watching |
 | `0x0607` | `GameFocus { session, in_front }` | Optional. Host to its viewers: whether the streamed window is in front (P1) |
@@ -74,7 +75,7 @@ Each pair of room members shares one iroh connection.
 | Channel | QUIC primitive | Direction | Content |
 |---|---|---|---|
 | Control | Bidirectional stream, opened first by the dialer | both | Envelope messages above; priority 50, above video, below input |
-| Video | One unidirectional stream per epoch | host to viewer | Preamble `{kind 0x01, version u8, session u64, epoch u32, codec u8 (1 = H.264), width u16, height u16, fps u16}`, then frames `{seq u32, flags u8 (bit 0 = keyframe), capture_us u64, encode_us u32, len u32 (at most 8 MiB), Annex-B access unit}` |
+| Video | One unidirectional stream per epoch | host to viewer | Preamble `{kind 0x01, version u8, session u64, epoch u32, codec u8 (1 = H.264, 2 = HEVC; another is refused), width u16, height u16, fps u16}`, then frames `{seq u32, flags u8 (bit 0 = keyframe), capture_us u64, encode_us u32, len u32 (at most 8 MiB), Annex-B access unit}` |
 | Input | One unidirectional stream, priority 100 (video streams have 0) | viewer to host | Kind byte `0x02`, then messages framed like the control stream (see [Input](#input)) |
 | `0x01` Audio | Datagram | host to viewer | `{seq u32, capture_us u64, packet}`: one Opus packet of 10 ms (see [Audio](#audio)) |
 | `0x02` Gamepad | Datagram | viewer to host | `{seat u8, seat_epoch u32, seq u32, pad}`, on change and every 100 ms while holding a seat. `pad` is `{buttons u16 (XInput bits), left_trigger u8, right_trigger u8, left_x, left_y, right_x, right_y i16 (up positive)}` |
@@ -198,6 +199,14 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
 - No B-frames, `delay=0`, `zerolatency=1`, `rc-lookahead=0`.
 - `forced-idr=1` with an infinite GOP; `bufsize` = bitrate / fps (a one-frame VBV, which also keeps keyframes small).
 - **Known cost.** FFmpeg 8.1's NVENC wrapper turns any bitrate change into an encoder reset with an IDR frame. That is why costly increases are batched. Calling NVENC directly (M9) reconfigures without one.
+
+**`hevc_nvenc` settings** (M12c): the same as `h264_nvenc`'s, with the Main profile (8-bit). Only an NVIDIA host taking GPU frames sends HEVC.
+
+**Which codec a viewer gets** (M12c, `pipeline::host::choose_codec`). Chosen when the viewer joins, and kept for its stream:
+- HEVC if the viewer's `SessionJoin` says it decodes HEVC, the host's capture gives GPU frames to NVENC, and the host isn't forced to H.264 (`COUCH_HOST_CODEC=h264`);
+- otherwise H.264.
+- If `hevc_nvenc` fails to open or to encode, that viewer falls back to H.264 (a new epoch with a keyframe), and the other viewers keep theirs.
+- A viewer reports HEVC when its GPU lists the HEVC Main decoder profile (`couch_platform_win::video_caps`), unless `COUCH_VIEWER_HEVC=0`.
 
 **Decoder:** single thread, `AV_CODEC_FLAG_LOW_DELAY`. After a decode error the viewer drops frames until the next keyframe and asks for one at most every 500 ms. It does the same when a frame waited more than 200 ms for the decoder: decoding can't keep up, and the host can't see that queue.
 
@@ -424,7 +433,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | Kind | Direction | Meaning |
 |---|---|---|
 | `0x01` | main to viewer | Hello: `IPC_VERSION` as a big-endian `u16`. A viewer that speaks another version stops |
-| `0x02` | main to viewer | Video frame |
+| `0x02` | main to viewer | Video frame: `{epoch u32, seq u32, keyframe u8, codec u8 (as in the preamble), capture_us u64, encode_us u32, arrived_us u64}`, then the access unit. The viewer reopens its decoder when a keyframe brings another codec |
 | `0x03` | main to viewer | Audio packet (postcard): `{seq, capture_us, arrived_us, packet}`, the datagram plus its arrival time on this machine |
 | `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], host_on_seats, viewers u8, control_paused, game_in_front, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller; `host_on_seats` that the host's controller plays only through the seats (a free seat is empty) |
 | `0x05` | main to viewer | Shutdown |
@@ -438,7 +447,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 | `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
 
-`IPC_VERSION` (now 7: the shortcut keys in P3) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 8: the codec in each video frame, M12c) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the host-keys hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;

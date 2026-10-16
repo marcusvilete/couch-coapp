@@ -1,6 +1,6 @@
-//! H.264 encoding through FFmpeg, tuned for latency: no B-frames, an
-//! effectively infinite GOP with keyframes on demand, constant bitrate with a
-//! one-frame rate buffer, and output after every input frame.
+//! H.264 and HEVC encoding through FFmpeg, tuned for latency: no B-frames,
+//! an effectively infinite GOP with keyframes on demand, constant bitrate
+//! with a one-frame rate buffer, and output after every input frame.
 
 use std::{ffi::CString, time::Instant};
 
@@ -20,13 +20,33 @@ use rsmpeg::{
 use crate::{
     d3d11::D3d11Frames,
     options::{OptionSet, option_sets},
-    probe::H264_ENCODERS,
+    probe::{H264_ENCODERS, HEVC_ENCODERS},
 };
 
-/// The one encoder that takes GPU frames (M9b): NVENC reads the capture's
-/// BGRA textures and converts them to YUV itself, as it does with BGRA from
-/// memory. AMD and Intel would need testing on their hardware first.
-pub const GPU_INPUT_ENCODER: &str = "h264_nvenc";
+/// The one encoder of each codec that takes GPU frames (M9b): NVENC reads
+/// the capture's BGRA textures and converts them to YUV itself, as it does
+/// with BGRA from memory. AMD and Intel would need testing on their hardware
+/// first.
+pub fn gpu_input_encoder(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Hevc => "hevc_nvenc",
+        _ => "h264_nvenc",
+    }
+}
+
+/// The encoders worth trying for `codec`, best first. HEVC is NVENC's only
+/// (M12c): AMD's and Intel's wait for their hardware.
+pub fn encoders(codec: Codec) -> &'static [&'static str] {
+    match codec {
+        Codec::Hevc => HEVC_ENCODERS,
+        _ => H264_ENCODERS,
+    }
+}
+
+/// NVENC changes its bitrate in place; the others reopen.
+fn is_nvenc(name: &str) -> bool {
+    matches!(name, "h264_nvenc" | "hevc_nvenc")
+}
 
 pub struct FfmpegEncoder {
     // Field order is drop order: the codec context (NVENC's session, which
@@ -59,7 +79,7 @@ enum Input {
 unsafe impl Send for FfmpegEncoder {}
 
 impl FfmpegEncoder {
-    /// Opens [`GPU_INPUT_ENCODER`] for GPU frames like `frame`: on its device,
+    /// Opens [`gpu_input_encoder`] for GPU frames like `frame`: on its device,
     /// at its size. Fails where NVENC can't use that device (another GPU's,
     /// such as a laptop's integrated graphics), so the caller can open an
     /// encoder for frames in memory instead.
@@ -70,20 +90,22 @@ impl FfmpegEncoder {
                 frame.width, frame.height, config.width, config.height
             )));
         }
-        Self::open_from(GPU_INPUT_ENCODER, config, 0, Some(frame))
+        Self::open_from(gpu_input_encoder(config.codec), config, 0, Some(frame))
     }
 
-    /// Opens the best H.264 encoder that works on this machine, hardware first.
+    /// Opens the best encoder of `config.codec` that works on this machine,
+    /// hardware first.
     pub fn open_best(config: EncoderConfig) -> Result<Self, MediaError> {
         let mut errors = Vec::new();
-        for &name in H264_ENCODERS {
+        for &name in encoders(config.codec) {
             match Self::open(name, config) {
                 Ok(encoder) => return Ok(encoder),
                 Err(e) => errors.push(format!("{name}: {e}")),
             }
         }
         Err(MediaError::Backend(format!(
-            "no H.264 encoder opened ({})",
+            "no {:?} encoder opened ({})",
+            config.codec,
             errors.join("; ")
         )))
     }
@@ -135,9 +157,12 @@ impl FfmpegEncoder {
         set: &OptionSet,
         gpu: Option<&GpuFrame>,
     ) -> Result<Self, MediaError> {
-        let Codec::H264 = config.codec else {
-            return Err(MediaError::Unsupported(format!("{:?}", config.codec)));
-        };
+        if !encoders(config.codec).contains(&name) {
+            return Err(MediaError::Unsupported(format!(
+                "{name} doesn't encode {:?}",
+                config.codec
+            )));
+        }
         let cname = CString::new(name).map_err(|e| MediaError::Backend(e.to_string()))?;
         let codec = AVCodec::find_encoder_by_name(&cname).ok_or_else(|| {
             MediaError::Unsupported(format!("{name} is not in this FFmpeg build"))
@@ -291,7 +316,7 @@ impl VideoEncoder for FfmpegEncoder {
             )));
         }
         if let Some(bps) = self.pending_bitrate.take() {
-            if self.caps.name == "h264_nvenc" {
+            if is_nvenc(&self.caps.name) {
                 self.ctx.set_bit_rate(i64::from(bps));
                 unsafe { set_rate_buffer(self.ctx.as_mut_ptr(), bps, self.config.fps) };
                 self.config.bitrate_bps = bps;

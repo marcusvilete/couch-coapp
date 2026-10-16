@@ -23,6 +23,8 @@ Every gate also needs a full run with 0 decode errors. Two checks are regression
 - **G3 mean bitrate.** Cubic passed G3's latency target while collapsing to 2 Mbit/s.
 - **G5 latency back.** A bitrate can settle while a queue stays standing.
 
+**The gates run in H.264** (M12c): `gates` sets `COUCH_HOST_CODEC=h264` for the host it starts. HEVC, the default between NVIDIA PCs, sends only about 0.3 Mbit/s on the latency clock: the throttles never touch it, so G5 read "settled never" and G3's and G7's numbers said nothing about rate control. H.264 fills its target on the clock, as the gates assume. A plain `latency-probe` follows `COUCH_HOST_CODEC` as set, so it measures HEVC there.
+
 ## Run
 
 ```powershell

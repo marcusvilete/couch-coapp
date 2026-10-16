@@ -30,7 +30,7 @@ pub mod reset_code {
 pub struct EpochPreamble {
     pub session: u64,
     pub epoch: u32,
-    /// 1 = H.264.
+    /// [`crate::codec`]: 1 = H.264, 2 = HEVC.
     pub codec: u8,
     pub width: u16,
     pub height: u16,
@@ -41,7 +41,8 @@ impl EpochPreamble {
     /// Including the stream-kind byte.
     pub const LEN: usize = 1 + 1 + 8 + 4 + 1 + 2 + 2 + 2;
     const VERSION: u8 = 0;
-    pub const CODEC_H264: u8 = 1;
+    pub const CODEC_H264: u8 = crate::codec::H264;
+    pub const CODEC_HEVC: u8 = crate::codec::HEVC;
 
     pub fn write(&self, out: &mut Vec<u8>) {
         Writer(out)

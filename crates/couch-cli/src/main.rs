@@ -43,6 +43,21 @@ struct Cli {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum CodecArg {
+    H264,
+    Hevc,
+}
+
+impl From<CodecArg> for couch_media::Codec {
+    fn from(c: CodecArg) -> Self {
+        match c {
+            CodecArg::H264 => Self::H264,
+            CodecArg::Hevc => Self::Hevc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum SourceArg {
     Window,
     Monitor,
@@ -87,7 +102,14 @@ enum Cmd {
         fps: u32,
         #[arg(long, default_value_t = 20)]
         bitrate_mbps: u32,
-        /// Also write the H.264 stream here (Annex B; `ffplay` plays it).
+        /// The codec to encode in (M12c: HEVC is NVENC's only).
+        #[arg(long, value_enum, default_value = "h264")]
+        codec: CodecArg,
+        /// Also measure each decoded picture against the captured one (luma
+        /// PSNR): picture quality at this bitrate, to compare codecs.
+        #[arg(long)]
+        psnr: bool,
+        /// Also write the encoded stream here (Annex B; `ffplay` plays it).
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -331,6 +353,8 @@ async fn main() -> ExitCode {
             secs,
             fps,
             bitrate_mbps,
+            codec,
+            psnr,
             out,
         } => tokio::task::block_in_place(|| {
             // Capture and codecs block; keep them off the async runtime's threads.
@@ -340,6 +364,8 @@ async fn main() -> ExitCode {
                 secs,
                 fps,
                 bitrate_mbps,
+                codec: codec.into(),
+                psnr,
                 out,
             })
         }),
@@ -467,6 +493,8 @@ async fn main() -> ExitCode {
                 clock_fps,
                 gpu_load,
                 pacing_trace,
+                // `COUCH_HOST_CODEC` as set, if at all.
+                h264: false,
                 net,
             })
             .await

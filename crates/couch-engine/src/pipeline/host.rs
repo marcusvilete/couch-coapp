@@ -90,6 +90,25 @@ const CAPTURE_WAIT: Duration = Duration::from_millis(10);
 /// Before trying once more to start a capture again in memory.
 const RESTART_RETRY: Duration = Duration::from_millis(250);
 
+/// `COUCH_HOST_CODEC=h264`: every viewer in H.264, for measuring against
+/// HEVC (M12c).
+fn forced_h264() -> bool {
+    std::env::var("COUCH_HOST_CODEC").is_ok_and(|v| v.trim().eq_ignore_ascii_case("h264"))
+}
+
+/// A viewer's codec (M12c): HEVC if it decodes it in hardware (`codecs`,
+/// `couch_proto::codec` bits), this host encodes on the GPU (only NVENC
+/// takes GPU frames, and HEVC is NVENC's only), and H.264 isn't forced.
+/// Otherwise H.264. The encode loop holds to it: HEVC only on GPU frames,
+/// so a stream whose frames are in memory gives H.264 even so.
+pub fn choose_codec(codecs: u8, gpu_input_off: bool, forced_h264: bool) -> Codec {
+    if codecs & Codec::Hevc.bit() != 0 && !gpu_input_off && !forced_h264 {
+        Codec::Hevc
+    } else {
+        Codec::H264
+    }
+}
+
 /// Captured frames are paced to the stream's rate (M9d) unless
 /// `COUCH_HOST_PACING=0`, a switch for measuring against Windows' own limit
 /// from before.
@@ -662,10 +681,13 @@ impl HostStream {
     }
 
     /// Starts streaming to `member` on `conn`, whose datagram reader and
-    /// stream acceptor these are. Call inside a tokio runtime.
+    /// stream acceptor these are, in the best codec of those it decodes
+    /// (`codecs`, `couch_proto::codec` bits; [`choose_codec`]). Call inside a
+    /// tokio runtime.
     pub fn add_viewer(
         &self,
         member: MemberId,
+        codecs: u8,
         conn: Connection,
         datagrams: &Datagrams,
         streams: &Streams,
@@ -682,8 +704,14 @@ impl HostStream {
             .as_deref()
             .map(|path| numbered(path, state.traces));
         state.traces += 1;
+        let codec = choose_codec(
+            codecs,
+            sh.gpu_input_off.load(Ordering::SeqCst),
+            forced_h264(),
+        );
         let ctx = EncodeCtx {
             member,
+            codec,
             video: HostVideo::start(
                 conn.clone(),
                 sh.options.session,
@@ -1238,6 +1266,8 @@ fn send_sound(
 
 struct EncodeCtx {
     member: MemberId,
+    /// The viewer's codec, chosen at join; H.264 from then on if HEVC fails.
+    codec: Codec,
     video: HostVideo,
     feed: Arc<Feed>,
     shared: Arc<Shared>,
@@ -1247,12 +1277,13 @@ struct EncodeCtx {
 fn encode_loop(ctx: EncodeCtx) {
     let EncodeCtx {
         member,
+        codec,
         mut video,
         feed,
         shared,
         trace,
     } = ctx;
-    match encode(member, &mut video, &feed, &shared, trace.as_deref()) {
+    match encode(member, codec, &mut video, &feed, &shared, trace.as_deref()) {
         // The connection went: the viewer is gone, nothing failed.
         Ok(()) | Err(MediaError::Closed) => {}
         Err(e) => shared.event(HostEvent::ViewerFailed {
@@ -1265,6 +1296,7 @@ fn encode_loop(ctx: EncodeCtx) {
 
 fn encode(
     member: MemberId,
+    mut codec: Codec,
     video: &mut HostVideo,
     feed: &Feed,
     shared: &Shared,
@@ -1364,16 +1396,38 @@ fn encode(
             let (width, height) = (frame.width(), frame.height());
             // Closed first: it holds its pool's textures and an NVENC session.
             drop(encoder.take());
-            let enc = shared.backend.encoder(
-                EncoderConfig {
-                    codec: Codec::H264,
-                    width,
-                    height,
-                    fps: options.fps,
-                    bitrate_bps: start,
-                },
-                gpu,
-            )?;
+            let config = |codec| EncoderConfig {
+                codec,
+                width,
+                height,
+                fps: options.fps,
+                bitrate_bps: start,
+            };
+            // HEVC only as NVENC on GPU frames (M12c). With frames in memory
+            // (from the start, or since another encoder couldn't read them),
+            // not even tried: H.264, as on a host without NVENC.
+            if codec == Codec::Hevc && gpu.is_none() {
+                shared.note("HEVC unavailable (frames in memory); H.264 for this viewer".into());
+                codec = Codec::H264;
+            }
+            let mut opened = shared.backend.encoder(config(codec), gpu);
+            // If HEVC can't read the GPU frames, H.264 for this viewer, rather
+            // than turn GPU frames off for every viewer below.
+            let usable = match &opened {
+                Ok(e) => gpu.is_none() || e.caps().gpu_input,
+                Err(_) => false,
+            };
+            if codec == Codec::Hevc && !usable {
+                let why = match &opened {
+                    Err(e) => e.to_string(),
+                    Ok(_) => "it can't read the captured frames on the GPU".into(),
+                };
+                shared.note(format!("HEVC unavailable ({why}); H.264 for this viewer"));
+                drop(opened);
+                codec = Codec::H264;
+                opened = shared.backend.encoder(config(codec), gpu);
+            }
+            let enc = opened?;
             gpu_pool = gpu.filter(|_| enc.caps().gpu_input).map(|f| f.source);
             if gpu.is_some() && !enc.caps().gpu_input {
                 // This machine's encoder can't read them: copying each frame
@@ -1396,7 +1450,7 @@ fn encode(
             c.set_share(share);
             controller = Some(c);
             let p = VideoParams {
-                codec: Codec::H264,
+                codec,
                 width,
                 height,
                 fps: options.fps,
@@ -1418,6 +1472,14 @@ fn encode(
         };
         let units = match encoded {
             Ok(units) => units,
+            // HEVC failing: H.264 for this viewer from now on, from a
+            // keyframe, before giving up GPU frames for everyone (M12c).
+            Err(e) if codec == Codec::Hevc => {
+                shared.note(format!("encoding HEVC failed ({e}); H.264 for this viewer"));
+                codec = Codec::H264;
+                params = None;
+                continue;
+            }
             // Rather than lose the viewer: frames in memory from now on, for
             // every encoder opened in this stream. The reopen sends a keyframe.
             Err(e) if enc.caps().gpu_input => {
@@ -2045,6 +2107,21 @@ async fn next_local(states: &mut Option<mpsc::Receiver<PadState>>) -> Option<Pad
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hevc_only_for_a_viewer_that_decodes_it_and_a_host_on_the_gpu() {
+        let both = Codec::H264.bit() | Codec::Hevc.bit();
+        let h264 = Codec::H264.bit();
+        assert_eq!(choose_codec(both, false, false), Codec::Hevc);
+        // The viewer can't decode it.
+        assert_eq!(choose_codec(h264, false, false), Codec::H264);
+        // Frames in memory: no NVENC on the GPU here, so no HEVC encoder.
+        assert_eq!(choose_codec(both, true, false), Codec::H264);
+        // COUCH_HOST_CODEC=h264.
+        assert_eq!(choose_codec(both, false, true), Codec::H264);
+        // A join without codecs (none said) is H.264.
+        assert_eq!(choose_codec(0, false, false), Codec::H264);
+    }
 
     #[test]
     fn traces_are_numbered_after_the_first() {

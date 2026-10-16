@@ -40,4 +40,18 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// every change to what members exchange** (the `protocol-change` skill).
 ///
 /// 1: the first installer (0.8.0). Builds before it sent 0 and didn't check.
-pub const PROTOCOL_MINOR: u16 = 1;
+/// 2: HEVC (M12c): `SessionJoin` says which codecs the viewer decodes, and an
+/// epoch's preamble may name HEVC.
+pub const PROTOCOL_MINOR: u16 = 2;
+
+/// Video codecs on the wire: in an epoch's preamble and the viewer's IPC
+/// frame header, and as bits in what a viewer decodes (`SessionJoin`).
+pub mod codec {
+    pub const H264: u8 = 1;
+    /// HEVC Main, 8-bit (M12c).
+    pub const HEVC: u8 = 2;
+
+    /// What a viewer decodes, as bits: H.264 always.
+    pub const DECODES_H264: u8 = 1 << 0;
+    pub const DECODES_HEVC: u8 = 1 << 1;
+}

@@ -90,6 +90,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let mbps = |v: f64| (v * 1e6) as u32;
     let netem_elapsed = netem.map(|link| Arc::new(move || link.elapsed()) as NetemElapsed);
     let backend = platform_backend();
+    // `view` doesn't say what it decodes: taken as what this PC decodes,
+    // right for measuring on one PC (M12c). For a viewer on another PC
+    // without HEVC, set COUCH_HOST_CODEC=h264 (or COUCH_VIEWER_HEVC=0) here,
+    // on the host: `view`'s own environment isn't asked.
+    let viewer_codecs = backend.decodes();
     // A host here that was killed may have left a guest's keys held.
     let left = backend.release_left_input();
     if left > 0 {
@@ -197,7 +202,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     }
                     println!("viewer {} connected", short(member));
                     let channels = (Datagrams::start(conn.clone()), Streams::start(conn.clone()));
-                    stream.add_viewer(member, conn.clone(), &channels.0, &channels.1);
+                    stream.add_viewer(member, viewer_codecs, conn.clone(), &channels.0, &channels.1);
                     if let Some(free) = holders.iter().position(Option::is_none) {
                         holders[free] = Some(member);
                         let permissions = if free == first_guest_seat { args.permissions } else { Permissions::GAMEPAD };

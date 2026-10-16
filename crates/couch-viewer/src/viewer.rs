@@ -16,7 +16,7 @@ use anyhow::{Result, anyhow};
 use couch_codec_ffmpeg::{DecoderKind, FfmpegDecoder};
 use couch_input::shortcuts::{Shortcut, Shortcuts};
 use couch_media::{
-    DecodedFrame, GpuNv12Frame, MediaError, Micros, Nv12Frame, VideoDecoder, barcode,
+    Codec, DecodedFrame, GpuNv12Frame, MediaError, Micros, Nv12Frame, VideoDecoder, barcode,
     mailbox::Mailbox,
 };
 use couch_proto::ipc::{FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, UserAction};
@@ -368,6 +368,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
                         // that never gets drawn (the surface was lost) is
                         // still in the textures for the next redraw.
                         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                        let matrix = frame.matrix;
                         let (luma, chroma) = video_pass.planes(&gpu.device, size);
                         let result = importer.copy(
                             &gpu.device,
@@ -386,7 +387,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
                             strips.submitted(slot);
                         }
                         match result {
-                            Ok(()) => true,
+                            Ok(()) => {
+                                video_pass.matrix = matrix;
+                                true
+                            }
                             Err(e) => {
                                 // Frames through memory from the next
                                 // keyframe on; until then the last frame
@@ -616,26 +620,30 @@ fn is_stale(arrived_us: u64, ready_us: u64, now_us: u64) -> bool {
 /// The decoder for this stream window: on the GPU's device when frames can
 /// stay on the GPU (falling back to D3D11VA if that can't start), else
 /// D3D11VA, else software.
-fn open_decoder(device: Option<DecoderDevice>) -> Result<FfmpegDecoder, MediaError> {
+fn open_decoder(codec: Codec, device: Option<DecoderDevice>) -> Result<FfmpegDecoder, MediaError> {
     #[cfg(windows)]
     if let Some(device) = device {
-        match FfmpegDecoder::new_d3d12(device.into_raw()) {
+        match FfmpegDecoder::new_d3d12(codec, device.into_raw()) {
             Ok(decoder) => return Ok(decoder),
             Err(e) => tracing::warn!("D3D12VA unavailable, frames go through memory: {e}"),
         }
     }
     #[cfg(not(windows))]
     let _ = device;
-    FfmpegDecoder::new(true)
+    FfmpegDecoder::new(codec, true)
 }
 
 fn decoder_label(decoder: &FfmpegDecoder) -> String {
-    match decoder.kind() {
+    let codec = match decoder.codec() {
+        Codec::Hevc => "HEVC",
+        _ => "H.264",
+    };
+    let path = match decoder.kind() {
         DecoderKind::D3d12 => "D3D12VA (GPU frames)",
         DecoderKind::D3d11 => "D3D11VA (copied)",
         DecoderKind::Software => "software",
-    }
-    .into()
+    };
+    format!("{codec}, {path}")
 }
 
 fn decode_loop(
@@ -647,7 +655,9 @@ fn decode_loop(
     gpu_frames_failed: &AtomicBool,
     device: Option<DecoderDevice>,
 ) {
-    let mut decoder = match open_decoder(device) {
+    // H.264 until the stream says otherwise: the first frame's codec
+    // reopens it if need be (M12c).
+    let mut decoder = match open_decoder(Codec::H264, device.clone()) {
         Ok(d) => d,
         Err(e) => {
             tracing::error!("no decoder: {e}");
@@ -696,6 +706,34 @@ fn decode_loop(
             }
             ready_us = u64::MAX;
             need_keyframe = true;
+        }
+        // Another codec (the host chose it at join): a decoder for it, from
+        // a keyframe; on the GPU still, unless frames already go through
+        // memory.
+        let codec = Codec::from_wire(header.codec).unwrap_or(Codec::H264);
+        if codec != decoder.codec() {
+            if !header.keyframe {
+                need_keyframe = true;
+                request_keyframe();
+                continue;
+            }
+            let reopened = if decoder.kind() == DecoderKind::D3d12 {
+                open_decoder(codec, device.clone())
+            } else {
+                FfmpegDecoder::new(codec, true)
+            };
+            match reopened {
+                Ok(d) => {
+                    decoder = d;
+                    *decoder_name.lock().unwrap() = decoder_label(&decoder);
+                    tracing::info!("decoding with {}", decoder_label(&decoder));
+                    ready_us = u64::MAX;
+                }
+                Err(e) => {
+                    tracing::error!("no {codec:?} decoder: {e}");
+                    break;
+                }
+            }
         }
         queued = rx.try_recv().ok();
         // With a newer frame already waiting (a backlog: frames that queued
@@ -802,7 +840,7 @@ const D3D12_ERRORS: u32 = 3;
 /// Replaces `decoder` with one decoding through memory (D3D11VA, or
 /// software). `false` if there is none.
 fn reopen_in_memory(decoder: &mut FfmpegDecoder, name: &std::sync::Mutex<String>) -> bool {
-    match FfmpegDecoder::new(true) {
+    match FfmpegDecoder::new(decoder.codec(), true) {
         Ok(d) => {
             *decoder = d;
             *name.lock().unwrap() = decoder_label(decoder);

@@ -449,6 +449,7 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
                         epoch: frame.epoch,
                         seq: frame.header.seq,
                         keyframe: frame.header.keyframe,
+                        codec: frame.codec,
                         capture_us: frame.header.capture_us,
                         encode_us: frame.header.encode_us,
                         arrived_us: frame.arrived.0,

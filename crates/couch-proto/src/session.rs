@@ -194,6 +194,9 @@ pub struct SessionEnded {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionJoin {
     pub session: SessionId,
+    /// The codecs this viewer decodes in hardware, as [`crate::codec`]
+    /// bits; H.264's is always set (M12c). The host picks the stream's.
+    pub codecs: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
