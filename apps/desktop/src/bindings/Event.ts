@@ -11,4 +11,4 @@ export type Event = { "type": "pong", nonce: number, } | { "type": "roomChanged"
 /**
  * The seat's label, such as "Controller 2".
  */
-seat: string, } | { "type": "sessionEnded", room: string, reason: SessionEnd, } | { "type": "watchEnded", room: string, host: string, reason: WatchEnd, };
+seat: string, } | { "type": "sessionEnded", room: string, reason: SessionEnd, } | { "type": "streamEnded", room: string, reason: SessionEnd, } | { "type": "watchEnded", room: string, host: string, reason: WatchEnd, };

@@ -19,7 +19,10 @@ use couch_media::{
     Codec, DecodedFrame, GpuNv12Frame, MediaError, Micros, Nv12Frame, VideoDecoder, barcode,
     mailbox::Mailbox,
 };
-use couch_proto::ipc::{FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, UserAction};
+use couch_proto::{
+    ipc::{FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, UserAction},
+    session::StreamState,
+};
 use sdl3::{
     event::{Event, WindowEvent},
     video::Window,
@@ -418,6 +421,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
             Ok(None) => None,
             Err(_closed) => break,
         };
+        // While the host streams nothing (M19), the last picture goes: the
+        // window shows black and the HUD says why.
+        if shown.is_some() && hud.session().is_some_and(|s| s.stream != StreamState::Live) {
+            shown = None;
+            redraw = true;
+        }
         // Before the first frame, a session's viewer still shows its HUD
         // over black; `couch-cli view` waits for the stream.
         if shown.is_none() && hud.session().is_none() {
@@ -567,6 +576,7 @@ fn preview_session(role: HudRole) -> HudState {
         viewers: 2,
         control_paused: false,
         game_in_front: !playing,
+        stream: StreamState::Live,
         note: match role {
             HudRole::Watching => String::new(),
             HudRole::Asking => "Asked the host for Controller 2".into(),

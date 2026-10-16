@@ -19,7 +19,8 @@ use couch_proto::{
     ipc::{HudRole, HudSeat, HudState, ShortcutKeys, UserAction},
     session::{
         Cancel, ControlCancel, ControlRequest, EndReason, GameFocus, JoinResult, SeatKind,
-        SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, seat_labels, seat_phrase,
+        SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, StreamState, seat_labels,
+        seat_phrase,
     },
 };
 use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
@@ -27,10 +28,10 @@ use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 use super::*;
 use crate::{
     AnswerKeys, HostController, InputSetup, RequestView, ScreenArea, SeatView, SessionEnd,
-    SessionRole, SessionView, SourceChoice, WatchEnd,
+    SessionRole, SessionView, SourceChoice, StreamStateView, StreamView, WatchEnd,
     pipeline::{
         AudioChoice, Source, ViewerOptions,
-        host::{HostOptions, LocalSeat, Rates},
+        host::{HostOptions, LocalSeat, Rates, StreamControl, StreamOptions},
         watch::{Watch, WatchOptions},
     },
 };
@@ -50,9 +51,16 @@ pub(super) struct Sessions {
 struct Hosting {
     room: RoomId,
     session: HostSession,
-    /// `None` until the stream has started: plugging in the pad takes a
+    /// `None` until the session has started: plugging in the pads takes a
     /// while, and nobody hears of the session before.
-    stream: Option<HostStream>,
+    pipeline: Option<HostPipeline>,
+    /// The stream running in the session, if any (M19), or `Starting`.
+    stream: Option<OurStream>,
+    /// Stream starts asked for so far, to tell their answers apart.
+    stream_requests: u32,
+    /// Stream ends the pipeline reported while a start was pending, by
+    /// stream number: the starting stream may fail before its answer comes.
+    early_ends: Vec<(u32, EndReason)>,
     /// The connection each viewer joined on. When it closes, the viewer
     /// has gone: its stream and input were bound to it.
     viewer_conns: BTreeMap<MemberId, ConnId>,
@@ -69,10 +77,11 @@ struct Hosting {
     /// when it has been the oldest (not since it arrived: a request moves to
     /// the front when the one before it goes).
     first: Option<((MemberId, SeatId), Instant)>,
-    /// Where the overlay goes (the streamed window's or screen's monitor).
+    /// Where the overlay goes (the streamed window's or screen's monitor; the
+    /// main screen's with nothing streamed).
     overlay_area: Option<ScreenArea>,
     /// Whether the streamed window is in front, as last reported; `None`
-    /// before the first report, and always for a screen.
+    /// before the first report of a stream, and always for a screen.
     in_front: Option<bool>,
     /// Our own controller, if we chose to play through a seat: its name, or
     /// why it can't.
@@ -124,18 +133,38 @@ struct Listing {
     status: Option<SessionStatus>,
 }
 
-/// [`Command::GoLive`]'s fields.
-pub(super) struct GoLive {
+/// The stream in our session (M19).
+enum OurStream {
+    /// Asked for (the session's `request`th start); the pipeline hasn't
+    /// answered yet.
+    Starting { view: StreamView, request: u32 },
+    Live {
+        /// Its number in the pipeline: its events name it.
+        number: u32,
+        view: StreamView,
+    },
+}
+
+/// [`Command::StartSession`]'s fields.
+pub(super) struct StartSession {
     pub room: String,
-    pub source: SourceChoice,
     pub title: String,
-    pub fps: u32,
-    pub max_mbps: u32,
-    pub upload_mbps: Option<u32>,
     pub max_viewers: u8,
     pub input: InputSetup,
     pub controller: Option<HostController>,
 }
+
+/// [`Command::StartStream`]'s fields.
+pub(super) struct StartStream {
+    pub source: SourceChoice,
+    pub name: String,
+    pub fps: u32,
+    pub max_mbps: u32,
+    pub upload_mbps: Option<u32>,
+}
+
+/// The longest stream name the host's panel shows.
+const MAX_STREAM_NAME: usize = 200;
 
 fn end_reason(reason: EndReason) -> SessionEnd {
     match reason {
@@ -203,7 +232,7 @@ impl Actor {
         let Some(h) = self.sessions.hosting.as_ref() else {
             return;
         };
-        if h.room != room || h.stream.is_none() {
+        if h.room != room || h.pipeline.is_none() {
             return;
         }
         let fx = h.session.connected(peer);
@@ -384,9 +413,9 @@ impl Actor {
             return;
         }
         let ours = |s: &Sessions, session: SessionId| {
-            s.hosting
-                .as_ref()
-                .is_some_and(|h| h.room == room && h.session.id() == session && h.stream.is_some())
+            s.hosting.as_ref().is_some_and(|h| {
+                h.room == room && h.session.id() == session && h.pipeline.is_some()
+            })
         };
         match message {
             // To us, the host.
@@ -443,9 +472,9 @@ impl Actor {
                 if let Some(h) = self.sessions.hosting.as_ref()
                     && h.room == room
                     && h.session.is_viewer(peer)
-                    && let Some(stream) = &h.stream
+                    && let Some(pipeline) = &h.pipeline
                 {
-                    stream.keyframe(peer);
+                    pipeline.keyframe(peer);
                 }
             }
             // From a host, about its own session.
@@ -486,7 +515,26 @@ impl Actor {
                 {
                     return;
                 }
+                let was_live = listing
+                    .status
+                    .as_ref()
+                    .is_some_and(|old| old.stream == StreamState::Live);
+                let live = s.stream == StreamState::Live;
                 listing.status = Some(s);
+                // A stream ended: the next one's game is taken to be in front
+                // until the host says otherwise, as at joining (M19). Reset
+                // at the end, not when the next one starts: the host's first
+                // `GameFocus` for it may come before its status.
+                if was_live
+                    && !live
+                    && let Some(w) = self
+                        .sessions
+                        .watching
+                        .as_mut()
+                        .filter(|w| w.room == room && w.host == peer)
+                {
+                    w.in_front = true;
+                }
                 self.send_hud();
                 self.announce(room, now);
             }
@@ -675,7 +723,7 @@ impl Actor {
                         let c = self.conns.get(&id)?;
                         let h = self.sessions.hosting.as_ref()?;
                         let codecs = h.viewer_codecs.get(&member).copied().unwrap_or(0);
-                        h.stream.as_ref()?.add_viewer(
+                        h.pipeline.as_ref()?.add_viewer(
                             member,
                             codecs,
                             c.conn.clone(),
@@ -708,8 +756,8 @@ impl Actor {
                     if let Some(h) = self.sessions.hosting.as_mut() {
                         h.viewer_conns.remove(&member);
                         h.viewer_codecs.remove(&member);
-                        if let Some(stream) = &h.stream {
-                            stream.remove_viewer(member);
+                        if let Some(pipeline) = &h.pipeline {
+                            pipeline.remove_viewer(member);
                         }
                     }
                 }
@@ -718,23 +766,23 @@ impl Actor {
                     member,
                     permissions,
                 } => {
-                    if let Some(stream) = self.stream() {
-                        stream.grant(seat, member, permissions);
+                    if let Some(pipeline) = self.pipeline() {
+                        pipeline.grant(seat, member, permissions);
                     }
                 }
                 SessionEffect::Revoke { seat, holder } => {
-                    if let Some(stream) = self.stream() {
-                        stream.revoke(seat, holder);
+                    if let Some(pipeline) = self.pipeline() {
+                        pipeline.revoke(seat, holder);
                     }
                 }
                 SessionEffect::RevokeViewers => {
-                    if let Some(stream) = self.stream() {
-                        stream.revoke_viewers();
+                    if let Some(pipeline) = self.pipeline() {
+                        pipeline.revoke_viewers();
                     }
                 }
                 SessionEffect::Claim { seat, member } => {
-                    if let Some(stream) = self.stream() {
-                        stream.claim(seat, member);
+                    if let Some(pipeline) = self.pipeline() {
+                        pipeline.claim(seat, member);
                     }
                 }
                 SessionEffect::Requested(member, seat) => {
@@ -774,30 +822,31 @@ impl Actor {
         }
     }
 
-    fn stream(&self) -> Option<&HostStream> {
-        self.sessions.hosting.as_ref()?.stream.as_ref()
+    fn pipeline(&self) -> Option<&HostPipeline> {
+        self.sessions.hosting.as_ref()?.pipeline.as_ref()
     }
 
-    // ---- Our stream ----
+    // ---- Our session ----
 
-    /// Starts our stream. Answers through `reply` once it has started; the
+    /// Starts our session, with nothing streamed yet (M19). Answers through
+    /// `reply` once the pads are plugged in and our controller hidden; the
     /// error comes back too, for the caller's log.
-    pub(super) fn go_live(
+    pub(super) fn start_session(
         &mut self,
-        go: GoLive,
+        start: StartSession,
         reply: Reply,
         now: Instant,
     ) -> Result<(), EngineError> {
-        let result = self.prepare_live(go, now);
+        let result = self.prepare_session(start, now);
         match result {
             Ok((session, options)) => {
                 let backend = self.backend.clone();
                 let inbox = self.inbox.clone();
                 tokio::spawn(async move {
-                    let (stream, events) = HostStream::start(backend, options).await;
-                    let ready = Input::LiveReady {
+                    let (pipeline, events) = HostPipeline::start(backend, options).await;
+                    let ready = Input::SessionReady {
                         session,
-                        stream: Box::new(stream),
+                        pipeline: Box::new(pipeline),
                         events,
                         reply,
                     };
@@ -813,58 +862,32 @@ impl Actor {
         }
     }
 
-    fn prepare_live(
+    fn prepare_session(
         &mut self,
-        go: GoLive,
+        start: StartSession,
         _now: Instant,
     ) -> Result<(SessionId, HostOptions), EngineError> {
-        let (room, _) = self.entry_mut(&go.room)?;
+        let (room, _) = self.entry_mut(&start.room)?;
         if self.sessions.hosting.is_some() {
-            return Err(EngineError::Refused("you are streaming already"));
+            return Err(EngineError::Refused("you have a session already"));
         }
         if self.sessions.watching.is_some() {
             return Err(EngineError::Refused("stop watching first"));
         }
-        let gone = EngineError::Refused("that window or screen is gone");
-        let source = match &go.source {
-            SourceChoice::Window { id } => {
-                let id = id.parse().map_err(|_| gone)?;
-                if !self.backend.window_exists(id) {
-                    return Err(EngineError::Refused("that window is gone"));
-                }
-                Source::Window(id)
-            }
-            SourceChoice::Screen { id } => Source::Screen(id.parse().map_err(|_| gone)?),
-        };
-        if go.input.keyboard_mouse() && !source.is_window() {
-            return Err(EngineError::Refused(
-                "keyboard and mouse need a window as the source",
-            ));
-        }
-        let overlay_area = self.backend.overlay_area(&source);
         let session = SessionId(u64::from_le_bytes(random()?));
-        let seats = go.input.seats();
+        let seats = start.input.seats();
         // Our controller plays through a seat only if one has a pad.
-        let controller = go.controller.filter(|_| seats.iter().any(|s| s.has_pad()));
+        let controller = start
+            .controller
+            .filter(|_| seats.iter().any(|s| s.has_pad()));
         let config = SessionConfig {
-            title: go.title.trim().to_string(),
+            title: start.title.trim().to_string(),
             seats: seats.clone(),
-            max_viewers: go.max_viewers,
+            max_viewers: start.max_viewers,
             host: controller.as_ref().map(|_| self.me),
         };
         let host_session = HostSession::new(session, config)?;
-        let defaults = Rates::default();
-        let max_bps = mbps(go.max_mbps.max(2));
         let options = HostOptions {
-            source,
-            fps: go.fps.clamp(1, 240),
-            rates: Rates {
-                max_bps,
-                start_bps: defaults.start_bps.min(max_bps),
-                ..defaults
-            },
-            upload_bps: go.upload_mbps.map(mbps),
-            audio: AudioChoice::Auto,
             seats,
             // Games and Steam know a controller by its ids; a made-up pair
             // leaves only the D-pad working.
@@ -872,7 +895,6 @@ impl Actor {
             session: session.0,
             first_epoch: SeatEpoch(u32::from_le_bytes(random()?)),
             rc_trace: None,
-            pacing_trace: None,
             netem_elapsed: None,
             replace_grace: self.replace_grace,
             local: controller.as_ref().map(|c| LocalSeat {
@@ -887,23 +909,27 @@ impl Actor {
         self.sessions.hosting = Some(Hosting {
             room,
             session: host_session,
+            pipeline: None,
             stream: None,
+            stream_requests: 0,
+            early_ends: Vec::new(),
             viewer_conns: BTreeMap::new(),
             viewer_codecs: BTreeMap::new(),
             panic_key: None,
             answer_keys: None,
             first: None,
-            overlay_area,
+            // The main screen's, until something is streamed.
+            overlay_area: self.backend.overlay_area(&Source::PrimaryScreen),
             in_front: None,
             controller: controller.map(|c| Ok(c.name)),
         });
         Ok((session, options))
     }
 
-    pub(super) fn live_ready(
+    pub(super) fn session_ready(
         &mut self,
         session: SessionId,
-        stream: HostStream,
+        stream: HostPipeline,
         mut events: mpsc::UnboundedReceiver<HostEvent>,
         reply: Reply,
         now: Instant,
@@ -914,9 +940,9 @@ impl Actor {
             .as_mut()
             .filter(|h| h.session.id() == session && !h.session.is_ended())
         else {
-            // Stopped while it was starting.
+            // Ended while it was starting.
             tokio::spawn(stream.stop());
-            let _ = reply.send(Err(EngineError::Refused("stopped before it started")));
+            let _ = reply.send(Err(EngineError::Refused("ended before it started")));
             return;
         };
         let room = h.room;
@@ -987,7 +1013,7 @@ impl Actor {
             h.controller = Some(Err(e.clone()));
         }
         let start = h.session.start();
-        h.stream = Some(stream);
+        h.pipeline = Some(stream);
         self.apply_session(room, start, now);
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
@@ -997,7 +1023,7 @@ impl Actor {
                 }
             }
         });
-        tracing::info!(room = ?room, "went live");
+        tracing::info!(room = ?room, "session started");
         // Everyone connected hears of it.
         let peers: Vec<MemberId> = self
             .rooms
@@ -1025,6 +1051,253 @@ impl Actor {
                 .map(Response::Room)
                 .ok_or(EngineError::UnknownRoom),
         );
+    }
+
+    // ---- Streams in our session (M19) ----
+
+    /// Starts streaming in our session, stopping a stream already running
+    /// first. Answers through `reply` once it has started.
+    pub(super) fn start_stream(
+        &mut self,
+        start: StartStream,
+        reply: Reply,
+        now: Instant,
+    ) -> Result<(), EngineError> {
+        match self.prepare_stream(start, now) {
+            Ok((session, request, control, options)) => {
+                // Queued now, in order with any stop asked for later.
+                let started = control.start_stream(options);
+                let inbox = self.inbox.clone();
+                tokio::spawn(async move {
+                    let stream = started.await;
+                    let ready = Input::StreamReady {
+                        session,
+                        request,
+                        stream,
+                        reply,
+                    };
+                    let _ = inbox.send(ready).await;
+                });
+                Ok(())
+            }
+            Err(e) => {
+                let text = e.to_string();
+                let _ = reply.send(Err(e));
+                Err(EngineError::Media(text))
+            }
+        }
+    }
+
+    fn prepare_stream(
+        &mut self,
+        start: StartStream,
+        now: Instant,
+    ) -> Result<(SessionId, u32, StreamControl, StreamOptions), EngineError> {
+        let gone = EngineError::Refused("that window or screen is gone");
+        let source = match &start.source {
+            SourceChoice::Window { id } => {
+                let id = id.parse().map_err(|_| gone)?;
+                if !self.backend.window_exists(id) {
+                    return Err(EngineError::Refused("that window is gone"));
+                }
+                Source::Window(id)
+            }
+            SourceChoice::Screen { id } => Source::Screen(id.parse().map_err(|_| gone)?),
+        };
+        let overlay_area = self.backend.overlay_area(&source);
+        let h = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| h.pipeline.is_some())
+            .ok_or(EngineError::NotLive)?;
+        if matches!(h.stream, Some(OurStream::Starting { .. })) {
+            return Err(EngineError::Refused("a stream is starting already"));
+        }
+        let seats = &h.session.config().seats;
+        if seats.iter().any(|s| s.has_keyboard_mouse()) && !source.is_window() {
+            return Err(EngineError::Refused(
+                "keyboard and mouse need a window as the source: stream a window, or start \
+                 a session without them",
+            ));
+        }
+        let control = h.pipeline.as_ref().ok_or(EngineError::NotLive)?.control();
+        let defaults = Rates::default();
+        let max_bps = mbps(start.max_mbps.max(2));
+        let options = StreamOptions {
+            source,
+            fps: start.fps.clamp(1, 240),
+            rates: Rates {
+                max_bps,
+                start_bps: defaults.start_bps.min(max_bps),
+                ..defaults
+            },
+            upload_bps: start.upload_mbps.map(mbps),
+            audio: AudioChoice::Auto,
+            pacing_trace: None,
+        };
+        let mut name = start.name.trim().to_string();
+        if name.len() > MAX_STREAM_NAME {
+            let mut end = MAX_STREAM_NAME;
+            while !name.is_char_boundary(end) {
+                end -= 1;
+            }
+            name.truncate(end);
+        }
+        let view = StreamView {
+            name,
+            fps: options.fps,
+            max_mbps: start.max_mbps.max(2),
+            upload_mbps: start.upload_mbps,
+        };
+        let session = h.session.id();
+        let room = h.room;
+        h.stream_requests = h.stream_requests.wrapping_add(1);
+        let request = h.stream_requests;
+        h.early_ends.clear();
+        h.stream = Some(OurStream::Starting { view, request });
+        h.overlay_area = overlay_area;
+        h.in_front = None;
+        // Viewers are told it stopped, for the moment of the switch.
+        let fx = h.session.set_stream(match h.session.stream() {
+            StreamState::Live => StreamState::Stopped(EndReason::HostStopped),
+            other => other,
+        });
+        self.apply_session(room, fx, now);
+        Ok((session, request, control, options))
+    }
+
+    /// The pipeline started stream `number` for start `request`: if that is
+    /// still the start we wait for, everyone hears, and viewers' input goes
+    /// in again (the pipeline has let it through). Otherwise it was stopped
+    /// or replaced meanwhile, and the stop or the next start, queued after
+    /// it in the pipeline, has ended it already.
+    pub(super) fn stream_ready(
+        &mut self,
+        session: SessionId,
+        request: u32,
+        number: u32,
+        reply: Reply,
+        now: Instant,
+    ) {
+        let Some(h) = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| h.session.id() == session && !h.session.is_ended())
+        else {
+            let _ = reply.send(Err(EngineError::Refused("the session ended meanwhile")));
+            return;
+        };
+        let room = h.room;
+        match h.stream.take() {
+            Some(OurStream::Starting { view, request: r }) if r == request => {
+                h.stream = Some(OurStream::Live { number, view });
+            }
+            other => {
+                h.stream = other;
+                let _ = reply.send(Err(EngineError::Refused("stopped before it started")));
+                return;
+            }
+        }
+        // It may have failed already, before this answer came.
+        let ended = h
+            .early_ends
+            .iter()
+            .find(|(n, _)| *n == number)
+            .map(|(_, reason)| *reason);
+        h.early_ends.clear();
+        let fx = h.session.set_stream(StreamState::Live);
+        self.apply_session(room, fx, now);
+        tracing::info!(room = ?room, number, "streaming");
+        self.announce(room, now);
+        let _ = reply.send(
+            self.view(room, now)
+                .map(Response::Room)
+                .ok_or(EngineError::UnknownRoom),
+        );
+        if let Some(reason) = ended {
+            self.end_stream_on_its_own(number, reason, now);
+        }
+    }
+
+    /// Stops our stream; the session goes on (viewers stay, and keep their
+    /// seats, with their input held off).
+    pub(super) fn stop_stream(&mut self, now: Instant) -> Result<Response, EngineError> {
+        self.end_stream(EndReason::HostStopped, None, now)?;
+        Ok(Response::Done)
+    }
+
+    /// Ends our stream (all of it, or only stream `number`), its pipeline
+    /// told to stop; everyone hears why.
+    fn end_stream(
+        &mut self,
+        reason: EndReason,
+        number: Option<u32>,
+        now: Instant,
+    ) -> Result<(), EngineError> {
+        let h = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| h.pipeline.is_some())
+            .ok_or(EngineError::NotLive)?;
+        match (&h.stream, number) {
+            (None, _) => return Err(EngineError::Refused("nothing is being streamed")),
+            // A late report from a stream already replaced.
+            (Some(OurStream::Live { number: n, .. }), Some(asked)) if *n != asked => {
+                return Ok(());
+            }
+            (Some(OurStream::Starting { .. }), Some(_)) => return Ok(()),
+            _ => {}
+        }
+        h.stream = None;
+        h.in_front = None;
+        h.overlay_area = self.backend.overlay_area(&Source::PrimaryScreen);
+        if let Some(pipeline) = &h.pipeline {
+            // Queued now, after any start asked for before.
+            tokio::spawn(pipeline.control().stop_stream());
+        }
+        let room = h.room;
+        let fx = h.session.set_stream(StreamState::Stopped(reason));
+        self.apply_session(room, fx, now);
+        tracing::info!(room = ?room, ?reason, "stream stopped");
+        self.announce(room, now);
+        Ok(())
+    }
+
+    /// Our stream ended without us asking: the session goes on, and the UI
+    /// is told why.
+    fn end_stream_on_its_own(&mut self, number: u32, reason: EndReason, now: Instant) {
+        // A start is pending: this may be the starting stream failing before
+        // its answer came (or an older one's late report). Kept for the
+        // answer, which tells which.
+        if let Some(h) = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| matches!(h.stream, Some(OurStream::Starting { .. })))
+        {
+            if h.early_ends.len() < 16 {
+                h.early_ends.push((number, reason));
+            }
+            return;
+        }
+        let room = self.sessions.hosting.as_ref().map(|h| h.room);
+        let ours = self.sessions.hosting.as_ref().is_some_and(
+            |h| matches!(h.stream, Some(OurStream::Live { number: n, .. }) if n == number),
+        );
+        if !ours {
+            return;
+        }
+        if self.end_stream(reason, Some(number), now).is_ok()
+            && let Some(room) = room
+        {
+            let _ = self.events.send(Event::StreamEnded {
+                room: room.to_hex(),
+                reason: end_reason(reason),
+            });
+        }
     }
 
     pub(super) fn host_event(&mut self, session: SessionId, event: HostEvent, now: Instant) {
@@ -1092,14 +1365,19 @@ impl Actor {
                 let fx = self.hosting_mut().map(|h| h.session.viewer_failed(member));
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
-            HostEvent::SourceClosed => self.end_hosting_on_its_own(EndReason::SourceLost, now),
-            HostEvent::GameExited => self.end_hosting_on_its_own(EndReason::GameExited, now),
+            // The stream ends, not the session (M19).
+            HostEvent::SourceClosed { stream } => {
+                self.end_stream_on_its_own(stream, EndReason::SourceLost, now);
+            }
+            HostEvent::GameExited { stream } => {
+                self.end_stream_on_its_own(stream, EndReason::GameExited, now);
+            }
             HostEvent::SourceFollowed { .. } => {
                 tracing::info!("the game opened a new window; streaming that one");
             }
-            HostEvent::CaptureFailed(e) => {
-                tracing::error!("capture failed: {e}");
-                self.end_hosting_on_its_own(EndReason::Error, now);
+            HostEvent::CaptureFailed { stream, error } => {
+                tracing::error!("capture failed: {error}");
+                self.end_stream_on_its_own(stream, EndReason::Error, now);
             }
             HostEvent::Note(text) => tracing::info!("{text}"),
             HostEvent::Seat { seat, status, .. } => tracing::debug!(?seat, ?status, "seat"),
@@ -1110,47 +1388,34 @@ impl Actor {
         }
     }
 
-    /// The stream ended without us asking: the UI is told why.
-    fn end_hosting_on_its_own(&mut self, reason: EndReason, now: Instant) {
-        let room = self.sessions.hosting.as_ref().map(|h| h.room);
-        if let Some(stream) = self.end_hosting(reason, now) {
-            tokio::spawn(stream.stop());
-        }
-        if let Some(room) = room {
-            let _ = self.events.send(Event::SessionEnded {
-                room: room.to_hex(),
-                reason: end_reason(reason),
-            });
-        }
-    }
-
-    /// Ends our stream: input is released first, then the room hears why.
-    /// Returns the stream for the caller to stop (or wait for).
-    fn end_hosting(&mut self, reason: EndReason, now: Instant) -> Option<HostStream> {
+    /// Ends our session: input is released first, then the room hears why.
+    /// Returns the pipeline for the caller to stop (or wait for), which
+    /// stops the stream too, unplugs the pads and shows our controller.
+    fn end_hosting(&mut self, reason: EndReason, now: Instant) -> Option<HostPipeline> {
         let mut h = self.sessions.hosting.take()?;
         *self.panic.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        if let Some(stream) = &h.stream {
-            stream.revoke_all();
+        if let Some(pipeline) = &h.pipeline {
+            pipeline.revoke_all();
         }
         for effect in h.session.end(reason) {
             if let SessionEffect::Broadcast(message) = effect {
                 self.broadcast(h.room, &message);
             }
         }
-        tracing::info!(room = ?h.room, ?reason, "stream ended");
+        tracing::info!(room = ?h.room, ?reason, "session ended");
         self.announce(h.room, now);
-        h.stream
+        h.pipeline
     }
 
-    pub(super) fn stop_live(&mut self, now: Instant) -> Result<Response, EngineError> {
-        let stream = self
+    pub(super) fn end_session(&mut self, now: Instant) -> Result<Response, EngineError> {
+        let pipeline = self
             .sessions
             .hosting
             .is_some()
             .then(|| self.end_hosting(EndReason::HostStopped, now))
             .ok_or(EngineError::NotLive)?;
-        if let Some(stream) = stream {
-            tokio::spawn(stream.stop());
+        if let Some(pipeline) = pipeline {
+            tokio::spawn(pipeline.stop());
         }
         Ok(Response::Done)
     }
@@ -1164,7 +1429,7 @@ impl Actor {
             .sessions
             .hosting
             .as_mut()
-            .filter(|h| h.stream.is_some())
+            .filter(|h| h.pipeline.is_some())
             .ok_or(EngineError::NotLive)?;
         let room = h.room;
         let fx = act(&mut h.session)?;
@@ -1211,17 +1476,18 @@ impl Actor {
     pub(super) fn allow_control(&mut self, now: Instant) -> Result<Response, EngineError> {
         // First: the host's seat may come back with a claim, which the input
         // task refuses while paused.
-        if let Some(stream) = self.stream() {
-            stream.allow_grants();
+        if let Some(pipeline) = self.pipeline() {
+            pipeline.allow_grants();
         }
         self.our_session(|s| Ok(s.allow_control()), now)
     }
 
-    /// The panic key. The engine has already released through the stream's
-    /// panic handle; this declines the requests and pauses control.
+    /// The panic key. The engine has already released through the
+    /// pipeline's panic handle; this declines the requests and pauses
+    /// control.
     pub(super) fn panic_key(&mut self, session: Option<SessionId>, now: Instant) {
-        // A press during a stream that has since ended (stopped and gone
-        // live again meanwhile) isn't about this one.
+        // A press during a session that has since ended (and another begun
+        // meanwhile) isn't about this one.
         let Some(h) = self
             .sessions
             .hosting
@@ -1232,9 +1498,9 @@ impl Actor {
         };
         let room = h.room;
         tracing::warn!("panic key: every seat back to the host, control paused");
-        if let Some(stream) = &h.stream {
+        if let Some(pipeline) = &h.pipeline {
             // Also refuses any grant still on its way to the input task.
-            stream.panic();
+            pipeline.panic();
         }
         let fx = h.session.panic();
         self.apply_session(room, fx, now);
@@ -1249,7 +1515,7 @@ impl Actor {
             .sessions
             .hosting
             .as_ref()
-            .filter(|h| h.session.id() == session && h.stream.is_some())
+            .filter(|h| h.session.id() == session && h.pipeline.is_some())
         else {
             return;
         };
@@ -1612,6 +1878,7 @@ impl Actor {
             viewers: status.map_or(0, |s| s.viewers.len().min(255) as u8),
             control_paused: status.is_some_and(|s| s.control_paused),
             game_in_front: w.in_front,
+            stream: status.map_or(StreamState::Waiting, |s| s.stream),
             note: w.note.clone(),
         })
     }
@@ -1734,9 +2001,14 @@ impl Actor {
             .sessions
             .hosting
             .as_ref()
-            .filter(|h| h.room == room && h.stream.is_some())
+            .filter(|h| h.room == room && h.pipeline.is_some())
         {
             let s = &h.session;
+            let (stream, streaming) = match &h.stream {
+                Some(OurStream::Starting { view, .. }) => (StreamStateView::Starting, Some(view)),
+                Some(OurStream::Live { view, .. }) => (StreamStateView::Live, Some(view)),
+                None => (stream_view(s.stream()), None),
+            };
             views.push(SessionView {
                 host: self.me.to_hex(),
                 title: s.config().title.clone(),
@@ -1763,6 +2035,8 @@ impl Actor {
                 overlay_area: h.overlay_area,
                 host_controller: h.controller.clone().and_then(Result::ok),
                 host_controller_problem: h.controller.clone().and_then(Result::err),
+                stream,
+                streaming: streaming.cloned(),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -1809,9 +2083,20 @@ impl Actor {
                 overlay_area: None,
                 host_controller: None,
                 host_controller_problem: None,
+                stream: stream_view(status.map_or(StreamState::Waiting, |s| s.stream)),
+                streaming: None,
             });
         }
         views
+    }
+}
+
+/// A session's stream state, for the UI.
+fn stream_view(state: StreamState) -> StreamStateView {
+    match state {
+        StreamState::Waiting => StreamStateView::Waiting,
+        StreamState::Live => StreamStateView::Live,
+        StreamState::Stopped(reason) => StreamStateView::Stopped(end_reason(reason)),
     }
 }
 

@@ -40,7 +40,7 @@ use couch_proto::{
     room::valid_name,
     session::{
         ControlDeclined, EndReason, JoinResult, SeatKind, SessionAnnounce, SessionEnded,
-        SessionJoinReply, SessionStatus, valid_seats,
+        SessionJoinReply, SessionStatus, StreamState, valid_seats,
     },
 };
 
@@ -168,6 +168,8 @@ pub struct HostSession {
     home: Home,
     paused: bool,
     ended: bool,
+    /// Whether anything is streamed (M19): nothing at first.
+    stream: StreamState,
 }
 
 impl HostSession {
@@ -201,6 +203,7 @@ impl HostSession {
             cooldowns: BTreeMap::new(),
             paused: false,
             ended: false,
+            stream: StreamState::Waiting,
         })
     }
 
@@ -266,6 +269,11 @@ impl HostSession {
         self.ended
     }
 
+    /// Whether anything is streamed (M19).
+    pub fn stream(&self) -> StreamState {
+        self.stream
+    }
+
     /// What a viewer holding `seat` may send.
     pub fn permissions(&self, seat: SeatId) -> Permissions {
         self.config
@@ -299,6 +307,7 @@ impl HostSession {
             host_seat: self.host_seat(),
             host_on_seats: self.host().is_some(),
             control_paused: self.paused,
+            stream: self.stream,
         })
     }
 
@@ -679,6 +688,17 @@ impl HostSession {
         }
         fx.push(Effect::Changed);
         fx
+    }
+
+    /// A stream started or ended inside the session (M19): everyone in the
+    /// room hears of it. Seats and viewers stay; the engine holds viewers'
+    /// input off while nothing is streamed.
+    pub fn set_stream(&mut self, stream: StreamState) -> Vec<Effect> {
+        if self.ended || self.stream == stream {
+            return Vec::new();
+        }
+        self.stream = stream;
+        vec![Effect::Broadcast(self.status()), Effect::Changed]
     }
 
     /// Viewers may be given control again. The host's seat, if it went free

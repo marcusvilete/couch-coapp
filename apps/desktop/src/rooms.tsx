@@ -7,7 +7,7 @@ import type { MemberView } from "./bindings/MemberView";
 import type { OtherVersion } from "./bindings/OtherVersion";
 import type { ProfileView } from "./bindings/ProfileView";
 import type { RoomView } from "./bindings/RoomView";
-import { playersOf } from "./sessions";
+import { SessionBadge, isLive, playersOf } from "./sessions";
 import { Avatar, PlusIcon, duration } from "./ui";
 
 /** Rooms as round icons, in the order the user dragged them into (Alt+Up
@@ -232,7 +232,7 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
       <ul>
         {room.members.map((m) => {
           const link = LINKS[m.link];
-          const live = room.sessions.some((s) => s.host === m.id);
+          const session = room.sessions.find((s) => s.host === m.id);
           const plays = room.sessions.some((s) => playersOf(s).includes(m.id));
           return (
             <li key={m.id} className={`member link-${m.link}`}>
@@ -255,10 +255,11 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
                   </span>
                 )}
               </span>
-              {live && (
-                <span className="live-badge" title={`${m.name} is streaming`}>
-                  LIVE
-                </span>
+              {session && (
+                <SessionBadge
+                  session={session}
+                  title={isLive(session) ? `${m.name} is streaming` : `${m.name} has a session; nothing is streamed now`}
+                />
               )}
               {m.otherVersion ? (
                 <span className="link-label version" title={otherVersionText(m.name, m.otherVersion)}>

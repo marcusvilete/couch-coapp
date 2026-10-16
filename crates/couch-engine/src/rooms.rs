@@ -57,7 +57,7 @@ use crate::{
     MemberView, OtherVersion, Profile, ProfileView, Response, RoomGone, RoomView,
     pipeline::{
         Backend,
-        host::{HostEvent, HostStream, PanicHandle},
+        host::{HostEvent, HostPipeline, PanicHandle},
         watch::WatchEvent,
     },
     store::{RememberedRoom, Settings, Store, StoreError},
@@ -139,14 +139,21 @@ pub(crate) enum Input {
     Closed {
         conn: ConnId,
     },
-    /// Our stream has started (or failed to: see [`sessions`]).
-    LiveReady {
+    /// Our session's pipeline has started (or failed to: see [`sessions`]).
+    SessionReady {
         session: SessionId,
-        stream: Box<HostStream>,
+        pipeline: Box<HostPipeline>,
         events: mpsc::UnboundedReceiver<HostEvent>,
         reply: Reply,
     },
-    /// Something our stream reports.
+    /// Stream start `request` gave stream `stream` in our session (M19).
+    StreamReady {
+        session: SessionId,
+        request: u32,
+        stream: u32,
+        reply: Reply,
+    },
+    /// Something our session's pipeline reports.
     Host(SessionId, HostEvent),
     /// Something the session we watch reports.
     Watch(SessionId, WatchEvent),
@@ -562,12 +569,18 @@ impl Actor {
                 }
                 self.session_closed(closed.room, conn, closed.peer, now);
             }
-            Input::LiveReady {
+            Input::SessionReady {
                 session,
-                stream,
+                pipeline,
                 events,
                 reply,
-            } => self.live_ready(session, *stream, events, reply, now),
+            } => self.session_ready(session, *pipeline, events, reply, now),
+            Input::StreamReady {
+                session,
+                request,
+                stream,
+                reply,
+            } => self.stream_ready(session, request, stream, reply, now),
             Input::Host(session, event) => self.host_event(session, event, now),
             Input::Watch(session, event) => self.watch_event(session, event, now),
             Input::JoinTimeout(session, attempt) => self.join_timeout(session, attempt, now),
@@ -625,35 +638,48 @@ impl Actor {
             | Command::GetNotices
             | Command::InstallDriver { .. }
             | Command::ListSources => Err(EngineError::Stopped),
-            Command::GoLive {
+            Command::StartSession {
                 room,
-                source,
                 title,
-                fps,
-                max_mbps,
-                upload_mbps,
                 max_viewers,
                 input,
                 controller,
             } => {
-                let go = sessions::GoLive {
+                let start = sessions::StartSession {
                     room,
-                    source,
                     title,
-                    fps,
-                    max_mbps,
-                    upload_mbps,
                     max_viewers,
                     input,
                     controller,
                 };
-                // Answers later, once the stream has started.
-                if let Err(e) = self.go_live(go, reply, now) {
-                    tracing::info!("not going live: {e}");
+                // Answers later, once the pads are plugged in.
+                if let Err(e) = self.start_session(start, reply, now) {
+                    tracing::info!("no session started: {e}");
                 }
                 return;
             }
-            Command::StopLive => self.stop_live(now),
+            Command::StartStream {
+                source,
+                name,
+                fps,
+                max_mbps,
+                upload_mbps,
+            } => {
+                let start = sessions::StartStream {
+                    source,
+                    name,
+                    fps,
+                    max_mbps,
+                    upload_mbps,
+                };
+                // Answers later, once the stream has started.
+                if let Err(e) = self.start_stream(start, reply, now) {
+                    tracing::info!("no stream started: {e}");
+                }
+                return;
+            }
+            Command::StopStream => self.stop_stream(now),
+            Command::EndSession => self.end_session(now),
             Command::Watch { room, host } => {
                 // Answers later, once the host has.
                 self.watch(&room, &host, reply, now);

@@ -11,13 +11,14 @@ The wire protocol between room members, and the pipe between the main process an
 - M5b put sessions on screen without changing the wire: the viewer's HUD bar and shortcuts, the shortcuts table, and the panic-key hook.
 - M6 added liveness (`Alive`, the `timed_out` close code), Alt+F4 to the blocked keys, following a game to a new window and telling that it exited, and watching that survives a dropped connection or a crashed viewer window.
 - M12c added HEVC: the codecs a viewer decodes in `SessionJoin`, codec 2 in the epoch preamble, and viewer IPC v8 (the codec in each video frame).
+- M19 made sessions start before streams: `SessionStatus.stream`, the `STREAM_END` reset code, and viewer IPC v9 (the stream's state in the HUD).
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 2, for HEVC in M12c). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 3, for sessions before streams in M19). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -50,7 +51,7 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x8204` | `ControlCancel { session, what: Request \| Seat }` | Viewer to host: withdraw my request (my seat stays), or give my seat back |
 | `0x8205` | `ControlDeclined { session }` | Host to viewer: no (or not now: the panic key) |
 | `0x0601` | `SessionAnnounce { session, title, seats [Controller \| KeyboardMouse \| Both], max_viewers u8 }` | Optional. Host to each connected member: a session is live, with these seats |
-| `0x0602` | `SessionStatus { session, viewers [member id], holders [member id?], host_seat SeatId?, host_on_seats bool, control_paused }` | Optional. Host to each connected member: who watches, which viewer holds each seat, the seat the host plays with their own controller, and whether that controller plays only through the seats |
+| `0x0602` | `SessionStatus { session, viewers [member id], holders [member id?], host_seat SeatId?, host_on_seats bool, control_paused, stream: Waiting \| Live \| Stopped(EndReason) }` | Optional. Host to each connected member: who watches, which viewer holds each seat, the seat the host plays with their own controller, whether that controller plays only through the seats, and whether anything is streamed (M19) |
 | `0x0603` | `SessionEnded { session, reason }` | Optional. Host to each connected member |
 | `0x8604` | `SessionJoin { session, codecs u8 }` | Member to host: let me watch. `codecs` is what this member decodes in hardware: bit 0 H.264 (always set), bit 1 HEVC (M12c) |
 | `0x8605` | `SessionJoinReply { session, result: Joined \| Full \| Ended \| Unavailable }` | Host to member |
@@ -329,35 +330,37 @@ The layout is pinned by `couch_proto::invite`'s `the_layout_is_pinned` test. The
 
 ## Sessions
 
-A session is a member streaming a game to others in the same room, over the room's own connections. Code: `couch_room::session` (the host's state machine), `couch-engine`'s `rooms::sessions` (runs it), `couch_engine::pipeline` (video, sound and input).
+A session is a member sharing games with others in the same room, over the room's own connections. Code: `couch_room::session` (the host's state machine), `couch-engine`'s `rooms::sessions` (runs it), `couch_engine::pipeline` (video, sound and input).
+
+**Sessions before streams** (M19). A session starts with nothing streamed: its seats, their virtual pads and the host's hidden controller come first, before any game runs. Streams then start and stop inside it, each a window or a screen with its own frame rate and quality; viewers and seats stay through them. `SessionStatus.stream` says which: `Waiting` (nothing yet), `Live`, or `Stopped` with why the last stream ended (the host stopped it, the game exited, its window or screen went, an error). While nothing is streamed, viewers' input is held off on the host (the seat router's hold): they keep their seats, but can't see what they would do. The host's own controller keeps playing.
 
 **The host is the only writer.** It sends its session's facts straight to each member it is connected to; nobody relays them, so they carry no signature and never name the host.
 - A member acts on a session message only from the session's own host: the connection's authenticated peer, on the current connection with it, while it is on the roster.
 - To a host, `SessionJoin`, `SessionLeave`, `ControlRequest` and `ControlCancel` count only for its live session and from a member on the current connection. A join for a session that isn't (or is no longer) live is answered `Ended`.
 
 **The directory** (optional messages: a peer that doesn't know sessions only misses them).
-- Going live, the host sends `SessionAnnounce` and `SessionStatus` to every member it is connected to, and again to every member whose connection to it becomes current. Titles follow the name rules.
-- `SessionStatus` follows every change of viewers, controller or the control pause. It may list as many viewers as the room has members; the host's own limit is its business.
-- `SessionEnded` ends it, with the reason: the host stopped, the game exited, the window or screen went, the host left the room or shut down, an error.
+- Starting a session, the host sends `SessionAnnounce` and `SessionStatus` to every member it is connected to, and again to every member whose connection to it becomes current. Titles follow the name rules.
+- `SessionStatus` follows every change of viewers, controller, the control pause or the stream. It may list as many viewers as the room has members; the host's own limit is its business.
+- `SessionEnded` ends it, with the reason: the host ended it, left the room or shut down. Since M19 the game exiting and its window or screen going end only the stream (`SessionStatus.stream`).
 - A member forgets a session when its connection to the host goes; the next connection brings the announcement again.
 
 **Watching.**
 - A profile hosts at most one session and watches at most one, never both. A host takes 1 to 7 viewers (its choice when going live; 4 by default).
 - The viewer subscribes to the connection's video epochs, sound and rumble *before* sending `SessionJoin`, so no epoch arrives unclaimed. Epochs naming another session are refused (`SESSION_END`).
-- The host answers `SessionJoinReply`: `Joined` (video follows, starting with a keyframe), `Full`, `Ended`, or `Unavailable` (no encoder could be opened). `Unavailable` can also come later, dropping a viewer whose stream failed.
+- The host answers `SessionJoinReply`: `Joined` (video follows, starting with a keyframe, once something is streamed), `Full`, `Ended`, or `Unavailable` (no encoder could be opened). `Unavailable` can also come later, dropping a viewer whose stream failed.
+- **Between streams** (M19), each viewer's epoch ends with `STREAM_END`, and the viewer keeps watching. The next stream is a new epoch on the same connection, numbered after the last (the viewer drops older ones), starting with a keyframe, in a codec chosen again for it.
 - `SessionLeave`, the viewer's connection closing, a ban, or the viewer leaving the room ends watching. A ban or a departure counts the moment the room applies it, not when the connection finally closes. The host's seat router releases what that viewer held at once (`SeatRouter::disconnected`), without waiting for the dead-man timer.
 - **A dropped connection, on the viewer's side** (M6). The viewer keeps its window open ("Reconnecting to …") while the room redials. When the host's new connection announces the same session, the viewer subscribes on it and sends `SessionJoin` again; to the host it is a new viewer, and the seat it held went with the old connection. Watching ends if the session ended or changed meanwhile, the host left the roster, the join is refused, or 30 s pass.
 - **A join on a new connection, on the host's side.** If a viewer joins again on a connection other than the one it watched on (it reconnected before the host saw the old one close), the host drops the old viewer first, releasing what it held, then takes the join.
 - **The viewer window** is the viewer's own business: if it exits without the user leaving (a crash), it is started again, at most once a minute, and the viewer asks for a keyframe. Nothing about it goes on the wire.
 
-**Seats** (P1). The announcement lists the session's seats, by `SeatId` (their index):
-- **Single player** is one seat: `Controller`, `KeyboardMouse` or `Both`, as the host's setup for the game says.
-- **Multiplayer** is 1 to 4 `Controller` seats, then optionally one `KeyboardMouse` seat.
+**Seats** (P1; one setup since M19). The announcement lists the session's seats, by `SeatId` (their index), fixed for the session:
+- 0 to 4 `Controller` seats, and keyboard and mouse as one `KeyboardMouse` seat after them, or with Controller 1 (that seat is `Both`: one player on pad and keyboard).
 - **Limits** (`session::valid_seats`): 1 to 5 seats, at most 4 with a pad (XInput's slots), at most one with keyboard and mouse (Windows has one keyboard and one pointer).
 - **What a seat gives.** Its kind decides what its holder may send: `Controller` the gamepad, `KeyboardMouse` keyboard and mouse, `Both` all three. `SeatAssigned` carries those permissions, and the host approves every holder, so handing someone a keyboard seat is the trust decision.
-- **Pads.** Each seat with a pad has its own virtual Xbox 360 pad, plugged in at go-live in seat order and kept for the session, so a handoff never unplugs one.
-- **Keyboard and mouse need a window source.** For a screen, only controller seats are offered.
-- **Where the host plays.** Either outside the seats, with whatever devices the game sees directly (in single player while nobody holds the seat, in multiplayer beside the seats), or **on a seat** (P2), when the host chose their own controller at go-live:
+- **Pads.** Each seat with a pad has its own virtual Xbox 360 pad, plugged in at the session's start in seat order (before any game runs, M19) and kept for the session, so neither a handoff nor a new stream unplugs one.
+- **Keyboard and mouse need a window source.** A session with a keyboard seat streams only windows.
+- **Where the host plays.** Either outside the seats, with whatever devices the game sees directly (while nobody holds a single seat, or beside the seats), or **on a seat** (P2), when the host chose their own controller at the session's start:
   - the host app reads that controller (`couch_gamepad`) and feeds its state into the seat router as the host's own holder, with the pad permission only (the host's keyboard and mouse reach the game directly anyway);
   - the controller is hidden from games meanwhile (HidHide; see the architecture), so every player the game sees is one of the seats' virtual pads, and any seat, the host's included, can be handed over;
   - the host starts on the first seat with a pad, holds one seat at a time, and may move to another (a viewer on it loses it). When a viewer lets go of the seat the host last held (gives it back, leaves, goes quiet) and the host holds none, it comes back to them: the host's seat router grants such a *claim* only if the seat is still free, the host holds no other and control isn't paused, so it never takes a seat from a viewer it was just passed to;
@@ -386,12 +389,14 @@ The session messages changed in place in P1 (seats in `SessionAnnounce`, `Sessio
 
 **Ending.** When the host ends a session it releases all input first, then sends `SessionEnded` and resets the epoch streams with `SESSION_END`, then stops encoding, capture and sound, and unplugs the virtual pads last.
 
+**Stopping a stream** (M19), the session going on: viewers' input is held off first (what they held is released at once), then each viewer's epoch is reset with `STREAM_END` and its encoder closed, then capture and sound stop; `SessionStatus.stream` says it stopped. Pads, seats and hiding stay.
+
 **The game's window** (M6, `couch_engine::pipeline::source`). The host watches the process behind the streamed window. When the window goes:
-- the process has exited: the session ends with `GameExited`, at once;
+- the process has exited: the stream ends with `GameExited`, at once (before M19, the session did);
 - otherwise, for 5 s (`REPLACE_GRACE`), the host looks every 250 ms for a *new* window of that process or its descendants (visible, titled, not minimized, at least 200 pixels each way, largest first) and, if one shows, captures it instead, and watches its process from then on. Viewers see a short freeze and then a keyframe; nothing goes on the wire.
   - **Only a new window is followed.** The game's other windows (another browser window, Explorer's desktop) are never streamed in its place: the host notes the process tree's windows once a second while the captured one is there, and a window seen on two looks in a row is never followed. One that appeared within about a second of the old one closing is.
   - A process that exited still counts while one of its children shows a new window (a launcher handing over to the game).
-- if none shows within the grace, the session ends with `SourceLost`, as before M6.
+- if none shows within the grace, the stream ends with `SourceLost`.
 
 While nobody watches (no capture runs), the host checks once a second.
 
@@ -425,6 +430,7 @@ While nobody watches (no capture runs), the host checks once a second.
 - `SKIP_AHEAD` (1): a newer epoch replaces this one.
 - `SESSION_END` (2): the session is over; also a viewer's answer to an epoch that names another session.
 - `VIEWER_REMOVED` (3): this viewer left or was dropped.
+- `STREAM_END` (4): the host stopped streaming; the session goes on, and the next stream is a new epoch (M19).
 
 ## Viewer IPC
 
@@ -435,7 +441,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x01` | main to viewer | Hello: `IPC_VERSION` as a big-endian `u16`. A viewer that speaks another version stops |
 | `0x02` | main to viewer | Video frame: `{epoch u32, seq u32, keyframe u8, codec u8 (as in the preamble), capture_us u64, encode_us u32, arrived_us u64}`, then the access unit. The viewer reopens its decoder when a keyframe brings another codec |
 | `0x03` | main to viewer | Audio packet (postcard): `{seq, capture_us, arrived_us, packet}`, the datagram plus its arrival time on this machine |
-| `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], host_on_seats, viewers u8, control_paused, game_in_front, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller; `host_on_seats` that the host's controller plays only through the seats (a free seat is empty) |
+| `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], host_on_seats, viewers u8, control_paused, game_in_front, stream, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller; `host_on_seats` that the host's controller plays only through the seats (a free seat is empty); `stream` is `SessionStatus.stream` (M19): while it isn't `Live`, the window shows black and says why |
 | `0x05` | main to viewer | Shutdown |
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
 | `0x07` | main to viewer | Seat state (postcard): `{holding, permissions}`. The viewer captures the mouse only while holding with mouse permission |
@@ -447,7 +453,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x84` | viewer to main | Keyframe request (decoder error) |
 | `0x85` | viewer to main | Audio stats (postcard), every second: `{played, concealed, late, dropped, underruns}` since start, `buffered_us`, `target_us`, and capture to handing samples to the device (`capture_to_queue_us` median of the last second, `capture_to_queue_p95_us` over the session; meaningful only with host and viewer on one machine) |
 
-`IPC_VERSION` (now 8: the codec in each video frame, M12c) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 9: the stream's state in the HUD, M19) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the host-keys hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;

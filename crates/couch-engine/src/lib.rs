@@ -162,30 +162,44 @@ pub enum Command {
     },
     /// Windows and screens that could be streamed. Nothing is sent anywhere.
     ListSources,
-    /// Starts streaming `source` to `room`. One stream at a time, and not
-    /// while watching one.
-    GoLive {
+    /// Starts a session in `room`, with nothing streamed yet (M19): the
+    /// seats' virtual pads are plugged in and the host's controller hidden,
+    /// so a game started afterwards finds them. One session at a time, and
+    /// not while watching one.
+    StartSession {
         room: String,
-        source: SourceChoice,
         /// What the room sees it called (1 to 96 bytes).
         title: String,
+        /// 1 to 7.
+        max_viewers: u8,
+        /// How the game takes input: its seats, fixed for the session.
+        /// Keyboard and mouse need a window as the stream's source; they go
+        /// in only while it is in front.
+        input: InputSetup,
+        /// The host's own controller, to play through a seat: hidden from
+        /// games for the session, it drives the first seat with a pad.
+        /// `None` plays outside the seats, with whatever the game sees
+        /// directly.
+        controller: Option<HostController>,
+    },
+    /// In our session: streams `source` (M19), stopping a stream already
+    /// running first.
+    StartStream {
+        source: SourceChoice,
+        /// What the host's panel calls it (a window's title): shown only
+        /// here, and kept out of logs.
+        name: String,
         fps: u32,
         /// The most each viewer's stream may use, Mbit/s.
         max_mbps: u32,
         /// This PC's upload cap, split between viewers, Mbit/s.
         upload_mbps: Option<u32>,
-        /// 1 to 7.
-        max_viewers: u8,
-        /// How the game takes input: its seats. Keyboard and mouse need a
-        /// window source; they go in only while it is in front. Remembered
-        /// for the window's program.
-        input: InputSetup,
-        /// The host's own controller, to play through a seat: hidden from
-        /// games while live, it drives the first seat with a pad. `None`
-        /// plays outside the seats, with whatever the game sees directly.
-        controller: Option<HostController>,
     },
-    StopLive,
+    /// In our session: stops streaming; viewers stay, and keep their seats.
+    StopStream,
+    /// Ends our session: input released, the pads unplugged, the host's
+    /// controller shown again.
+    EndSession,
     /// Watches `host`'s stream in `room`, in a viewer window. Answers once
     /// the host has.
     Watch {
@@ -403,63 +417,56 @@ pub enum HidingView {
     Busy,
 }
 
-/// How the game takes input, chosen when going live and remembered per
-/// program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(tag = "mode", rename_all = "camelCase")]
-#[ts(export)]
-pub enum InputSetup {
-    /// One player at a time, on one seat.
-    Single { seat: SeatChoice },
-    /// A seat per player: 1 to 4 controllers, each its own virtual pad, and
-    /// optionally one seat with keyboard and mouse.
-    #[serde(rename_all = "camelCase")]
-    Multi {
-        controllers: u8,
-        keyboard_mouse: bool,
-    },
-}
-
-/// What a single-player seat takes.
+/// How the game takes input, chosen when a session starts (M19: one setup,
+/// where single player and multiplayer were two): 0 to 4 controller seats,
+/// each its own virtual pad, and keyboard and mouse as a seat of their own
+/// or with Controller 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub enum SeatChoice {
-    Controller,
-    KeyboardMouse,
-    Both,
+pub struct InputSetup {
+    pub controllers: u8,
+    pub keyboard_mouse: KeyboardMouseSeat,
+}
+
+/// Where a session's keyboard and mouse go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum KeyboardMouseSeat {
+    /// Guests get none.
+    None,
+    /// A seat of their own, after the controllers.
+    OwnSeat,
+    /// With Controller 1: one player on pad and keyboard. Without
+    /// controllers, a seat of their own.
+    WithController1,
 }
 
 impl Default for InputSetup {
     /// What guests get unless the host says otherwise: a controller.
     fn default() -> Self {
-        Self::Single {
-            seat: SeatChoice::Controller,
+        Self {
+            controllers: 1,
+            keyboard_mouse: KeyboardMouseSeat::None,
         }
     }
 }
 
 impl InputSetup {
-    /// The seats, by seat id: the controllers first, then the keyboard seat.
-    /// Not checked: `couch_room::session` refuses a bad setup.
+    /// The seats, by seat id: the controllers first, then a keyboard seat.
+    /// Not checked: `couch_room::session` refuses a bad setup (no seats, or
+    /// over 4 controllers).
     pub fn seats(&self) -> Vec<SeatKind> {
-        match *self {
-            Self::Single { seat } => vec![match seat {
-                SeatChoice::Controller => SeatKind::Controller,
-                SeatChoice::KeyboardMouse => SeatKind::KeyboardMouse,
-                SeatChoice::Both => SeatKind::Both,
-            }],
-            Self::Multi {
-                controllers,
-                keyboard_mouse,
-            } => {
-                let mut seats = vec![SeatKind::Controller; usize::from(controllers)];
-                if keyboard_mouse {
-                    seats.push(SeatKind::KeyboardMouse);
-                }
-                seats
+        let mut seats = vec![SeatKind::Controller; usize::from(self.controllers)];
+        match self.keyboard_mouse {
+            KeyboardMouseSeat::None => {}
+            KeyboardMouseSeat::WithController1 if !seats.is_empty() => seats[0] = SeatKind::Both,
+            KeyboardMouseSeat::OwnSeat | KeyboardMouseSeat::WithController1 => {
+                seats.push(SeatKind::KeyboardMouse);
             }
         }
+        seats
     }
 
     pub fn keyboard_mouse(&self) -> bool {
@@ -505,8 +512,6 @@ pub struct WindowView {
     /// and mouse can't reach it, and the panic key doesn't work while it is
     /// in front (measured in M6).
     pub elevated: bool,
-    /// The input setup last used with this program, if any.
-    pub input_setup: Option<InputSetup>,
     /// The refresh rate of the screen it is on, if known: the stream gets
     /// no more frames a second than that (Go live warns).
     pub refresh_hz: Option<u32>,
@@ -563,6 +568,48 @@ pub struct SessionView {
     /// For the host: why the controller they chose doesn't play through a
     /// seat (they play outside the seats instead).
     pub host_controller_problem: Option<String>,
+    /// Whether anything is streamed (M19).
+    pub stream: StreamStateView,
+    /// For the host: what is streamed, while it is.
+    pub streaming: Option<StreamView>,
+}
+
+/// Whether a session streams anything (M19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "state", content = "reason", rename_all = "camelCase")]
+#[ts(export)]
+pub enum StreamStateView {
+    /// Nothing streamed yet in this session.
+    Waiting,
+    /// A stream is starting (the host's own view only).
+    Starting,
+    Live,
+    /// The last stream ended, and why; the session goes on.
+    Stopped(SessionEnd),
+}
+
+/// For the host: the stream running in our session (M19). Its Debug leaves
+/// the name out: a window's title may say anything.
+#[derive(Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StreamView {
+    /// The window's title or the screen's name, as the panel named it.
+    pub name: String,
+    pub fps: u32,
+    pub max_mbps: u32,
+    pub upload_mbps: Option<u32>,
+}
+
+impl fmt::Debug for StreamView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamView")
+            .field("name", &"..")
+            .field("fps", &self.fps)
+            .field("max_mbps", &self.max_mbps)
+            .field("upload_mbps", &self.upload_mbps)
+            .finish()
+    }
 }
 
 /// A driver the app relies on (M10a; Settings → Drivers).
@@ -747,26 +794,33 @@ impl fmt::Debug for Command {
                 .field("driver", driver)
                 .finish(),
             Self::ListSources => f.write_str("ListSources"),
-            Self::GoLive {
+            Self::StartSession {
                 room,
-                fps,
-                max_mbps,
-                upload_mbps,
                 max_viewers,
                 input,
                 controller,
                 ..
             } => f
-                .debug_struct("GoLive")
+                .debug_struct("StartSession")
                 .field("room", room)
-                .field("fps", fps)
-                .field("max_mbps", max_mbps)
-                .field("upload_mbps", upload_mbps)
                 .field("max_viewers", max_viewers)
                 .field("input", input)
                 .field("controller", controller)
                 .finish_non_exhaustive(),
-            Self::StopLive => f.write_str("StopLive"),
+            // Never the window's title: it may say anything.
+            Self::StartStream {
+                fps,
+                max_mbps,
+                upload_mbps,
+                ..
+            } => f
+                .debug_struct("StartStream")
+                .field("fps", fps)
+                .field("max_mbps", max_mbps)
+                .field("upload_mbps", upload_mbps)
+                .finish_non_exhaustive(),
+            Self::StopStream => f.write_str("StopStream"),
+            Self::EndSession => f.write_str("EndSession"),
             Self::Watch { room, host } => f
                 .debug_struct("Watch")
                 .field("room", room)
@@ -984,8 +1038,15 @@ pub enum Event {
         /// The seat's label, such as "Controller 2".
         seat: String,
     },
-    /// Our stream ended other than by [`Command::StopLive`].
+    /// Our session ended other than by [`Command::EndSession`].
     SessionEnded {
+        room: String,
+        reason: SessionEnd,
+    },
+    /// Our stream ended other than by [`Command::StopStream`] (M19): the game
+    /// exited, its window or screen went, or the capture failed. The session
+    /// goes on.
+    StreamEnded {
         room: String,
         reason: SessionEnd,
     },
@@ -1492,14 +1553,12 @@ impl Engine {
                     .await
                     .map_err(|_| EngineError::Stopped)?;
                 let sources = sources.map_err(|e| EngineError::Media(e.to_string()))?;
-                let setups = store::input_setups(self.profile.data_dir());
                 Ok(Response::Sources(SourceList {
                     windows: sources
                         .windows
                         .into_iter()
                         .map(|w| WindowView {
                             id: w.id.to_string(),
-                            input_setup: setups.get(&w.app.to_lowercase()).copied(),
                             title: w.title,
                             app: w.app,
                             elevated: w.elevated,
@@ -1561,35 +1620,6 @@ impl Engine {
                 }
                 tracing::info!(?driver, "a driver's installer finished");
                 self.drivers().await
-            }
-            Command::GoLive {
-                source: SourceChoice::Window { ref id },
-                input,
-                ..
-            } => {
-                let window = id.parse::<pipeline::NativeId>().ok();
-                let response = self.forward(command).await;
-                // Live: remember the setup for the window's program.
-                if response.is_ok()
-                    && let Some(window) = window
-                {
-                    let backend = self.backend.clone();
-                    let dir = self.profile.data_dir().to_path_buf();
-                    tokio::task::spawn_blocking(move || {
-                        let app = backend
-                            .sources()
-                            .ok()
-                            .and_then(|s| s.windows.into_iter().find(|w| w.id == window))
-                            .map(|w| w.app)
-                            .filter(|app| !app.is_empty());
-                        if let Some(app) = app
-                            && let Err(e) = store::save_input_setup(&dir, &app, input)
-                        {
-                            tracing::warn!("couldn't remember the input setup: {e}");
-                        }
-                    });
-                }
-                response
             }
             command => self.forward(command).await,
         }
@@ -1662,16 +1692,12 @@ mod tests {
     fn window_titles_stay_out_of_debug() {
         let shown = format!(
             "{:?}",
-            Command::GoLive {
-                room: "00".into(),
+            Command::StartStream {
                 source: SourceChoice::Window { id: "42".into() },
-                title: "Bank of Somewhere - Chrome".into(),
+                name: "Bank of Somewhere - Chrome".into(),
                 fps: 60,
                 max_mbps: 20,
                 upload_mbps: None,
-                max_viewers: 4,
-                input: InputSetup::default(),
-                controller: None,
             }
         );
         assert!(!shown.contains("Bank"), "{shown}");
@@ -1683,7 +1709,6 @@ mod tests {
                     title: "Bank of Somewhere - Chrome".into(),
                     app: "chrome.exe".into(),
                     elevated: false,
-                    input_setup: None,
                     refresh_hz: None,
                 }],
                 screens: Vec::new(),
@@ -1694,6 +1719,17 @@ mod tests {
             })
         );
         assert!(!list.contains("Bank"), "{list}");
+        // The host's view of its stream (M19), which `Response::Room` shows.
+        let streaming = format!(
+            "{:?}",
+            StreamView {
+                name: "Bank of Somewhere - Chrome".into(),
+                fps: 60,
+                max_mbps: 20,
+                upload_mbps: None,
+            }
+        );
+        assert!(!streaming.contains("Bank"), "{streaming}");
     }
 
     #[tokio::test]

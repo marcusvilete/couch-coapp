@@ -114,6 +114,29 @@ fn joining_starts_a_stream_up_to_the_limit() {
     assert_eq!(reply(&s.join(CAIO), CAIO), Some(JoinResult::Joined));
 }
 
+/// M19: a session starts with nothing streamed; streams starting and ending
+/// are broadcast, and viewers and seats stay through them.
+#[test]
+fn streams_start_and_end_inside_the_session() {
+    let mut s = with_seats(&[SeatKind::Controller]);
+    assert_eq!(status_of(&s).stream, StreamState::Waiting);
+    s.join(ANA);
+    s.seat_changed(S0, Some(ANA));
+    let fx = s.set_stream(StreamState::Live);
+    assert!(broadcasts_status(&fx));
+    assert_eq!(status_of(&s).stream, StreamState::Live);
+    // The same again tells nobody.
+    assert_eq!(s.set_stream(StreamState::Live), vec![]);
+    let ended = StreamState::Stopped(EndReason::GameExited);
+    assert!(broadcasts_status(&s.set_stream(ended)));
+    assert_eq!(s.stream(), ended);
+    assert_eq!(s.viewers(), &[ANA]);
+    assert_eq!(s.seat_of(ANA), Some(S0));
+    // Once the session is over, nothing more.
+    s.end(EndReason::HostStopped);
+    assert_eq!(s.set_stream(StreamState::Live), vec![]);
+}
+
 #[test]
 fn a_viewer_the_host_cant_stream_to_is_dropped_and_told() {
     let mut s = session(4);

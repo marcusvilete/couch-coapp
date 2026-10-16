@@ -15,8 +15,8 @@ use std::{
 
 use couch_engine::{
     Command, Engine, EngineError, EngineOptions, Event, HidingView, HostController, InputSetup,
-    MemberLink, Profile, Response, RoomView, SeatChoice, SessionEnd, SessionRole, SessionView,
-    SourceChoice, WatchEnd,
+    KeyboardMouseSeat, MemberLink, Profile, Response, RoomView, SessionEnd, SessionRole,
+    SessionView, SourceChoice, StreamStateView, WatchEnd,
     pipeline::{
         AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, Source, Sources,
         ViewerOptions, ViewerProcess, WindowSource, ipc,
@@ -37,7 +37,7 @@ use couch_net::endpoint::{RelayChoice, RelayToken};
 use couch_proto::{
     input::PadSnapshot,
     ipc::{HudState, LocalInput, SeatState, ShortcutKeys, UserAction, VideoFrameHeader},
-    session::SeatKind,
+    session::{EndReason, SeatKind, StreamState},
 };
 use couch_room::{limits::LimitConfig, room::Timings};
 use couch_testkit::{
@@ -90,6 +90,8 @@ struct Fake {
     decodes_hevc: AtomicBool,
     /// HEVC encoders fail to open (another GPU's, or a broken driver).
     hevc_fails: AtomicBool,
+    /// Captures fail to start (M19: a stream failing as it starts).
+    capture_fails: AtomicBool,
     /// The codec of every encoder opened, in order.
     codecs: Mutex<Vec<Codec>>,
 }
@@ -307,6 +309,9 @@ impl Backend for Fake {
         request: CaptureRequest,
     ) -> Result<(Box<dyn Capturer>, Option<NativeId>), MediaError> {
         self.captures.lock().unwrap().push(request);
+        if self.capture_fails.load(Ordering::SeqCst) {
+            return Err(MediaError::Backend("no capture here".into()));
+        }
         let window = match source {
             Source::Window(window) => Some(*window),
             _ => None,
@@ -610,6 +615,11 @@ impl FakeViewer {
         self.keyframes.load(Ordering::SeqCst)
     }
 
+    /// The HUD as the main process last sent it.
+    fn hud(&self) -> Option<HudState> {
+        self.hud.lock().unwrap().clone()
+    }
+
     /// The codec frames come in, once any came.
     fn codec(&self) -> Option<Codec> {
         Codec::from_wire(self.codec.load(Ordering::SeqCst) as u8)
@@ -736,9 +746,17 @@ impl Member {
         }
     }
 
+    /// A session, and the game's window streamed in it.
     async fn go_live(&self, room: &str, max_viewers: u8) {
-        let reply = self.handle(go_live(room, max_viewers)).await;
+        let reply = self.live(go_live(room, max_viewers)).await;
         assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    }
+
+    /// Starts the session `start` asks for, then streams the game's window
+    /// in it (M19); the first refusal comes back.
+    async fn live(&self, start: Command) -> Result<Response, EngineError> {
+        self.handle(start).await?;
+        self.handle(stream_window()).await
     }
 
     async fn watch(&self, room: &str, host: &Member) -> Result<Response, EngineError> {
@@ -776,56 +794,50 @@ async fn start(dir: &Path, options: EngineOptions) -> Engine {
         .expect("engine starts")
 }
 
+/// A session with one controller seat, nothing streamed yet (M19).
 fn go_live(room: &str, max_viewers: u8) -> Command {
-    Command::GoLive {
-        room: room.into(),
-        source: SourceChoice::Window {
-            id: WINDOW.to_string(),
-        },
-        title: "Celeste".into(),
-        fps: 30,
-        max_mbps: 20,
-        upload_mbps: None,
-        max_viewers,
-        input: InputSetup::default(),
-        controller: None,
-    }
+    go_live_playing(room, max_viewers, InputSetup::default(), None)
 }
 
-/// Going live with these seats.
+/// A session with these seats.
 fn go_live_with(room: &str, max_viewers: u8, input: InputSetup) -> Command {
     go_live_playing(room, max_viewers, input, None)
 }
 
-/// Going live with these seats, and the host's own controller on one.
+/// A session with these seats, and the host's own controller on one.
 fn go_live_playing(
     room: &str,
     max_viewers: u8,
     input: InputSetup,
     controller: Option<HostController>,
 ) -> Command {
-    match go_live(room, max_viewers) {
-        Command::GoLive {
-            room,
-            source,
-            title,
-            fps,
-            max_mbps,
-            upload_mbps,
-            max_viewers,
-            ..
-        } => Command::GoLive {
-            room,
-            source,
-            title,
-            fps,
-            max_mbps,
-            upload_mbps,
-            max_viewers,
-            input,
-            controller,
+    Command::StartSession {
+        room: room.into(),
+        title: "Celeste".into(),
+        max_viewers,
+        input,
+        controller,
+    }
+}
+
+/// Streams the game's window in our session.
+fn stream_window() -> Command {
+    Command::StartStream {
+        source: SourceChoice::Window {
+            id: WINDOW.to_string(),
         },
-        _ => unreachable!(),
+        name: "Celeste".into(),
+        fps: 30,
+        max_mbps: 20,
+        upload_mbps: None,
+    }
+}
+
+/// `controllers` controller seats, and keyboard and mouse as `kbm` says.
+const fn setup(controllers: u8, kbm: KeyboardMouseSeat) -> InputSetup {
+    InputSetup {
+        controllers,
+        keyboard_mouse: kbm,
     }
 }
 
@@ -1075,33 +1087,29 @@ async fn a_full_session_turns_one_away_and_one_stream_at_a_time() {
     let reply = c.watch(&room, &a).await;
     assert!(refused_because(&reply, "all the viewers"), "{reply:?}");
 
-    // One stream per profile, never while watching, and keyboard and mouse
-    // only for a window.
+    // One session per profile, never while watching, and keyboard and mouse
+    // only with a window streamed.
     assert!(refused_because(
         &a.handle(go_live(&room, 1)).await,
-        "streaming already"
+        "session already"
     ));
     assert!(refused_because(
         &b.handle(go_live(&room, 1)).await,
         "stop watching first"
     ));
-    let screen_with_kbm = Command::GoLive {
-        room: room.clone(),
+    let both = setup(1, KeyboardMouseSeat::WithController1);
+    assert!(matches!(
+        c.handle(go_live_with(&room, 1, both)).await,
+        Ok(Response::Room(_))
+    ));
+    let screen = Command::StartStream {
         source: SourceChoice::Screen { id: "1".into() },
-        title: "Desktop".into(),
+        name: "Desktop".into(),
         fps: 30,
         max_mbps: 20,
         upload_mbps: None,
-        max_viewers: 1,
-        input: InputSetup::Single {
-            seat: SeatChoice::Both,
-        },
-        controller: None,
     };
-    assert!(refused_because(
-        &c.handle(screen_with_kbm).await,
-        "need a window"
-    ));
+    assert!(refused_because(&c.handle(screen).await, "need a window"));
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -1482,16 +1490,18 @@ async fn a_host_leaving_the_room_ends_its_stream() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M19: the window closing ends the stream after the grace, not the session:
+/// the viewer stays, and hears why.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_window_closing_ends_the_session_after_the_grace() {
+async fn the_window_closing_ends_the_stream_after_the_grace() {
     let (mut a, mut b, mut c, room) = three().await;
     a.go_live(&room, 4).await;
-    watching(&room, &a, &b).await;
+    let window = watching(&room, &a, &b).await;
     a.fake.close_window();
     let closed = Instant::now();
     let reason = a
-        .event("the end", |e| match e {
-            Event::SessionEnded { reason, .. } => Some(*reason),
+        .event("the stream's end", |e| match e {
+            Event::StreamEnded { reason, .. } => Some(*reason),
             _ => None,
         })
         .await;
@@ -1502,16 +1512,23 @@ async fn the_window_closing_ends_the_session_after_the_grace() {
         "ended after {:?}",
         closed.elapsed()
     );
-    assert!(!a.fake.panic_key_hooked(), "the hook goes with the stream");
-    let ended = b
-        .event("the end of watching", |e| match e {
-            Event::WatchEnded { reason, .. } => Some(*reason),
-            _ => None,
-        })
-        .await;
-    assert_eq!(ended, WatchEnd::Ended);
-    a.wait_session(&room, &a, "no session", |s| s.is_none())
-        .await;
+    assert!(a.fake.panic_key_hooked(), "the hook stays with the session");
+    let stopped = StreamStateView::Stopped(SessionEnd::SourceLost);
+    b.wait_session(&room, &a, "the stream stopped", |s| {
+        s.is_some_and(|s| s.stream == stopped)
+    })
+    .await;
+    wait("the viewer's HUD says so", || {
+        window
+            .hud()
+            .is_some_and(|h| h.stream == StreamState::Stopped(EndReason::SourceLost))
+    })
+    .await;
+    assert!(!window.shut_down.load(Ordering::SeqCst), "still watching");
+    a.wait_session(&room, &a, "the session goes on", |s| {
+        s.is_some_and(|s| s.stream == stopped)
+    })
+    .await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -1530,15 +1547,16 @@ async fn a_game_swapping_its_window_keeps_streaming() {
     .await;
     assert!(a.session(&room, &a).await.is_some(), "still live");
     assert!(b.session(&room, &a).await.is_some(), "still listed");
-    // The window it follows can go too.
+    // The window it follows can go too: the game exiting ends the stream.
     a.fake.exit_game();
     let reason = a
-        .event("the end", |e| match e {
-            Event::SessionEnded { reason, .. } => Some(*reason),
+        .event("the stream's end", |e| match e {
+            Event::StreamEnded { reason, .. } => Some(*reason),
             _ => None,
         })
         .await;
     assert_eq!(reason, SessionEnd::GameExited);
+    assert!(a.session(&room, &a).await.is_some(), "the session goes on");
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -1764,6 +1782,282 @@ async fn hevc_failing_mid_stream_falls_back_to_h264() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+// ---- Sessions before streams (M19) ----
+
+/// `viewer` watches `host`'s session, streamed or not: its window opens,
+/// without waiting for frames.
+async fn joined(room: &str, host: &Member, viewer: &Member) -> FakeViewer {
+    viewer
+        .wait_session(room, host, "the announcement", |s| s.is_some())
+        .await;
+    let reply = viewer.watch(room, host).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    viewer.fake.viewer().expect("a viewer window")
+}
+
+/// M19: a session starts with nothing streamed. Its pads are plugged in at
+/// once; viewers join, see that nothing is streamed, and get no frames.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_starts_with_nothing_streamed() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a.handle(go_live(&room, 4)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert_eq!(a.fake.pads_plugged(), 1, "the pad is there before any game");
+    assert!(a.fake.panic_key_hooked(), "and the panic key");
+    a.wait_session(&room, &a, "nothing streamed", |s| {
+        s.is_some_and(|s| s.stream == StreamStateView::Waiting && s.streaming.is_none())
+    })
+    .await;
+    let window = joined(&room, &a, &b).await;
+    wait("the HUD says nothing is streamed", || {
+        window
+            .hud()
+            .is_some_and(|h| h.stream == StreamState::Waiting)
+    })
+    .await;
+    b.wait_session(&room, &a, "B sees it too", |s| {
+        s.is_some_and(|s| s.stream == StreamStateView::Waiting)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(window.frames(), 0, "no frames without a stream");
+    assert!(
+        a.fake.captures.lock().unwrap().is_empty(),
+        "nothing captured"
+    );
+
+    // Streaming starts: the viewer that waited gets its first keyframe.
+    a.ok(stream_window()).await;
+    wait("frames", || window.frames() >= 5).await;
+    assert_eq!(*window.first_was_key.lock().unwrap(), Some(true));
+    a.wait_session(&room, &a, "live", |s| {
+        s.is_some_and(|s| s.stream == StreamStateView::Live && s.streaming.is_some())
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M19: a stream stops and starts again in the session: the viewer stays,
+/// keeps its seat, and the next stream reaches it (a later epoch, from a
+/// keyframe), in the codec chosen afresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_stops_and_starts_again_with_the_viewers_staying() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let gpu = &a.fake.gpu;
+    gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    gpu.encoders_take_it.store(true, Ordering::SeqCst);
+    b.fake.decodes_hevc.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &window).await;
+
+    a.ok(Command::StopStream).await;
+    let stopped = StreamStateView::Stopped(SessionEnd::HostStopped);
+    b.wait_session(&room, &a, "the stream stopped", |s| {
+        s.is_some_and(|s| s.stream == stopped)
+    })
+    .await;
+    wait("the HUD says so", || {
+        window
+            .hud()
+            .is_some_and(|h| h.stream == StreamState::Stopped(EndReason::HostStopped))
+    })
+    .await;
+    // Frames stop; the viewer and its seat stay.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let frames = window.frames();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(window.frames(), frames, "no frames between streams");
+    assert!(window.holding(), "the seat stays");
+    assert!(!window.shut_down.load(Ordering::SeqCst));
+    assert!(a.fake.panic_key_hooked());
+
+    let keyframes = window.keyframes();
+    a.ok(stream_window()).await;
+    wait("the second stream's frames", || {
+        window.frames() > frames + 5
+    })
+    .await;
+    assert!(window.keyframes() > keyframes, "from a keyframe");
+    assert!(window.holding());
+    assert_eq!(
+        *a.fake.codecs.lock().unwrap(),
+        [Codec::Hevc, Codec::Hevc],
+        "the codec chosen again for the new stream"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M19: stopping the stream releases at once what a guest held (keys and
+/// pad), keeps their seat, and drops their input until the next stream,
+/// which takes it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn between_streams_a_guests_input_is_released_and_held_off() {
+    use couch_input::HidUsage;
+    use couch_testkit::KbmCall;
+
+    let (mut a, mut b, mut c, room) = three().await;
+    let both = setup(1, KeyboardMouseSeat::WithController1);
+    let reply = a.live(go_live_with(&room, 4, both)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    let window = watching(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &window).await;
+    let typed = |key: u16, down: bool| {
+        a.fake
+            .kbm
+            .calls()
+            .iter()
+            .filter(|c| **c == KbmCall::Key(HidUsage(key), down))
+            .count()
+    };
+    window.key(0x1A, true);
+    window.pad(PadButtons::A);
+    wait("B's W and A", || {
+        typed(0x1A, true) == 1 && a.fake.pad() == Some(pressed(PadButtons::A))
+    })
+    .await;
+
+    a.ok(Command::StopStream).await;
+    wait("B's W released", || typed(0x1A, false) == 1).await;
+    wait("the pad neutral", || {
+        a.fake.pad() == Some(PadState::NEUTRAL)
+    })
+    .await;
+    // Held off: nothing B sends reaches the game, however long.
+    window.pad(PadButtons::B);
+    window.key(0x04, true);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(a.fake.pad(), Some(PadState::NEUTRAL));
+    assert_eq!(typed(0x04, true), 0);
+    assert!(window.holding(), "the seat stays");
+
+    // The next stream takes B's input again.
+    a.ok(stream_window()).await;
+    window.pad(PadButtons::X);
+    wait("B's X on the pad", || {
+        a.fake.pad() == Some(pressed(PadButtons::X))
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M19: the host's own controller plays its seat with nothing streamed: the
+/// host may start the game with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosts_controller_plays_between_streams() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a
+        .handle(go_live_playing(
+            &room,
+            4,
+            InputSetup::default(),
+            Some(dualsense()),
+        ))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert!(a.fake.hidden(), "hidden before any game starts");
+    a.fake.local_press(PadButtons::Y);
+    wait("the host's Y with nothing streamed", || {
+        a.fake.pad() == Some(pressed(PadButtons::Y))
+    })
+    .await;
+    a.ok(Command::EndSession).await;
+    wait("shown again", || !a.fake.hidden()).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M19: a stop asked for while a stream starts stops that stream: nothing is
+/// streamed in the end, and the viewer gets no frames.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_while_a_stream_starts_leaves_nothing_streamed() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.ok(go_live(&room, 4)).await;
+    let window = joined(&room, &a, &b).await;
+    let (_started, stopped) =
+        tokio::join!(a.handle(stream_window()), a.handle(Command::StopStream));
+    assert!(stopped.is_ok(), "{stopped:?}");
+    a.wait_session(&room, &a, "stopped", |s| {
+        s.is_some_and(|s| s.stream == StreamStateView::Stopped(SessionEnd::HostStopped))
+    })
+    .await;
+    // Whatever was captured meanwhile has stopped.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let frames = window.frames();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(window.frames(), frames, "nothing streamed");
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M19: a second start while one is pending is refused; the first goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_stream_starts_at_a_time() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.ok(go_live(&room, 4)).await;
+    let window = joined(&room, &a, &b).await;
+    let (first, second) = tokio::join!(a.handle(stream_window()), a.handle(stream_window()));
+    assert!(matches!(first, Ok(Response::Room(_))), "{first:?}");
+    assert!(refused_because(&second, "starting already"), "{second:?}");
+    wait("frames", || window.frames() >= 5).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M19: a stream whose capture fails as it starts ends, whether the failure
+/// or the start's answer reaches the engine first; viewers' input stays held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_failing_as_it_starts_ends() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.ok(go_live(&room, 4)).await;
+    let window = joined(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &window).await;
+    a.fake.capture_fails.store(true, Ordering::SeqCst);
+    let _ = a.handle(stream_window()).await;
+    let reason = a
+        .event("the stream's end", |e| match e {
+            Event::StreamEnded { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .await;
+    assert_eq!(reason, SessionEnd::Error);
+    let failed = StreamStateView::Stopped(SessionEnd::Error);
+    a.wait_session(&room, &a, "the stream ended", |s| {
+        s.is_some_and(|s| s.stream == failed)
+    })
+    .await;
+    // Nothing streamed: B's input stays out.
+    window.pad(PadButtons::A);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_ne!(a.fake.pad(), Some(pressed(PadButtons::A)), "held off");
+    // And streaming works again once the capture does.
+    a.fake.capture_fails.store(false, Ordering::SeqCst);
+    a.ok(stream_window()).await;
+    wait("frames", || window.frames() >= 5).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M19: streaming needs a session; starting again replaces the stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_needs_a_session() {
+    let (mut a, mut b, mut c, room) = three().await;
+    assert!(a.handle(stream_window()).await.is_err(), "no session yet");
+    assert!(a.handle(Command::StopStream).await.is_err());
+    a.ok(go_live(&room, 4)).await;
+    assert!(
+        refused_because(
+            &a.handle(Command::StopStream).await,
+            "nothing is being streamed"
+        ),
+        "nothing to stop"
+    );
+    // Streaming again replaces the stream.
+    a.ok(stream_window()).await;
+    a.ok(stream_window()).await;
+    a.wait_session(&room, &a, "live", |s| {
+        s.is_some_and(|s| s.stream == StreamStateView::Live)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 /// M9b: an encoder reading GPU frames that fails is reopened for frames in
 /// memory, with a keyframe, and the viewer keeps watching.
 #[tokio::test(flavor = "multi_thread")]
@@ -1799,16 +2093,17 @@ async fn a_failing_gpu_encoder_falls_back_to_frames_in_memory() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M19: the game exiting ends the stream at once, and the session goes on.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_game_exiting_ends_the_session_at_once() {
+async fn the_game_exiting_ends_the_stream_at_once() {
     let (mut a, mut b, mut c, room) = three().await;
     a.go_live(&room, 4).await;
-    watching(&room, &a, &b).await;
+    let window = watching(&room, &a, &b).await;
     a.fake.exit_game();
     let exited = Instant::now();
     let reason = a
-        .event("the end", |e| match e {
-            Event::SessionEnded { reason, .. } => Some(*reason),
+        .event("the stream's end", |e| match e {
+            Event::StreamEnded { reason, .. } => Some(*reason),
             _ => None,
         })
         .await;
@@ -1818,13 +2113,12 @@ async fn the_game_exiting_ends_the_session_at_once() {
         "no grace for an exited game: {:?}",
         exited.elapsed()
     );
-    let ended = b
-        .event("the end of watching", |e| match e {
-            Event::WatchEnded { reason, .. } => Some(*reason),
-            _ => None,
-        })
-        .await;
-    assert_eq!(ended, WatchEnd::Ended);
+    let stopped = StreamStateView::Stopped(SessionEnd::GameExited);
+    b.wait_session(&room, &a, "the stream stopped", |s| {
+        s.is_some_and(|s| s.stream == stopped)
+    })
+    .await;
+    assert!(!window.shut_down.load(Ordering::SeqCst), "still watching");
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -1842,8 +2136,8 @@ async fn a_swap_while_nobody_watches_is_followed_too() {
     wait("frames", || window.frames() > before + 5).await;
     a.fake.exit_game();
     let reason = a
-        .event("the end", |e| match e {
-            Event::SessionEnded { reason, .. } => Some(*reason),
+        .event("the stream's end", |e| match e {
+            Event::StreamEnded { reason, .. } => Some(*reason),
             _ => None,
         })
         .await;
@@ -1852,12 +2146,12 @@ async fn a_swap_while_nobody_watches_is_followed_too() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stopping_and_going_live_again() {
+async fn ending_the_session_and_starting_another() {
     let (mut a, mut b, mut c, room) = three().await;
     a.go_live(&room, 4).await;
     let first = watching(&room, &a, &b).await;
-    a.ok(Command::StopLive).await;
-    assert!(!a.fake.panic_key_hooked(), "the hook goes with the stream");
+    a.ok(Command::EndSession).await;
+    assert!(!a.fake.panic_key_hooked(), "the hook goes with the session");
     let ended = b
         .event("the end of watching", |e| match e {
             Event::WatchEnded { reason, .. } => Some(*reason),
@@ -1924,30 +2218,36 @@ async fn shutting_down_while_a_guest_plays_releases_first() {
 /// one the host's app sent just before the key was pressed.
 #[tokio::test(flavor = "multi_thread")]
 async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
-    use couch_engine::pipeline::host::{HostEvent, HostOptions, HostStream, Rates};
+    use couch_engine::pipeline::host::{
+        HostEvent, HostOptions, HostPipeline, Rates, StreamOptions,
+    };
     use couch_input::{MemberId, Permissions, SeatEpoch, SeatId};
 
     let fake = Arc::new(Fake::default());
-    let (stream, mut events) = HostStream::start(
+    let (stream, mut events) = HostPipeline::start(
         fake.clone(),
         HostOptions {
-            source: Source::Window(WINDOW),
-            fps: 30,
-            rates: Rates::default(),
-            upload_bps: None,
-            audio: couch_engine::pipeline::AudioChoice::Off,
             seats: vec![SeatKind::Controller],
             real_pad_ids: false,
             session: 1,
             first_epoch: SeatEpoch(0),
             rc_trace: None,
-            pacing_trace: None,
             netem_elapsed: None,
             replace_grace: Duration::from_millis(300),
             local: None,
         },
     )
     .await;
+    stream
+        .start_stream(StreamOptions {
+            source: Source::Window(WINDOW),
+            fps: 30,
+            rates: Rates::default(),
+            upload_bps: None,
+            audio: couch_engine::pipeline::AudioChoice::Off,
+            pacing_trace: None,
+        })
+        .await;
     let guest = MemberId([9; 32]);
     let granted = |events: &mut mpsc::UnboundedReceiver<HostEvent>| {
         std::iter::from_fn(|| events.try_recv().ok())
@@ -2057,7 +2357,7 @@ async fn a_session_that_ended_meanwhile_is_not_resumed() {
     a.go_live(&room, 4).await;
     let window = watching(&room, &a, &b).await;
     b.engine().drop_connection(&room, &a.id()).await;
-    a.ok(Command::StopLive).await;
+    a.ok(Command::EndSession).await;
     a.go_live(&room, 4).await;
     let ended = b
         .event("the end of watching", |e| match e {
@@ -2089,8 +2389,8 @@ async fn the_games_other_windows_are_never_followed() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     a.fake.close_window();
     let reason = a
-        .event("the end", |e| match e {
-            Event::SessionEnded { reason, .. } => Some(*reason),
+        .event("the stream's end", |e| match e {
+            Event::StreamEnded { reason, .. } => Some(*reason),
             _ => None,
         })
         .await;
@@ -2123,15 +2423,12 @@ async fn watching_during_the_grace_waits_for_the_window() {
 
 // ---- Seats and input modes ----
 
-const TWO_PADS: InputSetup = InputSetup::Multi {
-    controllers: 2,
-    keyboard_mouse: false,
-};
+const TWO_PADS: InputSetup = setup(2, KeyboardMouseSeat::None);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_guests_play_two_pads_at_once() {
     let (mut a, mut b, mut c, room) = three().await;
-    let reply = a.handle(go_live_with(&room, 4, TWO_PADS)).await;
+    let reply = a.live(go_live_with(&room, 4, TWO_PADS)).await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     assert_eq!(a.fake.pads_plugged(), 2, "one pad per seat");
     let b_window = watching(&room, &a, &b).await;
@@ -2185,7 +2482,7 @@ async fn two_guests_play_two_pads_at_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn moving_to_another_seat_lets_go_of_the_old_one_first() {
     let (mut a, mut b, mut c, room) = three().await;
-    let reply = a.handle(go_live_with(&room, 4, TWO_PADS)).await;
+    let reply = a.live(go_live_with(&room, 4, TWO_PADS)).await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     let b_window = watching(&room, &a, &b).await;
     give_seat(&room, &mut a, &b, &b_window, 0).await;
@@ -2263,11 +2560,8 @@ async fn a_keyboard_seat_types_and_never_drives_a_pad() {
     use couch_testkit::KbmCall;
 
     let (mut a, mut b, mut c, room) = three().await;
-    let setup = InputSetup::Multi {
-        controllers: 1,
-        keyboard_mouse: true,
-    };
-    let reply = a.handle(go_live_with(&room, 4, setup)).await;
+    let own_seat = setup(1, KeyboardMouseSeat::OwnSeat);
+    let reply = a.live(go_live_with(&room, 4, own_seat)).await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     assert_eq!(a.fake.pads_plugged(), 1, "no pad for the keyboard seat");
     let b_window = watching(&room, &a, &b).await;
@@ -2339,31 +2633,56 @@ async fn viewers_hear_when_the_game_leaves_the_front() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M19: one input setup. Setups that can't be are refused; keyboard and
+/// mouse go to a seat of their own or with Controller 1 (one player on both,
+/// single player's old "both").
 #[tokio::test(flavor = "multi_thread")]
-async fn the_input_setup_is_remembered_for_the_program() {
+async fn the_input_setup_is_checked_and_makes_the_seats() {
     let (mut a, mut b, mut c, room) = three().await;
-    // A setup that can't be: refused.
-    let five = InputSetup::Multi {
-        controllers: 5,
-        keyboard_mouse: false,
-    };
-    assert!(matches!(
-        a.handle(go_live_with(&room, 4, five)).await,
-        Err(EngineError::Session(_))
-    ));
-    assert_eq!(sources(&a).await.windows[0].input_setup, None);
-
-    let setup = InputSetup::Multi {
-        controllers: 2,
-        keyboard_mouse: true,
-    };
-    let reply = a.handle(go_live_with(&room, 4, setup)).await;
-    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
-    let deadline = Instant::now() + WAIT;
-    while sources(&a).await.windows[0].input_setup != Some(setup) {
-        assert!(Instant::now() < deadline, "the setup remembered");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    for bad in [
+        setup(5, KeyboardMouseSeat::None),
+        setup(0, KeyboardMouseSeat::None),
+    ] {
+        assert!(
+            matches!(
+                a.handle(go_live_with(&room, 4, bad)).await,
+                Err(EngineError::Session(_))
+            ),
+            "{bad:?}"
+        );
     }
+    let kinds = |s: &SessionView| {
+        s.seats
+            .iter()
+            .map(|s| (s.label.clone(), s.pad, s.keyboard_mouse))
+            .collect::<Vec<_>>()
+    };
+    let with_first = setup(2, KeyboardMouseSeat::WithController1);
+    let reply = a.handle(go_live_with(&room, 4, with_first)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    a.wait_session(&room, &a, "the seats", |s| s.is_some())
+        .await;
+    let view = a.session(&room, &a).await.unwrap();
+    assert_eq!(view.seats.len(), 2);
+    assert!(
+        view.seats[0].pad && view.seats[0].keyboard_mouse,
+        "{:?}",
+        kinds(&view)
+    );
+    assert!(view.seats[1].pad && !view.seats[1].keyboard_mouse);
+    assert_eq!(a.fake.pads_plugged(), 2);
+    a.ok(Command::EndSession).await;
+
+    // Keyboard and mouse alone.
+    let alone = setup(0, KeyboardMouseSeat::WithController1);
+    let reply = a.handle(go_live_with(&room, 4, alone)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    a.wait_session(&room, &a, "one keyboard seat", |s| {
+        s.is_some_and(|s| s.seats.len() == 1)
+    })
+    .await;
+    let view = a.session(&room, &a).await.unwrap();
+    assert!(!view.seats[0].pad && view.seats[0].keyboard_mouse);
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -2423,10 +2742,10 @@ async fn moved_shortcuts_reach_the_hook_and_the_stream_window() {
     })
     .await;
 
-    // A change while live applies at the next Go live.
+    // A change during a session applies at the next session.
     a.ok(set("panic", "KeyO")).await;
     assert_eq!(*a.fake.panic_key_on.lock().unwrap(), Some(HidUsage(0x13)));
-    a.ok(Command::StopLive).await;
+    a.ok(Command::EndSession).await;
     a.go_live(&room, 4).await;
     assert_eq!(*a.fake.panic_key_on.lock().unwrap(), Some(HidUsage(0x12)));
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
@@ -2448,7 +2767,7 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
     assert_eq!(list.host_controllers, vec![dualsense()]);
     assert_eq!(list.hiding, HidingView::Ready);
     let reply = a
-        .handle(go_live_playing(
+        .live(go_live_playing(
             &room,
             4,
             InputSetup::default(),
@@ -2561,8 +2880,8 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
     })
     .await;
 
-    // Stopping shows the controller to games again.
-    a.ok(Command::StopLive).await;
+    // Ending the session shows the controller to games again.
+    a.ok(Command::EndSession).await;
     wait("shown again", || !a.fake.hidden()).await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
@@ -2571,7 +2890,7 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
 async fn the_host_plays_another_seat_and_feels_its_rumble() {
     let (mut a, mut b, mut c, room) = three().await;
     let reply = a
-        .handle(go_live_playing(&room, 4, TWO_PADS, Some(dualsense())))
+        .live(go_live_playing(&room, 4, TWO_PADS, Some(dualsense())))
         .await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     a.fake.local_press(PadButtons::A);
@@ -2613,7 +2932,7 @@ async fn a_controller_that_cant_be_hidden_plays_outside_the_seats() {
     let (mut a, mut b, mut c, room) = three().await;
     a.fake.hide_fails.store(true, Ordering::SeqCst);
     let reply = a
-        .handle(go_live_playing(
+        .live(go_live_playing(
             &room,
             4,
             InputSetup::default(),
