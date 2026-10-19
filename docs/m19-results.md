@@ -79,4 +79,11 @@ The restructured pipeline costs nothing measurable: the gates and the four viewe
 
 Working as intended: the session started before the game, streams started, stopped and started again, the idle states showed in the stream window, and ending the session showed the controller again. Passing a real controller to a guest couldn't be tried on one PC (the guest's controller is plugged into this PC too); the session scenarios cover it with recording pads, including across a stream's stop and restart.
 
-**Still to come:** a run with friends over the internet, a friend holding a seat while the stream stops and starts again.
+**With friends, over the internet** (the 0.11.0 installer, 2026-10-17 and 18): streamed at 60 and at 120 fps, the friends enjoying it. The session of the 17th ran almost an hour, with its viewers' encoders opened again several times inside it (the host's `desktop.log`: new streams or new window sizes), and the viewers stayed. Not tried yet: stopping and starting the stream while a friend holds a seat.
+
+**Found in that run, and fixed: a newcomer saw no session.** A friend let into the room while the session was already live saw nobody streaming, until the host ended the session and started another.
+- **Not the engine:** the host announces its session to every member whose connection becomes current, newcomers included, and the newcomer's engine lists it. A new scenario shows it, with the owner hosting and with another member hosting (`a_newcomer_sees_a_session_already_live`, which also watches it).
+- **The app:** the join command's reply is the room as it stood at admission, before the host's announcement. The announcement's `RoomChanged` event comes by Tauri's event channel, the reply by its command channel, in either order. When the event landed first, the reply then replaced the room with its older copy, without the session, and nothing changed it back until the session did.
+- **The fix:** every room view the engine makes carries a `revision` (one counter for all views; the room actor is the only writer, so a later view is never older), and the app keeps the newer of two views of a room, for command replies, events and the room list alike. The scenario checks that the announcement's view is newer than the join's reply.
+
+**Still to come:** a friend holding a seat while the stream stops and starts again; a friend joining while a session is live, with the fix.

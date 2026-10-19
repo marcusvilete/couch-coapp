@@ -65,4 +65,6 @@ A controller seat and the keyboard-and-mouse seat for one guest worked: alice he
 
 **Two controllers couldn't be tried on one PC:** the second controller here is a generic pad that reports Xbox 360 ids, and a stream window on the same PC as a host skips every such pad (it can't tell them from the host's virtual pads; `couch_platform_win::virtual_pads`). On a guest's own PC it works. Telling real 360 pads from ours by their parent device is noted as a candidate for later.
 
+**With friends** (the 0.11.0 installer, 2026-10-17 and 18): one controller each, as before; nobody had two, so several seats for one guest weren't tried.
+
 **Still to come:** two controllers on a guest's own PC (the other PC with a `-TestRelay` build of this branch, or a friend), ideally two players in a co-op game (Fling to the Finish).

@@ -18,7 +18,10 @@ mod sessions;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -266,6 +269,9 @@ struct Actor {
     /// Members whose build we can't talk to: their wire revision and app
     /// version, until a connection with them works again.
     other_versions: BTreeMap<MemberId, (u16, String)>,
+    /// Numbers every room view as it is made ([`RoomView::revision`]): the
+    /// actor is the only writer, so a later view is never older.
+    views: AtomicU64,
 }
 
 fn lock(limits: &Mutex<AdmissionLimits>) -> MutexGuard<'_, AdmissionLimits> {
@@ -367,6 +373,7 @@ pub(crate) async fn start(
         panic,
         sessions: sessions::Sessions::default(),
         other_versions: BTreeMap::new(),
+        views: AtomicU64::new(0),
     };
     actor.restore_rooms(now);
     tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
@@ -1388,6 +1395,7 @@ impl Actor {
             });
         Some(RoomView {
             id: room.to_hex(),
+            revision: self.views.fetch_add(1, Ordering::Relaxed) + 1,
             name: status.name,
             is_owner: entry.room.is_owner(),
             members,

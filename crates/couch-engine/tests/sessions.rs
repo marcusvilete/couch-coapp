@@ -3214,6 +3214,90 @@ async fn a_controller_that_cant_be_hidden_plays_outside_the_seats() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// The friends' run (2026-10-18): someone let into the room while a session
+/// is already live sees it, and can watch it, without the host starting it
+/// again. Once with the owner hosting, once with another member hosting
+/// (the newcomer meets them by dialling, after the owner admits it).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newcomer_sees_a_session_already_live() {
+    for owner_hosts in [true, false] {
+        let a = Member::new("Ana").await;
+        let b = Member::new("Bia").await;
+        let mut c = Member::new("Caio").await;
+        let Response::Room(room) = a
+            .handle(Command::CreateRoom {
+                name: "Sofá".into(),
+                password: PASSWORD.into(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("a room");
+        };
+        let Response::Invite { link } = a
+            .handle(Command::GetInvite {
+                room: room.id.clone(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("an invite");
+        };
+        let room = room.id;
+        let (mut host, mut other) = (a, b);
+        if !owner_hosts {
+            // B joins first and hosts; A, the owner, only admits.
+            other
+                .ok(Command::JoinRoom {
+                    invite: link.clone(),
+                    password: PASSWORD.into(),
+                })
+                .await;
+            std::mem::swap(&mut host, &mut other);
+        }
+        host.go_live(&room, 4).await;
+
+        // C joins the room only now. Its reply comes from before the host's
+        // announcement; the event that brings the session is a newer view,
+        // which the app keeps whichever arrives first.
+        let Ok(Response::Room(joined)) = c
+            .handle(Command::JoinRoom {
+                invite: link.clone(),
+                password: PASSWORD.into(),
+            })
+            .await
+        else {
+            panic!("joined");
+        };
+        let host_id = host.id();
+        let announced = c
+            .event("the session announced", |e| match e {
+                Event::RoomChanged { room: view }
+                    if view.id == room && view.sessions.iter().any(|s| s.host == host_id) =>
+                {
+                    Some(view.revision)
+                }
+                _ => None,
+            })
+            .await;
+        assert!(
+            announced > joined.revision,
+            "the session's view ({announced}) is newer than the join's reply ({})",
+            joined.revision
+        );
+        c.wait_session(
+            &room,
+            &host,
+            "the live session, seen by the newcomer",
+            |s| s.is_some_and(|s| s.stream == StreamStateView::Live),
+        )
+        .await;
+        let window = watching(&room, &host, &c).await;
+        wait("frames for the newcomer", || window.frames() > 0).await;
+        stop_all(&mut [&mut host, &mut other, &mut c]).await;
+    }
+}
+
 async fn sources(m: &Member) -> couch_engine::SourceList {
     match m.handle(Command::ListSources).await.unwrap() {
         Response::Sources(s) => s,

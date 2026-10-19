@@ -136,3 +136,9 @@ Noted, not from M12c: `watching_resumes_when_the_connection_to_the_host_comes_ba
 - a sharper scaler in the stream window for a stream smaller than the window (bilinear today);
 - NVENC's quality settings: a slower preset than p1 and spatial adaptive quantization, each measured against its encode time with a switch;
 - a friend's run with an installer: their stats say HEVC, and the dips to 8–12 Mbit/s look less soft.
+
+## With friends, over the internet (the 0.11.0 installer, 2026-10-17 and 18)
+
+- **They got HEVC.** Every encoder the host opened for them was `hevc_nvenc` (main, p1, ultra-low latency) on GPU frames, at 1922x1112 (the game's window with its frame) and once 1920x1032; no viewer fell back to H.264 (the host's `desktop.log`). The friends' own decoder lines weren't checked.
+- **120 fps was way smoother for them than 60**, and they found barely any input lag.
+- **Not judged:** whether HEVC looked less soft than the 0.10.2 run's H.264 in the bitrate dips; nobody compared.
