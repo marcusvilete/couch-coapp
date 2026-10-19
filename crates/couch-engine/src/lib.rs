@@ -932,6 +932,13 @@ pub struct ProfileView {
 pub struct RoomView {
     /// Lowercase hex.
     pub id: String,
+    /// Grows with every view the engine makes, of any room: of two views of
+    /// one room, the higher is newer. A command's reply and a `RoomChanged`
+    /// event reach the UI by different paths, in either order, so the UI
+    /// keeps the newer one (a newcomer's join reply once hid a session
+    /// announced just after it, 2026-10-18).
+    #[ts(type = "number")]
+    pub revision: u64,
     pub name: String,
     pub is_owner: bool,
     /// This profile first, then by name.

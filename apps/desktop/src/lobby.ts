@@ -135,8 +135,14 @@ export function useLobby(): Lobby {
     setNotices((all) => all.filter((n) => n.id !== id));
   }, []);
 
+  // A command's reply and the engine's events arrive by different paths, in
+  // either order: of two views of a room, the one the engine made later (the
+  // higher revision) wins. A join's reply once hid a session announced just
+  // after it.
   const putRoom = useCallback((room: RoomView) => {
-    setRooms((all) => ({ ...all, [room.id]: room }));
+    const newer = (known: RoomView | undefined) => known != null && known.revision > room.revision;
+    if (newer(roomsRef.current[room.id])) return;
+    setRooms((all) => (newer(all[room.id]) ? all : { ...all, [room.id]: room }));
     setPausedUntil((all) => {
       const next = { ...all };
       if (room.joinsPausedForSecs != null) {
@@ -157,7 +163,14 @@ export function useLobby(): Lobby {
       reply = await request({ type: "listRooms" }, "rooms");
       if (roomEvents.current === seen || tries === 3) break;
     }
-    setRooms(Object.fromEntries(reply.rooms.map((r) => [r.id, r])));
+    setRooms((all) =>
+      Object.fromEntries(
+        reply.rooms.map((r) => {
+          const known = all[r.id];
+          return [r.id, known != null && known.revision > r.revision ? known : r];
+        }),
+      ),
+    );
     setPausedUntil(
       Object.fromEntries(
         reply.rooms

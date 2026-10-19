@@ -6,7 +6,15 @@ export type RoomView = {
 /**
  * Lowercase hex.
  */
-id: string, name: string, isOwner: boolean, 
+id: string, 
+/**
+ * Grows with every view the engine makes, of any room: of two views of
+ * one room, the higher is newer. A command's reply and a `RoomChanged`
+ * event reach the UI by different paths, in either order, so the UI
+ * keeps the newer one (a newcomer's join reply once hid a session
+ * announced just after it, 2026-10-18).
+ */
+revision: number, name: string, isOwner: boolean, 
 /**
  * This profile first, then by name.
  */
