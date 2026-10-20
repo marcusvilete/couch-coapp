@@ -112,6 +112,12 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **Remembered per profile** (`audio.json` in its folder): the next stream window plays at the same level, even after closing the window right after a change.
 - **On one PC**, every window plays through the same speakers: compare by muting one watcher's window.
 
+## The host's stream level (P7): what to expect
+
+- **The host panel's Stream section** has a Stream volume slider (0 to 400%) and a meter of what guests hear after it (a bar and a peak mark; "silent" without sound, "loud peaks rounded off" while a boost is limited). It changes what every guest hears, never what the host hears, at once, and comes back in the next session (`host-audio.json`).
+- **To play quietly while the stream (and a Discord call) stay loud:** lower the game's slider in Windows' volume mixer, then raise the stream volume until the meter is back where it was. Windows' main volume doesn't reach the capture, but lowers everything else.
+- **Checking a level on one PC:** a watcher's stats panel ends its audio line with `level peak … / avg … dBFS`, the sound as it arrives (50% on the host is about 12 dB lower).
+
 ## Several seats for one guest (M18): what to expect
 
 - **The guest's controller count** reaches the host when the guest's stream window opens its controllers: the host panel's Watching list says "bob · 2 controllers" (sessions with more than one seat). Plugging or unplugging one updates it.
@@ -128,7 +134,7 @@ Needs HidHide installed on the host (administrator, then a restart; installed on
 - **The session dialog's "Your controller".** Lists the host's controllers (never our pads) when a seat has a pad; the choice is remembered in the profile's web storage. Its line says what HidHide allows: not installed (with the download page), its configuration window open (close it, start again), or ready.
 - **After starting the session** the host panel says the controller is hidden for the whole session: start the game now. A game or Steam that was already running and had it open still sees it until it is reconnected once. `joy.cpl` (closed and reopened) lists only "Xbox 360 Controller", and `xinput-watch.ps1` shows the host's input in that pad's slot.
 - **Steam Input off for the game** (its Properties → Controller), or one seat gets no player in it: Steam keeps a player for the hidden controller. Turning off Steam's global PlayStation support instead also works, but then the DualSense works in games only while live.
-- **The seats list** shows "you (DualSense Wireless Controller)" on Controller 1 with Leave, Take back on guests' seats, and Play here on the others with a pad. Passing the host's seat to a guest leaves the host on none; the guest giving it back or leaving returns it. Take back and Leave leave the seat empty (guests see "free", or "Nobody is playing" in single player, never "own controller"); only Play here seats the host's controller again. The panic key removes guests but the host keeps the seat they play; a seat they had passed on stays empty.
+- **The seats list** shows "you (DualSense Wireless Controller)" on Controller 1 with Leave, Take back on guests' seats, and Play here on the others with a pad. Passing the host's seat to a guest leaves the host on none; the guest giving it back or leaving returns it. Take back and Leave leave the seat empty (guests see "free", or "Nobody is playing" with one seat, never "own controller"); only Play here seats the host's controller again. The panic key removes guests but the host keeps the seat they play; a seat they had passed on stays empty.
 - **Ending the session** shows the controller again (log: `the host's controller is shown again`); stopping a stream doesn't. If the app was killed, it stays hidden until the next start of the app or of `couch-cli host` (log: `showed 1 controller(s) hidden by a host that crashed`). HidHide's own configuration client (Start menu) also shows and clears the list.
 - **If hiding fails**, the host panel says why and the host plays outside the seats, as in P1.
 

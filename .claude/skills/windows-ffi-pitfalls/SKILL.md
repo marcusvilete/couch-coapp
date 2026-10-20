@@ -89,7 +89,7 @@ Each item below cost time or nearly caused undefined behaviour in M1–M3. Check
 
 ## Debugging
 
-- Build a minimal reproduction in the session scratchpad (`cargo new`), with `CARGO_TARGET_DIR` set to a short path such as `C:\dev\couch-coapp\target\scratch`. Deep paths break CMake and MSBuild builds (libopus) at Windows' 260-character limit.
+- Build a minimal reproduction in the session scratchpad (`cargo new`), with `CARGO_TARGET_DIR` set to a short path, such as `target\scratch` under the repository's root (it should be cloned to a short path, `docs/development.md`). Deep paths break CMake and MSBuild builds (libopus) at Windows' 260-character limit.
 - Run it against the known-good crate to tell your bug from the environment's.
 - Remove trace output before finishing. `couch-viewer` must never print to stdout.
 

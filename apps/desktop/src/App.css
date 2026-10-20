@@ -813,6 +813,56 @@ button.big:not(.primary) span {
   margin: 0;
 }
 
+/* The host's stream level (P7): a slider, and a meter of what guests hear. */
+.sound-level {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sound-level p {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* Not the text boxes' look (border, padding): with it, the handle stopped
+   short of both ends. */
+.sound-level input[type="range"] {
+  flex: 1 1 160px;
+  width: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+.level-meter {
+  position: relative;
+  flex: 1 1 120px;
+  height: 10px;
+  border: 1px solid var(--border-quiet);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* The average fills the bar; the peak is a thin mark. */
+.level-meter .average {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--link-direct);
+  transition: width 120ms linear;
+}
+
+.level-meter .peak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--fg);
+  transition: left 120ms linear;
+}
+
 .host-head {
   display: flex;
   align-items: center;

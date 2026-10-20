@@ -4,6 +4,7 @@
 //! - `shortcuts.json`: the shortcut keys the user moved off their defaults.
 //! - `network.json`: the relay to use (applies when the engine starts).
 //! - `audio.json`: the stream window's volume (P6).
+//! - `host-audio.json`: how loud guests hear our stream's sound (P7).
 //!
 //! The room actor rewrites `settings.json` whole, so what the engine itself
 //! writes has files of its own.
@@ -19,6 +20,7 @@ use std::{
 };
 
 use couch_input::shortcuts::Shortcuts;
+use couch_media::audio::MAX_BOOST_PERCENT;
 use couch_net::SecretKey;
 use couch_proto::{ids::RoomId, ipc::StreamVolume};
 use couch_room::room::SavedRoom;
@@ -37,6 +39,7 @@ const SETTINGS_FILE: &str = "settings.json";
 const SHORTCUTS_FILE: &str = "shortcuts.json";
 const NETWORK_FILE: &str = "network.json";
 const AUDIO_FILE: &str = "audio.json";
+const HOST_AUDIO_FILE: &str = "host-audio.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread.
@@ -263,6 +266,36 @@ pub(crate) fn save_volume(dir: &Path, volume: StreamVolume) -> Result<(), StoreE
     write_atomic(&dir.join(AUDIO_FILE), &bytes)
 }
 
+/// `host-audio.json` (P7): how loud guests hear our stream's sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct HostAudio {
+    /// 0 to 400% of the game's (`couch_media::audio::MAX_BOOST_PERCENT`).
+    percent: u16,
+}
+
+/// The host's stream level (`host-audio.json`, P7), 0 to 400; 100 if there
+/// is none or it can't be read. Only the engine writes it.
+pub(crate) fn host_level(dir: &Path) -> u16 {
+    let path = dir.join(HOST_AUDIO_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<HostAudio>(&bytes)
+            .map(|a| a.percent.min(MAX_BOOST_PERCENT))
+            .unwrap_or_else(|e| {
+                tracing::warn!("ignoring {}: {e}", path.display());
+                100
+            }),
+        Err(_) => 100,
+    }
+}
+
+pub(crate) fn save_host_level(dir: &Path, percent: u16) -> Result<(), StoreError> {
+    let audio = HostAudio {
+        percent: percent.min(MAX_BOOST_PERCENT),
+    };
+    let bytes = serde_json::to_vec_pretty(&audio).expect("level serialize");
+    write_atomic(&dir.join(HOST_AUDIO_FILE), &bytes)
+}
+
 /// Writes a sibling temporary file and renames it over `path`, so a crash
 /// leaves the old file or the new one, never half of one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
@@ -381,6 +414,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(volume(dir.path()).percent, 100);
+    }
+
+    #[test]
+    fn the_host_level_roundtrips_and_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(host_level(dir.path()), 100);
+        save_host_level(dir.path(), 35).unwrap();
+        assert_eq!(host_level(dir.path()), 35);
+        save_host_level(dir.path(), 300).unwrap();
+        assert_eq!(host_level(dir.path()), 300);
+        fs::write(dir.path().join(HOST_AUDIO_FILE), br#"{"percent":900}"#).unwrap();
+        assert_eq!(host_level(dir.path()), 400, "never above 400");
+        fs::write(dir.path().join(HOST_AUDIO_FILE), b"nope").unwrap();
+        assert_eq!(host_level(dir.path()), 100);
     }
 
     #[test]

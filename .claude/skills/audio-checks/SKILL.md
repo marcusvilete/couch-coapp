@@ -58,7 +58,7 @@ The probe prints:
 ## What isn't covered automatically; ask the user
 
 **Listening at 1% loss**, with a game that has music or speech:
-- On one machine, both the game and the viewer play. **Muting the game doesn't help**: the in-game volume and the volume mixer's sliders all silence the stream too. Those are the game's own slider and the `couch-cli` host's (the loopback capture has its own volume), as well as the viewer's. (So a host can't play quietly without the stream going quiet: a host level before Opus was left out of P6, a candidate for later.)
+- On one machine, both the game and the viewer play. **Muting the game doesn't help**: the in-game volume and the volume mixer's sliders all silence the stream too. Those are the game's own slider and the `couch-cli` host's (the loopback capture has its own volume), as well as the viewer's. **Windows' master volume doesn't** (measured in P7 with the stream window's level line), but it lowers everything else too. So the host's stream level (P7, `couch-cli host --audio-level`, 0 to 400%) can boost the stream to make up for the game turned down in the mixer; above 100% a soft limiter keeps peaks within full scale.
 - Instead have the user send the game's output to a device they can't hear: Settings → System → Sound → Volume mixer → the game → Output device. Capture doesn't depend on the output device.
 - Command: `host --source window --title "<game>" --relay none --netem "loss=1%"`, then `view <ticket> --relay none --netem "loss=1%"`.
 - Ask whether anything beyond faint smoothing is audible: clicks, dropouts, warbling, or pitch drifting. A pitch drift means the playback ratio is working too hard.
@@ -66,6 +66,8 @@ The probe prints:
 **Changing the default output device mid-stream:** SDL should follow it. Worth a quick try after changing the viewer's audio code.
 
 **The stream volume** (P6; after touching the viewer's audio, the HUD's volume or its shortcuts): the stream window's slider and Mute, and Ctrl+Alt+Shift+`-` / `=` / `0`, change only that window's sound, smoothly (no click at a change), never above how the host sent it; a note shows the level. The level comes back in the next stream window of the same profile (`audio.json` in the profile folder), including after closing the window right after a change. `latency-probe --audio` and `couch-cli view` always play at full volume, so their numbers don't move.
+
+**The host's stream level** (P7): the host panel's Stream volume slider (0 to 400%: the squared curve up to 100, a boost by the factor above, soft-limited; saved in `host-audio.json`) changes what every guest hears and not what the host hears; its meter moves with the sound, says "silent" without any and "loud peaks rounded off" while limiting. Ask the user to listen to a boosted loud scene: compressed is right, crackling is not. The stream window's stats panel ends its audio line with the level as it arrives (`level peak … / avg … dBFS`, before that window's own volume): 50% on the host reads about 12 dB lower.
 
 ## After the checks
 

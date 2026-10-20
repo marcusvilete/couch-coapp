@@ -12,6 +12,8 @@ The wire protocol between room members, and the pipe between the main process an
 - M6 added liveness (`Alive`, the `timed_out` close code), Alt+F4 to the blocked keys, following a game to a new window and telling that it exited, and watching that survives a dropped connection or a crashed viewer window.
 - M12c added HEVC: the codecs a viewer decodes in `SessionJoin`, codec 2 in the epoch preamble, and viewer IPC v8 (the codec in each video frame).
 - M19 made sessions start before streams: `SessionStatus.stream`, the `STREAM_END` reset code, and viewer IPC v9 (the stream's state in the HUD).
+- M18 let one viewer hold several seats: `ViewerControllers`, `ControlCancel { what: Seat(SeatId?) }`, a viewer on several seats in `SessionStatus`, and viewer IPC v10 (controllers by slot, the seat list with the controller driving each, rumble per seat).
+- P6 added the stream window's volume: viewer IPC v11 (`VOLUME`, `VOLUME_CHANGED`), with no wire change. P7's host stream level changed neither.
 - The rest is a draft for later milestones.
 
 ## Versioning
@@ -475,7 +477,7 @@ On the host, while streaming, with Ctrl+Alt+Shift held (`couch_platform_win::hos
 - Backspace is the panic key;
 - Y accepts and N declines the oldest request for a seat (M8), but only once it has been pending for 1 s, so a key meant for one request never answers another that just arrived in its place. The host overlay shows the requests and these keys over the game.
 
-The user may move each row to another key in Settings (P3), never its modifiers: chord rows keep Ctrl+Alt+Shift, and the row that works alone takes only F-keys. Only keys from `shortcuts::KEYS` are allowed (letters, digits, F-keys but F4, Backspace, punctuation): never Esc, Tab, Delete, the gray navigation keys (keyboards wrap them in fake Shift events the panic-key hook can't tell from Shift), Enter, Space, the modifiers, the Windows keys, Pause, Print Screen or the numpad. No two rows share a key, the panic key included, and the panic key can be moved but not removed. The keys are saved per profile in `shortcuts.json`; the host's keys apply at the next Go live, the viewer's in the next stream window (the `0x09` frame).
+The user may move each row to another key in Settings (P3), never its modifiers: chord rows keep Ctrl+Alt+Shift, and the row that works alone takes only F-keys. Only keys from `shortcuts::KEYS` are allowed (letters, digits, F-keys but F4, Backspace, punctuation): never Esc, Tab, Delete, the gray navigation keys (keyboards wrap them in fake Shift events the panic-key hook can't tell from Shift), Enter, Space, the modifiers, the Windows keys, Pause, Print Screen or the numpad. No two rows share a key, the panic key included, and the panic key can be moved but not removed. The keys are saved per profile in `shortcuts.json`; the host's keys apply at the next session's start, the viewer's in the next stream window (the `0x09` frame).
 
 **The HUD's bar.** The session bar (title, host, who plays, this viewer's state, a note, and buttons for the same actions plus Leave) takes clicks only while the mouse is free. A click on it goes to the HUD alone: it is never forwarded and never captures the mouse.
 

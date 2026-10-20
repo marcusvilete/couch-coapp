@@ -197,6 +197,12 @@ pub enum Command {
     },
     /// In our session: stops streaming; viewers stay, and keep their seats.
     StopStream,
+    /// How loud guests hear our stream's sound (P7): 0 to 100% of the game's
+    /// turns it down, up to 400% boosts it (peaks rounded off within full
+    /// scale). Applies at once, and is remembered for our next sessions.
+    SetStreamLevel {
+        percent: u16,
+    },
     /// Ends our session: input released, the pads unplugged, the host's
     /// controller shown again.
     EndSession,
@@ -582,6 +588,9 @@ pub struct SessionView {
     pub stream: StreamStateView,
     /// For the host: what is streamed, while it is.
     pub streaming: Option<StreamView>,
+    /// For the host: how loud guests hear the sound, 0 to 400% of the game's
+    /// (P7); `None` for others' sessions.
+    pub sound_level: Option<u16>,
 }
 
 /// Whether a session streams anything (M19).
@@ -830,6 +839,10 @@ impl fmt::Debug for Command {
                 .field("upload_mbps", upload_mbps)
                 .finish_non_exhaustive(),
             Self::StopStream => f.write_str("StopStream"),
+            Self::SetStreamLevel { percent } => f
+                .debug_struct("SetStreamLevel")
+                .field("percent", percent)
+                .finish(),
             Self::EndSession => f.write_str("EndSession"),
             Self::Watch { room, host } => f
                 .debug_struct("Watch")
@@ -1038,6 +1051,14 @@ pub enum Event {
     /// A room's name, members or connections changed.
     RoomChanged {
         room: RoomView,
+    },
+    /// While we stream sound: how loud guests hear it, after our level
+    /// (P7), four times a second. Peak and average, in whole dB below full
+    /// scale (-90 is silence).
+    StreamLevel {
+        room: String,
+        peak_db: i8,
+        average_db: i8,
     },
     RoomRemoved {
         room: String,
