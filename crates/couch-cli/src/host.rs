@@ -133,7 +133,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             );
             Some(LocalSeat {
                 member: MemberId(*endpoint.id().as_bytes()),
-                controller: chosen.ids,
+                controllers: vec![chosen.ids],
                 hide: args.hide_host_pad,
             })
         }
@@ -151,7 +151,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             rc_trace: args.rc_trace.clone(),
             netem_elapsed,
             replace_grace: REPLACE_GRACE,
-            local,
+            local: local.clone(),
         },
     )
     .await;
@@ -195,6 +195,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         match stream.local_seat() {
             Some(Ok(())) => {
                 holders[0] = Some(local.member);
+                // Its one controller drives seat 0: said before the claim.
+                stream.host_seats(vec![SeatId(0)]);
                 stream.claim(SeatId(0), local.member);
                 host = Some(local.member);
             }

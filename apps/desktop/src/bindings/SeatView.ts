@@ -20,4 +20,9 @@ holder: string | null,
 /**
  * The host plays it with their own controller.
  */
-host: boolean, };
+host: boolean, 
+/**
+ * For the host: which of their controllers drives it (M23), by its
+ * place in [`SessionView::host_controllers`]; set while they play it.
+ */
+hostController: number | null, };

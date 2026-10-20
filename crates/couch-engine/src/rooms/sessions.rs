@@ -86,9 +86,9 @@ struct Hosting {
     /// Whether the streamed window is in front, as last reported; `None`
     /// before the first report of a stream, and always for a screen.
     in_front: Option<bool>,
-    /// Our own controller, if we chose to play through a seat: its name, or
-    /// why it can't.
-    controller: Option<Result<String, String>>,
+    /// Our own controllers, if we chose to play through seats: their names,
+    /// by controller (M23), or why they can't.
+    controllers: Option<Result<Vec<String>, String>>,
     /// How loud guests hear the sound, 0 to 400% (P7): the profile's,
     /// applied to the pipeline once it has started.
     sound_level: u16,
@@ -179,7 +179,7 @@ pub(super) struct StartSession {
     pub title: String,
     pub max_viewers: u8,
     pub input: InputSetup,
-    pub controller: Option<HostController>,
+    pub controllers: Vec<HostController>,
 }
 
 /// [`Command::StartStream`]'s fields.
@@ -834,6 +834,11 @@ impl Actor {
                         pipeline.claim(seat, member);
                     }
                 }
+                SessionEffect::HostSeats(seats) => {
+                    if let Some(pipeline) = self.pipeline() {
+                        pipeline.host_seats(seats);
+                    }
+                }
                 SessionEffect::Requested(member, seat) => {
                     tracing::info!(member = ?member, ?seat, "a viewer asks for a seat");
                     let label = self
@@ -878,7 +883,7 @@ impl Actor {
     // ---- Our session ----
 
     /// Starts our session, with nothing streamed yet (M19). Answers through
-    /// `reply` once the pads are plugged in and our controller hidden; the
+    /// `reply` once the pads are plugged in and our controllers hidden; the
     /// error comes back too, for the caller's log.
     pub(super) fn start_session(
         &mut self,
@@ -925,15 +930,16 @@ impl Actor {
         }
         let session = SessionId(u64::from_le_bytes(random()?));
         let seats = start.input.seats();
-        // Our controller plays through a seat only if one has a pad.
-        let controller = start
-            .controller
-            .filter(|_| seats.iter().any(|s| s.has_pad()));
+        // Our controllers play through seats only on seats with a pad, one
+        // each: any beyond those stay out.
+        let mut controllers = start.controllers;
+        controllers.truncate(seats.iter().filter(|s| s.has_pad()).count());
         let config = SessionConfig {
             title: start.title.trim().to_string(),
             seats: seats.clone(),
             max_viewers: start.max_viewers,
-            host: controller.as_ref().map(|_| self.me),
+            host: (!controllers.is_empty()).then_some(self.me),
+            host_controllers: controllers.len() as u8,
         };
         let host_session = HostSession::new(session, config)?;
         let options = HostOptions {
@@ -946,12 +952,15 @@ impl Actor {
             rc_trace: None,
             netem_elapsed: None,
             replace_grace: self.replace_grace,
-            local: controller.as_ref().map(|c| LocalSeat {
+            local: (!controllers.is_empty()).then(|| LocalSeat {
                 member: self.me,
-                controller: ControllerIds {
-                    vendor: c.vendor,
-                    product: c.product,
-                },
+                controllers: controllers
+                    .iter()
+                    .map(|c| ControllerIds {
+                        vendor: c.vendor,
+                        product: c.product,
+                    })
+                    .collect(),
                 hide: true,
             }),
         };
@@ -970,7 +979,8 @@ impl Actor {
             // The main screen's, until something is streamed.
             overlay_area: self.backend.overlay_area(&Source::PrimaryScreen),
             in_front: None,
-            controller: controller.map(|c| Ok(c.name)),
+            controllers: (!controllers.is_empty())
+                .then(|| Ok(controllers.into_iter().map(|c| c.name).collect())),
             sound_level: crate::store::host_level(&self.data_dir),
         });
         Ok((session, options))
@@ -1056,11 +1066,11 @@ impl Actor {
                 }
             },
         };
-        // Our controller plays through a seat, or couldn't after all.
+        // Our controllers play through seats, or couldn't after all.
         if let Some(Err(e)) = stream.local_seat() {
-            tracing::warn!("our controller can't play through a seat: {e}");
+            tracing::warn!("our controllers can't play through seats: {e}");
             h.session.without_host();
-            h.controller = Some(Err(e.clone()));
+            h.controllers = Some(Err(e.clone()));
         }
         stream.set_sound_level(h.sound_level);
         let start = h.session.start();
@@ -1475,7 +1485,7 @@ impl Actor {
 
     /// Ends our session: input is released first, then the room hears why.
     /// Returns the pipeline for the caller to stop (or wait for), which
-    /// stops the stream too, unplugs the pads and shows our controller.
+    /// stops the stream too, unplugs the pads and shows our controllers.
     fn end_hosting(&mut self, reason: EndReason, now: Instant) -> Option<HostPipeline> {
         let mut h = self.sessions.hosting.take()?;
         *self.panic.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -1553,9 +1563,10 @@ impl Actor {
     pub(super) fn play_seat(
         &mut self,
         seat: SeatId,
+        controller: u8,
         now: Instant,
     ) -> Result<Response, EngineError> {
-        self.our_session(|s| Ok(s.play(seat)?), now)
+        self.our_session(|s| Ok(s.play(seat, controller)?), now)
     }
 
     pub(super) fn allow_control(&mut self, now: Instant) -> Result<Response, EngineError> {
@@ -1978,7 +1989,7 @@ impl Actor {
             .zip(kinds)
             .enumerate()
             .map(|(i, (label, kind))| {
-                let host = status.is_some_and(|s| s.host_seat == Some(SeatId(i as u8)));
+                let host = status.is_some_and(|s| s.host_seats.contains(&SeatId(i as u8)));
                 let holder = match host {
                     true => Some(w.host),
                     false => status.and_then(|s| s.holders.get(i).copied().flatten()),
@@ -2146,7 +2157,17 @@ impl Actor {
                 max_viewers: s.config().max_viewers,
                 viewers: s.viewers().iter().map(MemberId::to_hex).collect(),
                 viewer_controllers: s.viewers().iter().map(|v| s.controllers_of(*v)).collect(),
-                seats: seat_views(&s.config().seats, s.holders(), self.me),
+                seats: seat_views(&s.config().seats, s.holders(), self.me)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut seat)| {
+                        seat.host_controller = seat
+                            .host
+                            .then(|| s.host_controller_on(SeatId(i as u8)))
+                            .flatten();
+                        seat
+                    })
+                    .collect(),
                 host_on_seats: s.host().is_some(),
                 control_paused: s.control_paused(),
                 role: SessionRole::Host,
@@ -2165,8 +2186,13 @@ impl Actor {
                     .clone()
                     .map(|(accept, decline)| AnswerKeys { accept, decline }),
                 overlay_area: h.overlay_area,
-                host_controller: h.controller.clone().and_then(Result::ok),
-                host_controller_problem: h.controller.clone().and_then(Result::err),
+                host_controllers: h
+                    .controllers
+                    .clone()
+                    .and_then(Result::ok)
+                    .unwrap_or_default(),
+                host_homes: s.host_homes().iter().map(|seat| seat.0).collect(),
+                host_controller_problem: h.controllers.clone().and_then(Result::err),
                 stream,
                 streaming: streaming.cloned(),
                 sound_level: Some(h.sound_level),
@@ -2192,11 +2218,10 @@ impl Actor {
                 || vec![None; listing.announce.seats.len()],
                 |s| s.holders.clone(),
             );
-            if let Some(slot) = status
-                .and_then(|s| s.host_seat)
-                .and_then(|seat| holders.get_mut(usize::from(seat.0)))
-            {
-                *slot = Some(*host);
+            for seat in status.map_or(&[][..], |s| &s.host_seats) {
+                if let Some(slot) = holders.get_mut(usize::from(seat.0)) {
+                    *slot = Some(*host);
+                }
             }
             views.push(SessionView {
                 host: host.to_hex(),
@@ -2215,7 +2240,8 @@ impl Actor {
                 panic_key: None,
                 answer_keys: None,
                 overlay_area: None,
-                host_controller: None,
+                host_controllers: Vec::new(),
+                host_homes: Vec::new(),
                 host_controller_problem: None,
                 stream: stream_view(status.map_or(StreamState::Waiting, |s| s.stream)),
                 streaming: None,
@@ -2249,6 +2275,7 @@ fn seat_views(seats: &[SeatKind], holders: &[Option<MemberId>], host: MemberId) 
                 keyboard_mouse: kind.has_keyboard_mouse(),
                 holder: holder.map(|h| h.to_hex()),
                 host: holder == Some(host),
+                host_controller: None,
             }
         })
         .collect()

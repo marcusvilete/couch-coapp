@@ -224,7 +224,11 @@ impl Drop for Hidden {
         live().retain(|m| *m != self.marker);
         let shown = Control::open_patiently().and_then(|control| {
             if self.session {
-                // HidHide would drop them when we exit anyway.
+                // HidHide would drop them when we exit anyway. This clears
+                // every session entry of ours, other `Hidden`s' included:
+                // fine while a host's guards (M23: one per controller model)
+                // all drop together, as the pipeline's do. Guards that drop
+                // apart would need each to remove only its own.
                 let _ = control.clear_session();
             }
             undo_with(&control, &self.marker, &self.record)

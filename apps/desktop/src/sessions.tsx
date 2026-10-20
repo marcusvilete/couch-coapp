@@ -345,12 +345,17 @@ function HostPanel(props: {
   const single = s.seats.length === 1;
   const controllersOf = (member: string) => s.viewerControllers[s.viewers.indexOf(member)] ?? 0;
   const pass = (member: string, seat: number) => run(`pass-${member}`, { type: "passControl", member, seat });
-  // Our own controller plays through a seat (hidden from games), or we play
-  // outside the seats on whatever the game sees directly.
-  const pad = s.hostController;
-  const ourSeat = s.seats.findIndex((seat) => seat.host);
+  // Our own controllers play through seats (hidden from games; M23: one
+  // seat each), or we play outside the seats on whatever the game sees.
+  const pads = numbered(s.hostControllers);
+  const pad = pads.length > 0 ? listed(pads) : null;
+  const padOf = (seat: SessionView["seats"][number]) =>
+    (seat.hostController != null ? pads[seat.hostController] : undefined) ?? "your controller";
+  const ours = s.seats.flatMap((seat, i) => (seat.host ? [i] : []));
   const holderName = (seat: SessionView["seats"][number]) =>
-    seat.host ? `you (${pad ?? "your controller"})` : seat.holder ? nameOf(room, seat.holder) : "free";
+    seat.host ? `you (${padOf(seat)})` : seat.holder ? nameOf(room, seat.holder) : "free";
+  const playHere = (seat: number, controller: number) =>
+    run(`play-${seat}`, { type: "playSeat", seat, controller });
   return (
     <section className="host-panel" aria-label="Your session">
       <div className="host-head">
@@ -367,15 +372,16 @@ function HostPanel(props: {
 
       {pad && (
         <p className="banner" role="status">
-          Your {pad} is hidden from games for the whole session, so start the game now: it never sees the controller,
-          only the seats. A game that was already running keeps it until you reconnect it once (turn it off and on, or
-          unplug it and plug it back into the same port). If a seat gets no player in a Steam game, turn Steam Input off
-          for that game.
+          Your {pad} {pads.length === 1 ? "is" : "are"} hidden from games for the whole session, so start the game now:
+          it never sees {pads.length === 1 ? "the controller" : "them"}, only the seats. A game that was already running
+          keeps a controller until you reconnect it once (turn it off and on, or unplug it and plug it back into the same
+          port). If a seat gets no player in a Steam game, turn Steam Input off for that game.
         </p>
       )}
       {s.hostControllerProblem && (
         <p className="banner warn" role="status">
-          Your controller can't play through a seat: {s.hostControllerProblem}. You play on it directly, beside the seats.
+          Your controllers can't play through seats: {s.hostControllerProblem}. You play on them directly, beside the
+          seats.
         </p>
       )}
 
@@ -441,27 +447,61 @@ function HostPanel(props: {
                 {seat.holder && (
                   <button
                     disabled={busy != null}
-                    title={seat.host ? `Your ${pad ?? "controller"} stops playing it; it stays empty` : "It stays empty"}
+                    title={seat.host ? `Your ${padOf(seat)} stops playing it; it stays empty` : "It stays empty"}
                     onClick={() => run(`take-${i}`, { type: "takeBackControl", seat: i })}
                   >
                     {seat.host ? "Leave" : "Take back"}
                   </button>
                 )}
-                {pad && seat.pad && !seat.host && (
+                {pads.length === 1 && seat.pad && !seat.host && (
                   <button
                     disabled={busy != null}
                     title={seat.holder ? `${nameOf(room, seat.holder)} loses it` : undefined}
-                    onClick={() => run(`play-${i}`, { type: "playSeat", seat: i })}
+                    onClick={() => playHere(i, 0)}
                   >
                     Play here
                   </button>
+                )}
+                {pads.length > 1 && seat.pad && (
+                  <select
+                    className="pass-seat"
+                    aria-label={`Play ${seat.label} with one of your controllers`}
+                    value=""
+                    disabled={busy != null}
+                    onChange={(e) => playHere(i, Number(e.target.value))}
+                  >
+                    <option value="" disabled>
+                      Play here with…
+                    </option>
+                    {pads.map((name, k) => {
+                      // Each controller's own seat, held or not: onto
+                      // another's own seat, the two swap (HostSession::play).
+                      const own = s.hostHomes[k];
+                      if (own === i && seat.host) return null;
+                      const other = s.hostHomes.findIndex((home, j) => j !== k && home === i);
+                      const ownSeat = own != null ? s.seats[own] : undefined;
+                      return (
+                        <option key={k} value={k}>
+                          {name}
+                          {own === i
+                            ? " — back on its seat"
+                            : other >= 0
+                              ? ` — swaps seats with your ${pads[other]}`
+                              : ownSeat?.host
+                                ? ` — leaves ${ownSeat.label}`
+                                : ""}
+                          {!seat.host && seat.holder ? ` (${nameOf(room, seat.holder)} loses it)` : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
                 )}
               </li>
             ))}
           </ul>
           <p className="hint">
             {pad
-              ? "Every player in the game is one of these seats, yours included, so any of them can be handed over. A seat you take back or leave stays empty; Play here puts your controller on one. The game numbers its players itself, usually in the order controllers join."
+              ? `Every player in the game is one of these seats, yours included, so any of them can be handed over. A seat you take back or leave stays empty; Play here puts ${pads.length === 1 ? "your controller" : "one of your controllers"} on one. The game numbers its players itself, usually in the order controllers join.`
               : "The game numbers its players itself, usually in the order controllers join, and your own controller counts: it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat doesn't respond, move them to another one."}
           </p>
         </div>
@@ -534,9 +574,9 @@ function HostPanel(props: {
 
       <p className="hint">
         {pad
-          ? ourSeat >= 0
-            ? `You play ${single ? "the seat" : s.seats[ourSeat].label} with your ${pad}; your keyboard and mouse work beside the seats.`
-            : `Your ${pad} plays no seat now: use Play here to take one. Your keyboard and mouse still work.`
+          ? ours.length > 0
+            ? `You play ${listed(ours.map((i) => `${single ? "the seat" : s.seats[i].label} with your ${padOf(s.seats[i])}`))}; your keyboard and mouse work beside the seats.`
+            : `Your ${pad} ${pads.length === 1 ? "plays" : "play"} no seat now: use Play here to take one. Your keyboard and mouse still work.`
           : single
             ? s.seats[0].holder
               ? `${nameOf(room, s.seats[0].holder)} is playing; your own controller, keyboard and mouse still work too.`
@@ -568,8 +608,10 @@ const FRAME_RATES = [120, 60, 30];
 type Picked = { kind: "window" | "screen"; id: string; title: string };
 
 /** Where the app remembers choices (this profile's own web storage). The
- * controller's key keeps its name from before M19, so the choice stays. */
+ * single controller's key keeps its name from before M19, and is still read
+ * when no list of them (M23) is stored, so the choice stays. */
 const MY_PAD_KEY = "couch.goLive.controller";
+const MY_PADS_KEY = "couch.session.controllers";
 const SETUP_KEY = "couch.session.setup";
 const TITLE_KEY = "couch.session.title";
 const FPS_KEY = "couch.stream.fps";
@@ -577,6 +619,52 @@ const QUALITY_KEY = "couch.stream.quality";
 
 function padKey(c: HostController): string {
   return `${c.vendor}:${c.product}`;
+}
+
+/** Each listed controller's key: its ids, and for a second of one model its
+ * place among them ("1356:3302#2"), so two of one model are two choices,
+ * told apart by the order they are found (M23). */
+function padKeys(list: HostController[]): string[] {
+  const seen = new Map<string, number>();
+  return list.map((c) => {
+    const n = (seen.get(padKey(c)) ?? 0) + 1;
+    seen.set(padKey(c), n);
+    return n === 1 ? padKey(c) : `${padKey(c)}#${n}`;
+  });
+}
+
+/** A `padKeys` key's model (its ids) and its place among controllers of that
+ * model (1 for the first). */
+function modelOf(key: string): string {
+  return key.split("#")[0];
+}
+
+function ordinalOf(key: string): number {
+  return Number(key.split("#")[1] ?? 1);
+}
+
+/** Names with a number on those that repeat ("DualSense 1", "DualSense 2"):
+ * two controllers of one model, in the order found (M23). */
+function numbered(names: string[]): string[] {
+  const seen = new Map<string, number>();
+  return names.map((name) => {
+    const n = (seen.get(name) ?? 0) + 1;
+    seen.set(name, n);
+    return names.filter((other) => other === name).length > 1 ? `${name} ${n}` : name;
+  });
+}
+
+/** The controllers last chosen to play on seats, as keys: the list (M23),
+ * or the single choice from before it; `null` if none was ever made. */
+function storedPads(): string[] | null {
+  try {
+    const list = JSON.parse(readStored(MY_PADS_KEY) ?? "null");
+    if (Array.isArray(list) && list.every((k) => typeof k === "string")) return list;
+  } catch {
+    // Unreadable: as if none.
+  }
+  const one = readStored(MY_PAD_KEY);
+  return one == null ? null : one === "" ? [] : [one];
 }
 
 function readStored(key: string): string | null {
@@ -999,8 +1087,9 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
   const [viewers, setViewers] = useState(4);
   const [controllers, setControllers] = useState(() => storedSetup().controllers);
   const [kbm, setKbm] = useState<KeyboardMouseSeat>(() => storedSetup().keyboardMouse);
-  // Our controller to play through a seat, as `padKey`; "" plays outside.
-  const [myPad, setMyPad] = useState("");
+  // Our controllers to play through seats, as `padKeys` (M23), in the
+  // order listed: each takes the next seat with a pad. None plays outside.
+  const [myPads, setMyPads] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1009,12 +1098,12 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
     request({ type: "listSources" }, "sources")
       .then((list) => {
         setSources(list);
-        // The last choice comes back if that controller is here; otherwise
-        // the first one, if it can be hidden.
-        const last = readStored(MY_PAD_KEY);
-        const keys = list.hostControllers.map(padKey);
+        // The last choice comes back, for the controllers here; with none
+        // ever made, the first one, if it can be hidden.
+        const last = storedPads();
+        const keys = padKeys(list.hostControllers);
         const ready = list.hiding === "ready";
-        setMyPad(!ready ? "" : last === "" ? "" : last != null && keys.includes(last) ? last : (keys[0] ?? ""));
+        setMyPads(!ready ? [] : last == null ? keys.slice(0, 1) : keys.filter((k) => last.includes(k)));
       })
       .catch((e) => setLoadError(errorText(e)));
   };
@@ -1024,10 +1113,26 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
   const kbmChoice: KeyboardMouseSeat = controllers === 0 && kbm === "withController1" ? "ownSeat" : kbm;
   const input: InputSetup = { controllers, keyboardMouse: kbmChoice };
   const noSeats = controllers === 0 && kbmChoice === "none";
-  // Our controller needs a seat with a pad.
+  // Our controllers need seats with a pad: one each, in the order listed.
   const padSeat = controllers > 0;
   const hostControllers = sources?.hostControllers ?? [];
-  const controller = padSeat ? (hostControllers.find((c) => padKey(c) === myPad) ?? null) : null;
+  const keys = padKeys(hostControllers);
+  const names = numbered(hostControllers.map((c) => c.name));
+  const chosenKeys = padSeat ? keys.filter((k) => myPads.includes(k)).slice(0, controllers) : [];
+  const chosen = hostControllers.filter((_, i) => chosenKeys.includes(keys[i]));
+  // Two of one model are told apart by the order found (the reader takes the
+  // first free one): choosing "DualSense 2" chooses "DualSense 1" too, and
+  // leaving out the first leaves out the second.
+  const sameBefore = (key: string) =>
+    keys.filter((k) => modelOf(k) === modelOf(key) && ordinalOf(k) < ordinalOf(key));
+  const sameAfter = (key: string) =>
+    keys.filter((k) => modelOf(k) === modelOf(key) && ordinalOf(k) > ordinalOf(key));
+  const toggle = (key: string, on: boolean) =>
+    setMyPads((pads) =>
+      on
+        ? keys.filter((k) => k === key || pads.includes(k) || sameBefore(key).includes(k))
+        : pads.filter((k) => k !== key && !sameAfter(key).includes(k)),
+    );
   const others = props.room.members.length - 1;
 
   async function submit(e: FormEvent) {
@@ -1052,15 +1157,19 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
           title: title.trim(),
           max_viewers: viewers,
           input,
-          controller,
+          controllers: chosen,
         },
         "room",
       );
       writeStored(SETUP_KEY, JSON.stringify(input));
       writeStored(TITLE_KEY, title.trim());
-      // Only a real choice is remembered: with HidHide missing or busy the
-      // select was forced to "none".
-      if (hostControllers.length > 0 && sources?.hiding === "ready") writeStored(MY_PAD_KEY, myPad);
+      // Only a real choice is remembered: with HidHide missing or busy, or
+      // no controller seat, none could be made. It keeps the controllers
+      // remembered but not plugged in now: they come back when they are.
+      if (padSeat && hostControllers.length > 0 && sources?.hiding === "ready") {
+        const absent = (storedPads() ?? []).filter((k) => !keys.includes(k));
+        writeStored(MY_PADS_KEY, JSON.stringify([...chosenKeys, ...absent]));
+      }
       props.onStarted(room);
     } catch (e) {
       setError(errorText(e));
@@ -1086,7 +1195,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
     >
       <form id="start-session" onSubmit={submit} className="form">
         <p className="hint">
-          The seats are set up first, and your controller hidden from games, before any game starts. Then you stream a
+          The seats are set up first, and your controllers hidden from games, before any game starts. Then you stream a
           window or a screen from the session's panel, and stop or switch whenever you like.
         </p>
         <label>
@@ -1148,7 +1257,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
               Give the guests at least one seat: a controller, or keyboard and mouse.
             </p>
           )}
-          {(sources?.controllers ?? 0) > 0 && controller == null && padSeat && (
+          {(sources?.controllers ?? 0) > chosen.length && padSeat && (
             <p className="banner warn" role="status">
               A controller is plugged into this PC. Games may give it a player's place, and then a guest's controller may not
               work. Play on a seat with it (below), or unplug it.
@@ -1157,25 +1266,37 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
           {loadError && <p className="error">{loadError}</p>}
           {sources && hostControllers.length > 0 && padSeat && (
             <>
-              <label>
-                Your controller
-                <select value={myPad} disabled={sources.hiding !== "ready"} onChange={(e) => setMyPad(e.target.value)}>
-                  <option value="">Not on a seat: the game sees it directly</option>
-                  {hostControllers.map((c) => (
-                    <option key={padKey(c)} value={padKey(c)}>
-                      {c.name}: you start on Controller 1
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <fieldset className="own-controllers" disabled={sources.hiding !== "ready"}>
+                <legend>Your controllers: one seat each</legend>
+                {hostControllers.map((_, i) => {
+                  const on = chosenKeys.includes(keys[i]);
+                  const place = chosenKeys.indexOf(keys[i]);
+                  // Ticking it adds the earlier ones of its model too.
+                  const adds = 1 + sameBefore(keys[i]).filter((k) => !chosenKeys.includes(k)).length;
+                  const full = !on && chosenKeys.length + adds > controllers;
+                  return (
+                    <label key={keys[i]} className="check">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={full}
+                        title={full ? "Every controller seat has one of yours: add a seat first" : undefined}
+                        onChange={(e) => toggle(keys[i], e.target.checked)}
+                      />
+                      {names[i]}
+                      {on && <span className="hint"> · you start on Controller {place + 1}</span>}
+                    </label>
+                  );
+                })}
+              </fieldset>
               <p className="hint">
                 {sources.hiding === "notInstalled"
                   ? "To play on a seat with your controller, install HidHide: Settings → Drivers (it needs administrator rights, then a restart)."
                   : sources.hiding === "busy"
                     ? "HidHide is busy right now. If its configuration window is open, close it, then start the session again."
-                    : controller
-                      ? "It is hidden from games for the whole session and plays its seat through Couch Co-App, so every seat, yours included, can be handed over. Start the game after the session: a game already running keeps the controller until you reconnect it once. For a Steam game, turn Steam Input off for it (the game's Properties → Controller): otherwise Steam may keep a player for your hidden controller, and one seat gets none."
-                      : "You play outside the seats, as the game sees your controller."}
+                    : chosen.length > 0
+                      ? `${chosen.length === 1 ? "It is" : "They are"} hidden from games for the whole session and ${chosen.length === 1 ? "plays its seat" : "each play their own seat"} through Couch Co-App, so every seat, yours included, can be handed over. Start the game after the session: a game already running keeps a controller until you reconnect it once. For a Steam game, turn Steam Input off for it (the game's Properties → Controller): otherwise Steam may keep a player for a hidden controller, and one seat gets none.`
+                      : "You play outside the seats, as the game sees your controllers."}
               </p>
             </>
           )}

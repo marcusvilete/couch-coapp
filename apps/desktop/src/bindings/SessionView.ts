@@ -64,13 +64,19 @@ answerKeys: AnswerKeys | null,
  */
 overlayArea: ScreenArea | null, 
 /**
- * For the host: their controller playing through a seat, hidden from
- * games, if they chose one and it works.
+ * For the host: their controllers playing through seats, hidden from
+ * games, by name, if they chose some and they work (M23: several).
  */
-hostController: string | null, 
+hostControllers: Array<string>, 
 /**
- * For the host: why the controller they chose doesn't play through a
- * seat (they play outside the seats instead).
+ * For the host: each of those controllers' own seat, by controller
+ * (M23), held or not (lent to a viewer, left empty): Play here onto
+ * another controller's own seat swaps the two.
+ */
+hostHomes: Array<number>, 
+/**
+ * For the host: why the controllers they chose don't play through
+ * seats (they play outside the seats instead).
  */
 hostControllerProblem: string | null, 
 /**

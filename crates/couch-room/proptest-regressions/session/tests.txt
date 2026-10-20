@@ -7,3 +7,6 @@
 cc c9ed0f7a60c431dc46590e4673e5204b3f5b770935c83ac87e5373ce383f8584 # shrinks to host_plays = true, ops = [Deliver, Play(1), Play(0), Allow]
 cc 0e1ae697f57dfae97ed08a680cfb4e789367ff7f174f64b041f74f7b429444a3 # shrinks to host_plays = false, ops = [Join(2), Request(2, 2), Pass(2, 0), Answer(2, true), Deliver, Deliver]
 cc cca197905ee4f625d2de77f28f2d61e8c5d8a4f2d3061dfbdbb217db2c9f496c # shrinks to host_plays = false, ops = [Join(3), Pass(3, 1), Controllers(3, 2), Pass(3, 0), Deliver, Deliver]
+cc c7cc67cf6fbd5ff2bfd312a3de03c5b838f71bc536d72c2b1b54361c0e5545db # shrinks to host_controllers = 1, ops = [Play(1, 0)]
+cc 4541f5ffa75661eada1522606d58ec6d6ed3bd98e105d92dc376920d6c3f9113 # shrinks to host_controllers = 2, ops = [Join(0)]
+cc 4f850398de60dd5fa7c57a5e2a27fe976c7e6df79149eed7ec2f1fac2d612b79 # shrinks to host_controllers = 0, ops = [Join(1), Controllers(1, 2), Pass(1, 0), Pass(1, 1)]

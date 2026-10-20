@@ -176,11 +176,12 @@ pub enum Command {
         /// Keyboard and mouse need a window as the stream's source; they go
         /// in only while it is in front.
         input: InputSetup,
-        /// The host's own controller, to play through a seat: hidden from
-        /// games for the session, it drives the first seat with a pad.
-        /// `None` plays outside the seats, with whatever the game sees
-        /// directly.
-        controller: Option<HostController>,
+        /// The host's own controllers, to play through seats (M23): hidden
+        /// from games for the session, each drives its own seat with a pad,
+        /// in seat order. Empty plays outside the seats, with whatever the
+        /// game sees directly. Two of one model are told apart by the order
+        /// they are found.
+        controllers: Vec<HostController>,
     },
     /// In our session: streams `source` (M19), stopping a stream already
     /// running first.
@@ -241,10 +242,13 @@ pub enum Command {
     TakeBackControl {
         seat: Option<u8>,
     },
-    /// While streaming, with our controller playing through the seats: play
-    /// this seat with it. A viewer on that seat loses it.
+    /// With our controllers playing through the seats: play this seat with
+    /// our controller `controller` (M23, by its place in the session's
+    /// list). A viewer on that seat loses it; on a seat another of ours
+    /// plays, the two swap.
     PlaySeat {
         seat: u8,
+        controller: u8,
     },
     /// While streaming: let viewers have control again after the panic key.
     AllowControl,
@@ -500,6 +504,9 @@ pub struct SeatView {
     pub holder: Option<String>,
     /// The host plays it with their own controller.
     pub host: bool,
+    /// For the host: which of their controllers drives it (M23), by its
+    /// place in [`SessionView::host_controllers`]; set while they play it.
+    pub host_controller: Option<u8>,
 }
 
 /// A viewer asking for a seat, for the host.
@@ -578,11 +585,15 @@ pub struct SessionView {
     /// For the host: where the overlay goes, the work area of the monitor
     /// showing what we stream; `None` where unknown.
     pub overlay_area: Option<ScreenArea>,
-    /// For the host: their controller playing through a seat, hidden from
-    /// games, if they chose one and it works.
-    pub host_controller: Option<String>,
-    /// For the host: why the controller they chose doesn't play through a
-    /// seat (they play outside the seats instead).
+    /// For the host: their controllers playing through seats, hidden from
+    /// games, by name, if they chose some and they work (M23: several).
+    pub host_controllers: Vec<String>,
+    /// For the host: each of those controllers' own seat, by controller
+    /// (M23), held or not (lent to a viewer, left empty): Play here onto
+    /// another controller's own seat swaps the two.
+    pub host_homes: Vec<u8>,
+    /// For the host: why the controllers they chose don't play through
+    /// seats (they play outside the seats instead).
     pub host_controller_problem: Option<String>,
     /// Whether anything is streamed (M19).
     pub stream: StreamStateView,
@@ -817,14 +828,14 @@ impl fmt::Debug for Command {
                 room,
                 max_viewers,
                 input,
-                controller,
+                controllers,
                 ..
             } => f
                 .debug_struct("StartSession")
                 .field("room", room)
                 .field("max_viewers", max_viewers)
                 .field("input", input)
-                .field("controller", controller)
+                .field("controllers", controllers)
                 .finish_non_exhaustive(),
             // Never the window's title: it may say anything.
             Self::StartStream {
@@ -872,7 +883,11 @@ impl fmt::Debug for Command {
                 .debug_struct("TakeBackControl")
                 .field("seat", seat)
                 .finish(),
-            Self::PlaySeat { seat } => f.debug_struct("PlaySeat").field("seat", seat).finish(),
+            Self::PlaySeat { seat, controller } => f
+                .debug_struct("PlaySeat")
+                .field("seat", seat)
+                .field("controller", controller)
+                .finish(),
             Self::AllowControl => f.write_str("AllowControl"),
         }
     }
