@@ -48,6 +48,13 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// several seats in `SessionStatus`, and giving back one seat.
 pub const PROTOCOL_MINOR: u16 = 4;
 
+/// Each wire revision with the app's major.minor version that first carried
+/// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
+/// minor version bump** (`cargo xtask bump minor`): builds of different
+/// revisions refuse each other, so a patch release must never change it.
+/// The test `a_new_wire_revision_comes_with_a_minor_version` holds both.
+pub const REVISIONS: &[(u16, &str)] = &[(1, "0.8"), (2, "0.11"), (3, "0.11"), (4, "0.11")];
+
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC
 /// frame header, and as bits in what a viewer decodes (`SessionJoin`).
 pub mod codec {
@@ -58,4 +65,41 @@ pub mod codec {
     /// What a viewer decodes, as bits: H.264 always.
     pub const DECODES_H264: u8 = 1 << 0;
     pub const DECODES_HEVC: u8 = 1 << 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `major.minor` of a version, as numbers.
+    fn major_minor(version: &str) -> (u32, u32) {
+        let mut parts = version
+            .split('.')
+            .map(|p| p.parse::<u32>().expect("a number"));
+        (parts.next().expect("major"), parts.next().expect("minor"))
+    }
+
+    /// Builds of different wire revisions refuse each other, so a new one
+    /// must come with a new minor version, never in a patch: the last row of
+    /// `REVISIONS` is the revision in use, and the app's version is at least
+    /// the one that row names. Raise `PROTOCOL_MINOR` and this fails until
+    /// both the row and `cargo xtask bump minor` are there.
+    #[test]
+    fn a_new_wire_revision_comes_with_a_minor_version() {
+        let &(last, since) = REVISIONS.last().expect("revisions");
+        assert_eq!(
+            last, PROTOCOL_MINOR,
+            "PROTOCOL_MINOR is {PROTOCOL_MINOR}: add its row to REVISIONS with the next minor version, and bump to it (cargo xtask bump minor)"
+        );
+        let app = env!("CARGO_PKG_VERSION");
+        assert!(
+            major_minor(app) >= major_minor(since),
+            "revision {last} arrives in {since}, but the app is {app}: cargo xtask bump minor"
+        );
+        // Oldest first, one row per revision, versions never going back.
+        for pair in REVISIONS.windows(2) {
+            assert_eq!(pair[1].0, pair[0].0 + 1, "one row per revision");
+            assert!(major_minor(pair[1].1) >= major_minor(pair[0].1));
+        }
+    }
 }

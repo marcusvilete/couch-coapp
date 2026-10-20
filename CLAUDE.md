@@ -33,6 +33,7 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 | Front-end type check | `cd apps/desktop`, then `npx tsc --noEmit` |
 | Regenerate TypeScript bindings | `cargo test -p couch-engine` (writes `apps/desktop/src/bindings/`) |
 | Regenerate FFmpeg FFI bindings (after an FFmpeg bump; needs LLVM) | `cargo xtask gen-ffmpeg-bindings` |
+| Bump the app's version (every PR that changes the app; "Versions" below) | `cargo xtask bump patch` or `cargo xtask bump minor` |
 
 To run several instances with separate identities on one machine, set `COUCH_PROFILE=alice` before launching (letters, digits, `-`, `_`; lowercased, as Windows folder names ignore case). Each profile's data lives in `%LOCALAPPDATA%\CouchCoApp\profiles\<name>`: `identity.key` and `rooms\*.room` (sealed with DPAPI), `settings.json` (the name), `shortcuts.json`, `network.json`, `audio.json` (the stream window's volume, P6) and `host-audio.json` (the host's stream level, P7; written by the engine, not the room actor), and `webview\` (the UI's own storage, such as the room order and the last session setup).
 
@@ -127,7 +128,10 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 **Protocol changes**
 - Payloads may change in place (nothing is frozen, ADR 0009); prefer a new message type when that's just as simple. Decoders reject trailing bytes.
 - **Bump `couch_proto::PROTOCOL_MINOR` with every change to what members exchange** (M10a; permanent since [ADR 0009](docs/adr/0009-source-only-releases.md): there is no public binary release, so the wire format is never frozen). Builds of different revisions refuse each other right after `Hello` (close code `version`), and the app says who needs to update; without the bump, mismatched installs fail in confusing ways.
+- **A new wire revision is a minor version** (`couch_proto::REVISIONS` names the version each one arrived in): add its row and `cargo xtask bump minor` in the same PR. The test `a_new_wire_revision_comes_with_a_minor_version` fails otherwise.
 - Type ids with bit `0x8000` set are must-understand.
+
+**Versions.** Every PR that changes the app bumps the version once, in that PR: `cargo xtask bump patch` for fixes and small features, `cargo xtask bump minor` for a milestone or a new wire revision. It sets the same version in `Cargo.toml`, `tauri.conf.json`, `apps/desktop/package.json` and our crates in `Cargo.lock`; then say what the version carries in `docs/architecture.md`'s version line ("Installing"). PRs of docs, skills, tests or tooling alone don't bump. If two open PRs both bump, the one merged second takes the next number. So `main` always carries a version not yet handed out, and an installer can be built from it with no PR of its own (the `release-installer` skill).
 - Update `docs/protocol.md` with every wire change. The `protocol-change` skill has the full checklist.
 
 **Safety invariants.** Remote input is remote control of someone's PC. Never weaken these:

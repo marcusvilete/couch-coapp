@@ -11,8 +11,11 @@
 //!   repository) with a fresh relay token;
 //! - `relay-tool`: build the official relay server for testing here;
 //! - `notices`: write THIRD-PARTY-NOTICES.txt, the licences of everything
-//!   bundled with the app (needs cargo-about).
+//!   bundled with the app (needs cargo-about);
+//! - `bump patch|minor`: the app's version, the same in every file that
+//!   names it.
 
+mod bump;
 mod deps;
 mod doctor;
 mod ffmpeg_bindings;
@@ -42,9 +45,10 @@ fn main() -> ExitCode {
         Some("release-config") => relay::release_config(&root),
         Some("relay-tool") => relay::relay_tool(&root),
         Some("notices") => notices::generate(&root),
+        Some("bump") => bump::run(&root, std::env::args().nth(2).as_deref()),
         _ => {
             eprintln!(
-                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | doctor | release-config | relay-tool | notices>"
+                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | doctor | release-config | relay-tool | notices | bump patch|minor>"
             );
             return ExitCode::from(2);
         }

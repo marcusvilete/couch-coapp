@@ -120,7 +120,7 @@ Everyone in a room needs an installer from the same build of yours. A different 
 
   `build-installer.ps1 -InvitePage <address>` sets it for one build, and `-NoInvitePage` builds with plain `couchco://` links.
 - **Tests and the developer tools in [development.md](development.md).**
-- **A version bump,** unless you hand out a new installer to people who have an older one. Then bump it in `Cargo.toml`, `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json`, all the same.
+- **A version bump,** unless you hand out a new installer to people who have an older one. Then run `cargo xtask bump patch` (or `minor`, after changes that older builds can't talk to): it sets the same new version in every file that names it.
 
 ## If you change the code
 
