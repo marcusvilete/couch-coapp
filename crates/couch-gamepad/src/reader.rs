@@ -156,7 +156,8 @@ struct Sdl {
     /// change it (a DualSense's lights and report mode), so nothing is
     /// opened just to be listed.
     open: Vec<(JoystickId, Gamepad)>,
-    /// Pads not read: they could be our own.
+    /// Pads not read: virtual ones, and those that could be our own. Looked
+    /// at again at each listing.
     skipped: Vec<JoystickId>,
     events: EventPump,
     gamepads: GamepadSubsystem,
@@ -188,7 +189,24 @@ impl Sdl {
     }
 
     fn added(&mut self, which: JoystickId) {
+        self.consider(which, true);
+    }
+
+    /// Looks again at the pads skipped: one whose origin couldn't be told
+    /// when it came (its player light not set yet, say) may be physical.
+    fn recheck(&mut self) {
+        for which in std::mem::take(&mut self.skipped) {
+            self.consider(which, false);
+        }
+    }
+
+    fn consider(&mut self, which: JoystickId, first: bool) {
         if self.present.iter().any(|p| p.0 == which) || self.skipped.contains(&which) {
+            return;
+        }
+        // Looked at again but gone meanwhile (its removal not read yet):
+        // forgotten, never listed with no ids.
+        if !first && self.gamepads.vendor_for_id(which).is_none() {
             return;
         }
         let ids = ControllerIds {
@@ -199,13 +217,16 @@ impl Sdl {
             .gamepads
             .name_for_id(which)
             .unwrap_or_else(|_| "Controller".into());
-        if ids.could_be_ours() {
+        let path = self.gamepads.path_for_id(which).ok();
+        if let Some(why) = not_the_hosts(path.as_deref(), ids) {
             self.skipped.push(which);
-            tracing::info!(
-                "not reading {name:?} ({:04x}:{:04x}): it has our virtual pads' ids",
-                ids.vendor,
-                ids.product
-            );
+            if first {
+                tracing::info!(
+                    "not reading {name:?} ({:04x}:{:04x}): {why}",
+                    ids.vendor,
+                    ids.product
+                );
+            }
             return;
         }
         tracing::info!(
@@ -264,6 +285,30 @@ impl Sdl {
             .map(|p| &mut p.1)
     }
 }
+
+/// Why a controller can't be the host's own, if it can't: it's a virtual
+/// pad, ours or another program's (P9: only physical controllers play a
+/// seat as the host's); or its origin can't be told and it has our pads' ids.
+#[cfg(windows)]
+fn not_the_hosts(path: Option<&str>, ids: ControllerIds) -> Option<&'static str> {
+    use couch_platform_win::pad_origin::{self, Origin};
+    let origin = pad_origin::of_gamepad(path, ids);
+    if pad_origin::may_be_the_hosts(origin, ids) {
+        return None;
+    }
+    Some(match origin {
+        Origin::Ours => "it's one of our virtual pads",
+        Origin::OtherVirtual => "it's another program's virtual pad",
+        Origin::Physical | Origin::Unknown => UNTOLD,
+    })
+}
+
+#[cfg(not(windows))]
+fn not_the_hosts(_path: Option<&str>, ids: ControllerIds) -> Option<&'static str> {
+    ids.could_be_ours().then_some(UNTOLD)
+}
+
+const UNTOLD: &str = "it has our virtual pads' ids, and where it comes from can't be told";
 
 struct Follower {
     id: u64,
@@ -328,6 +373,7 @@ fn run(mut sdl: Sdl, rx: Receiver<Cmd>) {
 fn command(sdl: &mut Sdl, followers: &mut Vec<Follower>, cmd: Cmd) {
     match cmd {
         Cmd::List(reply) => {
+            sdl.recheck();
             let _ = reply.send(sdl.list());
         }
         Cmd::Follow { id, ids, on_state } => followers.push(Follower {

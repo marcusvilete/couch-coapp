@@ -394,8 +394,8 @@ pub struct SourceList {
     /// Game controllers plugged into this PC. In a multiplayer game, one
     /// can take a guest's place, so Go live warns.
     pub controllers: u32,
-    /// This PC's own controllers that could play through a seat (never our
-    /// virtual pads, nor a controller with their ids).
+    /// This PC's own controllers that could play through a seat: physical
+    /// ones, never a virtual pad (P9).
     pub host_controllers: Vec<HostController>,
     /// Whether a controller can be hidden from games (HidHide).
     pub hiding: HidingView,

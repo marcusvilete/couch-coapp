@@ -25,8 +25,10 @@ pub struct ControllerIds {
 
 impl ControllerIds {
     /// Our virtual pads report a real Xbox 360 controller's ids (or the
-    /// development ids), so a pad with them can't be told from ours: the
-    /// host's reader never reads one, and it is never hidden.
+    /// development ids), so by its ids alone a pad with them can't be told
+    /// from ours. Since P9 where it comes from decides
+    /// (`couch_platform_win::pad_origin`); this is the rule where that can't
+    /// be told: such a pad is never read as the host's, nor hidden.
     pub fn could_be_ours(self) -> bool {
         let ids = (self.vendor, self.product);
         ids == XBOX_360_IDS || ids == DEV_PAD_IDS

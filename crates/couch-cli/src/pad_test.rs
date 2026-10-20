@@ -30,7 +30,7 @@ const BUTTONS: [PadButtons; 14] = [
 ];
 
 pub fn run(secs: u64, real_ids: bool, count: u8) -> anyhow::Result<()> {
-    let before = controllers::count();
+    let before = controllers::count_all();
     let ids = (!real_ids).then_some(DEV_PAD_IDS);
     let factory = VigemPadFactory::connect(ids).context("connecting to ViGEmBus")?;
     let mut pads = (0..count.max(1))
@@ -39,7 +39,8 @@ pub fn run(secs: u64, real_ids: bool, count: u8) -> anyhow::Result<()> {
     // Windows lists a new pad shortly after it is plugged in.
     std::thread::sleep(Duration::from_secs(1));
     println!(
-        "game controllers Windows lists: {before} before, {} with ours",
+        "game controllers Windows lists: {before} before, {} with ours ({} not counting ours, as the app's warning does)",
+        controllers::count_all(),
         controllers::count()
     );
     println!(

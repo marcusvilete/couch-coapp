@@ -11,8 +11,8 @@ export type SourceList = { windows: Array<WindowView>, screens: Array<ScreenView
  */
 controllers: number, 
 /**
- * This PC's own controllers that could play through a seat (never our
- * virtual pads, nor a controller with their ids).
+ * This PC's own controllers that could play through a seat: physical
+ * ones, never a virtual pad (P9).
  */
 hostControllers: Array<HostController>, 
 /**

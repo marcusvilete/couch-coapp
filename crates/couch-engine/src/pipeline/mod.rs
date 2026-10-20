@@ -217,15 +217,16 @@ pub trait Backend: Send + Sync + 'static {
 
     fn kbm(&self) -> Box<dyn KbmInjector>;
 
-    /// Game controllers plugged into this PC, our own virtual pads included
-    /// if any are plugged in. Go live warns about them in multiplayer: a
-    /// host's controller can take a player's place in the game.
+    /// Game controllers plugged into this PC, the hosts' own virtual pads
+    /// left out (P9); other programs' count, since games see them. Go live
+    /// warns about them in multiplayer: a host's controller can take a
+    /// player's place in the game.
     fn controllers(&self) -> usize {
         0
     }
 
-    /// The host's own controllers, which can play through a seat. Never our
-    /// virtual pads.
+    /// The host's own controllers, which can play through a seat. Never a
+    /// virtual pad.
     fn local_pads(&self) -> Option<&dyn LocalPads> {
         None
     }

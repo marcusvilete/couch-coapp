@@ -57,6 +57,7 @@ use windows::{
 use crate::{
     controllers::{self, Device},
     markers::{self, own_start_time, process_state},
+    pad_origin::{self, Origin},
 };
 
 /// What HidHide can do for us right now.
@@ -77,7 +78,9 @@ pub enum HideError {
     Busy,
     #[error("that controller isn't plugged in")]
     NotFound,
-    #[error("a controller with our virtual pads' ids can't be hidden")]
+    #[error(
+        "only virtual pads, or controllers that can't be told from ours, have those ids: they're never hidden"
+    )]
     Ours,
     #[error("HidHide: {0}")]
     Failed(String),
@@ -132,16 +135,14 @@ fn live() -> MutexGuard<'static, Vec<PathBuf>> {
     LIVE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Hides the controller with `ids` (every node of it) from every program but
-/// ours.
+/// Hides the host's controller with `ids` (every node of it) from every
+/// program but ours. A virtual pad, ours or another program's, is never
+/// hidden (P9): only devices the host's reader would list as its controller
+/// (`pad_origin::may_be_the_hosts`), and nothing under a virtual bus.
 pub fn hide(ids: ControllerIds) -> Result<Hidden, HideError> {
-    if ids.could_be_ours() {
-        return Err(HideError::Ours);
-    }
-    let devices = to_hide(&controllers::present(), ids);
-    if devices.is_empty() {
-        return Err(HideError::NotFound);
-    }
+    let devices = to_hide(&controllers::present(), ids, &|d| {
+        pad_origin::of_device(&d.instance_id)
+    })?;
     // One handle throughout: HidHide takes one at a time, so an undo on the
     // way out must use this one, not open another.
     let control = Control::open_patiently()?;
@@ -570,10 +571,28 @@ const HIDDEN_CLASSES: [&str; 3] = [
 /// themselves are hidden then.
 const THE_PC: &str = "{00000000-0000-0000-ffff-ffffffffffff}";
 
-/// The instance ids to hide for the controller with `ids`: every device in
-/// its containers, of the classes HidHide filters.
-fn to_hide(devices: &[Device], ids: ControllerIds) -> Vec<String> {
-    let matching: Vec<&Device> = devices.iter().filter(|d| has_ids(d, ids)).collect();
+/// The instance ids to hide for the host's controller with `ids`: every
+/// device in its containers, of the classes HidHide filters. `origin` says
+/// where a device comes from: only one that may be the host's controller
+/// counts, and nothing virtual is ever hidden, whatever container it is in.
+fn to_hide(
+    devices: &[Device],
+    ids: ControllerIds,
+    origin: &dyn Fn(&Device) -> Origin,
+) -> Result<Vec<String>, HideError> {
+    let with_ids: Vec<&Device> = devices.iter().filter(|d| has_ids(d, ids)).collect();
+    let matching: Vec<&Device> = with_ids
+        .iter()
+        .copied()
+        .filter(|d| pad_origin::may_be_the_hosts(origin(d), ids))
+        .collect();
+    if matching.is_empty() {
+        return Err(if with_ids.is_empty() {
+            HideError::NotFound
+        } else {
+            HideError::Ours
+        });
+    }
     let containers: Vec<&str> = matching
         .iter()
         .filter_map(|d| d.container.as_deref())
@@ -593,33 +612,15 @@ fn to_hide(devices: &[Device], ids: ControllerIds) -> Vec<String> {
             out.push(d.instance_id.clone());
         }
     }
-    out
+    out.retain(|id| {
+        let device = devices.iter().find(|d| d.instance_id == *id);
+        !device.is_some_and(|d| matches!(origin(d), Origin::Ours | Origin::OtherVirtual))
+    });
+    Ok(out)
 }
 
-/// Whether a device's hardware ids name `ids`: `VID_054C&PID_0CE6` (USB),
-/// or `VID&0002054C_PID&0CE6` (Bluetooth, with a prefix before the vendor).
 fn has_ids(device: &Device, ids: ControllerIds) -> bool {
-    device.hardware_ids.iter().any(|id| {
-        let id = id.to_ascii_uppercase();
-        hex_after(&id, "VID") == Some(ids.vendor) && hex_after(&id, "PID") == Some(ids.product)
-    })
-}
-
-/// The 16-bit hex value after `key` and a `_` or `&`: the last four digits
-/// of a run of up to eight.
-fn hex_after(id: &str, key: &str) -> Option<u16> {
-    let at = id.find(key)? + key.len();
-    let rest = id.get(at..)?;
-    let rest = rest.strip_prefix('_').or_else(|| rest.strip_prefix('&'))?;
-    let digits: String = rest
-        .chars()
-        .take_while(char::is_ascii_hexdigit)
-        .take(8)
-        .collect();
-    if digits.len() < 4 {
-        return None;
-    }
-    u16::from_str_radix(&digits[digits.len() - 4..], 16).ok()
+    controllers::names_ids(&device.hardware_ids, ids)
 }
 
 // ---- Markers ----
@@ -834,22 +835,20 @@ mod tests {
             device(r"HID\KBD\1", r"HID\VID_1234&PID_5678", HID, Some(THE_PC)),
         ];
         assert_eq!(
-            to_hide(&devices, DUALSENSE),
+            to_hide(&devices, DUALSENSE, &|_| Origin::Physical).unwrap(),
             s(&[
                 r"USB\VID_054C&PID_0CE6\5",
                 r"HID\VID_054C&PID_0CE6&MI_03\7&1",
                 r"HID\SOMETHING\8&2"
             ])
         );
-        assert!(
-            to_hide(
-                &devices,
-                ControllerIds {
-                    vendor: 0x1111,
-                    product: 0x2222
-                }
-            )
-            .is_empty()
+        let none = ControllerIds {
+            vendor: 0x1111,
+            product: 0x2222,
+        };
+        assert_eq!(
+            to_hide(&devices, none, &|_| Origin::Physical).unwrap_err(),
+            HideError::NotFound
         );
     }
 
@@ -865,7 +864,7 @@ mod tests {
             device(r"HID\KBD\1", r"HID\VID_1234&PID_5678", HID, Some(THE_PC)),
         ];
         assert_eq!(
-            to_hide(&devices, DUALSENSE),
+            to_hide(&devices, DUALSENSE, &|_| Origin::Physical).unwrap(),
             s(&[r"HID\VID_054C&PID_0CE6\1"])
         );
     }
@@ -879,8 +878,6 @@ mod tests {
             Some("{cccc}"),
         );
         assert!(has_ids(&bt, DUALSENSE));
-        assert_eq!(hex_after("USB\\VID_054C&PID_0CE6", "VID"), Some(0x054C));
-        assert_eq!(hex_after("HID\\VID_12", "VID"), None);
     }
 
     #[test]
@@ -920,12 +917,105 @@ mod tests {
         let _ = state();
     }
 
+    /// P9: a real Xbox 360 controller can be hidden, never a virtual pad
+    /// with its ids (ours or a remapper's), nor anything in a virtual pad's
+    /// container.
     #[test]
-    fn our_own_pads_are_never_hidden() {
-        let ours = ControllerIds {
+    fn virtual_pads_are_never_hidden() {
+        let xbox_360 = ControllerIds {
             vendor: 0x045E,
             product: 0x028E,
         };
-        assert_eq!(hide(ours).unwrap_err(), HideError::Ours);
+        let real = Some("{real}");
+        let ours = Some("{ours}");
+        let devices = [
+            device(
+                r"USB\VID_045E&PID_028E\53",
+                r"USB\VID_045E&PID_028E",
+                XUSB,
+                ours,
+            ),
+            device(
+                r"HID\VID_045E&PID_028E&IG_00\3&1",
+                r"HID\VID_045E&PID_028E&IG_00",
+                HID,
+                ours,
+            ),
+            device(
+                r"USB\VID_045E&PID_028E\6&2&0&3",
+                r"USB\VID_045E&PID_028E&REV_0114",
+                XUSB,
+                real,
+            ),
+            device(
+                r"HID\VID_045E&PID_028E&IG_00\9&4",
+                r"HID\VID_045E&PID_028E&IG_00",
+                HID,
+                real,
+            ),
+        ];
+        let origin = |d: &Device| {
+            if d.container.as_deref() == real {
+                Origin::Physical
+            } else {
+                Origin::Ours
+            }
+        };
+        assert_eq!(
+            to_hide(&devices, xbox_360, &origin).unwrap(),
+            s(&[
+                r"USB\VID_045E&PID_028E\6&2&0&3",
+                r"HID\VID_045E&PID_028E&IG_00\9&4"
+            ])
+        );
+        // Only virtual pads with those ids: nothing to hide.
+        assert_eq!(
+            to_hide(&devices[..2], xbox_360, &origin).unwrap_err(),
+            HideError::Ours
+        );
+        // Ids like ours and an origin that can't be told: not hidden either.
+        assert_eq!(
+            to_hide(&devices, xbox_360, &|_| Origin::Unknown).unwrap_err(),
+            HideError::Ours
+        );
+    }
+
+    /// The review's case: a physical controller behind a USB stack we don't
+    /// recognise is still hidden when its ids aren't ours, as before P9; and
+    /// a virtual node that shares its container is left alone.
+    #[test]
+    fn an_unknown_controller_without_our_ids_is_hidden_but_never_a_virtual_node() {
+        let pad = Some("{pad}");
+        let devices = [
+            device(
+                r"USB\VID_054C&PID_0CE6\5",
+                r"USB\VID_054C&PID_0CE6",
+                HID,
+                pad,
+            ),
+            device(
+                r"HID\VID_054C&PID_0CE6\6",
+                r"HID\VID_054C&PID_0CE6",
+                HID,
+                pad,
+            ),
+            device(
+                r"USB\VID_045E&PID_028E\40",
+                r"USB\VID_045E&PID_028E",
+                XUSB,
+                pad,
+            ),
+        ];
+        let origin = |d: &Device| {
+            if d.instance_id.ends_with(r"\40") {
+                Origin::OtherVirtual
+            } else {
+                Origin::Unknown
+            }
+        };
+        assert_eq!(
+            to_hide(&devices, DUALSENSE, &origin).unwrap(),
+            s(&[r"USB\VID_054C&PID_0CE6\5", r"HID\VID_054C&PID_0CE6\6"])
+        );
     }
 }

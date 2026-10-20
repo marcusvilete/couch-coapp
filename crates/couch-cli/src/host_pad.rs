@@ -33,7 +33,7 @@ pub fn run(feed: Option<usize>, secs: u64, hide: bool) -> anyhow::Result<()> {
     let pads = couch_gamepad::host_pads();
     let list = pads.list().context("listing controllers")?;
     if list.is_empty() {
-        println!("no controllers (pads with our virtual pads' ids are never listed)");
+        println!("no controllers (virtual pads are never listed)");
     }
     for (i, c) in list.iter().enumerate() {
         println!(
