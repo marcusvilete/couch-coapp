@@ -8,7 +8,7 @@
 //! FFmpeg's public option names, checked against our FFmpeg build
 //! (`ffmpeg -h encoder=<name>`).
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, CString, c_char};
 
 use rsmpeg::{avcodec::AVCodecContext, ffi};
 
@@ -31,8 +31,20 @@ impl OptionSet {
     /// failed open with options, e.g. AMF or Quick Sync on a PC without that
     /// GPU (found in M9a).
     pub fn open(&self, ctx: &mut AVCodecContext) -> Result<Vec<String>, String> {
+        self.open_with(ctx, &[])
+    }
+
+    /// [`Self::open`], with `extra` options set after the set's own (a key
+    /// in both takes `extra`'s value): the measurement switches
+    /// ([`nvenc_overrides`]).
+    pub fn open_with(
+        &self,
+        ctx: &mut AVCodecContext,
+        extra: &[(CString, CString)],
+    ) -> Result<Vec<String>, String> {
         let mut dict: *mut ffi::AVDictionary = std::ptr::null_mut();
-        for (key, value) in self.options {
+        let extra = extra.iter().map(|(k, v)| (k.as_c_str(), v.as_c_str()));
+        for (key, value) in self.options.iter().copied().chain(extra) {
             // SAFETY: `dict` starts null and is only ever what av_dict_set
             // returns through it; the strings are NUL-terminated and copied.
             let set = unsafe { ffi::av_dict_set(&mut dict, key.as_ptr(), value.as_ptr(), 0) };
@@ -91,6 +103,56 @@ pub(crate) fn av_error(code: i32) -> String {
     unsafe { CStr::from_ptr(buf.as_ptr()) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Measurement switches for NVENC's quality settings (P8), laid over its
+/// option set, for comparing each against itself turned off on one build:
+/// - `COUCH_NVENC_PRESET=p1`…`p7` (slower is better, and costs encode time);
+/// - `COUCH_NVENC_SPATIAL_AQ=1`, with `COUCH_NVENC_AQ_STRENGTH=1`…`15`
+///   (FFmpeg's default 8): more bits where blockiness shows;
+/// - `COUCH_NVENC_MULTIPASS=1` (a quarter-resolution first pass) or `2`
+///   (full resolution).
+///
+/// Anything else is ignored, logged. Returns the options and a label for
+/// the encoder's caps (empty without any).
+pub fn nvenc_overrides() -> (Vec<(CString, CString)>, String) {
+    // The number read goes to FFmpeg, never the text as typed: "p04" would
+    // pass a check and then fail every open.
+    let number = |name: &str, prefix: &str, lo: u32, hi: u32| -> Option<u32> {
+        let v = std::env::var(name).ok()?;
+        match v.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok()) {
+            Some(n) if (lo..=hi).contains(&n) => Some(n),
+            _ => {
+                tracing::warn!("{name}={v:?} isn't allowed; ignored");
+                None
+            }
+        }
+    };
+    let mut options = Vec::new();
+    let mut label = Vec::new();
+    let mut push = |key: &str, value: String| {
+        label.push(format!("{key}={value}"));
+        options.push((
+            CString::new(key).expect("no NUL"),
+            CString::new(value).expect("checked"),
+        ));
+    };
+    if let Some(p) = number("COUCH_NVENC_PRESET", "p", 1, 7) {
+        push("preset", format!("p{p}"));
+    }
+    let strength = number("COUCH_NVENC_AQ_STRENGTH", "", 1, 15);
+    if number("COUCH_NVENC_SPATIAL_AQ", "", 0, 1) == Some(1) {
+        push("spatial-aq", "1".into());
+        if let Some(s) = strength {
+            push("aq-strength", s.to_string());
+        }
+    } else if strength.is_some() {
+        tracing::warn!("COUCH_NVENC_AQ_STRENGTH needs COUCH_NVENC_SPATIAL_AQ=1; ignored");
+    }
+    if let Some(m) = number("COUCH_NVENC_MULTIPASS", "", 0, 2) {
+        push("multipass", m.to_string());
+    }
+    (options, label.join("+"))
 }
 
 const NVENC: &[OptionSet] = &[OptionSet {

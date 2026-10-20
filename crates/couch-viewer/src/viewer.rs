@@ -526,7 +526,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
             shown.unwrap_or((0, 0)),
             &decoder_name.lock().unwrap(),
             &gpu.adapter_name,
-            &format!("{:?} (latency {})", gpu.present_mode(), gpu.frame_latency()),
+            &format!(
+                "{:?} (latency {}), {} scaling",
+                gpu.present_mode(),
+                gpu.frame_latency(),
+                video_pass.scaler.name()
+            ),
             decoded.replaced_count() + behind.load(Ordering::Relaxed),
             *net.lock().unwrap(),
         );

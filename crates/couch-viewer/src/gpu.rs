@@ -222,17 +222,55 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     return out;
 }
 
-// Limited range: luma and chroma (Cb, Cr), centred.
-fn planes(uv: vec2<f32>) -> vec3<f32> {
-    let y = (textureSample(y_tex, samp, uv).r - 0.0627451) * 1.1643836;
-    let c = textureSample(uv_tex, samp, uv).rg - vec2<f32>(0.5019608, 0.5019608);
+// Luma by Catmull-Rom (P8): the 4x4 texels around the point, weighted by the
+// cubic that passes through them, sharper than bilinear. The middle two
+// taps of each row and column are merged into one bilinear read at the
+// point between them that gives both their weights, so 16 texels take 9
+// reads (the well-known technique, as Matt Pettineo describes it in
+// "Catmull-Rom filtering using 9 texture samples"). Its negative lobes may overshoot a little at hard edges; the
+// colour is clamped at the end.
+fn luma_bicubic(uv: vec2<f32>) -> f32 {
+    let size = vec2<f32>(textureDimensions(y_tex));
+    let at = uv * size;
+    let t1 = floor(at - 0.5) + 0.5;
+    let f = at - t1;
+    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w12 = w1 + w2;
+    let t0 = (t1 - 1.0) / size;
+    let t12 = (t1 + w2 / w12) / size;
+    let t3 = (t1 + 2.0) / size;
+    var sum = 0.0;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t0.x, t0.y), 0.0).r * w0.x * w0.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t12.x, t0.y), 0.0).r * w12.x * w0.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t3.x, t0.y), 0.0).r * w3.x * w0.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t0.x, t12.y), 0.0).r * w0.x * w12.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t12.x, t12.y), 0.0).r * w12.x * w12.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t3.x, t12.y), 0.0).r * w3.x * w12.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t0.x, t3.y), 0.0).r * w0.x * w3.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t12.x, t3.y), 0.0).r * w12.x * w3.y;
+    sum += textureSampleLevel(y_tex, samp, vec2<f32>(t3.x, t3.y), 0.0).r * w3.x * w3.y;
+    return sum;
+}
+
+// Limited range: luma and chroma (Cb, Cr), centred. Chroma is at half the
+// size and the eye resolves it less: bilinear in both scalers.
+fn planes(uv: vec2<f32>, bicubic: bool) -> vec3<f32> {
+    var luma: f32;
+    if bicubic {
+        luma = luma_bicubic(uv);
+    } else {
+        luma = textureSampleLevel(y_tex, samp, uv, 0.0).r;
+    }
+    let y = (luma - 0.0627451) * 1.1643836;
+    let c = textureSampleLevel(uv_tex, samp, uv, 0.0).rg - vec2<f32>(0.5019608, 0.5019608);
     return vec3<f32>(y, c);
 }
 
 // BT.709 (what our converter writes for the encoders other than NVENC).
-@fragment
-fn fs_bt709(in: VsOut) -> @location(0) vec4<f32> {
-    let p = planes(in.uv);
+fn bt709(p: vec3<f32>) -> vec4<f32> {
     let rgb = vec3<f32>(
         p.x + 1.7927411 * p.z,
         p.x - 0.2132486 * p.y - 0.5329093 * p.z,
@@ -242,9 +280,7 @@ fn fs_bt709(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // BT.601 (NVENC's conversion of RGB, M12c).
-@fragment
-fn fs_bt601(in: VsOut) -> @location(0) vec4<f32> {
-    let p = planes(in.uv);
+fn bt601(p: vec3<f32>) -> vec4<f32> {
     let rgb = vec3<f32>(
         p.x + 1.5960268 * p.z,
         p.x - 0.3917623 * p.y - 0.8129676 * p.z,
@@ -252,7 +288,92 @@ fn fs_bt601(in: VsOut) -> @location(0) vec4<f32> {
     );
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
+
+@fragment
+fn fs_bt709(in: VsOut) -> @location(0) vec4<f32> {
+    return bt709(planes(in.uv, false));
+}
+
+@fragment
+fn fs_bt601(in: VsOut) -> @location(0) vec4<f32> {
+    return bt601(planes(in.uv, false));
+}
+
+@fragment
+fn fs_bt709_bicubic(in: VsOut) -> @location(0) vec4<f32> {
+    return bt709(planes(in.uv, true));
+}
+
+@fragment
+fn fs_bt601_bicubic(in: VsOut) -> @location(0) vec4<f32> {
+    return bt601(planes(in.uv, true));
+}
 "#;
+
+/// How the stream window scales the picture to its size (P8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scaler {
+    /// One bilinear read per pixel, as before P8.
+    Bilinear,
+    /// Catmull-Rom on luma: sharper, 9 reads per pixel, no measurable cost.
+    /// The default: it looked best of the three tried (P8; AMD's FSR 1 was
+    /// tried too, looked no better, and was dropped).
+    Bicubic,
+}
+
+impl Scaler {
+    /// `COUCH_VIEWER_SCALER` (`bilinear`, `bicubic`), for comparing; the
+    /// default otherwise.
+    pub fn from_env() -> Self {
+        match std::env::var("COUCH_VIEWER_SCALER").as_deref() {
+            Ok(v) if v.eq_ignore_ascii_case("bilinear") => Self::Bilinear,
+            Ok(v) if v.eq_ignore_ascii_case("bicubic") => Self::Bicubic,
+            Ok(other) => {
+                tracing::warn!("COUCH_VIEWER_SCALER={other:?} isn't a scaler; bicubic");
+                Self::Bicubic
+            }
+            Err(_) => Self::Bicubic,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bilinear => "bilinear",
+            Self::Bicubic => "bicubic",
+        }
+    }
+}
+
+fn render_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    fragment: &str,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(fragment),
+            targets: &[Some(format.into())],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
 
 struct Planes {
     size: (u32, u32),
@@ -264,11 +385,14 @@ struct Planes {
 pub struct VideoPass {
     bt709: wgpu::RenderPipeline,
     bt601: wgpu::RenderPipeline,
+    bt709_bicubic: wgpu::RenderPipeline,
+    bt601_bicubic: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     planes: Option<Planes>,
     /// The matrix of the frame in the planes, as its stream declares.
     pub matrix: YuvMatrix,
+    pub scaler: Scaler,
 }
 
 impl VideoPass {
@@ -306,29 +430,18 @@ impl VideoPass {
             ..Default::default()
         });
         let pipeline = |fragment| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(fragment),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(fragment),
-                    targets: &[Some(format.into())],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
+            render_pipeline(
+                device,
+                fragment,
+                &pipeline_layout,
+                &shader,
+                fragment,
+                format,
+            )
         };
         let (bt709, bt601) = (pipeline("fs_bt709"), pipeline("fs_bt601"));
+        let (bt709_bicubic, bt601_bicubic) =
+            (pipeline("fs_bt709_bicubic"), pipeline("fs_bt601_bicubic"));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nv12"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -338,10 +451,13 @@ impl VideoPass {
         Self {
             bt709,
             bt601,
+            bt709_bicubic,
+            bt601_bicubic,
             layout,
             sampler,
             planes: None,
             matrix: YuvMatrix::default(),
+            scaler: Scaler::from_env(),
         }
     }
 
@@ -431,9 +547,11 @@ impl VideoPass {
         };
         let [x, y, w, h] = viewport;
         pass.set_viewport(x, y, w, h, 0.0, 1.0);
-        pass.set_pipeline(match self.matrix {
-            YuvMatrix::Bt601 => &self.bt601,
-            YuvMatrix::Bt709 => &self.bt709,
+        pass.set_pipeline(match (self.matrix, self.scaler) {
+            (YuvMatrix::Bt601, Scaler::Bilinear) => &self.bt601,
+            (YuvMatrix::Bt709, Scaler::Bilinear) => &self.bt709,
+            (YuvMatrix::Bt601, Scaler::Bicubic) => &self.bt601_bicubic,
+            (YuvMatrix::Bt709, Scaler::Bicubic) => &self.bt709_bicubic,
         });
         pass.set_bind_group(0, &planes.bind_group, &[]);
         pass.draw(0..3, 0..1);
@@ -473,4 +591,44 @@ pub fn letterbox((fw, fh): (u32, u32), (tw, th): (u32, u32)) -> [f32; 4] {
     let scale = (tw as f32 / fw as f32).min(th as f32 / fh as f32);
     let (w, h) = (fw as f32 * scale, fh as f32 * scale);
     [(tw as f32 - w) / 2.0, (th as f32 - h) / 2.0, w, h]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parses and validates a shader as wgpu would when the window opens,
+    /// so a mistake fails here rather than on someone's screen.
+    fn validate(source: &str) -> naga::Module {
+        let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|e| {
+            panic!("{}", e.emit_to_string(source));
+        });
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        module
+    }
+
+    /// P8: the video shader has every entry point a pipeline asks for.
+    #[test]
+    fn the_video_shader_is_valid_and_has_each_scaler() {
+        let module = validate(SHADER);
+        let entries: Vec<&str> = module
+            .entry_points
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        for name in [
+            "vs",
+            "fs_bt709",
+            "fs_bt601",
+            "fs_bt709_bicubic",
+            "fs_bt601_bicubic",
+        ] {
+            assert!(entries.contains(&name), "{name} missing: {entries:?}");
+        }
+    }
 }
