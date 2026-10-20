@@ -1,7 +1,7 @@
 // Sessions on screen: the stage with a card per session, the host's panel
 // for its own session and the stream in it, the dialog that starts a session.
 // The engine decides everything; these only show its state and send commands.
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { Command } from "./bindings/Command";
 import type { HostController } from "./bindings/HostController";
 import type { InputSetup } from "./bindings/InputSetup";
@@ -11,7 +11,7 @@ import type { SessionView } from "./bindings/SessionView";
 import type { SourceList } from "./bindings/SourceList";
 import type { StreamStateView } from "./bindings/StreamStateView";
 import { prepareChime } from "./chime";
-import { engineCommand, errorText, request } from "./engine";
+import { engineCommand, errorText, onEngineEvent, request } from "./engine";
 import { Avatar, MAX_NAME_BYTES, Modal, truncateBytes } from "./ui";
 
 /** What this profile is doing in any room: one session at a time, and not
@@ -379,7 +379,7 @@ function HostPanel(props: {
         </p>
       )}
 
-      <StreamSection session={s} onRoom={props.onRoom} notify={props.notify} />
+      <StreamSection roomId={room.id} session={s} onRoom={props.onRoom} notify={props.notify} />
 
       {s.controlPaused && (
         <div className="banner warn offer" role="status">
@@ -635,9 +635,139 @@ function hostIdleText(stream: StreamStateView): string {
   }
 }
 
+/** The meter's bottom: quieter than this shows as an empty bar. */
+const METER_FLOOR_DB = -60;
+/** The engine's silence (`couch_media::audio::SILENCE_DB`). */
+const SILENCE_DB = -90;
+/** A level report older than this means no sound is being sent. */
+const METER_STALE_MS = 1000;
+/** The host's stream level's top (`couch_media::audio::MAX_BOOST_PERCENT`). */
+const MAX_STREAM_LEVEL = 400;
+
+/** The host's stream level (P7): how loud guests hear the game, 0 to 400% of
+ * it (above 100% boosted, peaks rounded off), and a meter of what they hear
+ * after it. */
+function SoundLevel(props: {
+  roomId: string;
+  level: number;
+  onRoom: (room: RoomView) => void;
+  notify: (text: string, tone?: "info" | "warn") => void;
+}) {
+  const [percent, setPercent] = useState(props.level);
+  const [heard, setHeard] = useState<{ peak: number; average: number; at: number } | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const sendTimer = useRef<number | null>(null);
+  // Changes not yet answered: a timer waiting, or requests on their way.
+  // Until all are, the engine's level may be an older one than the slider's.
+  const inFlight = useRef(0);
+  const editing = () => sendTimer.current != null || inFlight.current > 0;
+
+  // The engine's level, unless the slider has changes still on their way.
+  useEffect(() => {
+    if (!editing()) setPercent(props.level);
+  }, [props.level]);
+
+  // A change still waiting when the panel goes: sent at once, not lost.
+  const waiting = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (sendTimer.current != null && waiting.current != null) {
+        window.clearTimeout(sendTimer.current);
+        sendTimer.current = null;
+        void engineCommand({ type: "setStreamLevel", percent: waiting.current }).catch(() => {});
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const unlisten = onEngineEvent((e) => {
+      if (e.type === "streamLevel" && e.room === props.roomId) {
+        setHeard({ peak: e.peak_db, average: e.average_db, at: Date.now() });
+      }
+    });
+    // Ticks, so the meter empties when reports stop.
+    const tick = window.setInterval(() => setNow(Date.now()), 500);
+    return () => {
+      void unlisten.then((f) => f());
+      window.clearInterval(tick);
+    };
+  }, [props.roomId]);
+
+  // Applied while dragging, but at most every 100 ms: each change is saved.
+  const send = (value: number) => {
+    inFlight.current++;
+    engineCommand({ type: "setStreamLevel", percent: value })
+      .then((r) => {
+        if (r.type === "room") props.onRoom(r);
+      })
+      .catch((e) => {
+        props.notify(`The stream volume didn't change: ${errorText(e)}`, "warn");
+        if (inFlight.current === 1 && sendTimer.current == null) setPercent(props.level);
+      })
+      .finally(() => {
+        inFlight.current--;
+      });
+  };
+  const change = (value: number) => {
+    setPercent(value);
+    waiting.current = value;
+    if (sendTimer.current != null) window.clearTimeout(sendTimer.current);
+    sendTimer.current = window.setTimeout(() => {
+      sendTimer.current = null;
+      waiting.current = null;
+      send(value);
+    }, 100);
+  };
+
+  const live = heard != null && now - heard.at < METER_STALE_MS;
+  const width = (db: number) => `${Math.max(0, Math.min(100, ((db - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100))}%`;
+  const silent = !live || heard.peak <= SILENCE_DB;
+  // A boost's peaks at full scale (whole dB: 0 only once bent near it): the
+  // limiter is at work.
+  const limiting = live && percent > 100 && heard.peak >= 0;
+  return (
+    <div className="sound-level">
+      <label htmlFor="stream-level">Stream volume</label>
+      <input
+        id="stream-level"
+        type="range"
+        min={0}
+        max={MAX_STREAM_LEVEL}
+        step={5}
+        value={percent}
+        onChange={(e) => change(Number(e.target.value))}
+        aria-valuetext={`${percent}%`}
+      />
+      <span className="hint">
+        {percent}%{percent > 100 && ` (×${(percent / 100).toFixed(percent % 100 === 0 ? 0 : 2)})`}
+      </span>
+      <div
+        className="level-meter"
+        role="meter"
+        aria-label="What guests hear"
+        aria-valuemin={METER_FLOOR_DB}
+        aria-valuemax={0}
+        aria-valuenow={live ? heard.average : METER_FLOOR_DB}
+        title={silent ? "Guests hear nothing right now" : `Guests hear: peak ${heard.peak} dB, average ${heard.average} dB`}
+      >
+        {live && <div className="average" style={{ width: width(heard.average) }} />}
+        {live && !silent && <div className="peak" style={{ left: width(heard.peak) }} />}
+      </div>
+      <span className="hint">{silent ? "silent" : limiting ? "loud peaks rounded off" : "sending sound"}</span>
+      <p className="hint">
+        Only guests hear this; you hear the game as it plays. To play the game quietly while the stream (and Discord) stay
+        loud: lower the game's slider in Windows' volume mixer, then raise this until the meter is back where it was. Above
+        100% the loudest peaks are rounded off rather than distorted. Windows' main volume doesn't change the stream.
+      </p>
+    </div>
+  );
+}
+
 /** The host panel's Stream section (M19): what to stream and how; start,
  * stop, and start again with other choices, the session going on. */
 function StreamSection(props: {
+  roomId: string;
   session: SessionView;
   onRoom: (room: RoomView) => void;
   notify: (text: string, tone?: "info" | "warn") => void;
@@ -730,6 +860,7 @@ function StreamSection(props: {
           see.
         </p>
       )}
+      {s.soundLevel != null && <SoundLevel roomId={props.roomId} level={s.soundLevel} onRoom={props.onRoom} notify={props.notify} />}
 
       <fieldset className="sources">
         <legend>

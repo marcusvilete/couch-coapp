@@ -686,6 +686,7 @@ impl Actor {
                 return;
             }
             Command::StopStream => self.stop_stream(now),
+            Command::SetStreamLevel { percent } => self.set_stream_level(percent, now),
             Command::EndSession => self.end_session(now),
             Command::Watch { room, host } => {
                 // Answers later, once the host has.

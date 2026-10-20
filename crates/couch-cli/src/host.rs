@@ -59,6 +59,8 @@ pub struct Args {
     /// Stop the stream after this long and start it again, once, in the same
     /// session (M19): viewers stay, and see a second stream.
     pub restart_stream_after: Option<u64>,
+    /// How loud viewers hear the sound, 0 to 400% (P7).
+    pub audio_level: u16,
     pub net: NetArgs,
 }
 
@@ -166,6 +168,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         audio: args.audio,
         pacing_trace: args.pacing_trace.clone(),
     };
+    stream.set_sound_level(args.audio_level);
     let mut current = stream.start_stream(stream_options.clone()).await;
     let restart = tokio::time::sleep(std::time::Duration::from_secs(
         args.restart_stream_after.unwrap_or(u64::MAX / 4),
@@ -286,6 +289,8 @@ fn on_event(
     secs: f64,
 ) -> Option<anyhow::Result<()>> {
     match event {
+        // The app's meter; nothing to print four times a second.
+        HostEvent::SoundLevel(_) => {}
         HostEvent::Granted {
             member,
             seat,

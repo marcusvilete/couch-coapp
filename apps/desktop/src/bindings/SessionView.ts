@@ -80,4 +80,9 @@ stream: StreamStateView,
 /**
  * For the host: what is streamed, while it is.
  */
-streaming: StreamView | null, };
+streaming: StreamView | null, 
+/**
+ * For the host: how loud guests hear the sound, 0 to 400% of the game's
+ * (P7); `None` for others' sessions.
+ */
+soundLevel: number | null, };

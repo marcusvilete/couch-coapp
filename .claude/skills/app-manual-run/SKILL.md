@@ -112,6 +112,12 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **Remembered per profile** (`audio.json` in its folder): the next stream window plays at the same level, even after closing the window right after a change.
 - **On one PC**, every window plays through the same speakers: compare by muting one watcher's window.
 
+## The host's stream level (P7): what to expect
+
+- **The host panel's Stream section** has a Stream volume slider (0 to 400%) and a meter of what guests hear after it (a bar and a peak mark; "silent" without sound, "loud peaks rounded off" while a boost is limited). It changes what every guest hears, never what the host hears, at once, and comes back in the next session (`host-audio.json`).
+- **To play quietly while the stream (and a Discord call) stay loud:** lower the game's slider in Windows' volume mixer, then raise the stream volume until the meter is back where it was. Windows' main volume doesn't reach the capture, but lowers everything else.
+- **Checking a level on one PC:** a watcher's stats panel ends its audio line with `level peak … / avg … dBFS`, the sound as it arrives (50% on the host is about 12 dB lower).
+
 ## Several seats for one guest (M18): what to expect
 
 - **The guest's controller count** reaches the host when the guest's stream window opens its controllers: the host panel's Watching list says "bob · 2 controllers" (sessions with more than one seat). Plugging or unplugging one updates it.

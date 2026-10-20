@@ -13,13 +13,15 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
 use anyhow::{Result, anyhow};
 use couch_codec_opus::OpusDecoder;
-use couch_media::audio::{CHANNELS, FRAME_LEN, JitterBuffer, JitterConfig, Pop, SAMPLE_RATE};
+use couch_media::audio::{
+    CHANNELS, FRAME_LEN, JitterBuffer, JitterConfig, Level, LevelMeter, Pop, SAMPLE_RATE, ramp_gain,
+};
 use couch_proto::ipc::{AudioPacket, AudioStats, StreamVolume};
 use sdl3::audio::{AudioCallback, AudioFormat, AudioSpec, AudioStream, AudioStreamWithCallback};
 
@@ -113,7 +115,12 @@ pub struct AudioOut {
     /// The stream volume's gain (P6), an `f32`'s bits: the audio thread reads
     /// it without a lock.
     gain: Arc<AtomicU32>,
+    /// The level of the sound as it arrives ([`Self::heard`]).
+    heard: Arc<AtomicU64>,
 }
+
+/// The stats' level line covers this much sound.
+const LEVEL_WINDOW_MS: u32 = 250;
 
 impl AudioOut {
     /// Opens the default playback device. SDL moves playback to the new
@@ -126,6 +133,7 @@ impl AudioOut {
             histogram: vec![0; HISTOGRAM_MS + 1],
         }));
         let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let heard = Arc::new(AtomicU64::new(pack(Level::SILENT)));
         let player = Player {
             shared: shared.clone(),
             decoder: OpusDecoder::new()?,
@@ -134,6 +142,8 @@ impl AudioOut {
             ratio: 1.0,
             gain: gain.clone(),
             level: 1.0,
+            meter: LevelMeter::new(LEVEL_WINDOW_MS),
+            heard: heard.clone(),
         };
         let spec = AudioSpec::new(
             Some(SAMPLE_RATE as i32),
@@ -155,9 +165,15 @@ impl AudioOut {
                 stream,
                 shared,
                 gain,
+                heard,
             },
             feed,
         ))
+    }
+
+    /// The sound's level as it arrives, before this window's volume (P7).
+    pub fn heard(&self) -> Level {
+        unpack(self.heard.load(Ordering::Relaxed))
     }
 
     /// How loud to play from now on (P6); the audio thread ramps to it over
@@ -188,13 +204,16 @@ impl AudioOut {
     pub fn hud_line(&self) -> String {
         let s = self.stats();
         let total = (s.played + s.concealed).max(1);
+        let heard = self.heard();
         format!(
-            "audio {:.0}/{:.0} ms  concealed {:.1}%  underruns {}  capture -> device {:.0} ms",
+            "audio {:.0}/{:.0} ms  concealed {:.1}%  underruns {}  capture -> device {:.0} ms  level peak {:.0} / avg {:.0} dBFS",
             f64::from(s.buffered_us) / 1000.0,
             f64::from(s.target_us) / 1000.0,
             s.concealed as f64 * 100.0 / total as f64,
             s.underruns,
-            f64::from(s.capture_to_queue_us) / 1000.0
+            f64::from(s.capture_to_queue_us) / 1000.0,
+            heard.peak_db,
+            heard.rms_db,
         )
     }
 }
@@ -222,21 +241,21 @@ struct Player {
     /// the last sample.
     gain: Arc<AtomicU32>,
     level: f32,
+    /// The sound as it arrives, before this window's volume (P7): what the
+    /// host sends, for the stats.
+    meter: LevelMeter,
+    heard: Arc<AtomicU64>,
 }
 
-/// Scales interleaved `samples` by a gain going from `from` (before the
-/// first frame) to `to` (at the last), so a change never clicks.
-fn apply_gain(samples: &mut [f32], from: f32, to: f32) {
-    let channels = usize::from(CHANNELS);
-    let frames = samples.len() / channels;
-    if frames == 0 || (from == 1.0 && to == 1.0) {
-        return;
-    }
-    for (i, frame) in samples.chunks_exact_mut(channels).enumerate() {
-        let gain = from + (to - from) * (i + 1) as f32 / frames as f32;
-        for sample in frame {
-            *sample *= gain;
-        }
+/// A [`Level`] in one atomic: the peak's bits high, the RMS's low.
+fn pack(level: Level) -> u64 {
+    (u64::from(level.peak_db.to_bits()) << 32) | u64::from(level.rms_db.to_bits())
+}
+
+fn unpack(bits: u64) -> Level {
+    Level {
+        peak_db: f32::from_bits((bits >> 32) as u32),
+        rms_db: f32::from_bits(bits as u32),
     }
 }
 
@@ -279,8 +298,11 @@ impl AudioCallback<f32> for Player {
         }
         self.out.clear();
         self.out.extend(self.pcm.drain(..want));
+        if let Some(level) = self.meter.push(&self.out) {
+            self.heard.store(pack(level), Ordering::Relaxed);
+        }
         let target = f32::from_bits(self.gain.load(Ordering::Relaxed));
-        apply_gain(&mut self.out, self.level, target);
+        ramp_gain(&mut self.out, self.level, target);
         self.level = target;
         if let Err(e) = stream.put_data_f32(&self.out) {
             tracing::debug!("audio data not queued: {e}");
@@ -302,22 +324,14 @@ impl AudioCallback<f32> for Player {
 mod tests {
     use super::*;
 
-    /// P6: a volume change ramps over the buffer, both channels alike, and
-    /// ends exactly at the new level.
+    /// P7: the level passes from the audio thread in one atomic, intact.
     #[test]
-    fn the_gain_ramps_without_a_jump() {
-        let mut samples = vec![1.0f32; 8];
-        apply_gain(&mut samples, 1.0, 0.0);
-        let left: Vec<f32> = samples.iter().step_by(2).copied().collect();
-        assert_eq!(left, [0.75, 0.5, 0.25, 0.0]);
-        assert!(samples.chunks(2).all(|f| f[0] == f[1]));
-        // Held: every sample at the level.
-        let mut samples = vec![0.5f32; 4];
-        apply_gain(&mut samples, 0.5, 0.5);
-        assert_eq!(samples, [0.25; 4]);
-        // Full volume leaves the sound as it came.
-        let mut samples = vec![0.3f32; 4];
-        apply_gain(&mut samples, 1.0, 1.0);
-        assert_eq!(samples, [0.3; 4]);
+    fn a_level_packs_into_one_atomic() {
+        let level = Level {
+            peak_db: -6.5,
+            rms_db: -21.25,
+        };
+        assert_eq!(unpack(pack(level)), level);
+        assert_eq!(unpack(pack(Level::SILENT)), Level::SILENT);
     }
 }

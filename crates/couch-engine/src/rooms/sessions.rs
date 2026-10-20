@@ -89,6 +89,9 @@ struct Hosting {
     /// Our own controller, if we chose to play through a seat: its name, or
     /// why it can't.
     controller: Option<Result<String, String>>,
+    /// How loud guests hear the sound, 0 to 400% (P7): the profile's,
+    /// applied to the pipeline once it has started.
+    sound_level: u16,
 }
 
 struct Watching {
@@ -968,6 +971,7 @@ impl Actor {
             overlay_area: self.backend.overlay_area(&Source::PrimaryScreen),
             in_front: None,
             controller: controller.map(|c| Ok(c.name)),
+            sound_level: crate::store::host_level(&self.data_dir),
         });
         Ok((session, options))
     }
@@ -1058,6 +1062,7 @@ impl Actor {
             h.session.without_host();
             h.controller = Some(Err(e.clone()));
         }
+        stream.set_sound_level(h.sound_level);
         let start = h.session.start();
         h.pipeline = Some(stream);
         self.apply_session(room, start, now);
@@ -1267,6 +1272,31 @@ impl Actor {
         }
     }
 
+    /// How loud guests hear our sound (P7): remembered for the profile, and
+    /// applied at once if we host. Any time, so the setting is ready before a
+    /// session too.
+    pub(super) fn set_stream_level(
+        &mut self,
+        percent: u16,
+        now: Instant,
+    ) -> Result<Response, EngineError> {
+        let percent = percent.min(couch_media::audio::MAX_BOOST_PERCENT);
+        crate::store::save_host_level(&self.data_dir, percent)
+            .map_err(|e| EngineError::Media(e.to_string()))?;
+        let Some(h) = self.sessions.hosting.as_mut() else {
+            return Ok(Response::Done);
+        };
+        h.sound_level = percent;
+        if let Some(pipeline) = &h.pipeline {
+            pipeline.set_sound_level(percent);
+        }
+        let room = h.room;
+        self.announce(room, now);
+        Ok(Response::Room(
+            self.view(room, now).ok_or(EngineError::Stopped)?,
+        ))
+    }
+
     /// Stops our stream; the session goes on (viewers stay, and keep their
     /// seats, with their input held off).
     pub(super) fn stop_stream(&mut self, now: Instant) -> Result<Response, EngineError> {
@@ -1357,6 +1387,15 @@ impl Actor {
         };
         let room = h.room;
         match event {
+            // Only the meter shows it (P7).
+            HostEvent::SoundLevel(level) => {
+                let db = |v: f32| v.round().clamp(couch_media::audio::SILENCE_DB, 0.0) as i8;
+                let _ = self.events.send(Event::StreamLevel {
+                    room: room.to_hex(),
+                    peak_db: db(level.peak_db),
+                    average_db: db(level.rms_db),
+                });
+            }
             HostEvent::Granted {
                 member,
                 seat,
@@ -2130,6 +2169,7 @@ impl Actor {
                 host_controller_problem: h.controller.clone().and_then(Result::err),
                 stream,
                 streaming: streaming.cloned(),
+                sound_level: Some(h.sound_level),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -2179,6 +2219,7 @@ impl Actor {
                 host_controller_problem: None,
                 stream: stream_view(status.map_or(StreamState::Waiting, |s| s.stream)),
                 streaming: None,
+                sound_level: None,
             });
         }
         views

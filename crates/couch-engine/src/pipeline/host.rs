@@ -51,7 +51,7 @@ use couch_input::{
 use couch_media::{
     AudioSource, CaptureEvent, Codec, EncoderConfig, EncoderInput, FeedbackSnapshot, MediaError,
     Micros, VideoEncoder, VideoFrame, VideoParams, VideoSender,
-    audio::Framer,
+    audio::{Framer, Level, LevelMeter, host_gain_for_percent, ramp_gain, soft_limit},
     clock::Clock,
     mailbox::Mailbox,
     pacing::Pacer,
@@ -89,6 +89,8 @@ const RUMBLE_REPEAT: Duration = Duration::from_millis(500);
 const RATE_TICK: Duration = Duration::from_millis(50);
 /// Upload shares and the window check run this often.
 const HOUSEKEEPING: Duration = Duration::from_secs(1);
+/// The host's sound meter covers this much sound per report (P7).
+const SOUND_LEVEL_MS: u32 = 250;
 /// How long the game's sound waits for the capture to find its window.
 const WINDOW_WAIT: Duration = Duration::from_secs(10);
 /// No share of an upload cap.
@@ -253,6 +255,9 @@ pub enum HostEvent {
     CaptureFailed { stream: u32, error: String },
     /// Something worth a line in a log.
     Note(String),
+    /// The sound guests hear, after the host's level (P7), four times a
+    /// second while sound is streamed.
+    SoundLevel(Level),
 }
 
 /// One viewer's last second.
@@ -312,6 +317,9 @@ struct Shared {
     /// The next sound packet's number, counting on across streams (M19):
     /// viewers stay, and their jitter buffer reads a jump back as old.
     audio_seq: AtomicU32,
+    /// The stream's sound level (P7): the gain applied before Opus, an
+    /// `f32`'s bits, at most 4 ([`HostPipeline::set_sound_level`]).
+    sound_gain: AtomicU32,
     /// Set by the panic key: grants are refused until the host allows
     /// control again.
     grants_paused: Arc<AtomicBool>,
@@ -653,6 +661,7 @@ impl HostPipeline {
             audio_to: Mutex::default(),
             audio_sent: AtomicU64::new(0),
             audio_seq: AtomicU32::new(0),
+            sound_gain: AtomicU32::new(1.0f32.to_bits()),
             grants_paused: Arc::new(AtomicBool::new(false)),
         });
         // By seat: a seat without a pad (a keyboard seat, or one whose pad
@@ -747,6 +756,17 @@ impl HostPipeline {
     /// streamed.
     pub fn stream(&self) -> Option<u32> {
         self.shared.current().map(|s| s.number)
+    }
+
+    /// How loud guests hear the stream's sound (P7): 0 to 100% turns it down,
+    /// up to 400% boosts it, peaks then rounded off within full scale. From
+    /// the next 10 ms on, ramped so a change never clicks. Lasts across
+    /// streams.
+    pub fn set_sound_level(&self, percent: u16) {
+        let gain = host_gain_for_percent(percent);
+        self.shared
+            .sound_gain
+            .store(gain.to_bits(), Ordering::Relaxed);
     }
 
     /// Starts and stops streams from a task of its own (M19).
@@ -1481,6 +1501,11 @@ fn send_sound(
     let mut framer = Framer::new();
     let mut encoder = OpusEncoder::new()?;
     let mut frames = Vec::new();
+    // The host's level (P7), ramped over a frame from the last one, from the
+    // level set (each stream starts here again: never a burst at full); and
+    // what guests then hear, for the host's meter.
+    let mut gain = f32::from_bits(shared.sound_gain.load(Ordering::Relaxed));
+    let mut meter = LevelMeter::new(SOUND_LEVEL_MS);
     while !stop.load(Ordering::SeqCst) {
         match source.next_chunk(Duration::from_millis(100)) {
             Ok(Some(chunk)) => framer.push(&chunk, &mut frames)?,
@@ -1488,7 +1513,17 @@ fn send_sound(
             Err(MediaError::Closed) => return Ok(()),
             Err(e) => return Err(e),
         }
-        for frame in frames.drain(..) {
+        for mut frame in frames.drain(..) {
+            let target = f32::from_bits(shared.sound_gain.load(Ordering::Relaxed));
+            let boosting = gain > 1.0 || target > 1.0;
+            ramp_gain(&mut frame.samples, gain, target);
+            if boosting {
+                soft_limit(&mut frame.samples);
+            }
+            gain = target;
+            if let Some(level) = meter.push(&frame.samples) {
+                shared.event(HostEvent::SoundLevel(level));
+            }
             let packet = AudioDatagram {
                 // (Wraps, as viewers expect.)
                 seq: shared.audio_seq.fetch_add(1, Ordering::Relaxed),

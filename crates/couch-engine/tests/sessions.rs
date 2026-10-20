@@ -3298,6 +3298,80 @@ async fn a_newcomer_sees_a_session_already_live() {
     }
 }
 
+/// P7: the host's stream level scales what guests hear, at once, and the
+/// meter shows it; it is remembered for the next session.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosts_stream_level_scales_the_sound_and_is_remembered() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let _window = watching(&room, &a, &b).await;
+    // The fake game's clicks peak at 0.8: about -2 dB.
+    async fn loudest(a: &mut Member, room: &str, range: std::ops::RangeInclusive<i8>, what: &str) {
+        a.event(what, |e| match e {
+            Event::StreamLevel {
+                room: r, peak_db, ..
+            } if r == room && range.contains(peak_db) => Some(()),
+            _ => None,
+        })
+        .await;
+    }
+    loudest(&mut a, &room, -3..=-1, "the clicks at full level").await;
+    a.wait_session(&room, &a, "the level shown", |s| {
+        s.is_some_and(|s| s.sound_level == Some(100))
+    })
+    .await;
+
+    // Half: a quarter of the amplitude, -12 dB lower.
+    let reply = a.handle(Command::SetStreamLevel { percent: 50 }).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    loudest(&mut a, &room, -15..=-13, "the clicks at half level").await;
+    // Boosted 4x, the clicks (0.8, so 3.2) are rounded off within full
+    // scale: never above 0 dB.
+    a.ok(Command::SetStreamLevel { percent: 400 }).await;
+    loudest(&mut a, &room, -1..=0, "the clicks boosted, limited").await;
+    for _ in 0..4 {
+        let peak = a
+            .event("the next level", |e| match e {
+                Event::StreamLevel {
+                    room: r, peak_db, ..
+                } if *r == room => Some(*peak_db),
+                _ => None,
+            })
+            .await;
+        assert!(peak <= 0, "never past full scale: {peak} dB");
+    }
+    // Nothing above 400%.
+    a.ok(Command::SetStreamLevel { percent: 900 }).await;
+    a.wait_session(&room, &a, "capped at 400", |s| {
+        s.is_some_and(|s| s.sound_level == Some(400))
+    })
+    .await;
+    a.ok(Command::SetStreamLevel { percent: 0 }).await;
+    // Silence from then on: the next second of windows all read -90.
+    loudest(&mut a, &room, -90..=-90, "silence").await;
+    for _ in 0..4 {
+        let peak = a
+            .event("the next level", |e| match e {
+                Event::StreamLevel {
+                    room: r, peak_db, ..
+                } if *r == room => Some(*peak_db),
+                _ => None,
+            })
+            .await;
+        assert_eq!(peak, -90, "nothing above silence at 0%");
+    }
+
+    // The next session starts at the level last set.
+    a.ok(Command::SetStreamLevel { percent: 30 }).await;
+    a.ok(Command::EndSession).await;
+    a.go_live(&room, 4).await;
+    a.wait_session(&room, &a, "the level remembered", |s| {
+        s.is_some_and(|s| s.sound_level == Some(30))
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 async fn sources(m: &Member) -> couch_engine::SourceList {
     match m.handle(Command::ListSources).await.unwrap() {
         Response::Sources(s) => s,

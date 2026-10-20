@@ -178,6 +178,10 @@ enum Cmd {
         /// see the second stream.
         #[arg(long)]
         restart_stream_after: Option<u64>,
+        /// How loud viewers hear the sound, in percent of the game's (P7):
+        /// below 100 quieter, up to 400 boosted (peaks rounded off).
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(0..=400))]
+        audio_level: u16,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -394,6 +398,7 @@ async fn main() -> ExitCode {
             show_host_pad,
             audio,
             restart_stream_after,
+            audio_level,
             net,
         } => {
             use couch_engine::pipeline::{AudioChoice, Source};
@@ -435,6 +440,7 @@ async fn main() -> ExitCode {
                     AudioArg::Off => AudioChoice::Off,
                 },
                 restart_stream_after,
+                audio_level,
                 net,
             })
             .await
