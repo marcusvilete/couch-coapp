@@ -10,9 +10,10 @@ There are no public binaries (ADR 0009): installers are built from source and ha
 ## 1. Is a new version needed?
 
 - **Everyone in a session must run the same wire revision** (`couch_proto::PROTOCOL_MINOR`). Builds of different revisions refuse each other right after `Hello`, and the app says who needs to update. So a `PROTOCOL_MINOR` change since the installer people have means everyone needs the new one.
-- **Bump the version for every installer handed out,** whatever changed: people tell builds apart by it (Settings → About, and the "needs update" line). Bump it the same in all three: `Cargo.toml` (`[workspace.package] version`), `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json`; the script refuses mismatched ones. `Cargo.lock` follows on the next build. `apps/desktop/package-lock.json`'s own version isn't checked; leave it.
-- A minor bump (0.11.0 → 0.12.0) when the wire revision changes or a milestone lands; a patch (0.11.0 → 0.11.1) for fixes alone. Record each in `docs/architecture.md`'s version line (under "Installing").
-- The bump is a commit like any other, through the project's usual branch and review.
+- **Every installer handed out has a version not handed out before:** people tell builds apart by it (Settings → About, and the "needs update" line).
+- **Normally there's nothing to do:** every PR that changes the app bumps the version itself (CLAUDE.md, "Versions": `cargo xtask bump patch` or `minor`), so a merged `main` already carries a new one. Check it against the last installer handed out (`docs/architecture.md`'s version line, under "Installing").
+- **If it was handed out already** (a change merged without its bump): bump in a PR of its own first, `cargo xtask bump patch` (or `minor` after a new wire revision), and say in that version line what it carries. The command sets the same version in `Cargo.toml`, `tauri.conf.json`, `apps/desktop/package.json` and our crates in `Cargo.lock`; the build script refuses mismatched files anyway. `apps/desktop/package-lock.json`'s own version isn't checked; leave it.
+- A new wire revision always comes with a minor version (`couch_proto::REVISIONS`, held by a test).
 
 ## 2. Build from main, merged and clean
 

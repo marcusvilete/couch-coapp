@@ -240,7 +240,7 @@ These hold in every milestone. Tests guard them from M2 on.
   - If a crash marker is waiting (a controller left hidden, keys left held), only the app undoes those, so the question advises No and starting the app once first. Yes still deletes.
   - Never during an update, nor in a silent run.
 - **Release configuration** (M7): `build-installer.ps1` reads the private `release.toml` (outside the repository; `deploy/release.example.toml` shows its shape). It holds the relay's URL and token and the invite page, and the script passes them to the build as `COUCH_BUILD_*` variables. Without the file it builds only with `-TestRelay`: iroh's public relays, and plain http relays on the LAN allowed. Such installers are named `-test`.
-- **The version** (0.8.0 for the first installer, 0.9.0 for M7's, 0.10.0 for M9 and P4, 0.10.1 for M9e's fix, 0.10.2 for M9f's capture, 0.11.0 now: M12c, M19, M18 and P6, wire revision 4) is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`; the build script checks. Updates are a new installer, installed by hand (no updater: ADR 0009).
+- **The version** (0.8.0 for the first installer, 0.9.0 for M7's, 0.10.0 for M9 and P4, 0.10.1 for M9e's fix, 0.10.2 for M9f's capture, 0.11.0 for M12c, M19, M18 and P6, wire revision 4; 0.11.1 now: the newcomer fix and P7, the same wire revision, so it still talks to 0.11.0). From 0.11.1 on, every PR that changes the app bumps it itself (`cargo xtask bump patch|minor`, CLAUDE.md "Versions"), and each wire revision's version is in `couch_proto::REVISIONS` is the same in `Cargo.toml`, `tauri.conf.json` and `apps/desktop/package.json`; the build script checks. Updates are a new installer, installed by hand (no updater: ADR 0009).
 
 ## Platform limits
 
