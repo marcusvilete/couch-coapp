@@ -115,7 +115,7 @@ Everyone in a room needs an installer from the same build of yours. A different 
 
 - **The drivers on your build PC.** The installer offers them to whoever installs it.
 - **The invite page,** an optional page that makes invite links clickable in chat apps. To use it, either:
-  - **use ours:** set `invite_page = "https://marcusvilete.github.io/couch-coapp/j/"` in `release.toml`. Whoever runs the page could see the invites opened with it (the password still guards the room);
+  - **use an existing one:** set `invite_page` in `release.toml` to its address, such as the page published from the repository you cloned (`https://<user>.github.io/<repository>/j/`). Whoever runs the page could see the invites opened with it (the password still guards the room);
   - **host your own:** your fork's GitHub Pages runs the same workflow ([deploy/invite-page/README.md](../deploy/invite-page/README.md)).
 
   `build-installer.ps1 -InvitePage <address>` sets it for one build, and `-NoInvitePage` builds with plain `couchco://` links.
