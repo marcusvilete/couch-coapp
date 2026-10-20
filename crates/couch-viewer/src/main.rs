@@ -145,8 +145,9 @@ fn probe() -> anyhow::Result<()> {
                 gamepads.vendor_for_id(id).unwrap_or(0),
                 gamepads.product_for_id(id).unwrap_or(0),
             );
+            let path = gamepads.path_for_id(id).ok();
             let skipped = ids == couch_input::DEV_PAD_IDS
-                || (ids == couch_input::XBOX_360_IDS && input::host_pads_here());
+                || (ids == couch_input::XBOX_360_IDS && input::may_be_hosts(path.as_deref(), ids));
             if skipped {
                 format!(
                     "{name} ({:04x}:{:04x}, maybe a host's virtual pad: skipped)",

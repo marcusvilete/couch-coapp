@@ -1,6 +1,6 @@
 ---
 name: windows-ffi-pitfalls
-description: Checklist for writing or reviewing unsafe Windows, COM, D3D11 and SDL3 code in Couch Co-App with the `windows` 0.62 crate, `windows-core` and `sdl3` 0.20 — hidden Drop impls, packed structs, COM threading, callbacks on foreign threads, teardown order, COM references handed to FFmpeg, textures NVENC has registered, and D3D12 resources shared between FFmpeg's decoder and wgpu (states, fences). Use when adding or changing code in crates/couch-platform-win (WASAPI, Windows.Graphics.Capture and the GPU texture pool, SendInput, ViGEm, HidHide, low-level hooks, DPAPI, WLAN, process and window APIs), FFmpeg hardware contexts in couch-codec-ffmpeg (d3d11.rs, d3d12.rs, the decoder's D3D11VA and D3D12VA), couch-viewer's zero_copy.rs, any `unsafe` block that calls Windows or SDL, or an SDL callback in couch-viewer.
+description: Checklist for writing or reviewing unsafe Windows, COM, D3D11 and SDL3 code in Couch Co-App with the `windows` 0.62 crate, `windows-core` and `sdl3` 0.20 — hidden Drop impls, packed structs, COM threading, callbacks on foreign threads, teardown order, COM references handed to FFmpeg, textures NVENC has registered, and D3D12 resources shared between FFmpeg's decoder and wgpu (states, fences). Use when adding or changing code in crates/couch-platform-win (WASAPI, Windows.Graphics.Capture and the GPU texture pool, SendInput, ViGEm, HidHide, the device tree and the Xbox driver's undocumented requests, low-level hooks, DPAPI, WLAN, process and window APIs), FFmpeg hardware contexts in couch-codec-ffmpeg (d3d11.rs, d3d12.rs, the decoder's D3D11VA and D3D12VA), couch-viewer's zero_copy.rs, any `unsafe` block that calls Windows or SDL, or an SDL callback in couch-viewer.
 ---
 
 # Windows and SDL FFI pitfalls
@@ -92,6 +92,12 @@ Each item below cost time or nearly caused undefined behaviour in M1–M3. Check
 - Build a minimal reproduction in the session scratchpad (`cargo new`), with `CARGO_TARGET_DIR` set to a short path, such as `target\scratch` under the repository's root (it should be cloned to a short path, `docs/development.md`). Deep paths break CMake and MSBuild builds (libopus) at Windows' 260-character limit.
 - Run it against the known-good crate to tell your bug from the environment's.
 - Remove trace output before finishing. `couch-viewer` must never print to stdout.
+
+## Undocumented driver requests
+
+- **`xinput_slots` asks the Xbox 360 driver (`xusb22`) through IOCTLs Microsoft doesn't document** (P9: `GET_INFORMATION`, `GET_LED_STATE`, layouts as community projects describe them). Check any change against a known answer: `couch-cli pad-origins --ours 2` prints the driver's lights beside ViGEm's own for the pads it plugged.
+- **A request that fails or answers oddly means "unknown", never a guess**: the callers then fall back to the safe rule (a pad with our ids counts as ours). ViGEm's own `user_index` failed every time on the dev PC; its notification's `led_number` was right.
+- **The configuration manager's buffers** (`CM_Get_Device_Interface_List*`, `CM_Get_DevNode_Registry_PropertyW`) can change size between the size call and the read when a device comes or goes: loop on `CR_BUFFER_SMALL` a bounded number of times.
 
 ## Before calling it done
 

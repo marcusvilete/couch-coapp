@@ -37,8 +37,13 @@ const RUMBLE_MS: u32 = 1_000;
 pub struct InputCapture {
     gamepads: GamepadSubsystem,
     pads: HashMap<JoystickId, Gamepad>,
-    /// Open pads with Xbox 360 ids: dropped if a host here plugs one in.
+    /// Open pads with Xbox 360 ids, our pads' ids, opened while no host here
+    /// had pads: looked at every second, closed if one turns out a host's,
+    /// settled (dropped from here) once proven not to be.
     xbox_360: BTreeSet<JoystickId>,
+    /// Pads not opened because they are, or may be, a host's on this PC:
+    /// looked at again every second (P9), and opened once they aren't.
+    held_back: BTreeSet<JoystickId>,
     /// Each controller's slot, kept while it is connected (M18): the main
     /// process pins seats to slots (`couch_input::forward`), so a controller
     /// going never moves the others.
@@ -80,6 +85,7 @@ impl InputCapture {
             gamepads,
             pads: HashMap::new(),
             xbox_360: BTreeSet::new(),
+            held_back: BTreeSet::new(),
             slots: [None; MAX_LOCAL_CONTROLLERS],
             active: None,
             last_pads: HashMap::new(),
@@ -375,12 +381,25 @@ impl InputCapture {
         let ids = (pad.vendor_id().unwrap_or(0), pad.product_id().unwrap_or(0));
         let name = pad.name().unwrap_or_default();
         let xbox_360 = ids == XBOX_360_IDS;
-        if ids == DEV_PAD_IDS || (xbox_360 && host_pads_here()) {
-            tracing::info!(
-                "skipping {name:?}: a host on this PC has a virtual pad plugged in, and it may be this one"
-            );
+        if ids == DEV_PAD_IDS {
+            tracing::info!("skipping {name:?}: it has our test pads' ids");
             return false;
         }
+        // Only our pads' ids can be a host's pad: the others need no look.
+        let check = if xbox_360 {
+            host_check(pad.path().as_deref(), ids)
+        } else {
+            HostCheck::NotAHosts
+        };
+        if check == HostCheck::MaybeAHosts {
+            if self.held_back.insert(id) {
+                tracing::info!(
+                    "skipping {name:?}: it's a virtual pad of a host on this PC, or may be"
+                );
+            }
+            return false;
+        }
+        self.held_back.remove(&id);
         tracing::info!("gamepad {name:?} ({:04x}:{:04x})", ids.0, ids.1);
         // The lowest free slot; the others keep theirs.
         if !self.slots.contains(&Some(id)) {
@@ -390,7 +409,9 @@ impl InputCapture {
             };
             *slot = Some(id);
         }
-        if xbox_360 {
+        // Opened with no host here: looked at again once one comes. Proven
+        // not a host's: settled.
+        if xbox_360 && check == HostCheck::NoHostHere {
             self.xbox_360.insert(id);
         }
         self.pads.insert(id, pad);
@@ -401,6 +422,7 @@ impl InputCapture {
     /// the others keep theirs.
     fn close_pad(&mut self, id: JoystickId) -> bool {
         self.xbox_360.remove(&id);
+        self.held_back.remove(&id);
         self.last_pads.remove(&id);
         for slot in &mut self.slots {
             if *slot == Some(id) {
@@ -424,20 +446,41 @@ impl InputCapture {
         LocalInput::ControllerSlots(mask)
     }
 
-    /// Drops Xbox 360 pads once a host on this PC has a virtual pad plugged
-    /// in (it went live after this window opened): one of them may be the
-    /// host's. Call every second or so.
-    pub fn drop_host_pads(&mut self, out: &mut Vec<LocalInput>) {
-        if self.xbox_360.is_empty() || !host_pads_here() {
-            return;
+    /// Looks again at the Xbox 360 pads, our pads' ids (P9): one open that
+    /// turns out a host's on this PC (a host went live after this window
+    /// opened, say) closes; one held back that turns out physical or another
+    /// program's (its player light set since, or the host gone) opens. Call
+    /// every second or so.
+    pub fn recheck_host_pads(&mut self, out: &mut Vec<LocalInput>) {
+        let mut changed = false;
+        for id in self.xbox_360.clone() {
+            let path = self.pads.get(&id).and_then(|pad| pad.path());
+            match host_check(path.as_deref(), XBOX_360_IDS) {
+                HostCheck::NoHostHere => {}
+                HostCheck::NotAHosts => {
+                    self.xbox_360.remove(&id);
+                }
+                HostCheck::MaybeAHosts => {
+                    tracing::info!(
+                        "skipping an Xbox 360 pad: it's a virtual pad of a host on this PC, or may be"
+                    );
+                    changed |= self.close_pad(id);
+                    self.held_back.insert(id);
+                }
+            }
         }
-        for id in std::mem::take(&mut self.xbox_360) {
-            tracing::info!(
-                "skipping an Xbox 360 pad: a host on this PC has a virtual pad plugged in"
-            );
-            self.close_pad(id);
+        for id in self.held_back.clone() {
+            let path = self.gamepads.path_for_id(id).ok();
+            if host_check(path.as_deref(), XBOX_360_IDS) != HostCheck::MaybeAHosts
+                && self.open_pad(id)
+            {
+                tracing::info!("reading an Xbox 360 pad after all: it isn't a host's");
+                changed = true;
+            }
         }
-        out.push(self.controller_slots());
+        if changed {
+            out.push(self.controller_slots());
+        }
     }
 
     /// One pad's state, by its slot, if it changed.
@@ -454,18 +497,53 @@ impl InputCapture {
     }
 }
 
-/// A host on this PC has a virtual pad plugged in. Host pads report a real
-/// Xbox 360 controller's ids (games need them), so while one is plugged in,
-/// every pad with those ids is skipped (`couch_platform_win::virtual_pads`).
-pub fn host_pads_here() -> bool {
-    #[cfg(windows)]
-    {
-        couch_platform_win::virtual_pads::host_pads_here()
+/// Whether the pad SDL lists with `path` and `ids` is, or may be, a virtual
+/// pad of a host on this PC: reading it would send the host's own pad back
+/// to it. Host pads report a real Xbox 360 controller's ids (games need
+/// them), so the ids can't tell; where the pad comes from can (P9,
+/// `couch_platform_win::pad_origin`): a physical controller or another
+/// program's virtual pad is read. Where that can't be told, any Xbox 360 pad
+/// counts as a host's while a host here has pads, as before P9.
+pub fn may_be_hosts(path: Option<&str>, ids: (u16, u16)) -> bool {
+    host_check(path, ids) == HostCheck::MaybeAHosts
+}
+
+/// What [`may_be_hosts`] found, and whether it proved anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostCheck {
+    /// No host here has pads: nothing to tell yet.
+    NoHostHere,
+    /// Physical or another program's, with a host here: that won't change.
+    NotAHosts,
+    MaybeAHosts,
+}
+
+#[cfg(windows)]
+fn host_check(path: Option<&str>, ids: (u16, u16)) -> HostCheck {
+    use couch_input::local::ControllerIds;
+    use couch_platform_win::{
+        pad_origin::{self, Origin},
+        virtual_pads,
+    };
+    let hosts = virtual_pads::host_pads();
+    if !hosts.any() {
+        return HostCheck::NoHostHere;
     }
-    #[cfg(not(windows))]
-    {
-        false
+    let controller = ControllerIds {
+        vendor: ids.0,
+        product: ids.1,
+    };
+    match pad_origin::of_gamepad_given(path, controller, &hosts) {
+        Origin::Ours => HostCheck::MaybeAHosts,
+        Origin::Physical | Origin::OtherVirtual => HostCheck::NotAHosts,
+        Origin::Unknown if ids == XBOX_360_IDS => HostCheck::MaybeAHosts,
+        Origin::Unknown => HostCheck::NotAHosts,
     }
+}
+
+#[cfg(not(windows))]
+fn host_check(_path: Option<&str>, _ids: (u16, u16)) -> HostCheck {
+    HostCheck::NoHostHere
 }
 
 pub fn button_code(button: MouseButton) -> Option<u8> {

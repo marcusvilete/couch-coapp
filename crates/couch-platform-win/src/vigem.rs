@@ -23,6 +23,8 @@ fn driver(e: impl std::fmt::Display) -> InputError {
 pub struct VigemPadFactory {
     client: Client,
     ids: Option<(u16, u16)>,
+    /// Each pad leaves a marker (`virtual_pads`); only the probe's don't.
+    marked: bool,
 }
 
 impl VigemPadFactory {
@@ -35,34 +37,100 @@ impl VigemPadFactory {
         Ok(Self {
             client: Client::connect().map_err(driver)?,
             ids,
+            marked: true,
+        })
+    }
+
+    /// Pads that leave no marker, standing in for another program's ViGEm
+    /// pads (a remapper's), for `couch-cli pad-origins` only (P9). Never for
+    /// hosting: a stream window on this PC would read them and send them
+    /// back.
+    pub fn connect_unmarked(ids: Option<(u16, u16)>) -> Result<Self, InputError> {
+        Ok(Self {
+            marked: false,
+            ..Self::connect(ids)?
         })
     }
 }
 
 impl VirtualPadFactory for VigemPadFactory {
     fn plug(&self) -> Result<Box<dyn VirtualPad>, InputError> {
+        Ok(Box::new(self.plug_pad()?))
+    }
+}
+
+/// A pad plugged for `couch-cli pad-origins` (P9), with what ViGEm says of
+/// it. Unplugs when dropped.
+pub struct ProbePad {
+    pad: VigemPad,
+    light: Option<u8>,
+}
+
+impl VigemPadFactory {
+    pub fn plug_for_probe(&self) -> Result<ProbePad, InputError> {
+        Ok(ProbePad {
+            pad: self.plug_pad()?,
+            light: None,
+        })
+    }
+
+    fn plug_pad(&self) -> Result<VigemPad, InputError> {
         let mut builder = self.client.new_x360_target();
         if let Some((vid, pid)) = self.ids {
             builder = builder.with_vid(vid).with_pid(pid);
         }
         // Marked before it appears, so a stream window on this PC never
-        // opens it (see `virtual_pads`). A failed plug drops the marker.
-        let marker = virtual_pads::mark()
-            .inspect_err(|e| tracing::warn!("marking the virtual pad: {e}"))
-            .ok();
+        // opens it (see `virtual_pads`), and given its serial once it has
+        // one; until then every ViGEm pad counts as ours. A failed plug
+        // drops the marker.
+        let marker = self
+            .marked
+            .then(|| {
+                virtual_pads::mark()
+                    .inspect_err(|e| tracing::warn!("marking the virtual pad: {e}"))
+                    .ok()
+            })
+            .flatten();
         let pad = builder
             .plug()
             .map_err(driver)?
             .wait_for_ready()
             .map_err(driver)?;
+        if let Some(marker) = &marker {
+            // Without it the marker stays serial-less: every ViGEm pad then
+            // counts as ours, as before P9.
+            if let Err(e) = marker.set_serial(pad.serial_no()) {
+                tracing::warn!("recording the virtual pad's serial: {e}");
+            }
+        }
         let rumble = pad.register_notification().map_err(driver)?;
-        Ok(Box::new(VigemPad {
+        Ok(VigemPad {
             _client: self.client.clone(),
             pad,
             rumble,
             last_rumble: Rumble::default(),
             _marker: marker,
-        }))
+        })
+    }
+}
+
+impl ProbePad {
+    /// Its ViGEm serial: the last part of its device's instance id.
+    pub fn serial(&self) -> u32 {
+        self.pad.pad.serial_no()
+    }
+
+    /// The XInput slot ViGEm reports for it.
+    pub fn user_index(&self) -> Option<u32> {
+        self.pad.pad.user_index().ok()
+    }
+
+    /// The last player light ViGEm passed on for it, if any came yet.
+    pub fn light(&mut self) -> Option<u8> {
+        while let Ok(n) = self.pad.rumble.try_recv() {
+            self.light = Some(n.led_number);
+        }
+        self.light
     }
 }
 

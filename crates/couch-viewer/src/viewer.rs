@@ -376,7 +376,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
         }
         if last_pad_check.elapsed() >= Duration::from_secs(1) {
             last_pad_check = Instant::now();
-            input.drop_host_pads(&mut local);
+            input.recheck_host_pads(&mut local);
         }
         if let Some(audio) = &audio
             && last_audio_stats.elapsed() >= Duration::from_secs(1)

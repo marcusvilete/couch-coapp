@@ -153,7 +153,7 @@ Code: `couch_input::forward` on the viewer's side, `couch_input::router` on the 
 **Injection on Windows** (`couch-platform-win`)
 - Keys go in as set-1 scancodes through `SendInput`, so the host's layout decides what they type. Pause and Num Lock go by virtual-key code. Media and power keys are not sent.
 - The mouse moves relatively; the wheel goes as `MOUSEEVENTF_WHEEL` and `HWHEEL`.
-- The pads are ViGEmBus Xbox 360 controllers, one per seat with a pad. The app gives them a real Xbox 360 controller's ids, which games and Steam need; `couch-cli` uses USB ids 1209:0001 (pid.codes' test range) unless given `--real-pad-ids`. A viewer on the same machine skips every Xbox 360 pad while a host there has one plugged in (`couch_platform_win::virtual_pads` markers), so the host's pads aren't captured and sent back.
+- The pads are ViGEmBus Xbox 360 controllers, one per seat with a pad. The app gives them a real Xbox 360 controller's ids, which games and Steam need; `couch-cli` uses USB ids 1209:0001 (pid.codes' test range) unless given `--real-pad-ids`. A viewer on the same machine skips the pads of any host running there, so they aren't captured and sent back: each host's marker names its pads' ViGEm serials (`couch_platform_win::virtual_pads`), and the viewer finds each gamepad's device in Windows' device tree (P9, `couch_platform_win::pad_origin`). One whose origin can't be told is skipped if it has Xbox 360 ids, as every Xbox 360 pad was before P9. Nothing of this is on the wire.
 
 ## Bitrate control (per viewer, 20 times a second)
 

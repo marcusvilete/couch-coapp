@@ -8,6 +8,8 @@
 //! the main thread, so a process must never start it from two.
 
 mod reader;
+#[doc(hidden)]
+pub mod survey;
 
 use couch_input::PadButtons;
 use couch_proto::input::PadSnapshot;

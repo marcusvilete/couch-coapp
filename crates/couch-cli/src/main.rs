@@ -22,6 +22,7 @@ mod input_sink;
 mod latency_probe;
 mod lifecycle_check;
 mod net_args;
+mod pad_origins;
 mod pad_test;
 mod probe;
 mod release_check;
@@ -298,6 +299,23 @@ enum Cmd {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
         count: u8,
     },
+    /// Every gamepad SDL finds, where it sits in Windows' device tree, and the
+    /// origin the app gives it (P9). Plugs pads only when asked to.
+    PadOrigins {
+        /// Our own virtual pads to plug first, marked as a host's are.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=4))]
+        ours: u8,
+        /// Virtual pads that leave no marker, standing in for another
+        /// program's.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=4))]
+        unmarked: u8,
+        /// Seconds SDL gets to find the gamepads.
+        #[arg(long, default_value_t = 3)]
+        settle: u64,
+        /// Seconds to keep the pads plugged afterwards.
+        #[arg(long, default_value_t = 0)]
+        hold: u64,
+    },
     /// List this PC's controllers and HidHide's state; with `--feed N`, hide
     /// controller N and drive a virtual pad from it, as a host on a seat does.
     HostPad {
@@ -532,6 +550,12 @@ async fn main() -> ExitCode {
             real_pad_ids,
             count,
         } => tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids, count)),
+        Cmd::PadOrigins {
+            ours,
+            unmarked,
+            settle,
+            hold,
+        } => tokio::task::block_in_place(|| pad_origins::run(ours, unmarked, settle, hold)),
         Cmd::HostPad {
             feed,
             secs,
