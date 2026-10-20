@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.11.1"
+version = "0.11.2"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -50,6 +50,9 @@ egui = "0.36"
 egui-wgpu = { version = "0.36", default-features = false }
 pollster = "1"
 wgpu = "30"
+# wgpu's own shader compiler, for the stream window's shader tests: keep it
+# on wgpu's major version.
+naga = { version = "30", features = ["wgsl-in"] }
 
 # App shell
 tauri = "2.12"

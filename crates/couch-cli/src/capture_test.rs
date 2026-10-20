@@ -1,8 +1,8 @@
 //! `couch-cli capture-test`: the host-side pipeline without a network.
 //! Captures a window, encodes it, decodes it again and reads the latency
 //! clock's barcode, reporting how long each stage takes. With `--psnr`, also
-//! how close each decoded picture is to what was captured (M12c: H.264
-//! against HEVC at the same bitrate).
+//! how close each decoded picture is to what was captured, as PSNR and SSIM
+//! (M12c: H.264 against HEVC at the same bitrate; P8: NVENC's settings).
 
 use std::{
     fs::File,
@@ -71,10 +71,11 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let mut decoder = FfmpegDecoder::new(config.codec, true)?;
     let mut out = args.out.as_ref().map(File::create).transpose()?;
     println!(
-        "capturing {}x{} with {}, decoding with {}",
+        "capturing {}x{} with {} ({}), decoding with {}",
         config.width,
         config.height,
         encoder.caps().name,
+        encoder.caps().options,
         if decoder.is_hardware() {
             "D3D11VA"
         } else {
@@ -87,7 +88,8 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let mut decode = Samples::default();
     let mut clock_to_capture = Samples::default();
     let mut clock_to_decoded = Samples::default();
-    let mut psnr = Samples::default();
+    let mut psnr_db = Samples::default();
+    let mut similarity = Samples::default();
     let (mut frames, mut bytes) = (0u64, 0u64);
     let mut barcode_at: Option<(u32, u32)> = None;
     let started = Instant::now();
@@ -126,7 +128,9 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                 let done = clock::now();
                 decode.push(ms(done.0, encoded.0));
                 if args.psnr {
-                    psnr.push(luma_psnr(&frame, &nv12));
+                    let l = lumas(&frame, &nv12);
+                    psnr_db.push(psnr(&l));
+                    similarity.push(ssim(&l));
                 }
                 let size = (nv12.width, nv12.height);
                 let stride = nv12.y_stride as usize;
@@ -162,10 +166,17 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         // Over 99 dB counts as identical (a still picture).
         println!(
             "PSNR (luma, dB)     p5 {:.2}  p50 {:.2}  min {:.2}  (n={})",
-            psnr.percentile(5.0).unwrap_or(f64::NAN),
-            psnr.percentile(50.0).unwrap_or(f64::NAN),
-            psnr.percentile(0.0).unwrap_or(f64::NAN),
-            psnr.len()
+            psnr_db.percentile(5.0).unwrap_or(f64::NAN),
+            psnr_db.percentile(50.0).unwrap_or(f64::NAN),
+            psnr_db.percentile(0.0).unwrap_or(f64::NAN),
+            psnr_db.len()
+        );
+        println!(
+            "SSIM (luma)         p5 {:.4}  p50 {:.4}  min {:.4}  (n={})",
+            similarity.percentile(5.0).unwrap_or(f64::NAN),
+            similarity.percentile(50.0).unwrap_or(f64::NAN),
+            similarity.percentile(0.0).unwrap_or(f64::NAN),
+            similarity.len()
         );
     }
     if let Some(path) = args.out {
@@ -174,31 +185,58 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Peak signal-to-noise ratio of the decoded luma against the captured
-/// picture's, in dB (capped at 99 for identical pictures). The captured BGRA
-/// becomes luma as the encoder did, with the matrix the stream declares
-/// (NVENC's BT.601, the others' BT.709), limited range (`Y = 16 + 219 x
-/// (wr R + wg G + wb B) / 255`), so rounding alone keeps it below about
-/// 50 dB; the comparison between codecs is what counts.
-fn luma_psnr(source: &BgraFrame, decoded: &Nv12Frame) -> f64 {
-    let [wr, wg, wb] = decoded.matrix.luma_weights();
+/// Both pictures' luma, row by row, over the size they share: the captured
+/// BGRA becomes luma as the encoder made it, with the matrix the stream
+/// declares (NVENC's BT.601, the others' BT.709), limited range (`Y = 16 +
+/// 219 x (wr R + wg G + wb B) / 255`).
+struct Lumas {
+    width: usize,
+    height: usize,
+    source: Vec<f32>,
+    decoded: Vec<f32>,
+}
+
+fn lumas(source: &BgraFrame, decoded: &Nv12Frame) -> Lumas {
+    let [wr, wg, wb] = decoded.matrix.luma_weights().map(|w| w as f32);
     let (w, h) = (
         source.width.min(decoded.width) as usize,
         source.height.min(decoded.height) as usize,
     );
-    let mut sum = 0.0f64;
+    let mut src_luma = Vec::with_capacity(w * h);
+    let mut dec_luma = Vec::with_capacity(w * h);
     for y in 0..h {
         let src = &source.data[y * source.stride as usize..][..w * 4];
-        let dec = &decoded.y[y * decoded.y_stride as usize..][..w];
         let (pixels, _) = src.as_chunks::<4>();
-        for (px, &out) in pixels.iter().zip(dec) {
-            let (b, g, r) = (f64::from(px[0]), f64::from(px[1]), f64::from(px[2]));
-            let luma = 16.0 + 219.0 * (wr * r + wg * g + wb * b) / 255.0;
-            let d = luma - f64::from(out);
-            sum += d * d;
-        }
+        src_luma.extend(pixels.iter().map(|px| {
+            let (b, g, r) = (f32::from(px[0]), f32::from(px[1]), f32::from(px[2]));
+            16.0 + 219.0 * (wr * r + wg * g + wb * b) / 255.0
+        }));
+        dec_luma.extend(
+            decoded.y[y * decoded.y_stride as usize..][..w]
+                .iter()
+                .map(|&v| f32::from(v)),
+        );
     }
-    let mse = sum / (w * h) as f64;
+    Lumas {
+        width: w,
+        height: h,
+        source: src_luma,
+        decoded: dec_luma,
+    }
+}
+
+/// Peak signal-to-noise ratio of the decoded luma against the captured
+/// picture's, in dB (capped at 99 for identical pictures). Rounding alone
+/// keeps it below about 50 dB; the comparison between settings is what
+/// counts.
+fn psnr(l: &Lumas) -> f64 {
+    let sum: f64 = l
+        .source
+        .iter()
+        .zip(&l.decoded)
+        .map(|(&a, &b)| f64::from(a - b) * f64::from(a - b))
+        .sum();
+    let mse = sum / (l.width * l.height).max(1) as f64;
     if mse < 1e-10 {
         99.0
     } else {
@@ -206,6 +244,97 @@ fn luma_psnr(source: &BgraFrame, decoded: &Nv12Frame) -> f64 {
     }
 }
 
+/// Structural similarity of the decoded luma against the captured picture's
+/// (P8), 1 for identical, averaged over 8x8 blocks (the fast form, without
+/// the Gaussian window). Unlike PSNR it follows what the eye notices
+/// (structure, contrast), so it can rise where adaptive quantization moves
+/// bits to flat and dark areas even if PSNR falls. The last rows and
+/// columns short of a whole block are left out; a picture smaller than one
+/// block scores 1 (captures that small are dropped before encoding).
+fn ssim(l: &Lumas) -> f64 {
+    const BLOCK: usize = 8;
+    const C1: f64 = (0.01 * 255.0) * (0.01 * 255.0);
+    const C2: f64 = (0.03 * 255.0) * (0.03 * 255.0);
+    let (mut sum, mut blocks) = (0.0f64, 0usize);
+    for by in (0..l.height / BLOCK).map(|b| b * BLOCK) {
+        for bx in (0..l.width / BLOCK).map(|b| b * BLOCK) {
+            let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0.0f64, 0.0, 0.0, 0.0, 0.0);
+            for y in by..by + BLOCK {
+                let row = y * l.width;
+                for x in bx..bx + BLOCK {
+                    let (a, b) = (f64::from(l.source[row + x]), f64::from(l.decoded[row + x]));
+                    sa += a;
+                    sb += b;
+                    saa += a * a;
+                    sbb += b * b;
+                    sab += a * b;
+                }
+            }
+            let n = (BLOCK * BLOCK) as f64;
+            let (ma, mb) = (sa / n, sb / n);
+            let (va, vb) = (saa / n - ma * ma, sbb / n - mb * mb);
+            let cov = sab / n - ma * mb;
+            sum += ((2.0 * ma * mb + C1) * (2.0 * cov + C2))
+                / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+            blocks += 1;
+        }
+    }
+    if blocks == 0 {
+        1.0
+    } else {
+        sum / blocks as f64
+    }
+}
+
 fn ms(later_us: u64, earlier_us: u64) -> f64 {
     later_us.saturating_sub(earlier_us) as f64 / 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picture(width: usize, height: usize, f: impl Fn(usize, usize) -> f32) -> Vec<f32> {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|(x, y)| f(x, y))
+            .collect()
+    }
+
+    fn pair(source: Vec<f32>, decoded: Vec<f32>) -> Lumas {
+        Lumas {
+            width: 32,
+            height: 16,
+            source,
+            decoded,
+        }
+    }
+
+    #[test]
+    fn identical_pictures_score_full_marks() {
+        let p = picture(32, 16, |x, y| 16.0 + ((x * 7 + y * 3) % 200) as f32);
+        let l = pair(p.clone(), p);
+        assert_eq!(psnr(&l), 99.0);
+        assert!((ssim(&l) - 1.0).abs() < 1e-9);
+    }
+
+    /// P8: detail smoothed away leaves SSIM near 0; slight noise lowers it a
+    /// little, and PSNR by the noise's strength.
+    #[test]
+    fn ssim_falls_with_lost_detail() {
+        let detail = picture(32, 16, |x, y| if (x + y) % 2 == 0 { 60.0 } else { 180.0 });
+        let flat = vec![120.0; 32 * 16];
+        let blurred = ssim(&pair(detail.clone(), flat));
+        assert!(blurred < 0.1, "a checkerboard turned flat: {blurred}");
+        let noisy: Vec<f32> = detail
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + if i % 3 == 0 { 4.0 } else { -2.0 })
+            .collect();
+        let close = ssim(&pair(detail.clone(), noisy.clone()));
+        assert!(close > 0.99 && close < 1.0, "slight noise: {close}");
+        // Mean squared error about (16 + 4 + 4) / 3 = 8: 10 log10(255² / 8) dB.
+        let db = psnr(&pair(detail, noisy));
+        assert!((db - 39.10).abs() < 0.01, "{db}");
+    }
 }

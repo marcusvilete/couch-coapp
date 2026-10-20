@@ -19,7 +19,7 @@ use rsmpeg::{
 
 use crate::{
     d3d11::D3d11Frames,
-    options::{OptionSet, option_sets},
+    options::{self, OptionSet, option_sets},
     probe::{H264_ENCODERS, HEVC_ENCODERS},
 };
 
@@ -205,8 +205,14 @@ impl FfmpegEncoder {
             (*raw).color_trc = ffi::AVCOL_TRC_BT709;
             (*raw).color_range = ffi::AVCOL_RANGE_MPEG;
         }
+        // P8's measurement switches, over NVENC's set (none unless set).
+        let (extra, extra_label) = if is_nvenc(name) {
+            options::nvenc_overrides()
+        } else {
+            (Vec::new(), String::new())
+        };
         let unused = set
-            .open(&mut ctx)
+            .open_with(&mut ctx, &extra)
             .map_err(|e| MediaError::Backend(format!("{name}: {e}")))?;
         if !unused.is_empty() {
             tracing::warn!("{name} ignored options {unused:?} (\"{}\")", set.label);
@@ -235,7 +241,11 @@ impl FfmpegEncoder {
             ctx,
             caps: EncoderCaps {
                 name: name.to_string(),
-                options: set.label.to_string(),
+                options: if extra_label.is_empty() {
+                    set.label.to_string()
+                } else {
+                    format!("{}, measuring {extra_label}", set.label)
+                },
                 hardware: name != "libopenh264",
                 gpu_input: matches!(input, Input::Gpu(_)),
                 // NVENC resets with an IDR; the others are reopened (`encode`).

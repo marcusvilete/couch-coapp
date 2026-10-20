@@ -1,6 +1,6 @@
 ---
 name: app-manual-run
-description: Set up and read a manual test of the Couch Co-App desktop app, on one PC with several profiles (the default profile plus alice, bob and carol) or on two PCs with the installer (scripts/build-installer.ps1): starting them, where every log is, what one PC can and can't show (games grab the guest's physical controller; keyboard and mouse never reach the game), how to tell a stream problem from a game's choice with xinput-watch.ps1, checking the viewer's HUD without a session, two-PC setup, checklists per area and traps already met, and what to ask the user to try. Use when asking the user to try the app (going live, watching, passing control, the panic key, games, two PCs), when the user reports something from such a run, or when reading its logs.
+description: Set up and read a manual test of the Couch Co-App desktop app, on one PC with several profiles (the default profile plus alice, bob and carol) or on two PCs with the installer (scripts/build-installer.ps1): starting them, where every log is, what one PC can and can't show (games grab the guest's physical controller; keyboard and mouse never reach the game), how to tell a stream problem from a game's choice with xinput-watch.ps1, checking the viewer's HUD without a session, what to expect by area (sessions and streams, seats, sound, Settings and the overlay), two-PC setup, checklists per area and traps already met, and what to ask the user to try. Use when asking the user to try the app (going live, watching, passing control, the panic key, games, two PCs), when the user reports something from such a run, or when reading its logs.
 ---
 
 # A manual run of the app on one PC
@@ -81,8 +81,18 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **Expect** the guest's pad to go neutral, "control paused" in the host panel, no Backspace in the game, and `panic key:` in the host's log.
 - **If it fails only in our own window:** something registered the process for raw keyboard input (see `windows-ffi-pitfalls`).
 
-## Lifecycle (M6): what to expect
+## What to expect, by area
 
+Each feature's notes sit under its area, tagged with the milestone that added it. Add a new feature's notes to the area it belongs to (or a new area), not as a section of its own.
+
+### Sessions and streams (M19), lifecycle (M6), the picture (P8)
+
+- **Start a session** (the dialog): a title, how many can watch, the seats, and the host's controller. Nothing is captured yet. The pads are plugged in and the controller hidden at once, so a game started afterwards never sees the controller and finds the seats' pads.
+- **The host panel** shows SESSION (LIVE while streaming), End session, and a Stream section: the windows and screens, frame rate, quality and upload limit, then Start streaming. While live it says what is streamed, with Stop streaming; picking something else and "Stream this instead" switches.
+- **Watchers between streams:** the room card says "Ana isn't streaming anything yet" (or why the last stream stopped); a stream window stays open, black, with that line in the middle and "Your seat stays yours". Their input does nothing until the next stream (the host's log shows no seat change). The next stream arrives by itself, from a keyframe.
+- **A session with a keyboard-and-mouse seat** streams only windows: the Stream section says so if a screen is picked.
+- **The host's own controller** plays its seat between streams too, so the host can start the game with it.
+- **The "game not in front" line.** With alice live and the game window behind another window, the guests' stream windows say "The game isn't in front on Ana's PC"; for a player the bar stays up until it comes back. On one PC the stream window itself takes the front, so expect the line while clicking in it: that is right.
 - **Closing the game** ends the stream with "The game closed", not the session (M19): viewers' windows stay, black, saying so, and the host can stream again. A game that swaps its window (some do when changing display mode) keeps streaming after a short freeze; host log: `the game opened a new window; streaming that one`.
 - **A window that closes while the game runs** ends the stream after 5 s ("went away"); the session goes on.
 - **Killing the host app** (Task Manager): its viewers see the connection lost after about 5 s (log: `the peer went silent; closing`).
@@ -90,47 +100,18 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **Killing `couch-viewer.exe`**: use Task Manager's **Details** tab (End task there kills). The window comes back by itself once; a second kill within a minute ends watching ("crashed twice"). Log: `the stream window crashed and was started again`. The Processes tab's End task asks the window to close instead, which counts as leaving: watching just stops.
 - **A program run as administrator** is marked "admin" in the Stream section's list, with a warning when picked. Keyboard and mouse can't reach it, and the panic key doesn't work while it is in front (measured in M6); Take back does.
 - On one PC, the network can't be dropped for one pair; two PCs (turn off the guest's network for about 10 s) or the `sessions` scenarios cover it.
+- **The stream window scales with bicubic** on luma (P8); the stats panel's decoder line says "…, bicubic scaling, …". `COUCH_VIEWER_SCALER=bilinear` in the watcher's environment gives the old one, to compare. The difference is small, most visible on text.
+- **A soft picture is mostly the upscale and the bitrate,** not the scaler: a game in a window smaller than the watcher's screen is stretched to fit, and a stream starts at 10 Mbit/s and climbs only up to the host's quality setting. When the user reports blur, suggest the game borderless at the host's screen resolution, and the quality at 20 Mbit/s or higher (30 or 50 on a fast connection); the stats panel shows the size streamed and the bitrate.
 
-## Sessions before streams (M19): what to expect
+### Seats (P1), the host on a seat (P2), several seats for one guest (M18)
 
-- **Start a session** (the dialog): a title, how many can watch, the seats, and the host's controller. Nothing is captured yet. The pads are plugged in and the controller hidden at once, so a game started afterwards never sees the controller and finds the seats' pads.
-- **The host panel** shows SESSION (LIVE while streaming), End session, and a Stream section: the windows and screens, frame rate, quality and upload limit, then Start streaming. While live it says what is streamed, with Stop streaming; picking something else and "Stream this instead" switches.
-- **Watchers between streams:** the room card says "Ana isn't streaming anything yet" (or why the last stream stopped); a stream window stays open, black, with that line in the middle and "Your seat stays yours". Their input does nothing until the next stream (the host's log shows no seat change). The next stream arrives by itself, from a keyframe.
-- **A session with a keyboard-and-mouse seat** streams only windows: the Stream section says so if a screen is picked.
-- **The host's own controller** plays its seat between streams too, so the host can start the game with it.
-
-## Seats (P1): what to expect
-
+**The seats themselves (P1):**
 - **The session dialog's seats** (M19: one setup). Controllers 0 to 4, each its own virtual pad, and keyboard and mouse: not for guests, a seat of their own, or with Controller 1 (one player on both, single player's old "both"). The last setup comes back (the profile's web storage). Fixed for the session.
 - **A controller plugged into the host** shows a warning when it isn't chosen as the host's: it may take a player's place.
 - **On this PC with profiles:** alice starts a session with 2 controllers and streams; bob and carol each ask for one. `xinput-watch.ps1` should show two virtual pads (after any physical ones), each moving only with its own guest. Steam announces each pad.
 - **Moving.** A guest with one controller holding Controller 1 who asks for Controller 2 keeps the first until the host accepts; then the first goes neutral and the second follows them. Host log: `seat` lines for both.
 
-## The stream volume (P6): what to expect
-
-- **In the stream window's bar:** Mute and a volume slider (0 to 100%, never louder than the host sends). Ctrl+Alt+Shift+`-` / `=` / `0` turn it down, up (by 10%) and mute it, showing "Volume 70%" or "Muted"; turning it up unmutes. Settings → Shortcuts lists the three, movable like the others. Only this window's sound changes: the host and other watchers hear no difference.
-- **Remembered per profile** (`audio.json` in its folder): the next stream window plays at the same level, even after closing the window right after a change.
-- **On one PC**, every window plays through the same speakers: compare by muting one watcher's window.
-
-## The host's stream level (P7): what to expect
-
-- **The host panel's Stream section** has a Stream volume slider (0 to 400%) and a meter of what guests hear after it (a bar and a peak mark; "silent" without sound, "loud peaks rounded off" while a boost is limited). It changes what every guest hears, never what the host hears, at once, and comes back in the next session (`host-audio.json`).
-- **To play quietly while the stream (and a Discord call) stay loud:** lower the game's slider in Windows' volume mixer, then raise the stream volume until the meter is back where it was. Windows' main volume doesn't reach the capture, but lowers everything else.
-- **Checking a level on one PC:** a watcher's stats panel ends its audio line with `level peak … / avg … dBFS`, the sound as it arrives (50% on the host is about 12 dB lower).
-
-## Several seats for one guest (M18): what to expect
-
-- **The guest's controller count** reaches the host when the guest's stream window opens its controllers: the host panel's Watching list says "bob · 2 controllers" (sessions with more than one seat). Plugging or unplugging one updates it.
-- **Added or moved.** With 2 controllers, a guest on Controller 1 who asks for Controller 2 keeps both; with 1 they move, as before. The keyboard-and-mouse seat is always added, and a move keeps it. The host's "Pass another seat…" menu says "— added" or "— moves them" per seat.
-- **Which controller drives which.** Each pad seat keeps the controller it got: a new seat goes to the lowest free controller, and when a second seat comes, the first keeps the controller driving it. With one pad seat, whichever controller they touch last.
-- **A controller disconnecting** (unplugged, battery, sleep) with several pad seats gives its seat back at once (the host panel shows it free, the host overlay notes it); the guest's other controllers stay on their seats. With one pad seat, the seat stays: another controller or the same one reconnected carries on. The stream window's stats panel (the bar's Stats button) has an input line saying "pad A → seat 1, pad B → seat 2"; rumble goes to the controller driving that seat.
-- **Giving back.** The guest's card and stream-window bar get "Give back Controller N" per seat and "Give all back"; the host's Take back stays per seat.
-- **On this PC:** two physical controllers both on this PC, alice hosting 2 controller seats, bob watching (alice's own controller not chosen, or HidHide hides one from bob too). bob's window shows 2 controllers; bob asks for both; `xinput-watch.ps1` shows each of bob's controllers moving only its own pad. A DualSense and an Xbox controller work; two Xbox 360 pads are skipped while a host here has pads plugged in (the viewer can't tell them from ours).
-- **The "game not in front" line.** With alice live and the game window behind another window, the guests' stream windows say "The game isn't in front on Ana's PC"; for a player the bar stays up until it comes back. On one PC the stream window itself takes the front, so expect the line while clicking in it: that is right.
-
-## The host on a seat (P2): what to expect
-
-Needs HidHide installed on the host (administrator, then a restart; installed on the user's PC on 2026-10-06) and a controller that isn't an Xbox 360 one (theirs is a DualSense, on Bluetooth).
+**The host on a seat (P2).** Needs HidHide installed on the host (administrator, then a restart; installed on the user's PC on 2026-10-06) and a controller that isn't an Xbox 360 one (theirs is a DualSense, on Bluetooth).
 - **The session dialog's "Your controller".** Lists the host's controllers (never our pads) when a seat has a pad; the choice is remembered in the profile's web storage. Its line says what HidHide allows: not installed (with the download page), its configuration window open (close it, start again), or ready.
 - **After starting the session** the host panel says the controller is hidden for the whole session: start the game now. A game or Steam that was already running and had it open still sees it until it is reconnected once. `joy.cpl` (closed and reopened) lists only "Xbox 360 Controller", and `xinput-watch.ps1` shows the host's input in that pad's slot.
 - **Steam Input off for the game** (its Properties → Controller), or one seat gets no player in it: Steam keeps a player for the hidden controller. Turning off Steam's global PlayStation support instead also works, but then the DualSense works in games only while live.
@@ -138,7 +119,24 @@ Needs HidHide installed on the host (administrator, then a restart; installed on
 - **Ending the session** shows the controller again (log: `the host's controller is shown again`); stopping a stream doesn't. If the app was killed, it stays hidden until the next start of the app or of `couch-cli host` (log: `showed 1 controller(s) hidden by a host that crashed`). HidHide's own configuration client (Start menu) also shows and clears the list.
 - **If hiding fails**, the host panel says why and the host plays outside the seats, as in P1.
 
-## Settings and the splash (P3): what to expect
+**Several seats for one guest (M18):**
+- **The guest's controller count** reaches the host when the guest's stream window opens its controllers: the host panel's Watching list says "bob · 2 controllers" (sessions with more than one seat). Plugging or unplugging one updates it.
+- **Added or moved.** With 2 controllers, a guest on Controller 1 who asks for Controller 2 keeps both; with 1 they move, as before. The keyboard-and-mouse seat is always added, and a move keeps it. The host's "Pass another seat…" menu says "— added" or "— moves them" per seat.
+- **Which controller drives which.** Each pad seat keeps the controller it got: a new seat goes to the lowest free controller, and when a second seat comes, the first keeps the controller driving it. With one pad seat, whichever controller they touch last.
+- **A controller disconnecting** (unplugged, battery, sleep) with several pad seats gives its seat back at once (the host panel shows it free, the host overlay notes it); the guest's other controllers stay on their seats. With one pad seat, the seat stays: another controller or the same one reconnected carries on. The stream window's stats panel (the bar's Stats button) has an input line saying "pad A → seat 1, pad B → seat 2"; rumble goes to the controller driving that seat.
+- **Giving back.** The guest's card and stream-window bar get "Give back Controller N" per seat and "Give all back"; the host's Take back stays per seat.
+- **On this PC:** two physical controllers both on this PC, alice hosting 2 controller seats, bob watching (alice's own controller not chosen, or HidHide hides one from bob too). bob's window shows 2 controllers; bob asks for both; `xinput-watch.ps1` shows each of bob's controllers moving only its own pad. A DualSense and an Xbox controller work; two Xbox 360 pads are skipped while a host here has pads plugged in (the viewer can't tell them from ours).
+
+### Sound: the stream volume (P6), the host's stream level (P7)
+
+- **In the stream window's bar:** Mute and a volume slider (0 to 100%, never louder than the host sends). Ctrl+Alt+Shift+`-` / `=` / `0` turn it down, up (by 10%) and mute it, showing "Volume 70%" or "Muted"; turning it up unmutes. Settings → Shortcuts lists the three, movable like the others. Only this window's sound changes: the host and other watchers hear no difference.
+- **Remembered per profile** (`audio.json` in its folder): the next stream window plays at the same level, even after closing the window right after a change.
+- **On one PC**, every window plays through the same speakers: compare by muting one watcher's window.
+- **The host panel's Stream section** has a Stream volume slider (0 to 400%, P7) and a meter of what guests hear after it (a bar and a peak mark; "silent" without sound, "loud peaks rounded off" while a boost is limited). It changes what every guest hears, never what the host hears, at once, and comes back in the next session (`host-audio.json`).
+- **To play quietly while the stream (and a Discord call) stay loud:** lower the game's slider in Windows' volume mixer, then raise the stream volume until the meter is back where it was. Windows' main volume doesn't reach the capture, but lowers everything else.
+- **Checking a level on one PC:** a watcher's stats panel ends its audio line with `level peak … / avg … dBFS`, the sound as it arrives (50% on the host is about 12 dB lower).
+
+### Settings and the splash (P3), the host overlay (M8)
 
 - **The splash** ("Player 2 joins") plays at every start for about 3 s: two controllers slide in, land on a couch, the name types out, the picture holds a second, then fades. A click or a key skips it. It animates even with Windows' animation effects off (the user's choice; their PC has them off). It covers the lobby's first load only; the engine is already running.
 - **⚙ Settings** in the user panel, two tabs:
@@ -158,8 +156,7 @@ Needs HidHide installed on the host (administrator, then a restart; installed on
 - **Keys are checked within one profile only.** On one PC, a viewer profile's chord set to the hosting profile's panic key is swallowed by the host's hook and presses the panic key. Not a bug (on two PCs they never meet); keep them apart when testing.
 - **Restart now** shows a "Restarting Couch Co-App…" screen with a spinner, goes through the normal exit (the rooms hear we go; a second or two), then starts the same profile again, which opens with the splash; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the installed app): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`import.meta.env.DEV`). Pressing it under `tauri dev` once ended both, leaving no app running.
 
-## The host overlay (M8): what to expect
-
+**The host overlay (M8):**
 - **When it shows:** only while this profile streams, something is pending or just happened, and the app's own window isn't in front (it shows the same). A corner window, top right of the monitor showing the streamed window (or the streamed screen), opened for each burst and closed when empty, so there's a short delay (about a third of a second) before the first toast.
 - **What it shows:** each request ("bob asks for Controller 2"), the oldest framed in orange with its keys (Ctrl+Alt+Shift+Y accept, N decline by default); notes that fade after about 4 s (started or stopped watching, now plays or no longer plays a seat, no longer asking, control paused).
 - **The keys** answer the oldest request, only once it has been pending 1 s (an immediate press does nothing; log: `too new to have been seen`). They go through the panic key's hook: a game running as administrator in front hides them from us, as for the panic key.
