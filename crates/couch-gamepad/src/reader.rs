@@ -253,9 +253,15 @@ impl Sdl {
             .collect()
     }
 
-    /// The first plugged-in controller with `ids`, opened.
-    fn attach(&mut self, ids: ControllerIds) -> Option<JoystickId> {
-        let which = self.present.iter().find(|p| p.1 == ids)?.0;
+    /// The first plugged-in controller with `ids` that no other follower
+    /// reads (`taken`), opened: two controllers of one model are told apart
+    /// by the order they were found (M23).
+    fn attach(&mut self, ids: ControllerIds, taken: &[JoystickId]) -> Option<JoystickId> {
+        let which = self
+            .present
+            .iter()
+            .find(|p| p.1 == ids && !taken.contains(&p.0))?
+            .0;
         if !self.open.iter().any(|p| p.0 == which) {
             match self.gamepads.open(which) {
                 Ok(pad) => self.open.push((which, pad)),
@@ -352,9 +358,11 @@ fn run(mut sdl: Sdl, rx: Receiver<Cmd>) {
             next = sdl.events.poll_event();
         }
         let now = Instant::now();
+        let mut taken: Vec<JoystickId> = followers.iter().filter_map(|f| f.on).collect();
         for f in &mut followers {
             if f.on.is_none() {
-                f.on = sdl.attach(f.ids);
+                f.on = sdl.attach(f.ids, &taken);
+                taken.extend(f.on);
             }
             let state =
                 f.on.and_then(|which| sdl.pad(which))

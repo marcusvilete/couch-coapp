@@ -47,10 +47,11 @@ pub trait LocalPads: Send + Sync {
     /// The controllers plugged in now.
     fn list(&self) -> Result<Vec<LocalController>, InputError>;
 
-    /// Follows the first controller with `ids` until the returned handle
-    /// drops: `on_state` gets its state on every change and every
-    /// [`LOCAL_PAD_EVERY`], neutral while none is plugged in. It runs on the
-    /// reader's thread and must return at once.
+    /// Follows the first controller with `ids` that no other follow reads
+    /// (M23: two of one model go to two follows, in the order found), until
+    /// the returned handle drops: `on_state` gets its state on every change
+    /// and every [`LOCAL_PAD_EVERY`], neutral while none is plugged in. It
+    /// runs on the reader's thread and must return at once.
     fn follow(
         &self,
         ids: ControllerIds,

@@ -1048,6 +1048,20 @@ select {
   color: var(--fg-muted);
 }
 
+/* The host's own controllers on seats (M23): one check each. */
+.own-controllers {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.own-controllers:disabled {
+  opacity: 0.6;
+}
+
 /* The host panel's seats. */
 .seat-kind {
   flex: none;

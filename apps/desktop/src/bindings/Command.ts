@@ -25,12 +25,13 @@ max_viewers: number,
  */
 input: InputSetup, 
 /**
- * The host's own controller, to play through a seat: hidden from
- * games for the session, it drives the first seat with a pad.
- * `None` plays outside the seats, with whatever the game sees
- * directly.
+ * The host's own controllers, to play through seats (M23): hidden
+ * from games for the session, each drives its own seat with a pad,
+ * in seat order. Empty plays outside the seats, with whatever the
+ * game sees directly. Two of one model are told apart by the order
+ * they are found.
  */
-controller: HostController | null, } | { "type": "startStream", source: SourceChoice, 
+controllers: Array<HostController>, } | { "type": "startStream", source: SourceChoice, 
 /**
  * What the host's panel calls it (a window's title): shown only
  * here, and kept out of logs.
@@ -43,4 +44,4 @@ max_mbps: number,
 /**
  * This PC's upload cap, split between viewers, Mbit/s.
  */
-upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "setStreamLevel", percent: number, } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "giveBackSeat", seat: number, } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, } | { "type": "allowControl" };
+upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "setStreamLevel", percent: number, } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "giveBackSeat", seat: number, } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, controller: number, } | { "type": "allowControl" };

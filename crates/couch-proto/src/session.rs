@@ -123,13 +123,14 @@ pub struct SessionStatus {
     /// Each seat's viewer holder, by seat; `None` while no viewer holds it.
     /// As long as the announcement's seats (the receiver checks).
     pub holders: Vec<Option<MemberId>>,
-    /// The seat the host plays with their own controller (it reads the
-    /// controller and drives that seat's pad); none of the viewers holds it.
-    /// `None` while the host plays outside the seats, with whatever devices
-    /// the game sees directly, as on a seat no viewer holds.
-    pub host_seat: Option<SeatId>,
-    /// The host's own controller plays only through the seats, hidden from
-    /// the game: with `host_seat` `None` the host plays no seat, and a seat
+    /// The seats the host plays with their own controllers (it reads each
+    /// controller and drives its seat's pad; M23: one seat per controller),
+    /// in seat order; none of the viewers holds them. Empty while the host
+    /// plays outside the seats, with whatever devices the game sees
+    /// directly, as on a seat no viewer holds.
+    pub host_seats: Vec<SeatId>,
+    /// The host's own controllers play only through the seats, hidden from
+    /// the game: with `host_seats` empty the host plays no seat, and a seat
     /// nobody holds is empty. `false` while the host plays outside the seats.
     pub host_on_seats: bool,
     /// The host took control back with the panic key; requests are declined
@@ -152,9 +153,10 @@ pub enum StreamState {
 }
 
 impl SessionStatus {
-    /// Every holder is a viewer, and the host's seat is a seat no viewer
-    /// holds, only while the host plays on seats. A viewer may hold several
-    /// seats (M18: one per controller, and the keyboard seat).
+    /// Every holder is a viewer, and the host's seats are seats no viewer
+    /// holds, each once, only while the host plays on seats. A viewer may
+    /// hold several seats (M18: one per controller, and the keyboard seat),
+    /// and so may the host (M23).
     pub fn is_valid(&self) -> bool {
         self.viewers.len() <= MAX_VIEWERS_LISTED
             && self.holders.len() <= MAX_SEATS
@@ -163,9 +165,12 @@ impl SessionStatus {
                 .iter()
                 .flatten()
                 .all(|h| self.viewers.contains(h))
-            && self.host_seat.is_none_or(|s| {
-                self.host_on_seats && self.holders.get(usize::from(s.0)) == Some(&None)
-            })
+            && (self.host_on_seats || self.host_seats.is_empty())
+            && self.host_seats.windows(2).all(|w| w[0] < w[1])
+            && self
+                .host_seats
+                .iter()
+                .all(|s| self.holders.get(usize::from(s.0)) == Some(&None))
     }
 
     /// Every seat `member` holds, in seat order.
@@ -357,12 +362,30 @@ mod tests {
             session: SessionId(1),
             viewers: vec![bia, cai],
             holders: vec![Some(bia), None, Some(cai)],
-            host_seat: Some(SeatId(1)),
+            host_seats: vec![SeatId(1)],
             host_on_seats: true,
             control_paused: false,
             stream: StreamState::Waiting,
         };
         assert!(status.is_valid());
+        assert!(
+            SessionStatus {
+                holders: vec![Some(bia), None, None, Some(cai)],
+                host_seats: vec![SeatId(1), SeatId(2)],
+                ..status.clone()
+            }
+            .is_valid(),
+            "the host may play two seats (M23)"
+        );
+        assert!(
+            !SessionStatus {
+                holders: vec![Some(bia), None, None],
+                host_seats: vec![SeatId(1), SeatId(1)],
+                ..status.clone()
+            }
+            .is_valid(),
+            "each of the host's seats once"
+        );
         assert!(
             !SessionStatus {
                 host_on_seats: false,
@@ -373,7 +396,7 @@ mod tests {
         );
         assert!(
             SessionStatus {
-                host_seat: None,
+                host_seats: vec![],
                 ..status.clone()
             }
             .is_valid(),
@@ -381,7 +404,7 @@ mod tests {
         );
         assert!(
             !SessionStatus {
-                host_seat: Some(SeatId(0)),
+                host_seats: vec![SeatId(0)],
                 ..status.clone()
             }
             .is_valid(),
@@ -389,7 +412,7 @@ mod tests {
         );
         assert!(
             !SessionStatus {
-                host_seat: Some(SeatId(3)),
+                host_seats: vec![SeatId(3)],
                 ..status.clone()
             }
             .is_valid(),
@@ -407,7 +430,7 @@ mod tests {
         );
         let two = SessionStatus {
             holders: vec![Some(bia), Some(bia)],
-            host_seat: None,
+            host_seats: vec![],
             ..status.clone()
         };
         assert!(two.is_valid(), "a viewer may hold two seats (M18)");
@@ -436,7 +459,7 @@ mod tests {
             session: SessionId(u64::MAX),
             viewers: vec![MemberId([0xff; 32]); MAX_VIEWERS_LISTED],
             holders: vec![Some(MemberId([0xff; 32])); MAX_SEATS],
-            host_seat: Some(SeatId(u8::MAX)),
+            host_seats: (0..MAX_SEATS as u8).map(SeatId).collect(),
             host_on_seats: true,
             control_paused: true,
             stream: StreamState::Stopped(EndReason::GameExited),

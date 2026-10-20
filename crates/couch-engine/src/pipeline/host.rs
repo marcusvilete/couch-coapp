@@ -173,7 +173,7 @@ pub struct HostOptions {
     /// How long a game may take to show a new window before the stream ends
     /// ([`source::REPLACE_GRACE`]; shorter in tests).
     pub replace_grace: Duration,
-    /// The host's own controller, played through a seat.
+    /// The host's own controllers, each played through a seat.
     pub local: Option<LocalSeat>,
 }
 
@@ -191,15 +191,19 @@ pub struct StreamOptions {
     pub pacing_trace: Option<PathBuf>,
 }
 
-/// The host's own controller, read on this PC and played through a seat like
-/// a viewer's: its input goes through the seat router as `member`'s, which
-/// [`HostPipeline::claim`] and [`HostPipeline::grant`] give a seat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The host's own controllers, read on this PC and each played through a
+/// seat like a viewer's (M23: one seat per controller): their input goes
+/// through the seat router as `member`'s, which [`HostPipeline::claim`] and
+/// [`HostPipeline::grant`] give seats, each controller driving the seat
+/// [`HostPipeline::host_seats`] names for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSeat {
     /// The host's own id, as the router's holder.
     pub member: MemberId,
-    pub controller: ControllerIds,
-    /// Hide it from games first, or they would see it beside its seat's pad.
+    /// By controller: two of one model are told apart by the order found.
+    pub controllers: Vec<ControllerIds>,
+    /// Hide them from games first, or they would see them beside their
+    /// seats' pads.
     pub hide: bool,
 }
 
@@ -613,12 +617,12 @@ impl HostPipeline {
         options: HostOptions,
     ) -> (Self, mpsc::UnboundedReceiver<HostEvent>) {
         let (events, events_rx) = mpsc::unbounded_channel();
-        let (local_tx, local_rx) = mpsc::channel::<PadState>(LOCAL_QUEUE);
+        let (local_tx, local_rx) = mpsc::channel::<(u8, PadState)>(LOCAL_QUEUE);
         let plugged = {
             let backend = backend.clone();
             let real_ids = options.real_pad_ids;
             let seats = options.seats.clone();
-            let local = options.local;
+            let local = options.local.clone();
             tokio::task::spawn_blocking(move || {
                 let pads = seats
                     .iter()
@@ -634,11 +638,14 @@ impl HostPipeline {
             Err(e) => (Err(e), None),
         };
         let (local, local_status, hidden) = match local {
-            Some(Ok((pad, hidden))) => (Some(pad), Some(Ok(())), hidden),
+            Some(Ok((pads, hidden))) => (Some(pads), Some(Ok(())), hidden),
             Some(Err(e)) => (None, Some(Err(e)), None),
             None => (
                 None,
-                options.local.map(|_| Err("it didn't start".to_string())),
+                options
+                    .local
+                    .as_ref()
+                    .map(|_| Err("it didn't start".to_string())),
                 None,
             ),
         };
@@ -689,26 +696,32 @@ impl HostPipeline {
                 Vec::new()
             }
         };
-        let local_seat = shared.options.local;
-        match (local_seat, &local_status) {
-            (Some(l), Some(Ok(()))) => shared.note(format!(
-                "the host's controller {:04x}:{:04x} plays through a seat{}",
-                l.controller.vendor,
-                l.controller.product,
-                if hidden.is_some() {
-                    ", hidden from games"
-                } else {
-                    ""
-                }
-            )),
+        let local_seat = shared.options.local.clone();
+        match (&local_seat, &local_status) {
+            (Some(l), Some(Ok(()))) => {
+                let ids: Vec<String> = l
+                    .controllers
+                    .iter()
+                    .map(|c| format!("{:04x}:{:04x}", c.vendor, c.product))
+                    .collect();
+                shared.note(format!(
+                    "the host's controllers {} play through seats{}",
+                    ids.join(", "),
+                    if hidden.is_some() {
+                        ", hidden from games"
+                    } else {
+                        ""
+                    }
+                ));
+            }
             (Some(_), Some(Err(e))) => shared.note(format!(
-                "the host's controller can't play through a seat: {e}"
+                "the host's controllers can't play through seats: {e}"
             )),
             _ => {}
         }
-        let local = local.zip(local_seat).map(|(pad, seat)| LocalFeed {
+        let local = local.zip(local_seat).map(|(pads, seat)| LocalFeed {
             member: seat.member,
-            pad,
+            pads,
             states: local_rx,
         });
         let (input, cmds) = mpsc::unbounded_channel();
@@ -737,11 +750,18 @@ impl HostPipeline {
         self.local.as_ref()
     }
 
-    /// Hands `seat` to `member` only if nobody holds it and `member` holds no
-    /// other: the host's own seat coming back to them. Only the host's own
-    /// controller may claim; other claims are ignored.
+    /// Hands `seat` to `member` only if nobody holds it and it is one of the
+    /// host's controllers' seats: a controller's own seat coming back to it.
+    /// Only the host may claim; other claims are ignored.
     pub fn claim(&self, seat: SeatId, member: MemberId) {
         let _ = self.input.send(InputCmd::Claim { seat, member });
+    }
+
+    /// The seat each of the host's controllers drives, by controller (M23).
+    /// Send before the claims and grants it concerns: they go on the same
+    /// ordered channel.
+    pub fn host_seats(&self, seats: Vec<SeatId>) {
+        let _ = self.input.send(InputCmd::HostSeats(seats));
     }
 
     /// The stream's captured window, once known; `None` without a stream.
@@ -1041,19 +1061,19 @@ impl HostPipeline {
         let _ = self.input.send(InputCmd::Revoke { seat, holder });
     }
 
-    /// Every seat back to the host at once, their own controller's included.
+    /// Every seat back to the host at once, their own controllers' included.
     pub fn revoke_all(&self) {
         let _ = self.input.send(InputCmd::RevokeAll);
     }
 
-    /// Every seat a viewer holds back to the host at once; the one the
-    /// host's own controller plays stays theirs.
+    /// Every seat a viewer holds back to the host at once; those the host's
+    /// own controllers play stay theirs.
     pub fn revoke_viewers(&self) {
         let _ = self.input.send(InputCmd::RevokeViewers);
     }
 
     /// The panic key: every seat a viewer holds back to the host (their own
-    /// controller keeps the seat it plays), and no grant to a viewer, nor any
+    /// controllers keep the seats they play), and no grant to a viewer, nor any
     /// claim, goes through until [`HostPipeline::allow_grants`], even one
     /// already on its way.
     pub fn panic(&self) {
@@ -1947,42 +1967,62 @@ impl RcTrace {
 /// so dropping some when it falls behind loses nothing.
 const LOCAL_QUEUE: usize = 64;
 
-/// The host's controller while it plays through a seat.
+/// The host's controllers while they play through seats.
 struct LocalFeed {
     member: MemberId,
-    pad: Box<dyn LocalPad>,
-    states: mpsc::Receiver<PadState>,
+    /// By controller.
+    pads: Vec<Box<dyn LocalPad>>,
+    /// Each state with its controller.
+    states: mpsc::Receiver<(u8, PadState)>,
 }
 
-/// Keeps the host's controller hidden from games until dropped.
+/// Keeps the host's controllers hidden from games until dropped.
 type HiddenGuard = Box<dyn Any + Send>;
 
-/// Hides the host's controller if asked, then follows it, its states going
-/// to `states`. Blocks: hiding and starting the reader take a moment.
-/// Returns the followed pad and the hiding guard.
+/// The host's controllers followed, by controller, and what keeps them
+/// hidden.
+type Followed = (Vec<Box<dyn LocalPad>>, Option<HiddenGuard>);
+
+/// Hides the host's controllers if asked (each model once: hiding goes by
+/// ids), then follows each, its states going to `states` with its index.
+/// Blocks: hiding and starting the reader take a moment. All or nothing: if
+/// one can't be hidden or followed, none plays through a seat, and those
+/// hidden are shown again. Returns the followed pads, by controller, and
+/// the hiding guard.
 fn start_local(
     backend: &dyn Backend,
     local: LocalSeat,
-    states: mpsc::Sender<PadState>,
-) -> Result<(Box<dyn LocalPad>, Option<HiddenGuard>), String> {
+    states: mpsc::Sender<(u8, PadState)>,
+) -> Result<Followed, String> {
     let pads = backend
         .local_pads()
         .ok_or_else(|| "this PC's controllers can't be read".to_string())?;
-    let hidden = if local.hide {
-        Some(backend.hide_controller(local.controller)?)
-    } else {
-        None
-    };
-    // A failure here drops `hidden`: the controller is shown again.
-    let pad = pads
-        .follow(
-            local.controller,
-            Box::new(move |state| {
-                let _ = states.try_send(state);
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok((pad, hidden))
+    let mut hidden: Vec<HiddenGuard> = Vec::new();
+    if local.hide {
+        let mut models = local.controllers.clone();
+        models.sort_by_key(|c| (c.vendor, c.product));
+        models.dedup();
+        for ids in models {
+            hidden.push(backend.hide_controller(ids)?);
+        }
+    }
+    // A failure here drops `hidden`: the controllers are shown again.
+    let mut followed = Vec::new();
+    for (k, ids) in local.controllers.iter().enumerate() {
+        let states = states.clone();
+        let k = k as u8;
+        followed.push(
+            pads.follow(
+                *ids,
+                Box::new(move |state| {
+                    let _ = states.try_send((k, state));
+                }),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    let hidden = (!hidden.is_empty()).then(|| Box::new(hidden) as HiddenGuard);
+    Ok((followed, hidden))
 }
 
 enum InputCmd {
@@ -2003,17 +2043,20 @@ enum InputCmd {
         holder: Option<MemberId>,
     },
     RevokeAll,
-    /// Every seat but the one the host's own controller plays.
+    /// Every seat but those the host's own controllers play.
     RevokeViewers,
-    /// Grant only if the seat is free, `member`, the host, holds none, and
-    /// the panic key hasn't paused control.
+    /// Grant only if the seat is free, `member` is the host, the seat is one
+    /// of their controllers' ([`InputCmd::HostSeats`]), and the panic key
+    /// hasn't paused control.
     Claim {
         seat: SeatId,
         member: MemberId,
     },
+    /// The seat each of the host's controllers drives, by controller (M23).
+    HostSeats(Vec<SeatId>),
     /// Holds every viewer's input off (releasing what they held), or lets it
     /// through again, then answers if asked (M19: while nothing is
-    /// streamed). The host's own controller keeps playing.
+    /// streamed). The host's own controllers keep playing.
     Hold {
         on: bool,
         ack: Option<oneshot::Sender<()>>,
@@ -2030,6 +2073,8 @@ enum InputCmd {
 struct SeatRumble {
     now: Rumble,
     sent: (Option<MemberId>, Rumble, Instant),
+    /// The host's controller it last went to, when it went to the host.
+    controller: Option<usize>,
 }
 
 /// The input task's state: the router, what it injects into, and where
@@ -2052,12 +2097,25 @@ struct Inputs {
     local: Option<Local>,
 }
 
-/// The host's controller, in the input task.
+/// The host's controllers, in the input task.
 struct Local {
     member: MemberId,
-    pad: Box<dyn LocalPad>,
-    /// Its states, numbered as a viewer numbers its pad datagrams.
+    /// By controller.
+    pads: Vec<Box<dyn LocalPad>>,
+    /// The seat each controller drives, by controller, as the session last
+    /// said: only these may be claimed, and a controller's states go only
+    /// to its own, while the host holds it.
+    seats: Vec<SeatId>,
+    /// Their states, numbered as a viewer numbers its pad datagrams (the
+    /// router checks the order per seat).
     seq: u32,
+}
+
+impl Local {
+    /// The controller driving `seat`.
+    fn controller_on(&self, seat: SeatId) -> Option<usize> {
+        self.seats.iter().position(|s| *s == seat)
+    }
 }
 
 struct FocusReport {
@@ -2165,22 +2223,25 @@ impl Inputs {
         self.send_rumble(now);
     }
 
-    /// The seat `member` holds in the router.
-    fn seat_of(&self, member: MemberId) -> Option<SeatId> {
-        self.seats()
-            .find(|seat| self.router.seat(*seat).is_some_and(|s| s.1 == Some(member)))
+    /// Whether `member` holds `seat` in the router.
+    fn holds(&self, member: MemberId, seat: SeatId) -> bool {
+        self.router.seat(seat).is_some_and(|s| s.1 == Some(member))
     }
 
-    /// The host's controller moved, or reports itself still: into the router
-    /// as the host's input on the seat they hold, like a viewer's pad
-    /// datagram. Dropped while they hold none.
-    fn local_input(&mut self, state: PadState) {
-        let Some(member) = self.local.as_ref().map(|l| l.member) else {
+    /// The host's controller `controller` moved, or reports itself still:
+    /// into the router as the host's input on that controller's own seat,
+    /// like a viewer's pad datagram. Dropped while the host doesn't hold it.
+    fn local_input(&mut self, controller: u8, state: PadState) {
+        let Some((member, seat)) = self.local.as_ref().and_then(|l| {
+            l.seats
+                .get(usize::from(controller))
+                .map(|seat| (l.member, *seat))
+        }) else {
             return;
         };
-        let Some(seat) = self.seat_of(member) else {
+        if !self.holds(member, seat) {
             return;
-        };
+        }
         let Some((epoch, ..)) = self.router.seat(seat) else {
             return;
         };
@@ -2203,11 +2264,11 @@ impl Inputs {
     }
 
     /// A seat's rumble goes only to its holder: a viewer's stream window, or
-    /// the host's controller. A running rumble is repeated, so a lost "stop"
-    /// can't leave a controller shaking: each one ends after a second.
+    /// the host's controller driving it. A running rumble is repeated, so a
+    /// lost "stop" can't leave a controller shaking: each one ends after a
+    /// second.
     fn send_rumble(&mut self, now: Instant) {
         let host = self.local.as_ref().map(|l| l.member);
-        let host_seated = host.and_then(|h| self.seat_of(h)).is_some();
         for seat in self.seats() {
             let i = usize::from(seat.0);
             if let Some(Some(pad)) = self.pads.get_mut(i)
@@ -2219,29 +2280,56 @@ impl Inputs {
             let holder = self.router.seat(seat).and_then(|s| s.1);
             let rumble = &mut self.rumble[i];
             let (to, sent, at) = rumble.sent;
-            // The seat left the host, and they hold no other: their
-            // controller stops at once. (A viewer's stream window stops when
-            // it hears its seat went. A host who moved gets the new seat's
-            // rumble from its own turn of this loop.)
+            // The seat left the host: the controller that drove it stops at
+            // once, unless it drives another seat of theirs now (which sends
+            // its own rumble from its turn of this loop). A viewer's stream
+            // window stops when it hears its seat went.
             if to.is_some()
                 && to == host
                 && holder != host
-                && !host_seated
                 && let Some(local) = &self.local
+                && let Some(k) = rumble.controller
+                && !local.seats.get(k).is_some_and(|s| {
+                    *s != seat && self.router.seat(*s).is_some_and(|r| r.1 == host)
+                })
+                && let Some(pad) = local.pads.get(k)
             {
-                local.pad.rumble(Rumble::default());
+                pad.rumble(Rumble::default());
             }
             let Some(holder) = holder else {
                 rumble.sent = (None, Rumble::default(), now);
+                rumble.controller = None;
                 continue;
             };
             let repeat = rumble.now != Rumble::default() && now.duration_since(at) >= RUMBLE_REPEAT;
-            if to == Some(holder) && sent == rumble.now && !repeat {
+            // The host's controller driving it, which a swap may change.
+            let controller = (Some(holder) == host)
+                .then(|| self.local.as_ref().and_then(|l| l.controller_on(seat)))
+                .flatten();
+            if to == Some(holder)
+                && sent == rumble.now
+                && !repeat
+                && controller == rumble.controller
+            {
                 continue;
             }
             if Some(holder) == host {
                 if let Some(local) = &self.local {
-                    local.pad.rumble(rumble.now);
+                    // A swap: the controller that drove it stops, unless it
+                    // drives another seat of the host's now, whose own turn
+                    // of this loop sends it that seat's rumble (stopping it
+                    // here could cut that off).
+                    if let Some(old) = rumble.controller.filter(|old| Some(*old) != controller)
+                        && !local.seats.get(old).is_some_and(|s| {
+                            *s != seat && self.router.seat(*s).is_some_and(|r| r.1 == host)
+                        })
+                        && let Some(pad) = local.pads.get(old)
+                    {
+                        pad.rumble(Rumble::default());
+                    }
+                    if let Some(pad) = controller.and_then(|k| local.pads.get(k)) {
+                        pad.rumble(rumble.now);
+                    }
                 }
             } else if let Some((_, conn)) = self.viewers.get(&holder) {
                 send_rumble(
@@ -2254,6 +2342,7 @@ impl Inputs {
                 );
             }
             rumble.sent = (Some(holder), rumble.now, now);
+            rumble.controller = controller;
         }
     }
 }
@@ -2273,7 +2362,9 @@ async fn input_loop(
         Some(feed) => (
             Some(Local {
                 member: feed.member,
-                pad: feed.pad,
+                pads: feed.pads,
+                // Until the session says (its first word, before any claim).
+                seats: Vec::new(),
                 seq: 0,
             }),
             Some(feed.states),
@@ -2292,6 +2383,7 @@ async fn input_loop(
             SeatRumble {
                 now: Rumble::default(),
                 sent: (None, Rumble::default(), start),
+                controller: None,
             };
             seats
         ],
@@ -2369,8 +2461,12 @@ async fn input_loop(
                     st.deliver(effects);
                 }
                 Some(InputCmd::RevokeViewers) => {
-                    let ours = host.and_then(|h| st.seat_of(h));
-                    let seats: Vec<SeatId> = st.seats().filter(|s| Some(*s) != ours).collect();
+                    // Decided from the router's own holders: the session's
+                    // mirror may lag.
+                    let seats: Vec<SeatId> = st
+                        .seats()
+                        .filter(|s| !host.is_some_and(|h| st.holds(h, *s)))
+                        .collect();
                     for seat in seats {
                         let effects = st.router.revoke(seat);
                         st.deliver(effects);
@@ -2379,9 +2475,18 @@ async fn input_loop(
                 Some(InputCmd::Claim { seat, member }) => {
                     let free = st.router.seat(seat).is_some_and(|s| s.1.is_none());
                     let paused = st.shared.grants_paused.load(Ordering::SeqCst);
-                    if !released && !paused && host == Some(member) && free && st.seat_of(member).is_none() {
+                    // Only a controller's own seat: a late claim for one it
+                    // has left could give the host a seat no controller of
+                    // theirs drives.
+                    let theirs = st.local.as_ref().is_some_and(|l| l.controller_on(seat).is_some());
+                    if !released && !paused && host == Some(member) && free && theirs {
                         let effects = st.router.grant(seat, member, Permissions::GAMEPAD, Instant::now());
                         st.deliver(effects);
+                    }
+                }
+                Some(InputCmd::HostSeats(seats)) => {
+                    if let Some(local) = st.local.as_mut() {
+                        local.seats = seats;
                     }
                 }
                 Some(InputCmd::Hold { on, ack }) => {
@@ -2412,7 +2517,7 @@ async fn input_loop(
                 st.deliver(effects);
             }
             state = next_local(&mut local_states) => match state {
-                Some(state) => st.local_input(state),
+                Some((controller, state)) => st.local_input(controller, state),
                 // The reader stopped: the host's seat goes quiet, and the
                 // dead-man timer releases it.
                 None => local_states = None,
@@ -2439,7 +2544,7 @@ async fn input_loop(
 }
 
 /// The host controller's next state; never, without one.
-async fn next_local(states: &mut Option<mpsc::Receiver<PadState>>) -> Option<PadState> {
+async fn next_local(states: &mut Option<mpsc::Receiver<(u8, PadState)>>) -> Option<(u8, PadState)> {
     match states {
         Some(states) => states.recv().await,
         None => std::future::pending().await,

@@ -477,7 +477,7 @@ mod tests {
                 session,
                 viewers: vec![MemberId([1; 32]), MemberId([2; 32])],
                 holders: vec![None, Some(MemberId([2; 32]))],
-                host_seat: Some(SeatId(0)),
+                host_seats: vec![SeatId(0)],
                 host_on_seats: true,
                 control_paused: true,
                 stream: crate::session::StreamState::Stopped(EndReason::SourceLost),

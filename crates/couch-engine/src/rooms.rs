@@ -650,14 +650,14 @@ impl Actor {
                 title,
                 max_viewers,
                 input,
-                controller,
+                controllers,
             } => {
                 let start = sessions::StartSession {
                     room,
                     title,
                     max_viewers,
                     input,
-                    controller,
+                    controllers,
                 };
                 // Answers later, once the pads are plugged in.
                 if let Err(e) = self.start_session(start, reply, now) {
@@ -700,7 +700,7 @@ impl Actor {
             Command::AnswerControl { member, accept } => self.answer_control(&member, accept, now),
             Command::PassControl { member, seat } => self.pass_control(&member, SeatId(seat), now),
             Command::TakeBackControl { seat } => self.take_back_control(seat.map(SeatId), now),
-            Command::PlaySeat { seat } => self.play_seat(SeatId(seat), now),
+            Command::PlaySeat { seat, controller } => self.play_seat(SeatId(seat), controller, now),
             Command::AllowControl => self.allow_control(now),
         };
         let _ = reply.send(result);

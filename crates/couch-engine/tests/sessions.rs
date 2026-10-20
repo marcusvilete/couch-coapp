@@ -8,7 +8,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -75,8 +75,8 @@ struct Fake {
     away: AtomicBool,
     /// The host's own controller.
     local: FakeLocal,
-    /// The host's controller is hidden from games now.
-    hidden: Arc<AtomicBool>,
+    /// How many of the host's controllers are hidden from games now.
+    hidden: Arc<AtomicUsize>,
     /// Hiding it fails (HidHide busy).
     hide_fails: AtomicBool,
     /// Frames on the GPU (M9b).
@@ -113,17 +113,26 @@ struct FakeGpuSide {
     opened: Mutex<Vec<Option<u64>>>,
 }
 
-/// The host's own controller: a DualSense, followed by a thread that reports
-/// its state on change and every 100 ms, as the real reader does.
+/// The host's own controllers: a DualSense and a GameSir (M23), each
+/// followed by a thread that reports its state on change and every 100 ms,
+/// as the real reader does.
 #[derive(Default)]
 struct FakeLocal {
     state: Arc<Mutex<PadState>>,
     rumble: Arc<Mutex<Vec<Rumble>>>,
+    /// The GameSir's.
+    second_state: Arc<Mutex<PadState>>,
+    second_rumble: Arc<Mutex<Vec<Rumble>>>,
 }
 
 const DUALSENSE: ControllerIds = ControllerIds {
     vendor: 0x054C,
     product: 0x0CE6,
+};
+
+const GAMESIR: ControllerIds = ControllerIds {
+    vendor: 0x3537,
+    product: 0x1040,
 };
 
 fn dualsense() -> HostController {
@@ -134,12 +143,26 @@ fn dualsense() -> HostController {
     }
 }
 
+fn gamesir() -> HostController {
+    HostController {
+        name: "GameSir T4n Lite".into(),
+        vendor: GAMESIR.vendor,
+        product: GAMESIR.product,
+    }
+}
+
 impl LocalPads for FakeLocal {
     fn list(&self) -> Result<Vec<LocalController>, InputError> {
-        Ok(vec![LocalController {
-            ids: DUALSENSE,
-            name: "DualSense Wireless Controller".into(),
-        }])
+        Ok(vec![
+            LocalController {
+                ids: DUALSENSE,
+                name: "DualSense Wireless Controller".into(),
+            },
+            LocalController {
+                ids: GAMESIR,
+                name: "GameSir T4n Lite".into(),
+            },
+        ])
     }
 
     fn follow(
@@ -147,9 +170,13 @@ impl LocalPads for FakeLocal {
         ids: ControllerIds,
         on_state: Box<dyn Fn(PadState) + Send>,
     ) -> Result<Box<dyn LocalPad>, InputError> {
-        assert_eq!(ids, DUALSENSE);
+        let (state, rumble) = match ids {
+            DUALSENSE => (self.state.clone(), self.rumble.clone()),
+            GAMESIR => (self.second_state.clone(), self.second_rumble.clone()),
+            other => panic!("no such controller {other:?}"),
+        };
         let stop = Arc::new(AtomicBool::new(false));
-        let (state, stopped) = (self.state.clone(), stop.clone());
+        let stopped = stop.clone();
         std::thread::spawn(move || {
             let mut sent: Option<(PadState, Instant)> = None;
             while !stopped.load(Ordering::SeqCst) {
@@ -161,10 +188,7 @@ impl LocalPads for FakeLocal {
                 std::thread::sleep(Duration::from_millis(5));
             }
         });
-        Ok(Box::new(FakeFollowed {
-            stop,
-            rumble: self.rumble.clone(),
-        }))
+        Ok(Box::new(FakeFollowed { stop, rumble }))
     }
 }
 
@@ -186,11 +210,11 @@ impl Drop for FakeFollowed {
 }
 
 /// Shows the host's controller to games again when the engine drops it.
-struct Shown(Arc<AtomicBool>);
+struct Shown(Arc<AtomicUsize>);
 
 impl Drop for Shown {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -276,7 +300,16 @@ impl Fake {
         *self.local.state.lock().unwrap() = pressed(buttons);
     }
 
+    /// The host's second controller, the GameSir (M23).
+    fn second_press(&self, buttons: PadButtons) {
+        *self.local.second_state.lock().unwrap() = pressed(buttons);
+    }
+
     fn hidden(&self) -> bool {
+        self.hidden.load(Ordering::SeqCst) > 0
+    }
+
+    fn hidden_count(&self) -> usize {
         self.hidden.load(Ordering::SeqCst)
     }
 
@@ -388,11 +421,11 @@ impl Backend for Fake {
     }
 
     fn hide_controller(&self, ids: ControllerIds) -> Result<Box<dyn std::any::Any + Send>, String> {
-        assert_eq!(ids, DUALSENSE);
+        assert!(ids == DUALSENSE || ids == GAMESIR, "{ids:?}");
         if self.hide_fails.load(Ordering::SeqCst) {
             return Err("HidHide's configuration window is open".into());
         }
-        self.hidden.store(true, Ordering::SeqCst);
+        self.hidden.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(Shown(self.hidden.clone())))
     }
 
@@ -831,27 +864,27 @@ async fn start(dir: &Path, options: EngineOptions) -> Engine {
 
 /// A session with one controller seat, nothing streamed yet (M19).
 fn go_live(room: &str, max_viewers: u8) -> Command {
-    go_live_playing(room, max_viewers, InputSetup::default(), None)
+    go_live_playing(room, max_viewers, InputSetup::default(), vec![])
 }
 
 /// A session with these seats.
 fn go_live_with(room: &str, max_viewers: u8, input: InputSetup) -> Command {
-    go_live_playing(room, max_viewers, input, None)
+    go_live_playing(room, max_viewers, input, vec![])
 }
 
-/// A session with these seats, and the host's own controller on one.
+/// A session with these seats, and the host's own controllers on some.
 fn go_live_playing(
     room: &str,
     max_viewers: u8,
     input: InputSetup,
-    controller: Option<HostController>,
+    controllers: Vec<HostController>,
 ) -> Command {
     Command::StartSession {
         room: room.into(),
         title: "Celeste".into(),
         max_viewers,
         input,
-        controller,
+        controllers,
     }
 }
 
@@ -1986,7 +2019,7 @@ async fn the_hosts_controller_plays_between_streams() {
             &room,
             4,
             InputSetup::default(),
-            Some(dualsense()),
+            vec![dualsense()],
         ))
         .await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
@@ -3015,22 +3048,21 @@ fn host_on(s: &SessionView, seat: u8, host: &Member) -> bool {
 async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
     let (mut a, mut b, mut c, room) = three().await;
     let list = sources(&a).await;
-    assert_eq!(list.host_controllers, vec![dualsense()]);
+    assert_eq!(list.host_controllers, vec![dualsense(), gamesir()]);
     assert_eq!(list.hiding, HidingView::Ready);
     let reply = a
         .live(go_live_playing(
             &room,
             4,
             InputSetup::default(),
-            Some(dualsense()),
+            vec![dualsense()],
         ))
         .await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     assert!(a.fake.hidden(), "hidden from games while live");
     a.wait_session(&room, &a, "the host on the seat", |s| {
         s.is_some_and(|s| {
-            host_on(s, 0, &a)
-                && s.host_controller.as_deref() == Some("DualSense Wireless Controller")
+            host_on(s, 0, &a) && s.host_controllers == ["DualSense Wireless Controller"]
         })
     })
     .await;
@@ -3088,7 +3120,11 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(a.fake.pad(), Some(PadState::NEUTRAL), "nobody on it");
     // Play here puts the host's controller back on it.
-    a.ok(Command::PlaySeat { seat: 0 }).await;
+    a.ok(Command::PlaySeat {
+        seat: 0,
+        controller: 0,
+    })
+    .await;
     wait("the host's X", || {
         a.fake.pad() == Some(pressed(PadButtons::X))
     })
@@ -3114,7 +3150,11 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
         s.is_some_and(|s| holder(s, 0).is_none())
     })
     .await;
-    a.ok(Command::PlaySeat { seat: 0 }).await;
+    a.ok(Command::PlaySeat {
+        seat: 0,
+        controller: 0,
+    })
+    .await;
     a.wait_session(&room, &a, "the host on while paused", |s| {
         s.is_some_and(|s| host_on(s, 0, &a))
     })
@@ -3141,7 +3181,7 @@ async fn the_hosts_controller_plays_a_seat_and_gets_it_back() {
 async fn the_host_plays_another_seat_and_feels_its_rumble() {
     let (mut a, mut b, mut c, room) = three().await;
     let reply = a
-        .live(go_live_playing(&room, 4, TWO_PADS, Some(dualsense())))
+        .live(go_live_playing(&room, 4, TWO_PADS, vec![dualsense()]))
         .await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     a.fake.local_press(PadButtons::A);
@@ -3150,7 +3190,11 @@ async fn the_host_plays_another_seat_and_feels_its_rumble() {
     })
     .await;
 
-    a.ok(Command::PlaySeat { seat: 1 }).await;
+    a.ok(Command::PlaySeat {
+        seat: 1,
+        controller: 0,
+    })
+    .await;
     wait("the host on pad 2", || {
         a.fake.pad_at(1) == Some(pressed(PadButtons::A))
     })
@@ -3163,7 +3207,14 @@ async fn the_host_plays_another_seat_and_feels_its_rumble() {
         s.is_some_and(|s| host_on(s, 1, &a) && holder(s, 0).is_none())
     })
     .await;
-    assert!(a.handle(Command::PlaySeat { seat: 5 }).await.is_err());
+    assert!(
+        a.handle(Command::PlaySeat {
+            seat: 5,
+            controller: 0,
+        })
+        .await
+        .is_err()
+    );
 
     // The game shakes the host's seat: their controller shakes.
     let shake = Rumble {
@@ -3178,6 +3229,126 @@ async fn the_host_plays_another_seat_and_feels_its_rumble() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M23: the host's two controllers, each on its own seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosts_two_controllers_play_two_seats() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a
+        .live(go_live_playing(
+            &room,
+            4,
+            TWO_PADS,
+            vec![dualsense(), gamesir()],
+        ))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert_eq!(a.fake.hidden_count(), 2, "both hidden from games");
+    a.wait_session(&room, &a, "the host on both seats", |s| {
+        s.is_some_and(|s| {
+            host_on(s, 0, &a)
+                && host_on(s, 1, &a)
+                && s.host_controllers == ["DualSense Wireless Controller", "GameSir T4n Lite"]
+                && s.seats[0].host_controller == Some(0)
+                && s.seats[1].host_controller == Some(1)
+        })
+    })
+    .await;
+    // Each drives its own seat's pad.
+    a.fake.local_press(PadButtons::A);
+    a.fake.second_press(PadButtons::B);
+    wait("each on its pad", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::A))
+            && a.fake.pad_at(1) == Some(pressed(PadButtons::B))
+    })
+    .await;
+    // Everyone sees the host on both.
+    c.wait_session(&room, &a, "the host on both, from C", |s| {
+        s.is_some_and(|s| host_on(s, 0, &a) && host_on(s, 1, &a))
+    })
+    .await;
+
+    // One passed to Bia: hers drives it; the host's other seat plays on.
+    let b_window = watching(&room, &a, &b).await;
+    give_seat(&room, &mut a, &b, &b_window, 1).await;
+    b_window.pad(PadButtons::X);
+    wait("Bia's X on pad 2", || {
+        a.fake.pad_at(1) == Some(pressed(PadButtons::X))
+    })
+    .await;
+    a.fake.local_press(PadButtons::Y);
+    a.fake.second_press(PadButtons::START);
+    wait("the DualSense still on pad 1", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::Y))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        a.fake.pad_at(1),
+        Some(pressed(PadButtons::X)),
+        "the GameSir is off it"
+    );
+
+    // Taken back: empty, until Play here gives it to the GameSir again.
+    a.ok(Command::TakeBackControl { seat: Some(1) }).await;
+    wait("Bia's seat gone", || !b_window.holding()).await;
+    a.wait_session(&room, &a, "pad 2 empty", |s| {
+        s.is_some_and(|s| holder(s, 1).is_none() && host_on(s, 0, &a))
+    })
+    .await;
+    a.ok(Command::PlaySeat {
+        seat: 1,
+        controller: 1,
+    })
+    .await;
+    wait("the GameSir back on pad 2", || {
+        a.fake.pad_at(1) == Some(pressed(PadButtons::START))
+    })
+    .await;
+
+    // The DualSense onto the GameSir's seat: they swap.
+    a.ok(Command::PlaySeat {
+        seat: 1,
+        controller: 0,
+    })
+    .await;
+    a.fake.local_press(PadButtons::LEFT_SHOULDER);
+    a.fake.second_press(PadButtons::RIGHT_SHOULDER);
+    wait("swapped", || {
+        a.fake.pad_at(1) == Some(pressed(PadButtons::LEFT_SHOULDER))
+            && a.fake.pad_at(0) == Some(pressed(PadButtons::RIGHT_SHOULDER))
+    })
+    .await;
+    a.wait_session(&room, &a, "the swap, in the view", |s| {
+        s.is_some_and(|s| {
+            s.seats[0].host_controller == Some(1) && s.seats[1].host_controller == Some(0)
+        })
+    })
+    .await;
+    // The game shakes pad 2: the DualSense, driving it now, shakes.
+    let shake = Rumble {
+        low_frequency: 180,
+        high_frequency: 90,
+    };
+    a.fake.pads.plugged.lock().unwrap()[1].queue_rumble(shake);
+    wait("the DualSense's rumble", || {
+        a.fake.local.rumble.lock().unwrap().contains(&shake)
+    })
+    .await;
+    assert!(!a.fake.local.second_rumble.lock().unwrap().contains(&shake));
+
+    // The panic key leaves the host both seats.
+    assert!(a.fake.press_panic_key());
+    a.wait_session(&room, &a, "paused, the host on both", |s| {
+        s.is_some_and(|s| s.control_paused && host_on(s, 0, &a) && host_on(s, 1, &a))
+    })
+    .await;
+
+    // Ending shows both again.
+    a.ok(Command::EndSession).await;
+    wait("both shown again", || a.fake.hidden_count() == 0).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_controller_that_cant_be_hidden_plays_outside_the_seats() {
     let (mut a, mut b, mut c, room) = three().await;
@@ -3187,13 +3358,13 @@ async fn a_controller_that_cant_be_hidden_plays_outside_the_seats() {
             &room,
             4,
             InputSetup::default(),
-            Some(dualsense()),
+            vec![dualsense()],
         ))
         .await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     a.wait_session(&room, &a, "the problem, and a free seat", |s| {
         s.is_some_and(|s| {
-            s.host_controller.is_none()
+            s.host_controllers.is_empty()
                 && s.host_controller_problem
                     .as_deref()
                     .is_some_and(|p| p.contains("configuration window"))
@@ -3206,7 +3377,11 @@ async fn a_controller_that_cant_be_hidden_plays_outside_the_seats() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_ne!(a.fake.pad(), Some(pressed(PadButtons::A)));
     assert!(matches!(
-        a.handle(Command::PlaySeat { seat: 0 }).await,
+        a.handle(Command::PlaySeat {
+            seat: 0,
+            controller: 0,
+        })
+        .await,
         Err(EngineError::Session(_))
     ));
     let b_window = watching(&room, &a, &b).await;
