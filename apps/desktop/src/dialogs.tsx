@@ -372,6 +372,74 @@ export function NameDialog(props: {
   );
 }
 
+/** The owner offers us the room (M13): accept with the password newcomers
+ * will need, which we choose. */
+export function AcceptRoomDialog(props: {
+  room: RoomView;
+  ownerName: string;
+  onClose: () => void;
+  onAccepted: (room: RoomView) => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [again, setAgain] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const problem =
+      (password.trim() === "" ? "Choose a password." : null) ??
+      (password !== again ? "The passwords don't match." : null);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      props.onAccepted(await request({ type: "answerOffer", room: props.room.id, accept: true, password }, "room"));
+    } catch (e) {
+      setError(errorText(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`Take over ${props.room.name}?`}
+      onClose={props.onClose}
+      busy={busy}
+      footer={
+        <>
+          <button type="button" onClick={props.onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" form="accept-room" className="primary" disabled={busy}>
+            Take over the room
+          </button>
+        </>
+      }
+    >
+      <form id="accept-room" onSubmit={submit} className="form">
+        <p className="hint">
+          {props.ownerName} offers you the room. As its owner, you let people in with invites, you can ban, and leaving
+          closes the room for everyone. {props.ownerName} stays as a member; the invites they sent stop working.
+        </p>
+        <label>
+          Password for newcomers
+          <PasswordInput autoComplete="new-password" value={password} onChange={setPassword} autoFocus />
+        </label>
+        <label>
+          Password again
+          <PasswordInput autoComplete="new-password" value={again} onChange={setAgain} />
+        </label>
+        <p className="hint">Members already in aren't affected. The password isn't saved anywhere, so note it down.</p>
+        {error && <p className="error" role="alert">{error}</p>}
+      </form>
+    </Modal>
+  );
+}
+
 export function ChangePasswordDialog(props: { room: RoomView; onClose: () => void; onChanged: () => void }) {
   const [password, setPassword] = useState("");
   const [again, setAgain] = useState("");

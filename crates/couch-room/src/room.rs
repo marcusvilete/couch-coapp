@@ -5,8 +5,10 @@
 //! reports what happened (`connected`, `received`, `disconnected`,
 //! `dial_failed`, `tick`) and carries out the returned [`Effect`]s.
 //!
-//! **The owner decides who is in.** The owner (the creator, bound into the
-//! room id) signs the policy: the roster of members, and the banned. Only
+//! **The owner decides who is in.** The owner signs the policy: the roster
+//! of members, and the banned. The founder is bound into the room id; the
+//! owner now is the last of the handovers from it (M13), each signed by the
+//! owner handing over, which travel with the policy. Only
 //! the owner admits newcomers, with an invite it made and the password, and
 //! puts them on the roster. Members accept connections from ids on the
 //! roster and nobody else; iroh has already authenticated the ids. Removing
@@ -40,16 +42,17 @@ use couch_proto::{
     ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce},
     invite::Invite,
     room::{
-        Goodbye, GoodbyeReason, MAX_BANNED, MAX_IPS, MAX_RELAY_URL_BYTES, MemberRecord, PeerAddr,
-        Presence, RoomPolicy, RoomSnapshot, RosterEntry, Signed, valid_name,
+        Goodbye, GoodbyeReason, Handover, HandoverAnswer, HandoverOffer, HandoverWithdraw,
+        MAX_BANNED, MAX_HANDOVERS, MAX_IPS, MAX_RELAY_URL_BYTES, MemberRecord, OwnedPolicy,
+        PeerAddr, Presence, RoomPolicy, RoomSnapshot, RosterEntry, Signed, valid_name,
     },
 };
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 
 use crate::signing::{
-    invite_tag, member_id, policy_is_authentic, record_is_authentic, room_id, sign_policy,
-    sign_record,
+    handover_is_authentic, invite_tag, member_id, policy_is_authentic, record_is_authentic,
+    room_id, sign_handover, sign_policy, sign_record,
 };
 
 /// The owner admits nobody new once the roster has this many members (the
@@ -109,9 +112,25 @@ pub enum Effect {
     Removed { banned: bool },
     /// We left (or closed the room) and the word got out: forget the room.
     Departed,
-    /// A room restored from a backup has caught up with its members (or the
-    /// owner stopped waiting): it may sign again ([`Room::catch_up_first`]).
-    CaughtUp,
+    /// Where a room restored from a backup stands (M13,
+    /// [`Room::catch_up_first`]): the engine keeps it in the room's mark.
+    Restore(RestoreMark),
+    /// We became the room's owner, or stopped being it (M13): the engine
+    /// takes the password key in or drops it, before the save that follows.
+    Ownership { is_owner: bool },
+}
+
+/// Where a room restored from a backup stands (M13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreMark {
+    /// Catching up: it signs nothing (again, if it found that it had lost
+    /// state it had signed).
+    CatchingUp,
+    /// The owner stopped waiting: it signs again, but hands the room over
+    /// only once every member on the roster has been heard.
+    Unconfirmed,
+    /// Over: the room is as any other.
+    Done,
 }
 
 /// Who we are in a room: our key, and what our record says about us.
@@ -132,7 +151,7 @@ pub enum JoinDecision {
     /// Close with this code.
     Refuse(u32),
     /// Refuse, showing the newcomer the owner's policy that bans it.
-    Banned(Box<Signed<RoomPolicy>>),
+    Banned(Box<OwnedPolicy>),
 }
 
 /// A member's answer to another's `MemberHello`.
@@ -144,7 +163,7 @@ pub enum MemberDecision {
     /// a stranger learns nothing about who is in the room.
     Refuse {
         code: u32,
-        proof: Option<Box<Signed<RoomPolicy>>>,
+        proof: Option<Box<OwnedPolicy>>,
     },
 }
 
@@ -170,6 +189,20 @@ pub enum RoomError {
         "this room was restored from a backup and is catching up with its members: try again once they have been online, or stop waiting"
     )]
     CatchingUp,
+    #[error(
+        "this room came back from a backup and hasn't heard from every member yet: hand it over once they have all been online"
+    )]
+    Unconfirmed,
+    #[error("they must be online to be offered the room")]
+    NotOnline,
+    #[error("there's no offer to answer")]
+    NoOffer,
+    #[error(
+        "you accepted the owner's offer of this room: wait until they hand it over or withdraw it"
+    )]
+    OfferAccepted,
+    #[error("this room has changed hands too many times")]
+    TooManyHandovers,
 }
 
 /// An invite the owner keeps.
@@ -194,9 +227,13 @@ pub struct Leaving {
 /// encrypted (DPAPI).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedRoom {
-    pub owner: MemberId,
+    /// Who founded the room: the room id binds it (M13: the owner now is the
+    /// last of `handovers`).
+    pub founder: MemberId,
     pub nonce: RoomNonce,
     pub policy: Signed<RoomPolicy>,
+    /// The chain from the founder to the owner now (M13).
+    pub handovers: Vec<Signed<Handover>>,
     pub records: Vec<Signed<MemberRecord>>,
     /// The owner's outstanding invites; empty for everyone else.
     pub invites: Vec<SavedInvite>,
@@ -241,13 +278,58 @@ struct Link {
     reports: BTreeSet<MemberId>,
 }
 
+/// An offer of the room we made (M13), in memory only: on one connection,
+/// for the policy at `version`.
+#[derive(Debug, Clone, Copy)]
+struct Offer {
+    id: u64,
+    to: MemberId,
+    conn: ConnId,
+    version: u32,
+}
+
+/// An offer of the room the owner made us (M13), on one connection, not
+/// answered yet.
+#[derive(Debug, Clone, Copy)]
+struct Offered {
+    id: u64,
+    conn: ConnId,
+    /// The owner's policy the offer is for.
+    version: u32,
+}
+
+/// We accepted the owner's offer (M13): the owner may have signed the room
+/// over already, so this stands until we know. We own the room, or the
+/// owner withdrew the offer, or signed anything else (any new policy voids
+/// an offer). Neither a dropped connection nor a second thought ends it:
+/// leaving meanwhile could leave a room nobody owns.
+#[derive(Debug, Clone, Copy)]
+struct Accepted {
+    id: u64,
+    version: u32,
+}
+
 pub struct Room {
     key: SigningKey,
     me: MemberId,
     id: RoomId,
+    /// Who founded the room: the room id binds it.
+    founder: MemberId,
+    /// The owner now: the last handover's `to`, the founder with none.
     owner: MemberId,
     nonce: RoomNonce,
     policy: Signed<RoomPolicy>,
+    /// From the founder to the owner now (M13), verified.
+    handovers: Vec<Signed<Handover>>,
+    offer: Option<Offer>,
+    /// An offer we made that a dropped connection voided: told to its
+    /// member when it connects again, so its acceptance ends.
+    voided: Option<(u64, MemberId)>,
+    offered: Option<Offered>,
+    accepted: Option<Accepted>,
+    /// Restored, and the owner stopped waiting: it signs, but hands the room
+    /// over only once every member on the roster has been heard (`heard`).
+    unconfirmed: bool,
     /// The latest record of each member on the roster, for its current stay;
     /// ours included.
     records: BTreeMap<MemberId, Signed<MemberRecord>>,
@@ -272,7 +354,8 @@ pub struct Room {
     /// matters (its own records, which the room's newer ones supersede), so
     /// any snapshot catches it up.
     catching_up: bool,
-    /// While catching up: members whose snapshot arrived this run.
+    /// While catching up or unconfirmed: members whose snapshot arrived
+    /// this run.
     heard: BTreeSet<MemberId>,
     /// Restored from a backup: the next policy we sign skips ahead
     /// ([`RESTORE_SKIP`]).
@@ -332,15 +415,18 @@ impl Room {
                 banned: Vec::new(),
             },
         );
-        let mut room = Self::empty(key, me, me, nonce, policy, timings, now);
+        let mut room = Self::empty(key, me, me, nonce, policy, Vec::new(), me, timings, now);
         room.publish_mine(1, my_name, my_addr, false);
         Ok(room)
     }
 
-    /// Joins with the snapshot the owner sent once it admitted us. `owner`
-    /// and `nonce` come from the invite.
+    /// Joins with the snapshot the owner sent once it admitted us. The
+    /// invite names the founder, the owner who admitted us, and the nonce:
+    /// the snapshot's chain must run from that founder to that owner, who
+    /// signed its policy.
     pub fn join(
         me: Identity,
+        founder: MemberId,
         owner: MemberId,
         nonce: RoomNonce,
         snapshot: RoomSnapshot,
@@ -356,15 +442,21 @@ impl Room {
             return Err(RoomError::InvalidName);
         }
         let me = member_id(&key);
-        let id = room_id(owner, nonce);
-        check_policy(&snapshot.policy, id, owner)?;
-        if snapshot.policy.body.banned.contains(&me) {
+        let id = room_id(founder, nonce);
+        let tip = check_owned(&snapshot.policy, id, founder, 0)?;
+        if tip != owner || policy_signer(&snapshot.policy, tip) != Some(owner) {
+            return Err(RoomError::BadPolicy);
+        }
+        let OwnedPolicy { policy, handovers } = snapshot.policy;
+        if policy.body.banned.contains(&me) {
             return Err(RoomError::Banned);
         }
-        if !snapshot.policy.body.lists(me) {
+        if !policy.body.lists(me) {
             return Err(RoomError::NotMember);
         }
-        let mut room = Self::empty(key, me, owner, nonce, snapshot.policy, timings, now);
+        let mut room = Self::empty(
+            key, me, founder, nonce, policy, handovers, owner, timings, now,
+        );
         room.adopt_records(snapshot.members, now);
         // Above any record of ours this stay already has.
         let version = room.records.get(&me).map_or(1, |r| r.body.version + 1);
@@ -380,21 +472,28 @@ impl Room {
         now: Instant,
     ) -> Result<Self, RoomError> {
         let me = member_id(&key);
-        let id = room_id(saved.owner, saved.nonce);
-        check_policy(&saved.policy, id, saved.owner)?;
-        if saved.policy.body.banned.contains(&me) {
+        let id = room_id(saved.founder, saved.nonce);
+        let owned = OwnedPolicy {
+            policy: saved.policy,
+            handovers: saved.handovers,
+        };
+        let owner = check_owned(&owned, id, saved.founder, 0)?;
+        let OwnedPolicy { policy, handovers } = owned;
+        if policy.body.banned.contains(&me) {
             return Err(RoomError::Banned);
         }
         // An owner closing the room is no longer on its (empty) roster.
-        if !saved.policy.body.lists(me) && saved.leaving.is_none() {
+        if !policy.body.lists(me) && saved.leaving.is_none() {
             return Err(RoomError::NotMember);
         }
         let mut room = Self::empty(
             key,
             me,
-            saved.owner,
+            saved.founder,
             saved.nonce,
-            saved.policy,
+            policy,
+            handovers,
+            owner,
             timings,
             now,
         );
@@ -418,12 +517,15 @@ impl Room {
         Ok(room)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn empty(
         key: SigningKey,
         me: MemberId,
-        owner: MemberId,
+        founder: MemberId,
         nonce: RoomNonce,
         policy: Signed<RoomPolicy>,
+        handovers: Vec<Signed<Handover>>,
+        owner: MemberId,
         timings: Timings,
         now: Instant,
     ) -> Self {
@@ -431,9 +533,16 @@ impl Room {
             key,
             me,
             id: policy.body.room,
+            founder,
             owner,
             nonce,
             policy,
+            handovers,
+            offer: None,
+            voided: None,
+            offered: None,
+            accepted: None,
+            unconfirmed: false,
             records: BTreeMap::new(),
             links: BTreeMap::new(),
             conns: BTreeMap::new(),
@@ -455,30 +564,34 @@ impl Room {
     /// to catch up with: it is caught up at once, its owner signing the room
     /// again ahead (whoever the lost PC let in after the backup finds it,
     /// and is no longer listed). The effects are applied as usual
-    /// ([`Effect::CaughtUp`] among them, if so).
+    /// ([`Effect::Restore`] among them, if so).
     pub fn catch_up_first(&mut self) -> Vec<Effect> {
         self.catching_up = true;
         self.skip_next = true;
         self.heard.clear();
         let mut fx = Vec::new();
-        if self.catching_up_with().is_empty() {
-            self.caught_up(&mut fx);
+        if self.unheard().is_empty() {
+            self.caught_up(false, &mut fx);
         }
         fx
+    }
+
+    /// Restored, and the owner had stopped waiting before the app started
+    /// again (M13): it signs as usual, but hands the room over only once
+    /// every member on the roster has been heard.
+    pub fn resume_unconfirmed(&mut self) {
+        self.unconfirmed = true;
+        self.heard.clear();
     }
 
     pub fn is_catching_up(&self) -> bool {
         self.catching_up
     }
 
-    /// While catching up, the members not heard from yet: everyone on the
-    /// roster as we know it now (a newer policy may have dropped someone
-    /// banned after the backup), but us and whoever left. A member catches
-    /// up from anyone, so for one this is empty or just the first.
-    pub fn catching_up_with(&self) -> Vec<MemberId> {
-        if !self.catching_up {
-            return Vec::new();
-        }
+    /// Everyone on the roster as we know it now (a newer policy may have
+    /// dropped someone banned after the backup) not heard from yet, but us
+    /// and whoever left.
+    fn unheard(&self) -> Vec<MemberId> {
         self.policy
             .body
             .roster
@@ -492,18 +605,60 @@ impl Room {
             .collect()
     }
 
+    /// While catching up, the members not heard from yet. A member catches
+    /// up from anyone, so for one this is empty or just the first.
+    pub fn catching_up_with(&self) -> Vec<MemberId> {
+        if !self.catching_up {
+            return Vec::new();
+        }
+        self.unheard()
+    }
+
     /// Owner only, the user's choice: stop waiting for members who may
     /// never come back, and sign from what we hold. A change made after the
     /// backup that only they hold can then be undone (a ban among them).
+    /// Handing the room over waits until they have all been heard.
     pub fn stop_catching_up(&mut self) -> Result<Vec<Effect>, RoomError> {
         if !self.is_owner() {
             return Err(RoomError::NotOwner);
         }
         let mut fx = Vec::new();
         if self.catching_up {
-            self.caught_up(&mut fx);
+            self.caught_up(true, &mut fx);
         }
         Ok(fx)
+    }
+
+    /// A snapshot from `from` arrived: while catching up or unconfirmed, it
+    /// counts towards hearing everyone.
+    fn heard_from(&mut self, from: Option<MemberId>, fx: &mut Vec<Effect>) {
+        if let Some(from) = from
+            && (self.catching_up || self.unconfirmed)
+        {
+            self.heard.insert(from);
+        }
+        self.check_heard(fx);
+    }
+
+    /// Whether whoever we waited for has now been heard (or dropped by a
+    /// newer roster, or left). An owner catching up waits for everyone; a
+    /// member, for anyone (`heard` not empty).
+    fn check_heard(&mut self, fx: &mut Vec<Effect>) {
+        if self.catching_up {
+            let done = if self.is_owner() {
+                self.unheard().is_empty()
+            } else {
+                !self.heard.is_empty() || self.unheard().is_empty()
+            };
+            if done {
+                self.caught_up(false, fx);
+            }
+        } else if self.unconfirmed && self.unheard().is_empty() {
+            self.unconfirmed = false;
+            self.heard.clear();
+            fx.push(Effect::Restore(RestoreMark::Done));
+            fx.push(Effect::Changed);
+        }
     }
 
     /// Verified records of the current stays from a snapshot or saved state;
@@ -542,12 +697,45 @@ impl Room {
         self.me
     }
 
+    /// The owner now: the last handover's `to`, or the founder.
     pub fn owner(&self) -> MemberId {
         self.owner
     }
 
+    pub fn founder(&self) -> MemberId {
+        self.founder
+    }
+
     pub fn is_owner(&self) -> bool {
         self.me == self.owner
+    }
+
+    /// The member we offered the room to, while the offer stands (M13).
+    pub fn offer(&self) -> Option<MemberId> {
+        self.offer.map(|o| o.to)
+    }
+
+    /// The owner offered us the room (M13): whether we accepted already
+    /// (and wait for the owner to hand it over).
+    pub fn offered(&self) -> Option<bool> {
+        if self.accepted.is_some() {
+            Some(true)
+        } else {
+            self.offered.map(|_| false)
+        }
+    }
+
+    /// Whether the room can be offered to a member now (M13): ours, not
+    /// leaving, not catching up or unconfirmed after a restore, no offer
+    /// standing, and room left in its chain. The UI shows the action then.
+    pub fn can_offer(&self) -> bool {
+        self.is_owner()
+            && !self.gone
+            && self.leaving.is_none()
+            && !self.catching_up
+            && !self.unconfirmed
+            && self.offer.is_none()
+            && self.handovers.len() < MAX_HANDOVERS
     }
 
     pub fn name(&self) -> &str {
@@ -564,16 +752,26 @@ impl Room {
         self.leaving.is_some()
     }
 
-    /// The owner's current policy: sent with `MemberHello`.
+    /// The owner's current policy.
     pub fn policy(&self) -> &Signed<RoomPolicy> {
         &self.policy
     }
 
+    /// The current policy with its chain of handovers: sent with
+    /// `MemberHello`, and wherever the policy goes.
+    pub fn owned_policy(&self) -> OwnedPolicy {
+        OwnedPolicy {
+            policy: self.policy.clone(),
+            handovers: self.handovers.clone(),
+        }
+    }
+
     pub fn saved(&self) -> SavedRoom {
         SavedRoom {
-            owner: self.owner,
+            founder: self.founder,
             nonce: self.nonce,
             policy: self.policy.clone(),
+            handovers: self.handovers.clone(),
             records: self.records.values().cloned().collect(),
             invites: self.invites.values().cloned().collect(),
             leaving: self.leaving.clone(),
@@ -705,6 +903,7 @@ impl Room {
             token,
             expires,
             addr,
+            founder: Some(self.founder),
         };
         Ok((invite, vec![Effect::Save]))
     }
@@ -739,11 +938,15 @@ impl Room {
         if self.gone || self.leaving.is_some() {
             return JoinDecision::Refuse(close_code::UNKNOWN_ROOM);
         }
-        if !self.is_owner() || dialer == self.me {
+        if dialer == self.me {
             return JoinDecision::Refuse(close_code::PROTOCOL);
         }
+        if !self.is_owner() {
+            // An invite of ours from before we handed the room over (M13).
+            return JoinDecision::Refuse(close_code::INVITE_EXPIRED);
+        }
         if self.is_banned(dialer) {
-            return JoinDecision::Banned(Box::new(self.policy.clone()));
+            return JoinDecision::Banned(Box::new(self.owned_policy()));
         }
         let Some(token) = self.usable_invite(invite, now_unix).map(|i| i.token) else {
             return JoinDecision::Refuse(close_code::INVITE_EXPIRED);
@@ -801,7 +1004,8 @@ impl Room {
     ) -> Result<Vec<Effect>, u32> {
         self.release(invite);
         if !self.is_owner() {
-            return Err(close_code::PROTOCOL);
+            // We handed the room over during the check (M13).
+            return Err(close_code::INVITE_EXPIRED);
         }
         if self.gone || self.leaving.is_some() {
             return Err(close_code::UNKNOWN_ROOM);
@@ -823,7 +1027,8 @@ impl Room {
         if self.in_roster(member) {
             return Ok(Vec::new());
         }
-        let Some(version) = self.policy.body.version.checked_add(1) else {
+        // The version the policy listing it will take: its stay.
+        let Some(version) = self.upcoming_version() else {
             return Err(close_code::ROOM_FULL);
         };
         let mut roster = self.policy.body.roster.clone();
@@ -844,17 +1049,19 @@ impl Room {
     pub fn member_hello(
         &mut self,
         dialer: MemberId,
-        policy: Signed<RoomPolicy>,
+        policy: OwnedPolicy,
     ) -> (MemberDecision, Vec<Effect>) {
         let mut fx = Vec::new();
         // A former member, by the owner's own word, may see why it's refused;
-        // a stranger may not even see who is in the room.
-        let former =
-            policy.body.lists(dialer) && check_policy(&policy, self.id, self.owner).is_ok();
+        // a stranger may not even see who is in the room. The word must be
+        // of our own room's owners (M13): a chain we hold, or the start of
+        // it, never one a former owner made up that names a stranger.
+        let former = policy.policy.body.lists(dialer) && self.compatible(&policy);
         if self.leaving.is_none() && !self.gone {
             self.merge_policy(policy, None, &mut fx);
         }
-        let refuse = |code, proof: Option<&Signed<RoomPolicy>>| MemberDecision::Refuse {
+        let owned = self.owned_policy();
+        let refuse = |code, proof: Option<&OwnedPolicy>| MemberDecision::Refuse {
             code,
             proof: proof.map(|p| Box::new(p.clone())),
         };
@@ -866,7 +1073,7 @@ impl Room {
             if leaving.closing {
                 // The room is closed: tell a former member, once.
                 if former {
-                    let proof = refuse(close_code::NOT_MEMBER, Some(&self.policy));
+                    let proof = refuse(close_code::NOT_MEMBER, Some(&owned));
                     self.mark_told(dialer, true, &mut fx);
                     proof
                 } else {
@@ -879,9 +1086,9 @@ impl Room {
                 refuse(close_code::UNKNOWN_ROOM, None)
             }
         } else if self.is_banned(dialer) {
-            refuse(close_code::BANNED, former.then_some(&self.policy))
+            refuse(close_code::BANNED, former.then_some(&owned))
         } else if !self.is_member(dialer) {
-            refuse(close_code::NOT_MEMBER, former.then_some(&self.policy))
+            refuse(close_code::NOT_MEMBER, former.then_some(&owned))
         } else {
             MemberDecision::Accept
         };
@@ -894,7 +1101,7 @@ impl Room {
         &mut self,
         peer: MemberId,
         code: u32,
-        proof: Option<Signed<RoomPolicy>>,
+        proof: Option<OwnedPolicy>,
         now: Instant,
     ) -> Vec<Effect> {
         let mut fx = Vec::new();
@@ -917,7 +1124,7 @@ impl Room {
                 code,
                 close_code::UNKNOWN_ROOM | close_code::NOT_MEMBER | close_code::BANNED
             );
-        let proven = proof.is_some_and(|p| check_policy(&p, self.id, self.owner).is_ok());
+        let proven = proof.is_some_and(|p| self.compatible(&p) || self.extends_ours(&p));
         if leaving.closing && answered {
             // Our hello carried the closing policy: it has seen it (or has no
             // such room).
@@ -998,6 +1205,15 @@ impl Room {
                 conn,
                 message: ControlMessage::RoomSnapshot(Box::new(self.snapshot())),
             });
+            // An offer a dropped connection voided (M13): it may have
+            // accepted it, and waits for our word.
+            if let Some((id, _)) = self.voided.filter(|(_, to)| *to == peer) {
+                self.voided = None;
+                fx.push(Effect::Send {
+                    conn,
+                    message: ControlMessage::HandoverWithdraw(HandoverWithdraw { offer: id }),
+                });
+            }
             self.presence_changed(&mut fx);
         } else {
             fx.push(Effect::Close {
@@ -1014,6 +1230,17 @@ impl Room {
         let Some(peer) = self.conns.remove(&conn) else {
             return fx;
         };
+        // An offer lives on its connection (M13). Its member may have
+        // accepted on the way: it hears it is void when it connects again.
+        if let Some(offer) = self.offer.filter(|o| o.conn == conn) {
+            self.offer = None;
+            self.voided = Some((offer.id, offer.to));
+            fx.push(Effect::Changed);
+        }
+        if self.offered.is_some_and(|o| o.conn == conn) {
+            self.offered = None;
+            fx.push(Effect::Changed);
+        }
         let redial = self.should_dial(peer);
         let first_redial = self.timings.first_redial;
         let Some(link) = self.links.get_mut(&peer) else {
@@ -1070,26 +1297,39 @@ impl Room {
                 }
                 // A member's whole view. An owner caught up with everyone
                 // holds anything newer it signed before the backup was
-                // restored; a member, from anyone.
-                if self.catching_up {
-                    self.heard.insert(from);
-                    if !self.is_owner() || self.catching_up_with().is_empty() {
-                        self.caught_up(&mut fx);
-                    }
-                }
+                // restored; a member, from anyone. Who owns the room is read
+                // after the merge: a restored member may find it owns it.
+                self.heard_from(Some(from), &mut fx);
             }
             ControlMessage::MemberUpdate(record) => {
                 self.merge_record(*record, Some(from), now, &mut fx);
                 // Someone we waited for may have left.
-                if self.catching_up && self.is_owner() && self.catching_up_with().is_empty() {
-                    self.caught_up(&mut fx);
-                }
+                self.check_heard(&mut fx);
             }
             ControlMessage::PolicyUpdate(policy) => {
                 self.merge_policy(*policy, Some(from), &mut fx);
                 // A newer roster may have dropped someone we waited for.
-                if self.catching_up && self.is_owner() && self.catching_up_with().is_empty() {
-                    self.caught_up(&mut fx);
+                if !self.gone {
+                    self.check_heard(&mut fx);
+                }
+            }
+            ControlMessage::HandoverOffer(offer) => self.offered_room(from, conn, offer, &mut fx),
+            ControlMessage::HandoverAnswer(answer) => {
+                self.answered(from, conn, answer, &mut fx);
+            }
+            ControlMessage::HandoverWithdraw(withdraw) => {
+                if self
+                    .offered
+                    .is_some_and(|o| o.id == withdraw.offer && o.conn == conn)
+                {
+                    self.offered = None;
+                    fx.push(Effect::Changed);
+                }
+                // The owner's word that an offer we accepted is void, on any
+                // connection (the one we answered on may be gone).
+                if from == self.owner && self.accepted.is_some_and(|a| a.id == withdraw.offer) {
+                    self.accepted = None;
+                    fx.push(Effect::Changed);
                 }
             }
             ControlMessage::Presence(presence) => {
@@ -1148,6 +1388,9 @@ impl Room {
         if self.gone {
             return fx;
         }
+        // Handed the room, and not signed yet (we started again before we
+        // did, say): sign now (M13).
+        fx.extend(self.take_over());
         let targets: Vec<(MemberId, PeerAddr)> = match &self.leaving {
             Some(leaving) => leaving.untold.clone(),
             None => self
@@ -1236,6 +1479,224 @@ impl Room {
         self.issue_policy(roster, banned)
     }
 
+    // ---- Handing the room over (M13) ----
+
+    /// Owner only: offers the room to `to`, a member connected to us now.
+    /// `id` names the offer (random, from the engine). Replaces an offer
+    /// still standing. Nothing is signed until `to` accepts.
+    pub fn offer_room(&mut self, to: MemberId, id: u64) -> Result<Vec<Effect>, RoomError> {
+        if !self.is_owner() || self.gone || self.leaving.is_some() {
+            return Err(RoomError::NotOwner);
+        }
+        if self.catching_up {
+            return Err(RoomError::CatchingUp);
+        }
+        if self.unconfirmed {
+            return Err(RoomError::Unconfirmed);
+        }
+        if self.handovers.len() >= MAX_HANDOVERS {
+            return Err(RoomError::TooManyHandovers);
+        }
+        if to == self.me || !self.is_member(to) {
+            return Err(RoomError::NotMember);
+        }
+        let Some((conn, _)) = self.links.get(&to).and_then(|l| l.current) else {
+            return Err(RoomError::NotOnline);
+        };
+        let mut fx = self.withdraw_offer();
+        // Not before our first policy as owner: a handover is after a
+        // version we signed.
+        if self.takeover_pending() {
+            fx.extend(self.take_over());
+        }
+        self.offer = Some(Offer {
+            id,
+            to,
+            conn,
+            version: self.policy.body.version,
+        });
+        fx.push(Effect::Send {
+            conn,
+            message: ControlMessage::HandoverOffer(HandoverOffer {
+                offer: id,
+                version: self.policy.body.version,
+            }),
+        });
+        fx.push(Effect::Changed);
+        Ok(fx)
+    }
+
+    /// Owner: the offer we made is gone, and its member is told.
+    pub fn withdraw_offer(&mut self) -> Vec<Effect> {
+        let Some(offer) = self.offer.take() else {
+            return Vec::new();
+        };
+        vec![
+            Effect::Send {
+                conn: offer.conn,
+                message: ControlMessage::HandoverWithdraw(HandoverWithdraw { offer: offer.id }),
+            },
+            Effect::Changed,
+        ]
+    }
+
+    /// The owner offered us the room: our answer. Accepting is for good:
+    /// the owner may sign the room over at once, so there is no taking it
+    /// back, and until the owner hands it over, withdraws or signs anything
+    /// else, we can't leave ([`Accepted`]). Once it hands over, we own the
+    /// room ([`Effect::Ownership`]).
+    pub fn answer_offer(&mut self, accept: bool) -> Result<Vec<Effect>, RoomError> {
+        let Some(offered) = self.offered else {
+            return Err(if self.accepted.is_some() {
+                RoomError::OfferAccepted
+            } else {
+                RoomError::NoOffer
+            });
+        };
+        let (id, conn) = (offered.id, offered.conn);
+        if accept && self.catching_up {
+            return Err(RoomError::CatchingUp);
+        }
+        self.offered = None;
+        if accept {
+            self.accepted = Some(Accepted {
+                id,
+                version: offered.version,
+            });
+        }
+        Ok(vec![
+            Effect::Send {
+                conn,
+                message: ControlMessage::HandoverAnswer(HandoverAnswer { offer: id, accept }),
+            },
+            Effect::Changed,
+        ])
+    }
+
+    /// The owner offers us the room.
+    fn offered_room(
+        &mut self,
+        from: MemberId,
+        conn: ConnId,
+        offer: HandoverOffer,
+        fx: &mut Vec<Effect>,
+    ) {
+        if from != self.owner
+            || self.links.get(&from).and_then(|l| l.current).map(|c| c.0) != Some(conn)
+        {
+            return;
+        }
+        if self.catching_up || self.unconfirmed {
+            // We may not know the room as it is: no.
+            fx.push(Effect::Send {
+                conn,
+                message: ControlMessage::HandoverAnswer(HandoverAnswer {
+                    offer: offer.offer,
+                    accept: false,
+                }),
+            });
+            return;
+        }
+        self.offered = Some(Offered {
+            id: offer.offer,
+            conn,
+            version: offer.version,
+        });
+        fx.push(Effect::Changed);
+    }
+
+    /// The member we offered the room answered. Accepted, and the offer
+    /// still stands (the same connection, and nothing signed since): we
+    /// hand the room over.
+    fn answered(
+        &mut self,
+        from: MemberId,
+        conn: ConnId,
+        answer: HandoverAnswer,
+        fx: &mut Vec<Effect>,
+    ) {
+        let Some(offer) = self
+            .offer
+            .filter(|o| o.id == answer.offer && o.conn == conn && o.to == from)
+        else {
+            return;
+        };
+        self.offer = None;
+        fx.push(Effect::Changed);
+        if !answer.accept {
+            return;
+        }
+        let stands = self.is_owner()
+            && !self.catching_up
+            && !self.unconfirmed
+            && self.leaving.is_none()
+            && !self.gone
+            && self.policy.body.version == offer.version
+            && !self.takeover_pending()
+            && self.is_member(offer.to)
+            && self.handovers.len() < MAX_HANDOVERS;
+        if !stands {
+            fx.push(Effect::Send {
+                conn,
+                message: ControlMessage::HandoverWithdraw(HandoverWithdraw { offer: offer.id }),
+            });
+            return;
+        }
+        self.hand_over(offer.to, fx);
+    }
+
+    /// Signs the room over to `to`, after the policy we hold: that policy
+    /// with the handover is the last word we sign. Our password key and
+    /// invites go; the policy goes to everyone, who passes it on, so `to`
+    /// gets it even if we never meet it again.
+    fn hand_over(&mut self, to: MemberId, fx: &mut Vec<Effect>) {
+        let handover = sign_handover(
+            &self.key,
+            Handover {
+                room: self.id,
+                from: self.me,
+                to,
+                after: self.policy.body.version,
+            },
+        );
+        self.handovers.push(handover);
+        self.owner = to;
+        self.invites.clear();
+        self.checking.clear();
+        fx.push(Effect::Ownership { is_owner: false });
+        fx.push(Effect::Save);
+        let message = self.policy_message();
+        for conn in self.current_conns() {
+            fx.push(Effect::Send {
+                conn,
+                message: message.clone(),
+            });
+        }
+        fx.push(Effect::Changed);
+    }
+
+    /// We are the owner by the last handover, and haven't signed a policy
+    /// of our own yet: the one we hold is the one handed to us.
+    fn takeover_pending(&self) -> bool {
+        self.is_owner()
+            && self
+                .handovers
+                .last()
+                .is_some_and(|h| h.body.after == self.policy.body.version)
+    }
+
+    /// The room was handed to us: our first policy, the roster and bans as
+    /// they are, so the room sees the new owner sign. Not while catching up
+    /// (catching up signs when done) or leaving.
+    fn take_over(&mut self) -> Vec<Effect> {
+        if !self.takeover_pending() || self.catching_up || self.leaving.is_some() || self.gone {
+            return Vec::new();
+        }
+        let roster = self.policy.body.roster.clone();
+        let banned = self.policy.body.banned.clone();
+        self.issue_policy(roster, banned).unwrap_or_default()
+    }
+
     /// We leave for good. A member tells whoever it is connected to, or keeps
     /// trying until one member has heard (the rest hear it from them); the
     /// owner then takes it off the roster. The owner leaving closes the room:
@@ -1245,6 +1706,13 @@ impl Room {
         if self.gone || self.leaving.is_some() {
             return Ok(Vec::new());
         }
+        // Having accepted the room, leaving now could leave it with nobody
+        // to own it (M13): the owner's word first.
+        if self.accepted.is_some() {
+            return Err(RoomError::OfferAccepted);
+        }
+        self.offer = None;
+        self.offered = None;
         // Allowed while catching up (M13): a room whose members never come
         // back must still be leavable. The closing policy, or our last
         // record, skips ahead of whatever the members may hold that is
@@ -1415,13 +1883,13 @@ impl Room {
 
     fn snapshot(&self) -> RoomSnapshot {
         RoomSnapshot {
-            policy: self.policy.clone(),
+            policy: self.owned_policy(),
             members: self.records.values().cloned().collect(),
         }
     }
 
     fn policy_message(&self) -> ControlMessage {
-        ControlMessage::PolicyUpdate(Box::new(self.policy.clone()))
+        ControlMessage::PolicyUpdate(Box::new(self.owned_policy()))
     }
 
     fn presence(&self) -> ControlMessage {
@@ -1558,18 +2026,24 @@ impl Room {
 
     /// Caught up after a restore (M13): signing may resume. The owner signs
     /// the room again at once, [`RESTORE_SKIP`] ahead, taking off the roster
-    /// whoever left meanwhile: saved before [`Effect::CaughtUp`] clears the
+    /// whoever left meanwhile: saved before [`Effect::Restore`] changes the
     /// mark, so a restart never loses the skip, and from then on whatever
     /// the lost PC signed after the backup is superseded wherever it is
-    /// held, never forked.
-    fn caught_up(&mut self, fx: &mut Vec<Effect>) {
+    /// held, never forked. `stopped`: the owner stopped waiting, so it stays
+    /// unconfirmed (no handing over) until everyone has been heard.
+    fn caught_up(&mut self, stopped: bool, fx: &mut Vec<Effect>) {
         self.catching_up = false;
-        self.heard.clear();
         if !self.is_owner() {
+            self.heard.clear();
             self.skip_next = false;
-            fx.push(Effect::CaughtUp);
+            fx.push(Effect::Restore(RestoreMark::Done));
             fx.push(Effect::Changed);
             return;
+        }
+        // Who we heard counts on: unconfirmed waits for the rest.
+        self.unconfirmed = stopped;
+        if !stopped {
+            self.heard.clear();
         }
         let departed: Vec<MemberId> = self
             .records
@@ -1589,37 +2063,91 @@ impl Room {
         if let Ok(more) = self.issue_policy(roster, banned) {
             fx.extend(more);
         }
-        fx.push(Effect::CaughtUp);
+        fx.push(Effect::Restore(if stopped {
+            RestoreMark::Unconfirmed
+        } else {
+            RestoreMark::Done
+        }));
         fx.push(Effect::Changed);
+        if stopped {
+            // Everyone may have been heard already.
+            self.check_heard(fx);
+        }
     }
 
-    fn merge_policy(
-        &mut self,
-        policy: Signed<RoomPolicy>,
-        from: Option<MemberId>,
-        fx: &mut Vec<Effect>,
-    ) {
-        if policy.body.version <= self.policy.body.version
-            || check_policy(&policy, self.id, self.owner).is_err()
+    /// Adopts `owned` if it is newer than ours: its chain extends ours (by
+    /// body: a chain that parts from ours is never taken), and then it is
+    /// longer, or the same with a higher version. That order comes first,
+    /// before any signature is checked, and only the handovers we don't
+    /// hold are verified. So whatever a former owner signs later, under a
+    /// shorter chain, loses to the owner it handed the room to (M13).
+    fn merge_policy(&mut self, owned: OwnedPolicy, from: Option<MemberId>, fx: &mut Vec<Effect>) {
+        let ours = (self.handovers.len(), self.policy.body.version);
+        if !extends(&owned.handovers, &self.handovers)
+            || (owned.handovers.len(), owned.policy.body.version) <= ours
         {
             return;
         }
-        self.install_policy(policy, from, fx);
+        let Ok(tip) = check_owned(&owned, self.id, self.founder, self.handovers.len()) else {
+            return;
+        };
+        // A newer policy we signed and don't hold: we lost state (restored
+        // from a backup, and caught up from someone who missed it). Signing
+        // on from here would reuse its versions: catch up again, as owner.
+        if policy_signer(&owned, tip) == Some(self.me) && !self.catching_up {
+            self.catching_up = true;
+            self.unconfirmed = false;
+            self.skip_next = true;
+            self.heard.clear();
+            fx.push(Effect::Restore(RestoreMark::CatchingUp));
+        }
+        // Our own, verified copies of the handovers we hold, then the new
+        // ones: those we skipped verifying (by body) are never stored as
+        // they came, so a member can't plant signatures that fail later
+        // (on our next start, or for whoever joins through us).
+        let OwnedPolicy { policy, handovers } = owned;
+        let mut chain = self.handovers.clone();
+        chain.extend(handovers.into_iter().skip(self.handovers.len()));
+        self.install_policy(policy, chain, tip, from, fx);
     }
 
-    /// The version our next policy takes: the next one, or for the first
-    /// after a restore, [`RESTORE_SKIP`] ahead.
+    /// `owned` is our room's own word: its chain is ours or the start of
+    /// ours, and it checks out. Under the start of ours, only a policy from
+    /// before the next handover we hold: a former owner can't sign one
+    /// afterwards that names a stranger, to show it the roster.
+    fn compatible(&self, owned: &OwnedPolicy) -> bool {
+        let before_next = self
+            .handovers
+            .get(owned.handovers.len())
+            .is_none_or(|next| owned.policy.body.version <= next.body.after);
+        extends(&self.handovers, &owned.handovers)
+            && before_next
+            && check_owned(owned, self.id, self.founder, owned.handovers.len()).is_ok()
+    }
+
+    /// `owned` checks out and its chain is ours or carries ours on.
+    fn extends_ours(&self, owned: &OwnedPolicy) -> bool {
+        extends(&owned.handovers, &self.handovers)
+            && check_owned(owned, self.id, self.founder, self.handovers.len()).is_ok()
+    }
+
+    /// The version our next policy would take: the next one, or for the
+    /// first after a restore, [`RESTORE_SKIP`] ahead.
+    fn upcoming_version(&self) -> Option<u32> {
+        let step = if self.skip_next { RESTORE_SKIP } else { 1 };
+        self.policy.body.version.checked_add(step)
+    }
+
+    /// The version our next policy takes ([`Self::upcoming_version`]). Every
+    /// policy we sign comes through here, and only while we own the room
+    /// (M13: never after handing it over).
     fn next_policy_version(&mut self) -> Result<u32, RoomError> {
-        let step = if std::mem::take(&mut self.skip_next) {
-            RESTORE_SKIP
-        } else {
-            1
-        };
-        self.policy
-            .body
-            .version
-            .checked_add(step)
-            .ok_or(RoomError::Exhausted)
+        if !self.is_owner() {
+            return Err(RoomError::NotOwner);
+        }
+        let version = self.upcoming_version().ok_or(RoomError::Exhausted)?;
+        self.skip_next = false;
+        Ok(version)
     }
 
     fn issue_policy(
@@ -1639,21 +2167,50 @@ impl Room {
             },
         );
         let mut fx = Vec::new();
-        self.install_policy(policy, None, &mut fx);
+        let (handovers, owner) = (self.handovers.clone(), self.owner);
+        self.install_policy(policy, handovers, owner, None, &mut fx);
         Ok(fx)
     }
 
-    /// Adopts a newer policy and settles every connection under it: anyone
-    /// no longer a member gets the policy as proof and is closed; everyone
-    /// else gets the policy (except `from`, who sent it). Saved first, so a
-    /// version is never sent before it is on disk.
+    /// Adopts a newer policy, with the chain naming `owner`, and settles
+    /// every connection under it: anyone no longer a member gets the policy
+    /// as proof and is closed; everyone else gets the policy (except
+    /// `from`, who sent it). Saved first, so a version is never sent before
+    /// it is on disk. An offer of the room made for the policy before is
+    /// void. Handed the room, we sign our first policy at once.
     fn install_policy(
         &mut self,
         policy: Signed<RoomPolicy>,
+        handovers: Vec<Signed<Handover>>,
+        owner: MemberId,
         from: Option<MemberId>,
         fx: &mut Vec<Effect>,
     ) {
+        let (was_owner, owner_before) = (self.is_owner(), self.owner);
         self.policy = policy;
+        self.handovers = handovers;
+        self.owner = owner;
+        fx.extend(self.withdraw_offer());
+        // An offer we accepted is settled: the room is ours, or its owner
+        // signed something else, or someone else owns it.
+        if let Some(accepted) = self.accepted
+            && (self.is_owner()
+                || self.owner != owner_before
+                || self.policy.body.version > accepted.version)
+        {
+            self.accepted = None;
+        }
+        if self.is_owner() != was_owner {
+            if self.is_owner() {
+                self.offered = None;
+            } else {
+                self.invites.clear();
+                self.checking.clear();
+            }
+            fx.push(Effect::Ownership {
+                is_owner: self.is_owner(),
+            });
+        }
         let message = self.policy_message();
         if !self.in_roster(self.me) {
             // Banned, or the owner closed the room.
@@ -1701,30 +2258,85 @@ impl Room {
             }
         }
         fx.push(Effect::Changed);
+        fx.extend(self.take_over());
     }
 }
 
 /// Whether `policy` is the owner's signed word that `member` is banned from
-/// the room with this id. Joiners use it before they have a [`Room`].
-pub fn proves_ban(
-    policy: &Signed<RoomPolicy>,
-    room: RoomId,
-    owner: MemberId,
-    member: MemberId,
-) -> bool {
-    policy.body.banned.contains(&member) && check_policy(policy, room, owner).is_ok()
+/// the room with this id and founder. Joiners use it before they have a
+/// [`Room`].
+pub fn proves_ban(policy: &OwnedPolicy, room: RoomId, founder: MemberId, member: MemberId) -> bool {
+    policy.policy.body.banned.contains(&member) && check_owned(policy, room, founder, 0).is_ok()
 }
 
-fn check_policy(
-    policy: &Signed<RoomPolicy>,
-    room: RoomId,
-    owner: MemberId,
-) -> Result<(), RoomError> {
-    if policy.body.room == room && policy.body.is_valid() && policy_is_authentic(policy, owner) {
-        Ok(())
-    } else {
-        Err(RoomError::BadPolicy)
+/// Who a chain of handovers from `founder` makes the owner, if it is well
+/// formed, signatures aside: each from the owner before it, to someone
+/// else, after a later version than the one before, in this room, and at
+/// most [`MAX_HANDOVERS`] of them.
+fn chain_tip(room: RoomId, founder: MemberId, chain: &[Signed<Handover>]) -> Option<MemberId> {
+    if chain.len() > MAX_HANDOVERS {
+        return None;
     }
+    let mut owner = founder;
+    let mut after: Option<u32> = None;
+    for handover in chain {
+        let h = &handover.body;
+        if h.room != room
+            || h.from != owner
+            || h.to == h.from
+            || after.is_some_and(|a| h.after <= a)
+        {
+            return None;
+        }
+        owner = h.to;
+        after = Some(h.after);
+    }
+    Some(owner)
+}
+
+/// Who must have signed `owned`'s policy, the chain naming `tip`: the owner
+/// it names, at a version past the last handover; or, at exactly that
+/// handover's `after`, the owner who handed it over (the policy it handed
+/// over). `None` for a version before it: an earlier owner's policy can't
+/// pass under a later chain.
+fn policy_signer(owned: &OwnedPolicy, tip: MemberId) -> Option<MemberId> {
+    let version = owned.policy.body.version;
+    match owned.handovers.last() {
+        None => Some(tip),
+        Some(last) if version > last.body.after => Some(tip),
+        Some(last) if version == last.body.after => Some(last.body.from),
+        Some(_) => None,
+    }
+}
+
+/// `owned` checks out for the room: a well-formed chain from the founder,
+/// each handover signed by its owner, and the policy by whoever
+/// [`policy_signer`] says. The first `known` handovers are ones we hold,
+/// already verified: only the rest cost a signature check each, in order,
+/// stopping at the first that fails. Returns the owner the chain names.
+fn check_owned(
+    owned: &OwnedPolicy,
+    room: RoomId,
+    founder: MemberId,
+    known: usize,
+) -> Result<MemberId, RoomError> {
+    let tip = chain_tip(room, founder, &owned.handovers).ok_or(RoomError::BadPolicy)?;
+    let signer = policy_signer(owned, tip).ok_or(RoomError::BadPolicy)?;
+    let policy = &owned.policy;
+    if policy.body.room != room || !owned.is_valid() {
+        return Err(RoomError::BadPolicy);
+    }
+    let unverified = &owned.handovers[known.min(owned.handovers.len())..];
+    if !unverified.iter().all(handover_is_authentic) || !policy_is_authentic(policy, signer) {
+        return Err(RoomError::BadPolicy);
+    }
+    Ok(tip)
+}
+
+/// Whether `chain` starts with `prefix`, handover by handover (by body: the
+/// same handover signed twice is still the same).
+fn extends(chain: &[Signed<Handover>], prefix: &[Signed<Handover>]) -> bool {
+    chain.len() >= prefix.len() && chain.iter().zip(prefix).all(|(a, b)| a.body == b.body)
 }
 
 /// Keeps an address within what a record may carry.

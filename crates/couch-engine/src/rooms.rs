@@ -38,14 +38,14 @@ use couch_proto::{
     control::{ALIVE_EVERY, Alive, ControlMessage, close_code},
     ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce, SeatId, SessionId},
     invite::Invite,
-    room::{PeerAddr, RoomPolicy, RoomSnapshot, Signed, valid_name},
+    room::{OwnedPolicy, PeerAddr, RoomSnapshot, valid_name},
 };
 use couch_room::{
     SigningKey,
     limits::AdmissionLimits,
     room::{
-        ConnId, Effect, Identity, JoinDecision, LinkState, MemberDecision, Room, RoomError,
-        Timings, proves_ban,
+        ConnId, Effect, Identity, JoinDecision, LinkState, MemberDecision, RestoreMark, Room,
+        RoomError, Timings, proves_ban,
     },
     signing::{invite_tag, room_id},
 };
@@ -112,7 +112,7 @@ pub(crate) enum Input {
     MemberQuery {
         room: RoomId,
         dialer: MemberId,
-        policy: Box<Signed<RoomPolicy>>,
+        policy: Box<OwnedPolicy>,
         reply: oneshot::Sender<MemberDecision>,
     },
     Admitted(Box<Admitted>),
@@ -186,7 +186,7 @@ pub(crate) enum JoinAnswer {
     },
     Refuse(u32),
     /// Refuse, showing the newcomer the owner's policy that bans it.
-    Banned(Box<Signed<RoomPolicy>>),
+    Banned(Box<OwnedPolicy>),
 }
 
 pub(crate) struct Admitted {
@@ -218,6 +218,27 @@ struct Entry {
     room: Room,
     /// The owner's password key; only the owner admits, so only it has one.
     password: Option<PasswordKey>,
+    /// We accepted the owner's offer of the room (M13): the key of the new
+    /// password we chose, ours once the room is handed to us. Memory only:
+    /// after a restart the room comes without one, and asks for a password.
+    pending: Option<PasswordKey>,
+    /// The owner, and whether we were offered the room, as last told to the
+    /// UI: a change makes a notice.
+    owner_seen: MemberId,
+    offered_seen: bool,
+}
+
+impl Entry {
+    fn new(room: Room, password: Option<PasswordKey>) -> Self {
+        let owner_seen = room.owner();
+        Self {
+            room,
+            password,
+            pending: None,
+            owner_seen,
+            offered_seen: false,
+        }
+    }
 }
 
 struct Conn {
@@ -397,7 +418,7 @@ impl Actor {
         // A restore cut short may have left a mark without its room.
         self.store.sweep_restored();
         for remembered in self.store.rooms() {
-            let id = room_id(remembered.saved.owner, remembered.saved.nonce);
+            let id = room_id(remembered.saved.founder, remembered.saved.nonce);
             match Room::restore(
                 self.key.clone(),
                 remembered.saved,
@@ -408,24 +429,25 @@ impl Actor {
                     // From a backup (M13), and not caught up yet: it signs
                     // nothing until its members' state arrives. With nobody
                     // to wait for, it is caught up at once (applied below).
+                    // The owner stopped waiting: it signs, but doesn't hand
+                    // the room over until it has heard everyone.
                     let mut fx = Vec::new();
-                    if self.store.is_restored(id) {
-                        fx = room.catch_up_first();
-                        if room.is_catching_up() {
-                            tracing::info!(room = ?id, "restored from a backup: catching up first");
+                    match self.store.restore_mark(id) {
+                        Some(RestoreMark::CatchingUp) => {
+                            fx = room.catch_up_first();
+                            if room.is_catching_up() {
+                                tracing::info!(room = ?id, "restored from a backup: catching up first");
+                            }
                         }
+                        Some(RestoreMark::Unconfirmed) => room.resume_unconfirmed(),
+                        Some(RestoreMark::Done) | None => {}
                     }
                     // Addresses change between runs; the name may have too.
                     if let Err(e) = room.set_profile(&self.name, self.addr.clone()) {
                         tracing::warn!("room {id:?}: {e}");
                     }
-                    self.rooms.insert(
-                        id,
-                        Entry {
-                            room,
-                            password: remembered.password.map(PasswordKey),
-                        },
-                    );
+                    self.rooms
+                        .insert(id, Entry::new(room, remembered.password.map(PasswordKey)));
                     self.save(id);
                     self.apply(id, fx, now);
                 }
@@ -702,6 +724,13 @@ impl Actor {
             Command::LeaveRoom { room } => self.leave(&room, now),
             Command::BanMember { room, member } => self.ban(&room, &member, now),
             Command::StopCatchingUp { room } => self.stop_catching_up(&room, now),
+            Command::OfferRoom { room, member } => self.offer_room(&room, &member, now),
+            Command::WithdrawOffer { room } => self.withdraw_offer(&room, now),
+            Command::AnswerOffer {
+                room,
+                accept,
+                password,
+            } => self.answer_offer(&room, accept, password.as_deref(), now),
             // Answered by the engine itself.
             Command::GetShortcuts
             | Command::SetShortcut { .. }
@@ -871,10 +900,7 @@ impl Actor {
         let id = room.id();
         self.rooms.insert(
             id,
-            Entry {
-                room,
-                password: Some(PasswordKey::derive(id, password)),
-            },
+            Entry::new(room, Some(PasswordKey::derive(id, password))),
         );
         self.save(id);
         tracing::info!(room = ?id, "created a room");
@@ -944,9 +970,13 @@ impl Actor {
 
     fn preview(&self, invite: &str, now: Instant) -> Result<Response, EngineError> {
         let invite = Invite::parse(invite)?;
-        let room = room_id(invite.owner, invite.nonce);
+        let room = room_id(invite.founder(), invite.nonce);
         let expires_in = invite.expires.saturating_sub(unix_now());
-        let status = if invite.owner == self.me {
+        // Our own invite only while we own the room: one of ours from before
+        // we handed it over (M13) is a room we are a member of.
+        let ours =
+            invite.owner == self.me && self.rooms.get(&room).is_none_or(|e| e.room.is_owner());
+        let status = if ours {
             InviteStatus::Own
         } else if self.view(room, now).is_some() {
             InviteStatus::Member
@@ -975,7 +1005,7 @@ impl Actor {
             let _ = reply.send(Err(EngineError::EmptyPassword));
             return;
         }
-        let id = room_id(invite.owner, invite.nonce);
+        let id = room_id(invite.founder(), invite.nonce);
         // A room we are still leaving counts as gone: joining replaces it.
         if let Some(view) = self.view(id, Instant::now()) {
             let _ = reply.send(Ok(Response::Room(view)));
@@ -1037,6 +1067,7 @@ impl Actor {
         }
         let room = match Room::join(
             self.identity(),
+            invite.founder(),
             invite.owner,
             invite.nonce,
             snapshot,
@@ -1054,13 +1085,7 @@ impl Actor {
             }
         };
         tracing::info!(room = ?id, "joined a room");
-        self.rooms.insert(
-            id,
-            Entry {
-                room,
-                password: None,
-            },
-        );
+        self.rooms.insert(id, Entry::new(room, None));
         self.save(id);
         self.admitted(admitted, now);
         self.announce(id, now);
@@ -1110,6 +1135,66 @@ impl Actor {
         Ok(Response::Room(self.view(id, now).expect("present")))
     }
 
+    /// Owner only (M13): offers the room to `member`, online now. Nothing is
+    /// signed until they accept.
+    fn offer_room(
+        &mut self,
+        room: &str,
+        member: &str,
+        now: Instant,
+    ) -> Result<Response, EngineError> {
+        let member = MemberId::from_hex(member).ok_or(EngineError::UnknownMember)?;
+        let id = self.owned(room)?;
+        let offer = u64::from_le_bytes(random()?);
+        let fx = self
+            .rooms
+            .get_mut(&id)
+            .expect("owned")
+            .room
+            .offer_room(member, offer)?;
+        tracing::info!(room = ?id, member = ?member, "offered the room");
+        self.apply(id, fx, now);
+        Ok(Response::Room(self.view(id, now).expect("present")))
+    }
+
+    fn withdraw_offer(&mut self, room: &str, now: Instant) -> Result<Response, EngineError> {
+        let id = self.owned(room)?;
+        let fx = self
+            .rooms
+            .get_mut(&id)
+            .expect("owned")
+            .room
+            .withdraw_offer();
+        self.apply(id, fx, now);
+        Ok(Response::Room(self.view(id, now).expect("present")))
+    }
+
+    /// The owner offered us the room (M13). Accepting takes the password
+    /// newcomers will need: its key waits here until the room is ours.
+    fn answer_offer(
+        &mut self,
+        room: &str,
+        accept: bool,
+        password: Option<&str>,
+        now: Instant,
+    ) -> Result<Response, EngineError> {
+        let (id, entry) = self.entry_mut(room)?;
+        let key = if accept {
+            let password = password.unwrap_or_default();
+            if password.trim().is_empty() {
+                return Err(EngineError::EmptyPassword);
+            }
+            Some(PasswordKey::derive(id, password))
+        } else {
+            None
+        };
+        let fx = entry.room.answer_offer(accept)?;
+        entry.pending = key;
+        tracing::info!(room = ?id, accept, "answered the owner's offer of the room");
+        self.apply(id, fx, now);
+        Ok(Response::Room(self.view(id, now).expect("present")))
+    }
+
     fn join_query(
         &mut self,
         room: RoomId,
@@ -1125,14 +1210,12 @@ impl Actor {
             return JoinAnswer::Refuse(close_code::UNKNOWN_ROOM);
         };
         let Some(password) = entry.password else {
-            // Only the owner admits, and only the owner has the key. An owner
-            // restored from a backup has none until a new password is set
-            // (M13): the invite is one from before.
-            return JoinAnswer::Refuse(if entry.room.is_owner() {
-                close_code::INVITE_EXPIRED
-            } else {
-                close_code::PROTOCOL
-            });
+            // Only the owner admits, and only the owner has the key. An invite
+            // reaching a member is one it made as owner before handing the
+            // room over; an owner restored from a backup has no key until a
+            // new password is set; either way the invite is from before
+            // (M13).
+            return JoinAnswer::Refuse(close_code::INVITE_EXPIRED);
         };
         match entry.room.join_request(dialer, invite, unix_now()) {
             JoinDecision::Proceed { token } => {
@@ -1259,6 +1342,25 @@ impl Actor {
                 Effect::Save => save = true,
                 Effect::Removed { banned } => over = Some(Some(*banned)),
                 Effect::Departed => over = Some(None),
+                // The password key goes in or out before the save below
+                // (M13): a handed-over room's key never stays on disk, and
+                // the new owner's is there with the policy that makes it so.
+                Effect::Ownership { is_owner } => {
+                    if let Some(entry) = self.rooms.get_mut(&room) {
+                        if *is_owner {
+                            entry.password = entry.pending.take();
+                            tracing::info!(
+                                room = ?room,
+                                password = entry.password.is_some(),
+                                "the room was handed to us"
+                            );
+                        } else {
+                            entry.password = None;
+                            entry.pending = None;
+                            tracing::info!(room = ?room, "we handed the room over");
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1274,11 +1376,14 @@ impl Actor {
                 Effect::Send { conn, message } => self.send(conn, Outgoing::Message(message)),
                 Effect::Close { conn, code } => self.send(conn, Outgoing::Close(code)),
                 Effect::Changed => changed = true,
-                Effect::CaughtUp => {
-                    tracing::info!(room = ?room, "caught up with the room after a restore");
-                    self.store.clear_restored(room);
+                Effect::Restore(mark) => {
+                    tracing::info!(room = ?room, ?mark, "a restored room's state");
+                    self.store.set_restore_mark(room, mark);
                 }
-                Effect::Save | Effect::Removed { .. } | Effect::Departed => {}
+                Effect::Save
+                | Effect::Removed { .. }
+                | Effect::Departed
+                | Effect::Ownership { .. } => {}
             }
         }
         match over {
@@ -1302,6 +1407,7 @@ impl Actor {
                 // its part in sessions now, not when its connection closes.
                 self.prune_sessions(room, now);
                 if changed {
+                    self.handover_notices(room);
                     self.announce(room, now);
                 }
             }
@@ -1354,7 +1460,7 @@ impl Actor {
             return;
         };
         let endpoint = self.endpoint.clone();
-        let policy = entry.room.policy().clone();
+        let policy = entry.room.owned_policy();
         tokio::spawn(async move {
             let input = match dial_member(&endpoint, target, room, policy).await {
                 Ok((conn, tx, rx, snapshot)) => Input::Admitted(Box::new(Admitted {
@@ -1430,6 +1536,36 @@ impl Actor {
         }
     }
 
+    /// Tells the UI, for a notice, that the room changed hands or that its
+    /// owner offers it to us (M13).
+    fn handover_notices(&mut self, room: RoomId) {
+        let Some(entry) = self.rooms.get_mut(&room) else {
+            return;
+        };
+        // An acceptance settled without the room coming to us (withdrawn,
+        // or the owner signed something else): its password key goes.
+        if !entry.room.is_owner() && entry.room.offered() != Some(true) {
+            entry.pending = None;
+        }
+        let owner = entry.room.owner();
+        if owner != entry.owner_seen {
+            entry.owner_seen = owner;
+            let _ = self.events.send(Event::OwnerChanged {
+                room: room.to_hex(),
+                owner: owner.to_hex(),
+            });
+        }
+        let offered = entry.room.offered().is_some();
+        if offered != entry.offered_seen {
+            entry.offered_seen = offered;
+            if offered {
+                let _ = self.events.send(Event::RoomOffered {
+                    room: room.to_hex(),
+                });
+            }
+        }
+    }
+
     fn announce(&self, room: RoomId, now: Instant) {
         if let Some(view) = self.view(room, now) {
             let _ = self.events.send(Event::RoomChanged { room: view });
@@ -1502,6 +1638,9 @@ impl Actor {
                 .map(|m| m.to_hex())
                 .collect(),
             needs_password: entry.room.is_owner() && entry.password.is_none(),
+            offering_to: entry.room.offer().map(|m| m.to_hex()),
+            offered: entry.room.offered(),
+            can_offer: entry.room.can_offer(),
         })
     }
 
@@ -1562,7 +1701,7 @@ async fn dial_member(
     endpoint: &Endpoint,
     target: couch_net::EndpointAddr,
     room: RoomId,
-    policy: Signed<RoomPolicy>,
+    policy: OwnedPolicy,
 ) -> Result<(Connection, ControlSender, ControlReceiver, RoomSnapshot), AdmissionError> {
     let (conn, mut tx, mut rx) = admission::connect(endpoint, target, CONNECT_TIMEOUT).await?;
     let hello = admission::hello_member(&conn, &mut tx, &mut rx, room, policy);
@@ -1650,7 +1789,7 @@ impl JoinJob {
             AdmissionError::WrongPassword
             | AdmissionError::Refused(close_code::ADMISSION_FAILED) => EngineError::WrongPassword,
             AdmissionError::Shown(policy)
-                if proves_ban(&policy, self.room, self.invite.owner, self.me) =>
+                if proves_ban(&policy, self.room, self.invite.founder(), self.me) =>
             {
                 EngineError::Refused("you are banned from this room")
             }

@@ -177,6 +177,27 @@ pub enum Command {
     StopCatchingUp {
         room: String,
     },
+    /// Owner only (M13): offers the room to `member`, who must be online. It
+    /// changes hands once they accept ([`Command::AnswerOffer`]): from then
+    /// they let people in, ban and close the room, with a new password of
+    /// their own, and our invites stop working.
+    OfferRoom {
+        room: String,
+        member: String,
+    },
+    /// Owner only: the offer is withdrawn (until they accepted).
+    WithdrawOffer {
+        room: String,
+    },
+    /// The owner offered us the room: accept, with the new password
+    /// newcomers will need, or decline. Accepting is for good: until the
+    /// owner hands the room over or withdraws, it can't be declined, nor
+    /// the room left.
+    AnswerOffer {
+        room: String,
+        accept: bool,
+        password: Option<String>,
+    },
     /// Runs a driver's installer, shipped with the app, with Windows'
     /// administrator prompt; answers when it has finished, with every
     /// driver's state.
@@ -911,6 +932,20 @@ impl fmt::Debug for Command {
                 .debug_struct("StopCatchingUp")
                 .field("room", room)
                 .finish(),
+            Self::OfferRoom { room, member } => f
+                .debug_struct("OfferRoom")
+                .field("room", room)
+                .field("member", member)
+                .finish(),
+            Self::WithdrawOffer { room } => {
+                f.debug_struct("WithdrawOffer").field("room", room).finish()
+            }
+            // The new password: newcomers' half of the way in.
+            Self::AnswerOffer { room, accept, .. } => f
+                .debug_struct("AnswerOffer")
+                .field("room", room)
+                .field("accept", accept)
+                .finish_non_exhaustive(),
             Self::InstallDriver { driver } => f
                 .debug_struct("InstallDriver")
                 .field("driver", driver)
@@ -1081,9 +1116,18 @@ pub struct RoomView {
     /// While catching up, the members not heard from yet: the owner waits
     /// for all of them, a member for any one.
     pub waiting_for: Vec<String>,
-    /// For the owner: restored from a backup, the room has no password
-    /// (M13: the backup never carries one); set a new one to invite again.
+    /// For the owner: the room has no password (M13: restored from a
+    /// backup, which never carries one, or handed to us before we chose
+    /// one); set a new one to invite again.
     pub needs_password: bool,
+    /// The member we offered the room to, while the offer stands (M13).
+    pub offering_to: Option<String>,
+    /// The owner offers us the room: whether we accepted already (M13).
+    pub offered: Option<bool>,
+    /// We own the room and can offer it to a member now (M13): not after a
+    /// restore until confirmed, not with an offer standing, not past the
+    /// 32 handovers a room's chain holds.
+    pub can_offer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1191,6 +1235,15 @@ pub enum Event {
     JoinsPaused {
         room: String,
         minutes: u32,
+    },
+    /// The room changed hands (M13): `owner` owns it now, perhaps us.
+    OwnerChanged {
+        room: String,
+        owner: String,
+    },
+    /// The room's owner offers it to us (M13): [`Command::AnswerOffer`].
+    RoomOffered {
+        room: String,
     },
     /// The app was opened with an invite link: [`Command::TakeOpenedInvite`]
     /// has it.
@@ -2378,6 +2431,7 @@ mod tests {
                 relay: Some("https://relay.example.com./".into()),
                 ips: vec![],
             },
+            founder: None,
         };
         let plain = rooms::invite_link(&invite, None);
         assert!(plain.starts_with(LINK_PREFIX));
@@ -2413,6 +2467,15 @@ mod tests {
                 Command::ChangePassword {
                     room: "00".into(),
                     password: secret.into()
+                }
+            ),
+            // The password a new owner chooses (M13).
+            format!(
+                "{:?}",
+                Command::AnswerOffer {
+                    room: "00".into(),
+                    accept: true,
+                    password: Some(secret.into())
                 }
             ),
             format!(

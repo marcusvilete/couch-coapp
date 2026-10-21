@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ids::{InviteTag, RoomId},
-    room::{RoomPolicy, Signed},
+    room::OwnedPolicy,
 };
 
 /// A SPAKE2 message: a side byte (`b'A'` from the dialer, `b'B'` from the
@@ -59,14 +59,15 @@ pub struct AdmitConfirm {
 }
 
 /// Member to member, first after `Hello`: which room, and the newest owner's
-/// policy the dialer has, so an acceptor that missed a change (a member who
-/// joined meanwhile) can catch up before deciding. The acceptor answers with
-/// its `RoomSnapshot`, or refuses: with the policy that shows why
+/// policy the dialer has (with the handovers that make its signer the owner,
+/// M13), so an acceptor that missed a change (a member who joined meanwhile)
+/// can catch up before deciding. The acceptor answers with its
+/// `RoomSnapshot`, or refuses: with the policy that shows why
 /// (`PolicyUpdate`), then a close.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberHello {
     pub room: RoomId,
-    pub policy: Signed<RoomPolicy>,
+    pub policy: OwnedPolicy,
 }
 
 #[cfg(test)]

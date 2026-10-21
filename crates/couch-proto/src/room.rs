@@ -19,10 +19,14 @@ pub const MAX_IPS: usize = 8;
 pub const MAX_ROSTER: usize = 64;
 pub const MAX_RECORDS: usize = MAX_ROSTER;
 pub const MAX_BANNED: usize = 64;
+/// Handovers a room's chain can hold (M13): a room changes hands at most
+/// this many times.
+pub const MAX_HANDOVERS: usize = 32;
 
 /// Signature domains: a signature over one kind of body can't pass for another.
 pub const MEMBER_RECORD_DOMAIN: &[u8] = b"couch/member-record/v1";
 pub const POLICY_DOMAIN: &[u8] = b"couch/room-policy/v1";
+pub const HANDOVER_DOMAIN: &[u8] = b"couch/room-handover/v1";
 
 /// Where a member can be dialed: an iroh relay and direct addresses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +106,68 @@ pub struct RosterEntry {
     pub since: u32,
 }
 
+/// The room changing hands (M13): `from`, its owner, hands it to `to`, a
+/// member, with the policy at version `after` as the last `from` signs.
+/// Signed by `from`. The room id binds its founder; the chain of handovers
+/// from the founder names the owner now ([`OwnedPolicy`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Handover {
+    pub room: RoomId,
+    pub from: MemberId,
+    pub to: MemberId,
+    pub after: u32,
+}
+
+/// The owner's policy with the chain of handovers that makes its signer the
+/// owner: how a policy travels (M13). Valid when the chain runs from the
+/// founder and the policy is signed by its last `to` (the founder with no
+/// handover) at a version above the last `after`, or by the last `from` at
+/// exactly `after` (the policy it handed over). `couch_room::room` checks
+/// it; a longer chain that extends ours replaces ours, then a higher
+/// version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedPolicy {
+    pub policy: Signed<RoomPolicy>,
+    pub handovers: Vec<Signed<Handover>>,
+}
+
+impl OwnedPolicy {
+    /// A policy of a room that never changed hands.
+    pub fn founders(policy: Signed<RoomPolicy>) -> Self {
+        Self {
+            policy,
+            handovers: Vec::new(),
+        }
+    }
+
+    /// Within the sizes a member keeps (signatures aside).
+    pub fn is_valid(&self) -> bool {
+        self.policy.body.is_valid() && self.handovers.len() <= MAX_HANDOVERS
+    }
+}
+
+/// Owner to a member (M13): would it take the room over? `offer` names this
+/// offer (random), `version` the policy it would take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverOffer {
+    pub offer: u64,
+    pub version: u32,
+}
+
+/// The member's answer to [`HandoverOffer`], on the same connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverAnswer {
+    pub offer: u64,
+    pub accept: bool,
+}
+
+/// Owner to the member offered: the offer is gone (withdrawn, or void since
+/// the policy changed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverWithdraw {
+    pub offer: u64,
+}
+
 /// A body and its author's Ed25519 signature over
 /// `domain || postcard(body)` (see [`signing_bytes`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +190,7 @@ pub fn signing_bytes<T: Serialize>(domain: &[u8], body: &T) -> Vec<u8> {
 /// as repair; the owner sends a joiner one once it is admitted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomSnapshot {
-    pub policy: Signed<RoomPolicy>,
+    pub policy: OwnedPolicy,
     pub members: Vec<Signed<MemberRecord>>,
 }
 
@@ -212,25 +278,40 @@ mod tests {
     #[test]
     fn a_full_snapshot_fits_a_control_frame() {
         let snapshot = RoomSnapshot {
-            policy: Signed {
-                body: RoomPolicy {
-                    room: RoomId([0xff; 16]),
-                    version: u32::MAX,
-                    name: "x".repeat(MAX_NAME_BYTES),
-                    roster: vec![
-                        RosterEntry {
-                            id: MemberId([0xff; 32]),
-                            since: u32::MAX,
-                        };
-                        MAX_ROSTER
-                    ],
-                    banned: vec![MemberId([0xff; 32]); MAX_BANNED],
+            policy: OwnedPolicy {
+                policy: Signed {
+                    body: RoomPolicy {
+                        room: RoomId([0xff; 16]),
+                        version: u32::MAX,
+                        name: "x".repeat(MAX_NAME_BYTES),
+                        roster: vec![
+                            RosterEntry {
+                                id: MemberId([0xff; 32]),
+                                since: u32::MAX,
+                            };
+                            MAX_ROSTER
+                        ],
+                        banned: vec![MemberId([0xff; 32]); MAX_BANNED],
+                    },
+                    sig: Signature([0xff; 32], [0xff; 32]),
                 },
-                sig: Signature([0xff; 32], [0xff; 32]),
+                // M13: the longest chain a room keeps.
+                handovers: vec![
+                    Signed {
+                        body: Handover {
+                            room: RoomId([0xff; 16]),
+                            from: MemberId([0xff; 32]),
+                            to: MemberId([0xfe; 32]),
+                            after: u32::MAX,
+                        },
+                        sig: Signature([0xff; 32], [0xff; 32]),
+                    };
+                    MAX_HANDOVERS
+                ],
             },
             members: (0..MAX_RECORDS as u8).map(largest_record).collect(),
         };
-        assert!(snapshot.policy.body.is_valid());
+        assert!(snapshot.policy.is_valid());
         assert!(snapshot.members.iter().all(|r| r.body.is_valid()));
         let len = postcard::to_stdvec(&snapshot).unwrap().len();
         assert!(

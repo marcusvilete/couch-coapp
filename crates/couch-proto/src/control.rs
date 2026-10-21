@@ -11,7 +11,10 @@ use crate::{
     admission::{AdmitConfirm, AdmitReply, JoinStart, MemberHello},
     envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND},
     ids::{Permissions, SeatEpoch, SeatId},
-    room::{Goodbye, MemberRecord, Presence, RoomPolicy, RoomSnapshot, Signed},
+    room::{
+        Goodbye, HandoverAnswer, HandoverOffer, HandoverWithdraw, MemberRecord, OwnedPolicy,
+        Presence, RoomSnapshot, Signed,
+    },
     session::{
         ControlCancel, ControlDeclined, ControlRequest, GameFocus, SessionAnnounce, SessionEnded,
         SessionJoin, SessionJoinReply, SessionLeave, SessionStatus, ViewerControllers,
@@ -41,6 +44,11 @@ pub mod type_ids {
     pub const POLICY_UPDATE: u16 = MUST_UNDERSTAND | 0x0503;
     /// Optional: a peer that ignores presence still works, just repairs slower.
     pub const PRESENCE: u16 = 0x0504;
+    /// Handing a room over (M13): a peer that doesn't know them can't take
+    /// part in the room's ownership.
+    pub const HANDOVER_OFFER: u16 = MUST_UNDERSTAND | 0x0505;
+    pub const HANDOVER_ANSWER: u16 = MUST_UNDERSTAND | 0x0506;
+    pub const HANDOVER_WITHDRAW: u16 = MUST_UNDERSTAND | 0x0507;
     /// The session directory is optional: a peer that doesn't know sessions
     /// just doesn't show them. The rest only follow an announcement.
     pub const SESSION_ANNOUNCE: u16 = 0x0601;
@@ -148,8 +156,11 @@ pub enum ControlMessage {
     AdmitConfirm(AdmitConfirm),
     RoomSnapshot(Box<RoomSnapshot>),
     MemberUpdate(Box<Signed<MemberRecord>>),
-    PolicyUpdate(Box<Signed<RoomPolicy>>),
+    PolicyUpdate(Box<OwnedPolicy>),
     Presence(Presence),
+    HandoverOffer(HandoverOffer),
+    HandoverAnswer(HandoverAnswer),
+    HandoverWithdraw(HandoverWithdraw),
     SessionAnnounce(SessionAnnounce),
     SessionStatus(SessionStatus),
     SessionEnded(SessionEnded),
@@ -228,6 +239,9 @@ impl ControlMessage {
             Self::MemberUpdate(_) => type_ids::MEMBER_UPDATE,
             Self::PolicyUpdate(_) => type_ids::POLICY_UPDATE,
             Self::Presence(_) => type_ids::PRESENCE,
+            Self::HandoverOffer(_) => type_ids::HANDOVER_OFFER,
+            Self::HandoverAnswer(_) => type_ids::HANDOVER_ANSWER,
+            Self::HandoverWithdraw(_) => type_ids::HANDOVER_WITHDRAW,
             Self::SessionAnnounce(_) => type_ids::SESSION_ANNOUNCE,
             Self::SessionStatus(_) => type_ids::SESSION_STATUS,
             Self::SessionEnded(_) => type_ids::SESSION_ENDED,
@@ -259,6 +273,9 @@ impl ControlMessage {
             Self::MemberUpdate(m) => postcard::to_stdvec(m)?,
             Self::PolicyUpdate(m) => postcard::to_stdvec(m)?,
             Self::Presence(m) => postcard::to_stdvec(m)?,
+            Self::HandoverOffer(m) => postcard::to_stdvec(m)?,
+            Self::HandoverAnswer(m) => postcard::to_stdvec(m)?,
+            Self::HandoverWithdraw(m) => postcard::to_stdvec(m)?,
             Self::SessionAnnounce(m) => postcard::to_stdvec(m)?,
             Self::SessionStatus(m) => postcard::to_stdvec(m)?,
             Self::SessionEnded(m) => postcard::to_stdvec(m)?,
@@ -292,6 +309,9 @@ impl ControlMessage {
             type_ids::MEMBER_UPDATE => Self::MemberUpdate(payload(frame)?),
             type_ids::POLICY_UPDATE => Self::PolicyUpdate(payload(frame)?),
             type_ids::PRESENCE => Self::Presence(payload(frame)?),
+            type_ids::HANDOVER_OFFER => Self::HandoverOffer(payload(frame)?),
+            type_ids::HANDOVER_ANSWER => Self::HandoverAnswer(payload(frame)?),
+            type_ids::HANDOVER_WITHDRAW => Self::HandoverWithdraw(payload(frame)?),
             type_ids::SESSION_ANNOUNCE => Self::SessionAnnounce(payload(frame)?),
             type_ids::SESSION_STATUS => Self::SessionStatus(payload(frame)?),
             type_ids::SESSION_ENDED => Self::SessionEnded(payload(frame)?),
@@ -414,18 +434,29 @@ mod tests {
             },
             sig,
         };
-        let policy = Signed {
-            body: RoomPolicy {
-                room: RoomId([3; 16]),
-                version: 2,
-                name: "Couch".into(),
-                roster: vec![crate::room::RosterEntry {
-                    id: MemberId([4; 32]),
-                    since: 1,
-                }],
-                banned: vec![MemberId([6; 32])],
+        let policy = OwnedPolicy {
+            policy: Signed {
+                body: crate::room::RoomPolicy {
+                    room: RoomId([3; 16]),
+                    version: 2,
+                    name: "Couch".into(),
+                    roster: vec![crate::room::RosterEntry {
+                        id: MemberId([4; 32]),
+                        since: 1,
+                    }],
+                    banned: vec![MemberId([6; 32])],
+                },
+                sig,
             },
-            sig,
+            handovers: vec![Signed {
+                body: crate::room::Handover {
+                    room: RoomId([3; 16]),
+                    from: MemberId([5; 32]),
+                    to: MemberId([4; 32]),
+                    after: 1,
+                },
+                sig,
+            }],
         };
         for message in [
             ControlMessage::Goodbye(Goodbye {
@@ -454,7 +485,17 @@ mod tests {
             ControlMessage::Presence(Presence {
                 connected: vec![MemberId([11; 32])],
             }),
+            ControlMessage::HandoverOffer(HandoverOffer {
+                offer: u64::MAX,
+                version: 7,
+            }),
+            ControlMessage::HandoverAnswer(HandoverAnswer {
+                offer: 1,
+                accept: true,
+            }),
+            ControlMessage::HandoverWithdraw(HandoverWithdraw { offer: 2 }),
         ] {
+            assert!(!message.is_session());
             roundtrip(message);
         }
     }
@@ -555,6 +596,9 @@ mod tests {
             type_ids::ROOM_SNAPSHOT,
             type_ids::MEMBER_UPDATE,
             type_ids::POLICY_UPDATE,
+            type_ids::HANDOVER_OFFER,
+            type_ids::HANDOVER_ANSWER,
+            type_ids::HANDOVER_WITHDRAW,
         ] {
             assert_ne!(id & MUST_UNDERSTAND, 0, "{id:#06x}");
         }

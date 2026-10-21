@@ -402,8 +402,17 @@ textarea {
   color: var(--danger);
 }
 
+/* M13: offering the room, beside Ban. */
+.member .make-owner {
+  display: none;
+  padding: 1px 8px;
+  font-size: 0.8rem;
+}
+
 .member:hover .ban,
-.member .ban:focus-visible {
+.member .ban:focus-visible,
+.member:hover .make-owner,
+.member .make-owner:focus-visible {
   display: inline-block;
 }
 

@@ -1,21 +1,26 @@
-//! Room ids and the signatures on member records and policies.
+//! Room ids and the signatures on member records, policies and handovers.
 //!
 //! A member's id is its Ed25519 public key (the iroh endpoint id), so records
-//! are verified against the id they describe and policies against the owner.
+//! are verified against the id they describe, policies against the owner
+//! and handovers against the owner handing over.
 
 use couch_proto::{
     ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce, Signature},
-    room::{MEMBER_RECORD_DOMAIN, MemberRecord, POLICY_DOMAIN, RoomPolicy, Signed, signing_bytes},
+    room::{
+        HANDOVER_DOMAIN, Handover, MEMBER_RECORD_DOMAIN, MemberRecord, POLICY_DOMAIN, RoomPolicy,
+        Signed, signing_bytes,
+    },
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-/// The room id an owner and nonce stand for. Anyone can recompute it, so a
-/// room can't be passed off as having a different owner.
-pub fn room_id(owner: MemberId, nonce: RoomNonce) -> RoomId {
+/// The room id a founder and nonce stand for. Anyone can recompute it, so a
+/// room can't be passed off as founded by someone else; the chain of
+/// handovers from the founder names the owner now (M13).
+pub fn room_id(founder: MemberId, nonce: RoomNonce) -> RoomId {
     let hash: [u8; 32] = Sha256::new()
         .chain_update(b"couch/room-id/v1")
-        .chain_update(owner.0)
+        .chain_update(founder.0)
         .chain_update(nonce.0)
         .finalize()
         .into();
@@ -51,6 +56,23 @@ pub fn sign_policy(key: &SigningKey, policy: RoomPolicy) -> Signed<RoomPolicy> {
         body: policy,
         sig: Signature::from_bytes(sig.to_bytes()),
     }
+}
+
+pub fn sign_handover(key: &SigningKey, handover: Handover) -> Signed<Handover> {
+    let sig = key.sign(&signing_bytes(HANDOVER_DOMAIN, &handover));
+    Signed {
+        body: handover,
+        sig: Signature::from_bytes(sig.to_bytes()),
+    }
+}
+
+/// Signed by the owner handing the room over.
+pub fn handover_is_authentic(handover: &Signed<Handover>) -> bool {
+    verify(
+        handover.body.from,
+        &signing_bytes(HANDOVER_DOMAIN, &handover.body),
+        &handover.sig,
+    )
 }
 
 /// Signed by the member the record describes.
@@ -157,6 +179,30 @@ mod tests {
     fn domains_separate_record_and_policy_signatures() {
         let ana = key(1);
         let signed = sign_record(&ana, record(&ana));
+        let bytes = signing_bytes(POLICY_DOMAIN, &signed.body);
+        assert!(!verify(member_id(&ana), &bytes, &signed.sig));
+    }
+
+    /// M13: a handover verifies only as signed by the owner handing over,
+    /// and under its own domain.
+    #[test]
+    fn handovers_verify_only_as_signed_by_who_hands_over() {
+        let (ana, bia) = (key(1), key(2));
+        let handover = Handover {
+            room: RoomId([1; 16]),
+            from: member_id(&ana),
+            to: member_id(&bia),
+            after: 3,
+        };
+        let signed = sign_handover(&ana, handover.clone());
+        assert!(handover_is_authentic(&signed));
+        assert!(!handover_is_authentic(&sign_handover(
+            &bia,
+            handover.clone()
+        )));
+        let mut later = signed.clone();
+        later.body.after = 4;
+        assert!(!handover_is_authentic(&later));
         let bytes = signing_bytes(POLICY_DOMAIN, &signed.body);
         assert!(!verify(member_id(&ana), &bytes, &signed.sig));
     }

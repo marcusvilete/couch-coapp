@@ -40,7 +40,9 @@ use crate::store::RememberedRoom;
 pub const MIN_PASSPHRASE_CHARS: usize = 12;
 
 const MAGIC: &[u8; 4] = b"CCBK";
-const FORMAT: u8 = 1;
+/// The format written: 2 since M13 (rooms with their chain of handovers);
+/// format 1 still opens.
+const FORMAT: u8 = 2;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + 3 * 4 + SALT_LEN + NONCE_LEN;
@@ -172,6 +174,14 @@ fn key(
 
 /// `contents` sealed with `passphrase`, as the file's bytes.
 pub fn seal(contents: &Contents, passphrase: &str) -> Result<Vec<u8>, BackupError> {
+    let mut body = postcard::to_stdvec(contents).map_err(|e| BackupError::Failed(e.to_string()))?;
+    let sealed = seal_body(FORMAT, &body, passphrase);
+    body.zeroize();
+    sealed
+}
+
+/// `body`, in `format`, sealed with `passphrase`.
+fn seal_body(format: u8, body: &[u8], passphrase: &str) -> Result<Vec<u8>, BackupError> {
     check_passphrase(passphrase)?;
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
@@ -179,7 +189,7 @@ pub fn seal(contents: &Contents, passphrase: &str) -> Result<Vec<u8>, BackupErro
     getrandom::fill(&mut nonce).map_err(|e| BackupError::Failed(e.to_string()))?;
     let mut header = Vec::with_capacity(HEADER_LEN);
     header.extend_from_slice(MAGIC);
-    header.push(FORMAT);
+    header.push(format);
     for n in [MEMORY_KIB, PASSES, LANES] {
         header.extend_from_slice(&n.to_le_bytes());
     }
@@ -187,16 +197,14 @@ pub fn seal(contents: &Contents, passphrase: &str) -> Result<Vec<u8>, BackupErro
     header.extend_from_slice(&nonce);
 
     let mut key = key(passphrase, &salt, MEMORY_KIB, PASSES, LANES)?;
-    let mut body = postcard::to_stdvec(contents).map_err(|e| BackupError::Failed(e.to_string()))?;
     let sealed = XChaCha20Poly1305::new(&key.into()).encrypt(
         &XNonce::from(nonce),
         Payload {
-            msg: &body,
+            msg: body,
             aad: &header,
         },
     );
     key.zeroize();
-    body.zeroize();
     let sealed = sealed.map_err(|e| BackupError::Failed(e.to_string()))?;
     let mut out = header;
     out.extend_from_slice(&sealed);
@@ -208,10 +216,11 @@ pub fn open(bytes: &[u8], passphrase: &str) -> Result<Contents, BackupError> {
     if bytes.len() < HEADER_LEN || bytes.len() > MAX_FILE_LEN || &bytes[..MAGIC.len()] != MAGIC {
         return Err(BackupError::NotABackup);
     }
-    match bytes[MAGIC.len()] {
-        FORMAT => {}
+    let format = bytes[MAGIC.len()];
+    match format {
         0 => return Err(BackupError::NotABackup),
-        _ => return Err(BackupError::NewerFormat),
+        f if f > FORMAT => return Err(BackupError::NewerFormat),
+        _ => {}
     }
     let (header, sealed) = bytes.split_at(HEADER_LEN);
     let word = |i: usize| {
@@ -242,9 +251,38 @@ pub fn open(bytes: &[u8], passphrase: &str) -> Result<Contents, BackupError> {
     );
     key.zeroize();
     let mut body = opened.map_err(|_| BackupError::WrongPassphrase)?;
-    let contents = postcard::from_bytes(&body).map_err(|_| BackupError::WrongPassphrase);
+    let contents = match format {
+        // From before M13: rooms as they were saved then.
+        1 => postcard::from_bytes::<ContentsV1>(&body).map(Contents::from),
+        _ => postcard::from_bytes(&body),
+    }
+    .map_err(|_| BackupError::WrongPassphrase);
     body.zeroize();
     contents
+}
+
+/// What format 1 held (before M13): the same, with rooms saved without
+/// their chain of handovers.
+#[derive(Serialize, Deserialize)]
+struct ContentsV1 {
+    identity: [u8; 32],
+    rooms: Vec<crate::store::legacy::RememberedRoom>,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl From<ContentsV1> for Contents {
+    fn from(mut old: ContentsV1) -> Self {
+        let contents = Self {
+            identity: old.identity,
+            rooms: std::mem::take(&mut old.rooms)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            files: std::mem::take(&mut old.files),
+        };
+        old.identity.zeroize();
+        contents
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +388,46 @@ mod tests {
             .set_len(MAX_FILE_LEN as u64 + 1)
             .unwrap();
         assert_eq!(read_file(&huge), Err(BackupError::NotABackup));
+    }
+
+    /// A backup made before M13 (format 1) still opens: its rooms come back
+    /// with their founder as owner and no handovers.
+    #[test]
+    fn a_format_1_backup_still_opens() {
+        use couch_proto::ids::RoomNonce;
+        use couch_room::{
+            SigningKey,
+            room::{Identity, Room},
+        };
+
+        let room = Room::create(
+            Identity {
+                key: SigningKey::from_bytes(&[1; 32]),
+                name: "Ana".into(),
+                addr: Default::default(),
+            },
+            RoomNonce([1; 16]),
+            "Couch",
+            Default::default(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let remembered = crate::store::RememberedRoom {
+            saved: room.saved(),
+            password: None,
+        };
+        let old = ContentsV1 {
+            identity: [7; 32],
+            rooms: vec![crate::store::legacy::RememberedRoom::from_new(&remembered)],
+            files: contents().files.clone(),
+        };
+        let sealed = seal_body(1, &postcard::to_stdvec(&old).unwrap(), PASSPHRASE).unwrap();
+        let opened = open(&sealed, PASSPHRASE).unwrap();
+        assert_eq!(opened.identity, [7; 32]);
+        assert_eq!(opened.rooms, vec![remembered]);
+        assert_eq!(opened.files, contents().files);
+        // And what is written now is format 2.
+        assert_eq!(seal(&contents(), PASSPHRASE).unwrap()[MAGIC.len()], 2);
     }
 
     #[test]

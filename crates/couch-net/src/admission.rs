@@ -31,7 +31,7 @@ use couch_proto::{
     admission::{AdmitConfirm, AdmitReply, JoinStart, MemberHello, PakeMessage},
     control::{ControlMessage, close_code},
     ids::{InviteTag, InviteToken, MemberId, RoomId},
-    room::{RoomPolicy, RoomSnapshot, Signed},
+    room::{OwnedPolicy, RoomSnapshot},
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
@@ -85,7 +85,7 @@ pub enum AdmissionError {
     /// or no longer on the roster). The room checks it; a peer's word alone
     /// proves nothing.
     #[error("refused, with the owner's policy as the reason")]
-    Shown(Box<Signed<RoomPolicy>>),
+    Shown(Box<OwnedPolicy>),
     #[error("the exchange timed out")]
     Timeout,
     #[error("no answer from the other member")]
@@ -454,7 +454,7 @@ pub async fn hello_member(
     tx: &mut ControlSender,
     rx: &mut ControlReceiver,
     room: RoomId,
-    policy: Signed<RoomPolicy>,
+    policy: OwnedPolicy,
 ) -> Result<RoomSnapshot, AdmissionError> {
     tx.send(&ControlMessage::MemberHello(Box::new(MemberHello {
         room,
@@ -546,7 +546,7 @@ pub async fn accept_join(
 pub async fn refuse_with(
     conn: &Connection,
     tx: &mut ControlSender,
-    policy: Signed<RoomPolicy>,
+    policy: OwnedPolicy,
     code: u32,
 ) {
     let message = ControlMessage::PolicyUpdate(Box::new(policy));

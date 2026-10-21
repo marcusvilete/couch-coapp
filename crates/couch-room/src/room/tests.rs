@@ -177,6 +177,7 @@ impl Sim {
                 name: format!("m{}", &joiner.to_hex()[..4]),
                 addr: PeerAddr::default(),
             },
+            invite.founder(),
             invite.owner,
             invite.nonce,
             snapshot,
@@ -219,11 +220,7 @@ impl Sim {
     /// What the engine does with a `Dial` effect: `MemberHello` with the
     /// dialer's policy, and a refusal's proof shown to the dialer.
     fn dial(&mut self, dialer: MemberId, peer: MemberId) {
-        let Some(policy) = self.members[&dialer]
-            .room
-            .as_ref()
-            .map(|r| r.policy().clone())
-        else {
+        let Some(policy) = self.members[&dialer].room.as_ref().map(Room::owned_policy) else {
             return;
         };
         let reachable = self
@@ -270,7 +267,7 @@ impl Sim {
                         self.members.get_mut(&who).unwrap().saved = Some(saved);
                     }
                 }
-                Effect::Changed | Effect::CaughtUp => {}
+                Effect::Changed | Effect::Restore(_) | Effect::Ownership { .. } => {}
                 Effect::Removed { banned } => removed = Some(banned),
                 Effect::Departed => departed = true,
             }
@@ -454,6 +451,24 @@ impl Sim {
             .unwrap()
             .1
     }
+
+    /// M13: `owner` offers the room to `to`, which accepts; returns whether
+    /// both steps went through (the messages are still to settle).
+    fn offer_and_accept(&mut self, owner: MemberId, to: MemberId) -> bool {
+        let id = self.rng;
+        let Ok(fx) = self.room_mut(owner).offer_room(to, id) else {
+            return false;
+        };
+        self.apply(owner, fx);
+        self.step();
+        if self.members[&to].room.as_ref().and_then(Room::offered) != Some(false) {
+            return false;
+        }
+        let fx = self.room_mut(to).answer_offer(true).unwrap();
+        self.apply(to, fx);
+        self.step();
+        true
+    }
 }
 
 /// A, the owner, with B and C, both let in by A.
@@ -561,14 +576,16 @@ fn only_the_owner_admits_invites_and_bans() {
     ));
     let stranger = sim.add(9);
     let tag = InviteTag([0; 16]);
+    // A member answers an invite as expired: it may be one it made as an
+    // owner before handing the room over (M13).
     assert_eq!(
         sim.room_mut(b).join_request(stranger, tag, unix),
-        JoinDecision::Refuse(close_code::PROTOCOL)
+        JoinDecision::Refuse(close_code::INVITE_EXPIRED)
     );
     assert_eq!(sim.room_mut(b).ban(c), Err(RoomError::NotOwner));
     assert_eq!(
         sim.room_mut(b).admit(stranger, tag, unix),
-        Err(close_code::PROTOCOL)
+        Err(close_code::INVITE_EXPIRED)
     );
     assert_eq!(sim.room_mut(a).ban(a), Err(RoomError::CantBanSelf));
     // The owner can ban someone who was never in the room.
@@ -610,7 +627,7 @@ fn a_member_who_missed_a_join_catches_up_from_the_newcomer() {
 fn a_ban_removes_the_member_everywhere_and_keeps_them_out() {
     let (mut sim, a, b, c) = three(9);
     let old_invite = sim.invite(a);
-    let policy_c_had = sim.room(c).policy().clone();
+    let policy_c_had = sim.room(c).owned_policy();
     let fx = sim.room_mut(a).ban(c).unwrap();
     sim.apply(a, fx);
     sim.settle(2);
@@ -751,7 +768,7 @@ fn the_owner_can_stop_waiting() {
     assert!(sim.restore_from_backup(a, backup));
     assert_eq!(sim.room_mut(a).ban(b), Err(RoomError::CatchingUp));
     let fx = sim.room_mut(a).stop_catching_up().unwrap();
-    assert!(fx.contains(&Effect::CaughtUp));
+    assert!(fx.contains(&Effect::Restore(RestoreMark::Unconfirmed)));
     assert!(!sim.room(a).is_catching_up());
     let fx = sim.room_mut(a).ban(b).unwrap();
     sim.apply(a, fx);
@@ -956,12 +973,15 @@ fn a_proof_must_come_from_the_owner_and_drop_us() {
             banned: vec![c],
         },
     );
-    let fx = sim
-        .room_mut(c)
-        .refused(b, close_code::BANNED, Some(forged), now);
+    let fx = sim.room_mut(c).refused(
+        b,
+        close_code::BANNED,
+        Some(OwnedPolicy::founders(forged)),
+        now,
+    );
     assert!(fx.is_empty());
     // The owner's real policy, which lists C.
-    let real = sim.room(a).policy().clone();
+    let real = sim.room(a).owned_policy();
     let fx = sim
         .room_mut(c)
         .refused(b, close_code::NOT_MEMBER, Some(real), now);
@@ -1054,7 +1074,7 @@ fn forged_policies_and_records_are_ignored() {
     let before = sim.room(c).status();
     let room_c = sim.room_mut(c);
     for message in [
-        ControlMessage::PolicyUpdate(Box::new(forged)),
+        ControlMessage::PolicyUpdate(Box::new(OwnedPolicy::founders(forged))),
         ControlMessage::MemberUpdate(Box::new(renamed)),
         ControlMessage::MemberUpdate(Box::new(outsider)),
     ] {
@@ -1294,7 +1314,7 @@ fn a_stranger_learns_nothing_from_a_member_hello() {
     let stranger = key(60);
     let id = member_id(&stranger);
     let room = sim.room(a).id();
-    let real = sim.room(a).policy().clone();
+    let real = sim.room(a).owned_policy();
     let (decision, _) = sim.room_mut(b).member_hello(id, real);
     assert_eq!(
         decision,
@@ -1315,7 +1335,9 @@ fn a_stranger_learns_nothing_from_a_member_hello() {
         },
     );
     let version = sim.room(b).version();
-    let (decision, _) = sim.room_mut(b).member_hello(id, forged);
+    let (decision, _) = sim
+        .room_mut(b)
+        .member_hello(id, OwnedPolicy::founders(forged));
     assert_eq!(
         decision,
         MemberDecision::Refuse {
@@ -1329,7 +1351,7 @@ fn a_stranger_learns_nothing_from_a_member_hello() {
 #[test]
 fn a_former_member_is_shown_why() {
     let (mut sim, a, b, c) = three(26);
-    let policy_c_had = sim.room(c).policy().clone();
+    let policy_c_had = sim.room(c).owned_policy();
     sim.crash(c);
     let fx = sim.room_mut(a).ban(c).unwrap();
     sim.apply(a, fx);
@@ -1494,17 +1516,824 @@ fn admission_is_checked_again_after_the_password() {
     assert_eq!(sim.room(a).policy().body.roster.len(), MAX_MEMBERS);
 }
 
+// ---- Handing the room over (M13) ----
+
+/// A offers B the room, B accepts: B owns it everywhere, C (away meanwhile)
+/// included once back, signs its first policy at once, and lets people in;
+/// A is a member like any other.
+#[test]
+fn a_room_handed_over_is_owned_by_its_new_owner_everywhere() {
+    let (mut sim, a, b, c) = three(40);
+    sim.crash(c);
+    let before = sim.room(a).version();
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    for id in [a, b] {
+        assert_eq!(sim.room(id).owner(), b, "{id:?}");
+        assert_eq!(sim.room(id).founder(), a);
+    }
+    assert!(sim.room(b).is_owner() && !sim.room(a).is_owner());
+    assert_eq!(sim.room(b).version(), before + 1, "B signed straight away");
+    assert_eq!(sim.room(a).version(), before + 1);
+    sim.restart(c);
+    sim.settle(3);
+    assert_eq!(sim.room(c).owner(), b);
+    assert_eq!(sim.room(c).saved().handovers, sim.room(b).saved().handovers);
+    // B's invites name the founder: a version 2 invite.
+    let invite = sim.invite(b);
+    assert_eq!((invite.owner, invite.founder), (b, Some(a)));
+    let d = sim.add(4);
+    sim.join(d, &invite).unwrap();
+    sim.settle(2);
+    sim.assert_full_mesh(&[a, b, c, d]);
+    // And it survives a restart, from the saved state.
+    sim.crash(a);
+    sim.restart(a);
+    sim.settle(2);
+    assert_eq!(sim.room(a).owner(), b);
+}
+
+/// After handing the room over, A admits, invites, bans and revokes nothing;
+/// its old invite is refused as expired, and its leaving is a member's.
+#[test]
+fn a_former_owner_can_no_longer_admit_invite_or_ban() {
+    let (mut sim, a, b, c) = three(41);
+    let old = sim.invite(a);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let unix = sim.unix;
+    assert_eq!(
+        sim.room_mut(a)
+            .create_invite(token(90), unix, WEEK, true)
+            .err(),
+        Some(RoomError::NotOwner)
+    );
+    assert_eq!(sim.room_mut(a).ban(c), Err(RoomError::NotOwner));
+    assert_eq!(sim.room_mut(a).revoke_invites(), Err(RoomError::NotOwner));
+    let d = sim.add(4);
+    assert_eq!(sim.join(d, &old), Err(close_code::INVITE_EXPIRED));
+    // A leaves: B takes it off the roster; the room stays.
+    let now = sim.now;
+    let fx = sim.room_mut(a).leave(now).unwrap();
+    sim.apply(a, fx);
+    sim.settle(2);
+    assert!(sim.members[&a].departed);
+    for id in [b, c] {
+        assert!(!sim.room(id).policy().body.lists(a), "{id:?}");
+    }
+    sim.assert_full_mesh(&[b, c]);
+}
+
+/// Whatever A signs after handing over, under the shorter chain, loses to
+/// B's, however high its version (the second review's finding: a cheap
+/// "no newer than ours" check on versions alone kept it).
+#[test]
+fn a_former_owners_later_policies_lose_everywhere() {
+    let (mut sim, a, b, c) = three(42);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let room = sim.room(a).id();
+    let roster = sim.room(a).policy().body.roster.clone();
+    let rogue = sign_policy(
+        &key(1),
+        RoomPolicy {
+            room,
+            version: sim.room(a).version() + RESTORE_SKIP,
+            name: "Couch".into(),
+            roster: roster.iter().copied().filter(|e| e.id != c).collect(),
+            banned: vec![c],
+        },
+    );
+    let conn = sim.conn_to(c, b);
+    let now = sim.now;
+    let fx = sim.room_mut(c).received(
+        conn,
+        ControlMessage::PolicyUpdate(Box::new(OwnedPolicy::founders(rogue))),
+        now,
+    );
+    sim.apply(c, fx);
+    sim.settle(1);
+    assert!(sim.room(c).is_member(c) && !sim.room(c).is_banned(c));
+    assert_eq!(sim.room(c).owner(), b);
+
+    // The other way round: D, away during the handover, takes A's rogue
+    // policy first (its own chain is A's too). B's, at a lower version but
+    // with the longer chain, still wins once D meets it.
+    let (mut sim, a, b, d) = three(54);
+    sim.crash(d);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let x = sim.add(9);
+    let rogue = OwnedPolicy::founders(sign_policy(
+        &key(1),
+        RoomPolicy {
+            room: sim.room(a).id(),
+            version: sim.room(a).version() + RESTORE_SKIP,
+            name: "Couch".into(),
+            roster: sim.room(a).policy().body.roster.clone(),
+            banned: vec![x],
+        },
+    ));
+    sim.restart(d);
+    let now = sim.now;
+    let fx = sim
+        .room_mut(d)
+        .refused(b, close_code::NOT_MEMBER, Some(rogue), now);
+    sim.apply(d, fx);
+    assert!(sim.room(d).is_banned(x), "D took A's rogue policy");
+    sim.settle(3);
+    assert_eq!(sim.room(d).owner(), b);
+    assert_eq!(sim.room(d).policy(), sim.room(b).policy());
+}
+
+/// A chain that parts from ours is never taken, and a stranger showing one
+/// made up by a former owner (naming the stranger) learns nothing of the
+/// roster.
+#[test]
+fn diverging_chains_are_refused() {
+    let (mut sim, a, b, c) = three(43);
+    let at = sim.room(a).owned_policy();
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    // A, handed over to B, signs a second handover after the same version,
+    // to a stranger S, and the policy it handed with it, listing S.
+    let s = sim.add(9);
+    let room = sim.room(a).id();
+    let mut roster = at.policy.body.roster.clone();
+    roster.push(RosterEntry { id: s, since: 0 });
+    let fork = OwnedPolicy {
+        policy: sign_policy(
+            &key(1),
+            RoomPolicy {
+                room,
+                roster,
+                ..at.policy.body.clone()
+            },
+        ),
+        handovers: vec![sign_handover(
+            &key(1),
+            Handover {
+                room,
+                from: a,
+                to: s,
+                after: at.policy.body.version,
+            },
+        )],
+    };
+    // It checks out on its own...
+    assert!(check_owned(&fork, room, a, 0).is_ok());
+    // ...but C, holding A→B, never takes it, and shows S nothing.
+    let (decision, _) = sim.room_mut(c).member_hello(s, fork.clone());
+    assert_eq!(
+        decision,
+        MemberDecision::Refuse {
+            code: close_code::NOT_MEMBER,
+            proof: None
+        }
+    );
+    assert_eq!(sim.room(c).owner(), b);
+    let conn = sim.conn_to(c, b);
+    let now = sim.now;
+    let fx = sim
+        .room_mut(c)
+        .received(conn, ControlMessage::PolicyUpdate(Box::new(fork)), now);
+    sim.apply(c, fx);
+    assert_eq!(sim.room(c).owner(), b);
+}
+
+/// What a chain must be, case by case.
+#[test]
+fn invalid_chains_are_refused() {
+    let room = RoomId([5; 16]);
+    let (f, n, m) = (key(1), key(2), key(3));
+    let (fid, nid, mid) = (member_id(&f), member_id(&n), member_id(&m));
+    let policy = |signer: &SigningKey, version| {
+        sign_policy(
+            signer,
+            RoomPolicy {
+                room,
+                version,
+                name: "Couch".into(),
+                roster: vec![RosterEntry { id: fid, since: 0 }],
+                banned: Vec::new(),
+            },
+        )
+    };
+    let hand = |signer: &SigningKey, from, to, after| {
+        sign_handover(
+            signer,
+            Handover {
+                room,
+                from,
+                to,
+                after,
+            },
+        )
+    };
+    let owned = |policy, handovers| OwnedPolicy { policy, handovers };
+    let ok = |o: &OwnedPolicy| check_owned(o, room, fid, 0);
+    // Good: F→N after 3, N signs 4; F's own policy at 3 (the one handed
+    // over); F→N→M.
+    assert_eq!(
+        ok(&owned(policy(&n, 4), vec![hand(&f, fid, nid, 3)])),
+        Ok(nid)
+    );
+    assert_eq!(
+        ok(&owned(policy(&f, 3), vec![hand(&f, fid, nid, 3)])),
+        Ok(nid)
+    );
+    let two = vec![hand(&f, fid, nid, 3), hand(&n, nid, mid, 5)];
+    assert_eq!(ok(&owned(policy(&m, 6), two.clone())), Ok(mid));
+    let bad = [
+        // Not from the founder.
+        owned(policy(&m, 4), vec![hand(&n, nid, mid, 3)]),
+        // A broken link.
+        owned(
+            policy(&m, 6),
+            vec![hand(&f, fid, nid, 3), hand(&m, mid, fid, 5)],
+        ),
+        // To itself.
+        owned(policy(&f, 4), vec![hand(&f, fid, fid, 3)]),
+        // `after` not increasing.
+        owned(
+            policy(&m, 6),
+            vec![hand(&f, fid, nid, 3), hand(&n, nid, mid, 3)],
+        ),
+        // The new owner signing at or before the handover's version.
+        owned(policy(&n, 2), vec![hand(&f, fid, nid, 3)]),
+        // The one handing over signing at another version than `after`.
+        owned(policy(&f, 4), vec![hand(&f, fid, nid, 3)]),
+        // The wrong signer: a handover N didn't make, a policy F signs.
+        owned(
+            policy(&m, 6),
+            vec![hand(&f, fid, nid, 3), hand(&f, nid, mid, 5)],
+        ),
+        owned(policy(&f, 6), two.clone()),
+        // Another room's handover.
+        owned(
+            policy(&n, 4),
+            vec![sign_handover(
+                &f,
+                Handover {
+                    room: RoomId([6; 16]),
+                    from: fid,
+                    to: nid,
+                    after: 3,
+                },
+            )],
+        ),
+    ];
+    for (i, case) in bad.iter().enumerate() {
+        assert_eq!(ok(case), Err(RoomError::BadPolicy), "case {i}");
+    }
+    // At most 32: F and N passing it back and forth.
+    let keys = [&f, &n];
+    let ids = [fid, nid];
+    let chain: Vec<_> = (0..=MAX_HANDOVERS)
+        .map(|i| hand(keys[i % 2], ids[i % 2], ids[(i + 1) % 2], i as u32))
+        .collect();
+    // After an even number of handovers F owns it again.
+    let long = owned(
+        policy(keys[MAX_HANDOVERS % 2], 100),
+        chain[..MAX_HANDOVERS].to_vec(),
+    );
+    assert!(ok(&long).is_ok());
+    let too_long = owned(policy(keys[(MAX_HANDOVERS + 1) % 2], 100), chain);
+    assert_eq!(ok(&too_long), Err(RoomError::BadPolicy));
+}
+
+/// F→N→F: F's policies from its first time as owner don't pass under the
+/// chain that made it owner again.
+#[test]
+fn an_earlier_tenures_policy_is_not_replayed() {
+    let room = RoomId([5; 16]);
+    let (f, n) = (key(1), key(2));
+    let (fid, nid) = (member_id(&f), member_id(&n));
+    let first = sign_policy(
+        &f,
+        RoomPolicy {
+            room,
+            version: 2,
+            name: "Couch".into(),
+            roster: vec![RosterEntry { id: fid, since: 0 }],
+            banned: Vec::new(),
+        },
+    );
+    let chain = vec![
+        sign_handover(
+            &f,
+            Handover {
+                room,
+                from: fid,
+                to: nid,
+                after: 3,
+            },
+        ),
+        sign_handover(
+            &n,
+            Handover {
+                room,
+                from: nid,
+                to: fid,
+                after: 5,
+            },
+        ),
+    ];
+    let replayed = OwnedPolicy {
+        policy: first,
+        handovers: chain,
+    };
+    assert_eq!(
+        check_owned(&replayed, room, fid, 0),
+        Err(RoomError::BadPolicy)
+    );
+}
+
+/// An answer for an offer that no longer stands hands nothing over: after a
+/// policy change, after a withdrawal and a new offer (the old id), or from
+/// someone else. And offers that can't be made aren't.
+#[test]
+fn stale_answers_and_bad_offers_hand_nothing_over() {
+    let (mut sim, a, b, c) = three(44);
+    // After a policy change: A bans someone in between.
+    let fx = sim.room_mut(a).offer_room(b, 1).unwrap();
+    sim.apply(a, fx);
+    sim.step();
+    assert_eq!(sim.room(b).offered(), Some(false));
+    let x = sim.add(9);
+    let fx = sim.room_mut(a).ban(x).unwrap();
+    sim.apply(a, fx);
+    assert_eq!(sim.room(a).offer(), None, "the ban voided it");
+    let fx = sim.room_mut(b).answer_offer(true);
+    // B may still have it (the withdrawal is on its way) or not.
+    if let Ok(fx) = fx {
+        sim.apply(b, fx);
+    }
+    sim.settle(1);
+    assert_eq!(sim.room(b).owner(), a);
+    assert_eq!(sim.room(b).offered(), None);
+    // A withdrawn offer's id, answered on: nothing.
+    let fx = sim.room_mut(a).offer_room(b, 2).unwrap();
+    sim.apply(a, fx);
+    sim.step();
+    let fx = sim.room_mut(a).withdraw_offer();
+    sim.apply(a, fx);
+    let fx = sim.room_mut(a).offer_room(b, 3).unwrap();
+    sim.apply(a, fx);
+    let conn = sim.conn_to(a, b);
+    let now = sim.now;
+    let fx = sim.room_mut(a).received(
+        conn,
+        ControlMessage::HandoverAnswer(HandoverAnswer {
+            offer: 2,
+            accept: true,
+        }),
+        now,
+    );
+    sim.apply(a, fx);
+    assert_eq!(sim.room(a).owner(), a);
+    // C answering B's offer: nothing.
+    let conn = sim.conn_to(a, c);
+    let fx = sim.room_mut(a).received(
+        conn,
+        ControlMessage::HandoverAnswer(HandoverAnswer {
+            offer: 3,
+            accept: true,
+        }),
+        now,
+    );
+    sim.apply(a, fx);
+    assert_eq!(sim.room(a).owner(), a);
+    assert_eq!(sim.room(a).offer(), Some(b));
+    // Offers that can't be made.
+    assert_eq!(sim.room_mut(a).offer_room(a, 4), Err(RoomError::NotMember));
+    assert_eq!(sim.room_mut(a).offer_room(x, 4), Err(RoomError::NotMember));
+    assert_eq!(sim.room_mut(b).offer_room(c, 4), Err(RoomError::NotOwner));
+    sim.crash(c);
+    assert_eq!(sim.room_mut(a).offer_room(c, 4), Err(RoomError::NotOnline));
+    // Only the owner offers: B ignores an offer from C.
+    sim.restart(c);
+    let fx = sim.room_mut(a).withdraw_offer();
+    sim.apply(a, fx);
+    sim.settle(2);
+    assert_eq!(sim.room(b).offered(), None);
+    let conn = sim.conn_to(b, c);
+    let fx = sim.room_mut(b).received(
+        conn,
+        ControlMessage::HandoverOffer(HandoverOffer {
+            offer: 5,
+            version: 0,
+        }),
+        now,
+    );
+    sim.apply(b, fx);
+    assert_eq!(sim.room(b).offered(), None);
+}
+
+/// A newcomer whose password check runs while the room changes hands is
+/// refused after it: the old owner signs nothing more.
+#[test]
+fn a_newcomer_mid_check_during_a_handover_is_refused() {
+    let (mut sim, a, b, _) = three(45);
+    let invite = sim.invite(a);
+    let d = sim.add(4);
+    let unix = sim.unix;
+    let tag = invite_tag(&invite.token);
+    assert!(matches!(
+        sim.room_mut(a).join_request(d, tag, unix),
+        JoinDecision::Proceed { .. }
+    ));
+    assert!(sim.offer_and_accept(a, b));
+    let version = sim.room(a).version();
+    assert_eq!(
+        sim.room_mut(a).admit(d, tag, unix),
+        Err(close_code::INVITE_EXPIRED)
+    );
+    assert_eq!(sim.room(a).version(), version);
+}
+
+/// The handover reaches B through the others when A never talks to it again
+/// (A's messages to B lost, A gone for good).
+#[test]
+fn the_others_carry_the_handover_to_the_new_owner() {
+    let (mut sim, a, b, c) = three(46);
+    let fx = sim.room_mut(a).offer_room(b, 1).unwrap();
+    sim.apply(a, fx);
+    sim.step();
+    let fx = sim.room_mut(b).answer_offer(true).unwrap();
+    sim.apply(b, fx);
+    // Deliver B's answer alone: A hands over.
+    let to_a = sim.conn_to(b, a);
+    let answer = sim.queues.get_mut(&to_a).unwrap().pop_front().unwrap();
+    let a_conn = sim.pipes[&to_a].2;
+    sim.deliver(a, a_conn, answer);
+    assert_eq!(sim.room(a).owner(), b);
+    // What A sends B is lost, and A is gone for good.
+    let to_b = sim.conn_to(a, b);
+    sim.queues.remove(&to_b);
+    let crashed = sim
+        .pipes
+        .keys()
+        .copied()
+        .filter(|c| sim.pipes[c].0 == a)
+        .collect::<Vec<_>>();
+    for conn in crashed {
+        if conn != to_b {
+            while let Some(m) = sim.queues.get_mut(&conn).and_then(VecDeque::pop_front) {
+                let (_, other, other_conn) = sim.pipes[&conn];
+                sim.deliver(other, other_conn, m);
+            }
+        }
+    }
+    sim.crash(a);
+    sim.settle(2);
+    assert_eq!(sim.room(b).owner(), b);
+    assert!(sim.room(b).is_owner());
+    assert_eq!(sim.room(c).owner(), b);
+    assert_eq!(sim.room(c).version(), sim.room(b).version());
+}
+
+/// B accepts, then crashes before the handover reaches it: back, it learns
+/// it from the room and owns it, signing its first policy.
+#[test]
+fn a_new_owner_that_restarted_meanwhile_still_takes_over() {
+    let (mut sim, a, b, c) = three(47);
+    let fx = sim.room_mut(a).offer_room(b, 1).unwrap();
+    sim.apply(a, fx);
+    sim.step();
+    let fx = sim.room_mut(b).answer_offer(true).unwrap();
+    sim.apply(b, fx);
+    let before = sim.room(a).version();
+    sim.crash(b); // delivers its answer as it goes
+    assert_eq!(sim.room(a).owner(), b);
+    sim.restart(b);
+    sim.settle(3);
+    assert!(sim.room(b).is_owner());
+    assert_eq!(sim.room(b).version(), before + 1);
+    assert_eq!(sim.room(c).version(), before + 1);
+}
+
+/// An acceptance stands until the owner's word (the second review's
+/// finding: one lost to a dropped connection or a second thought, then a
+/// leave, left a room nobody owned). B accepts; the owner signs, but the
+/// connection drops before B hears it. B can't leave or take it back, and
+/// owns the room once it reconnects.
+#[test]
+fn an_acceptance_stands_until_the_owner_hands_over() {
+    let (mut sim, a, b, c) = three(48);
+    sim.crash(c);
+    let fx = sim.room_mut(a).offer_room(b, 1).unwrap();
+    sim.apply(a, fx);
+    sim.step();
+    let fx = sim.room_mut(b).answer_offer(true).unwrap();
+    sim.apply(b, fx);
+    // A gets the answer and signs; what it sends B is lost with the link.
+    let to_a = sim.conn_to(b, a);
+    let answer = sim.queues.get_mut(&to_a).unwrap().pop_front().unwrap();
+    let a_conn = sim.pipes[&to_a].2;
+    sim.deliver(a, a_conn, answer);
+    assert_eq!(sim.room(a).owner(), b);
+    sim.queues.remove(&sim.conn_to(a, b));
+    sim.close(to_a);
+    let now = sim.now;
+    assert_eq!(sim.room(b).offered(), Some(true));
+    assert_eq!(
+        sim.room_mut(b).leave(now).err(),
+        Some(RoomError::OfferAccepted)
+    );
+    assert_eq!(
+        sim.room_mut(b).answer_offer(false).err(),
+        Some(RoomError::OfferAccepted)
+    );
+    sim.settle(3);
+    assert!(sim.room(b).is_owner());
+    assert_eq!(sim.room(b).offered(), None);
+}
+
+/// B accepts, but the connection drops before A hears it: A never signs,
+/// and tells B the offer is void when they meet again, so B may leave.
+#[test]
+fn an_acceptance_lost_on_the_way_is_withdrawn_on_reconnecting() {
+    let (mut sim, a, b, _) = three(55);
+    let fx = sim.room_mut(a).offer_room(b, 1).unwrap();
+    sim.apply(a, fx);
+    sim.step();
+    let fx = sim.room_mut(b).answer_offer(true).unwrap();
+    sim.apply(b, fx);
+    let to_a = sim.conn_to(b, a);
+    sim.queues.remove(&to_a);
+    sim.close(to_a);
+    assert_eq!(sim.room(a).offer(), None);
+    assert_eq!(sim.room(b).offered(), Some(true));
+    sim.settle(3);
+    assert_eq!(sim.room(a).owner(), a);
+    assert_eq!(sim.room(b).offered(), None, "A said it was void");
+    let now = sim.now;
+    assert!(sim.room_mut(b).leave(now).is_ok());
+}
+
+/// A relayed policy keeps the verified copies of the handovers we hold: a
+/// member that swaps their signatures can't plant ones that fail on our
+/// next start (the second review's finding).
+#[test]
+fn a_relayed_policy_keeps_our_verified_handovers() {
+    let (mut sim, a, b, c) = three(56);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let held = sim.room(c).saved().handovers;
+    // B signs a newer policy, sent with the handover's signature ruined.
+    let x = sim.add(9);
+    let fx = sim.room_mut(b).ban(x).unwrap();
+    sim.apply(b, fx);
+    let mut owned = sim.room(b).owned_policy();
+    owned.handovers[0].sig = couch_proto::ids::Signature([0; 32], [0; 32]);
+    sim.queues.clear();
+    let conn = sim.conn_to(c, b);
+    let now = sim.now;
+    let fx = sim
+        .room_mut(c)
+        .received(conn, ControlMessage::PolicyUpdate(Box::new(owned)), now);
+    sim.apply(c, fx);
+    assert!(sim.room(c).is_banned(x), "the newer policy was taken");
+    assert_eq!(sim.room(c).saved().handovers, held, "with our own copies");
+    let saved = sim.room(c).saved();
+    assert!(Room::restore(key(3), saved, Timings::default(), now).is_ok());
+}
+
+/// A former owner can't sign, under the start of our chain, a policy past
+/// the handover that names a stranger, to have the stranger shown the
+/// roster (the second review's finding).
+#[test]
+fn a_former_owners_late_policy_proves_no_stranger_a_member() {
+    let (mut sim, a, b, c) = three(57);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let s = sim.add(9);
+    let mut roster = sim.room(c).policy().body.roster.clone();
+    roster.push(RosterEntry { id: s, since: 0 });
+    let late = OwnedPolicy::founders(sign_policy(
+        &key(1),
+        RoomPolicy {
+            room: sim.room(c).id(),
+            version: sim.room(c).version() + 5,
+            name: "Couch".into(),
+            roster,
+            banned: Vec::new(),
+        },
+    ));
+    let (decision, _) = sim.room_mut(c).member_hello(s, late);
+    assert_eq!(
+        decision,
+        MemberDecision::Refuse {
+            code: close_code::NOT_MEMBER,
+            proof: None
+        }
+    );
+}
+
+/// An offer to a room catching up after a restore is declined at once,
+/// and an owner can't offer the room to someone who left.
+#[test]
+fn offers_while_catching_up_or_to_a_departed_member_go_nowhere() {
+    let (mut sim, a, b, c) = three(58);
+    // C leaves; A can't offer it the room.
+    let now = sim.now;
+    let fx = sim.room_mut(c).leave(now).unwrap();
+    sim.apply(c, fx);
+    sim.settle(1);
+    assert_eq!(sim.room_mut(a).offer_room(c, 1), Err(RoomError::NotMember));
+    // B catching up (as after a restore): A's offer is declined at once.
+    let fx = sim.room_mut(b).catch_up_first();
+    assert!(fx.is_empty() && sim.room(b).is_catching_up());
+    let conn = sim.conn_to(b, a);
+    let (now, version) = (sim.now, sim.room(a).version());
+    let fx = sim.room_mut(b).received(
+        conn,
+        ControlMessage::HandoverOffer(HandoverOffer { offer: 2, version }),
+        now,
+    );
+    assert_eq!(sim.room(b).offered(), None);
+    assert!(fx.iter().any(|e| matches!(
+        e,
+        Effect::Send {
+            message: ControlMessage::HandoverAnswer(HandoverAnswer { accept: false, .. }),
+            ..
+        }
+    )));
+}
+
+/// B bans A, then B leaving closes the room for everyone, A included.
+#[test]
+fn the_new_owner_can_ban_the_old_one_and_close_the_room() {
+    let (mut sim, a, b, c) = three(49);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let fx = sim.room_mut(b).ban(a).unwrap();
+    sim.apply(b, fx);
+    sim.settle(1);
+    assert_eq!(sim.members[&a].removed, Some(true));
+    let now = sim.now;
+    let fx = sim.room_mut(b).leave(now).unwrap();
+    sim.apply(b, fx);
+    sim.settle(2);
+    assert_eq!(sim.members[&c].removed, Some(false));
+}
+
+/// A joiner's snapshot must come from the owner its invite names, by a
+/// chain from the founder.
+#[test]
+fn a_joiner_takes_only_the_owner_its_invite_names() {
+    let (mut sim, a, b, _) = three(50);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let d = sim.add(4);
+    let invite = sim.invite(b);
+    let tag = invite_tag(&invite.token);
+    let unix = sim.unix;
+    let fx = sim.room_mut(b).admit(d, tag, unix).unwrap();
+    sim.apply(b, fx);
+    let snapshot = sim.room(b).snapshot();
+    let me = |name: &str| Identity {
+        key: key(4),
+        name: name.into(),
+        addr: PeerAddr::default(),
+    };
+    let now = sim.now;
+    // Named A as the owner (an old invite, or a made-up one): refused.
+    assert!(matches!(
+        Room::join(
+            me("Davi"),
+            a,
+            a,
+            invite.nonce,
+            snapshot.clone(),
+            Timings::default(),
+            now
+        ),
+        Err(RoomError::BadPolicy)
+    ));
+    // The right founder and owner: in.
+    assert!(
+        Room::join(
+            me("Davi"),
+            a,
+            b,
+            invite.nonce,
+            snapshot,
+            Timings::default(),
+            now
+        )
+        .is_ok()
+    );
+}
+
+/// Restores with handovers: A restored from a backup made before it handed
+/// the room to B catches up and finds itself a member; B, restored from a
+/// backup made before it took over, finds itself the owner, catches up as
+/// one and signs ahead.
+#[test]
+fn restores_follow_the_chain() {
+    let (mut sim, a, b, c) = three(51);
+    let a_before = sim.members[&a].saved.clone().unwrap();
+    let b_before = sim.members[&b].saved.clone().unwrap();
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let handed = sim.room(b).version();
+    // A's PC is lost; its backup comes back.
+    sim.crash(a);
+    assert!(sim.restore_from_backup(a, a_before));
+    sim.settle(2);
+    assert!(!sim.room(a).is_catching_up());
+    assert!(!sim.room(a).is_owner());
+    assert_eq!(sim.room(a).owner(), b);
+    // B's PC is lost; its backup (a member's) comes back, with A and C away
+    // but for C.
+    sim.crash(b);
+    sim.crash(a);
+    assert!(sim.restore_from_backup(b, b_before));
+    sim.settle(2);
+    // C's snapshot shows B owns it: it waits for A too, as an owner.
+    assert!(sim.room(b).is_owner());
+    assert!(sim.room(b).is_catching_up());
+    sim.restart(a);
+    sim.settle(3);
+    assert!(!sim.room(b).is_catching_up());
+    assert_eq!(sim.room(b).version(), handed + RESTORE_SKIP);
+    assert_eq!(sim.room(c).version(), handed + RESTORE_SKIP);
+}
+
+/// A restored member that caught up from someone who missed its newer state
+/// (it became the owner after the backup) finds a policy it signed and
+/// doesn't hold: it catches up again, as owner, and signs ahead (the second
+/// review's finding: it would have signed at +1, over what an absent
+/// member holds).
+#[test]
+fn finding_our_own_newer_policy_catches_up_again() {
+    let (mut sim, a, b, c) = three(52);
+    let b_before = sim.members[&b].saved.clone().unwrap();
+    sim.crash(c);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    let x = sim.add(9);
+    let fx = sim.room_mut(b).ban(x).unwrap();
+    sim.apply(b, fx);
+    sim.settle(1);
+    let newest = sim.room(b).version();
+    // B's PC is lost while A is away; C, stale, comes back with B's backup.
+    sim.crash(b);
+    sim.crash(a);
+    sim.restart(c);
+    assert!(sim.restore_from_backup(b, b_before));
+    sim.settle(2);
+    assert!(!sim.room(b).is_catching_up(), "a member caught up from C");
+    assert_eq!(sim.room(b).owner(), a);
+    // A comes back with B's own newer policy.
+    sim.restart(a);
+    sim.settle(1);
+    assert!(sim.room(b).is_owner());
+    sim.settle(35);
+    assert!(!sim.room(b).is_catching_up());
+    assert_eq!(sim.room(b).version(), newest + RESTORE_SKIP);
+}
+
+/// Stopped waiting: the room signs, but isn't handed over until every member
+/// on the roster has been heard.
+#[test]
+fn no_handover_after_stop_waiting_until_everyone_is_heard() {
+    let (mut sim, a, b, c) = three(53);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    sim.crash(a);
+    sim.crash(b);
+    sim.crash(c);
+    assert!(sim.restore_from_backup(a, backup));
+    let fx = sim.room_mut(a).stop_catching_up().unwrap();
+    sim.apply(a, fx);
+    sim.restart(b);
+    sim.settle(2);
+    assert_eq!(
+        sim.room_mut(a).offer_room(b, 1),
+        Err(RoomError::Unconfirmed)
+    );
+    sim.restart(c);
+    sim.settle(35);
+    assert!(sim.offer_and_accept(a, b));
+    sim.settle(1);
+    assert_eq!(sim.room(c).owner(), b);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     /// Whatever order messages interleave in, and whoever crashes and comes
-    /// back (the owner included), the room settles into one mesh with the
-    /// same view everywhere.
+    /// back (the owner included, before or after handing the room over),
+    /// the room settles into one mesh with the same view everywhere: one
+    /// policy, one chain of handovers, one owner.
     #[test]
     fn rooms_converge(
         seed in any::<u64>(),
         crashes in proptest::collection::vec((0usize..4, 0u64..30), 0..6),
         late_join in proptest::option::of(0usize..6),
+        handover in proptest::option::of((0usize..6, 1usize..4)),
     ) {
         let mut sim = Sim::new(seed);
         let ids: Vec<MemberId> = (1..=5).map(|s| sim.add(s)).collect();
@@ -1519,7 +2348,28 @@ proptest! {
             for _ in 0..*after_ticks {
                 sim.step();
             }
-            if late_join == Some(i) && sim.members[&ids[0]].online {
+            // M13: the owner, if online, hands the room to a member online.
+            if let Some((at, to)) = handover
+                && at == i
+            {
+                let owner = ids[..4]
+                    .iter()
+                    .copied()
+                    .find(|id| sim.members[id].online && sim.room(*id).is_owner());
+                if let Some(owner) = owner
+                    && sim.members[&ids[to]].online
+                    && owner != ids[to]
+                {
+                    sim.offer_and_accept(owner, ids[to]);
+                }
+            }
+            // A newcomer joins through whoever owns the room now.
+            let owner = ids[..4]
+                .iter()
+                .copied()
+                .find(|id| sim.members[id].online && sim.room(*id).is_owner());
+            if late_join == Some(i) && let Some(owner) = owner {
+                let invite = sim.invite(owner);
                 sim.join(ids[4], &invite).unwrap();
                 joined_late = true;
             }
@@ -1543,7 +2393,14 @@ proptest! {
         for id in &expected[1..] {
             let saved = sim.room(*id).saved();
             prop_assert_eq!(&saved.policy, &reference.policy);
+            prop_assert_eq!(&saved.handovers, &reference.handovers);
             prop_assert_eq!(&saved.records, &reference.records);
+            prop_assert_eq!(sim.room(*id).owner(), sim.room(expected[0]).owner());
         }
+        // Exactly one of them owns it, and has signed as owner.
+        let owners: Vec<&MemberId> =
+            expected.iter().filter(|id| sim.room(**id).is_owner()).collect();
+        prop_assert_eq!(owners.len(), 1);
+        prop_assert!(!sim.room(*owners[0]).takeover_pending());
     }
 }

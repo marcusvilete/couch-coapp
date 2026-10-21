@@ -15,13 +15,14 @@ The wire protocol between room members, and the pipe between the main process an
 - M18 let one viewer hold several seats: `ViewerControllers`, `ControlCancel { what: Seat(SeatId?) }`, a viewer on several seats in `SessionStatus`, and viewer IPC v10 (controllers by slot, the seat list with the controller driving each, rumble per seat).
 - P6 added the stream window's volume: viewer IPC v11 (`VOLUME`, `VOLUME_CHANGED`), with no wire change. P7's host stream level changed neither.
 - M23 let the host play several seats, one per controller of theirs: `SessionStatus.host_seats` (wire revision 5).
+- M13 let an owner hand a room over: a chain of signed handovers travels with every policy (`OwnedPolicy`), `HandoverOffer`, `HandoverAnswer`, `HandoverWithdraw`, and invites of version 2 naming the founder (wire revision 6).
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 5, for several seats for the host in M23). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 6, for handing a room over in M13). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -43,13 +44,16 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x8201` | `SeatAssigned { seat u8, seat_epoch u32, permissions u8 }` | Host to member: you hold this seat; tag input with this epoch. Permissions: bit 0 gamepad, 1 keyboard, 2 mouse |
 | `0x8202` | `SeatReleased { seat u8, seat_epoch u32 }` | Host to member: your hold on the seat (with that epoch) ended |
 | `0x8401` | `JoinStart { room [16], invite [16], pake [33] }` | Newcomer to owner, first after `Hello` (see [Admission](#admission)) |
-| `0x8402` | `MemberHello { room [16], policy }` | Member to member, first after `Hello`: the dialer's copy of the owner's policy |
+| `0x8402` | `MemberHello { room [16], policy }` | Member to member, first after `Hello`: the dialer's copy of the owner's policy, with its handovers |
 | `0x8403` | `AdmitReply { pake [33], confirm [32] }` | Owner's SPAKE2 message and key confirmation |
 | `0x8404` | `AdmitConfirm { confirm [32] }` | Newcomer's key confirmation |
-| `0x8501` | `RoomSnapshot { policy, members }` | The owner's signed policy and every member's record ([Rooms](#rooms)) |
+| `0x8501` | `RoomSnapshot { policy, members }` | The owner's signed policy, with its handovers, and every member's record ([Rooms](#rooms)) |
 | `0x8502` | `MemberUpdate { record }` | One signed member record |
-| `0x8503` | `PolicyUpdate { policy }` | The owner's signed policy; also the proof shown when refusing someone it no longer lists |
+| `0x8503` | `PolicyUpdate { policy }` | The owner's signed policy with its handovers; also the proof shown when refusing someone it no longer lists |
 | `0x0504` | `Presence { connected: [member id] }` | Optional: who the sender is connected to |
+| `0x8505` | `HandoverOffer { offer u64, version u32 }` | Owner to a member: would it take the room over? (M13, [Handing a room over](#handing-a-room-over)) |
+| `0x8506` | `HandoverAnswer { offer, accept bool }` | The member's answer, on the same connection |
+| `0x8507` | `HandoverWithdraw { offer }` | Owner to the member offered: the offer is gone |
 | `0x8203` | `ControlRequest { session u64, seat u8 }` | Viewer to host: may I play on this seat? ([Sessions](#sessions)) |
 | `0x8204` | `ControlCancel { session, what: Request \| Seat(SeatId?) }` | Viewer to host: withdraw my request (my seats stay), or give back one seat (`Seat(Some)`, M18) or all of mine (`Seat(None)`) |
 | `0x8205` | `ControlDeclined { session }` | Host to viewer: no (or not now: the panic key) |
@@ -220,7 +224,8 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
 Code: `couch_room::room` (the state machine), `couch-engine`'s `rooms` (runs it over iroh), `couch_net::admission` (admission). The design and its reasons: [ADR 0006](adr/0006-rooms-without-a-server.md).
 
 **The owner decides who is in.**
-- The owner is the room's creator, bound into its id: room id = the first 16 bytes of SHA-256(`"couch/room-id/v1"` || owner id || nonce [16]). Invites carry the owner and the nonce, so nobody can pass a room off as having another owner.
+- The room's founder is bound into its id: room id = the first 16 bytes of SHA-256(`"couch/room-id/v1"` || founder id || nonce [16]). Invites carry the founder (version 2, M13; the owner itself in version 1) and the nonce, so nobody can pass a room off as founded by someone else.
+- **The owner now** is the founder, or, once the room has changed hands (M13), the last `to` of its chain of handovers ([below](#handing-a-room-over)), which travels with every policy.
 - **Only the owner admits newcomers**, with an invite it made and the room password, and puts them on the roster.
 - **Members accept connections only from ids on the roster** (iroh has already authenticated the ids). Members never run the password check among themselves.
 - **Taking someone out is a new roster.** That covers a ban, a member leaving, and the owner closing the room. Every connection to someone no longer on it is closed, after showing them the policy as proof.
@@ -232,7 +237,9 @@ Code: `couch_room::room` (the state machine), `couch-engine`'s `rooms` (runs it 
 - **Member record** `{room, id, since u32, version u64, name, addr {relay?, ips (at most 8)}, left}`, signed by that member. A higher `version` replaces a lower, within one stay.
   - A record counts only if its `since` matches the member's roster entry. Records of anyone else, or of an earlier stay, are dropped unverified, so a replayed `left` record from before a member came back can't remove it again.
   - A member that sees a record of itself, for its current stay, at least as new as its own (left over from before a crash) publishes a higher version.
-- **Signatures** are Ed25519 by the writer's endpoint key, over `domain || postcard(body)`. The domains are `couch/member-record/v1` and `couch/room-policy/v1`. Receivers re-encode the body they decoded, so a non-canonical encoding fails the check.
+- **Handover** `{room, from, to, after u32}` (M13), signed by `from`, the owner handing over: the room goes to `to`, after the policy at version `after`. At most 32 per room.
+- **A policy travels with its chain** (`OwnedPolicy { policy, handovers }`) wherever it goes: `RoomSnapshot`, `PolicyUpdate`, `MemberHello`, and the proofs shown when refusing.
+- **Signatures** are Ed25519 by the writer's endpoint key, over `domain || postcard(body)`. The domains are `couch/member-record/v1`, `couch/room-policy/v1` and `couch/room-handover/v1`. Receivers re-encode the body they decoded, so a non-canonical encoding fails the check.
 - **Names** (display and room) are 1 to 96 bytes with no control characters, direction overrides or zero-width characters (the zero-width joiner stays, for emoji), so one name can't pass for another.
 
 **Connections.** One iroh connection per pair of members *per room*. Members open it with `MemberHello` (see [Admission](#admission)); the acceptor then sends `RoomSnapshot`, and both send `Presence`. When two connections join the same pair in the same room:
@@ -262,6 +269,50 @@ Code: `couch_room::room` (the state machine), `couch-engine`'s `rooms` (runs it 
 
 **Size.** The owner admits nobody new once the roster has 12 members (`room_full`). The UI stops at 8.
 
+### Handing a room over
+
+M13; [ADR 0006](adr/0006-rooms-without-a-server.md).
+
+**The chain.** A policy with its handovers (`OwnedPolicy`) checks out when:
+- the chain runs from the founder: the first handover is `from` the founder, each next one `from` the previous `to`, never `to` itself, with `after` strictly increasing, all in this room, each signed by its `from`;
+- and the policy is signed by the owner the chain names (its last `to`, the founder with none) at a version above the last `after`, or by the last `from` at exactly that `after` (the policy it handed over).
+
+So an earlier owner's policies can't pass under a later chain, and a key that owns the room again (F→N→F) can't replay its first tenure's.
+
+**Which policy wins.** One whose chain has ours as its start (handover by handover, by body), and then a longer chain, or the same chain with a higher version. A chain that parts from ours is never taken. This comes before any signature is checked, and only the handovers we don't hold yet are verified.
+- So whatever a former owner signs after handing over (its chain shorter) loses to the new owner's policies, whatever its version.
+- A former owner's key could still sign a second, diverging handover after the same version. Members holding the real chain never take it. A member that missed the real handover could, and then it never takes the real chain either: it stays on the fork until it leaves and is invited again. The app never signs such a handover.
+
+**The handover**, both online, in two steps:
+1. **The owner offers:** `HandoverOffer { offer, version }`, on its connection to a member on the roster.
+   - `offer` is random; the offer lives in memory, on that connection only.
+   - Any new policy voids it (the owner sends `HandoverWithdraw` on the connection), as does the connection closing (the owner sends `HandoverWithdraw` when the member connects again).
+   - No offer while the owner is catching up after a restore, or has stopped waiting and hasn't heard every member yet, nor once the chain holds 32 handovers.
+2. **The member answers:** `HandoverAnswer { offer, accept }`, on the same connection.
+   - Accepting takes a new password, chosen there, for newcomers. Nothing secret travels.
+   - **Accepting is for good.** The owner may sign at once, so there is no taking it back, and the member can't leave until it knows: until the room is handed to it, or the owner withdraws (on any connection), or the owner signs any newer policy (the offer is then void). Leaving before could leave a room nobody owns.
+   - A room catching up declines any offer at once.
+3. **The owner signs**, if the offer still stands (same id, connection, policy version): `Handover { from: it, to, after: its policy's version }`. Its policy with the extended chain is the last it signs.
+   - It drops its password key and invites, saves, and sends the policy to everyone.
+   - Every member relays it, so the new owner gets it even if the old one never comes back.
+4. **The new owner, on taking it, signs a policy at once**: the same roster and bans, the next version (ahead, after a restore).
+   - If it restarted in between and lost the password it chose, it owns the room without one, and sets one before inviting.
+
+**Afterwards.**
+- The former owner is a member: the new owner can ban it, and its leaving is a member's.
+- An invite it made earlier reaches it and is refused with `invite_expired`.
+- A newcomer admitted mid-check while the room changed hands is refused the same way.
+- Invites the new owner makes are version 2 ([Invites](#invites)).
+- A joiner's snapshot must come from the owner its invite names, by a chain from the founder.
+- A stranger showing a policy whose chain isn't ours, or the start of it, is shown nothing: only a chain from our own room's owners proves someone a former member. Under the start of ours, only a policy from before the next handover we hold counts, so a former owner can't sign one afterwards that names a stranger.
+- A relayed policy keeps the copies of the handovers we hold (verified): only the new ones are taken from it.
+
+**With backups** (M13 part B):
+- A restored former owner catches up and finds itself a member.
+- A restored member that finds itself the owner by the chain catches up as an owner (waiting for everyone) and signs ahead.
+- One that merges a newer policy it signed itself and doesn't hold has lost state: it catches up again before signing (as an owner, if the chain makes it one).
+- **What this can't prevent:** an owner restored from a backup made before it handed the room over, whose new owner is away and unknown to every member it hears (let in after the backup), can hand the room over a second time. The two chains part, and neither side ever takes the other's. A member let in after the backup is how it happens; one who knows the new owner prevents it. Leaving and inviting again mends it.
+
 ## Admission
 
 What a connection between room members exchanges after `Hello`, before it carries anything else.
@@ -277,7 +328,7 @@ What a connection between room members exchanges after `Hello`, before it carrie
 **Newcomer to owner: the password check.**
 1. **Newcomer → `JoinStart { room, invite, pake }`.** `invite` names the invite without revealing its token: the first 16 bytes of SHA-256(`"couch/invite-tag/v1"` || token). The owner closes the connection, with the code shown, if:
    - the newcomer's id is in backoff (`rate_limited`; the endpoint's gate already refuses those right after the TLS handshake);
-   - it isn't the owner of that room (`protocol`), or isn't in it (`unknown_room`);
+   - it isn't the owner of that room: a member answers `invite_expired` (the invite is one it made before handing the room over, M13), and it closes with `unknown_room` if it isn't in the room at all;
    - the newcomer is banned (`banned`), after sending it `PolicyUpdate` as proof;
    - the invite is unknown, expired, revoked or worn out (`invite_expired`);
    - the room has 12 members and the newcomer isn't one (`room_full`);
@@ -311,13 +362,13 @@ Each exchange must finish within 10 s. At most 32 incoming connections are being
 
 `couchco://join#<payload>`, or, in a build with an invite page (M7), `https://<page>/j/#<payload>`: chat apps make https links clickable. The page (`deploy/invite-page`) reads the payload in the browser and offers the `couchco://` link and a copy button. The payload after `#` never reaches the page's server. The payload is unpadded lowercase base32 of:
 - the magic bytes `CC`, which keep other base32 text from passing as an invite;
-- a version byte, now 1;
-- postcard `{owner, nonce [16], name, token [32], expires u64, addr {relay?, ips}}`.
+- a version byte: 1, or 2 for a room handed over (M13);
+- postcard `{owner, nonce [16], name, token [32], expires u64, addr {relay?, ips}}`, then in version 2 `founder` [32]. `owner` is who admits now; the room id comes from the founder (the owner in version 1). A version 2 invite whose founder is its owner is refused, so each invite has one way to be written.
 
-The layout is pinned by `couch_proto::invite`'s `the_layout_is_pinned` test. The invite page reads the room's name from it (`node deploy/invite-page/check.js`).
+The layouts are pinned by `couch_proto::invite`'s `the_layout_is_pinned` and `the_handed_over_layout_is_pinned` tests. The invite page reads the room's name from either, at the same offset (`node deploy/invite-page/check.js`).
 
 **Rules**
-- **Only the owner makes invites**, and each has its own random token, which the owner keeps.
+- **Only the owner makes invites**, and each has its own random token, which the owner keeps. Handing the room over (M13) drops them all: the new owner makes its own.
 - **Lifetime.** An invite works for 7 days (`expires`, seconds since 1970, also shown to the joiner) and for anyone who has it and the password. It stops working on expiry, on the owner's "revoke invites", on a ban, or after 5 wrong passwords. At most 32 are kept; making another drops the one closest to expiring.
 - **The address is the owner's own.** With relays configured that is its relay alone, never an IP address, so an invite posted in a chat publishes nobody's address. If the relay isn't known yet (just after startup), making the invite waits up to 10 s for it, then fails with "not connected to the relay yet". Without relays (a LAN, the tests), direct addresses are all there is.
 - **Each member names its own relay.** Settings → Network (P3, M7) chooses one of these, per profile, from the next start:

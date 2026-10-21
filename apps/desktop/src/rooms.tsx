@@ -120,6 +120,12 @@ export type RoomActions = {
   ban: (member: MemberView) => void;
   /** Owner only, restored from a backup (M13). */
   stopCatchingUp: () => void;
+  /** Handing the room over (M13): the owner offers or withdraws; the
+   * member offered accepts (with a new password) or declines. */
+  offerRoom: (member: MemberView) => void;
+  withdrawOffer: () => void;
+  acceptRoom: () => void;
+  declineRoom: () => void;
 };
 
 export function RoomColumn(props: {
@@ -142,11 +148,11 @@ export function RoomColumn(props: {
         <div className="column-body">
           {room.isOwner &&
             (room.needsPassword ? (
-              // Restored from a backup (M13): it came without a password.
+              // Restored from a backup, or handed to us after a restart (M13):
+              // it came without a password.
               <>
                 <p className="banner warn" role="status">
-                  This room came back from a backup without its password. Set a new one to invite people again; members
-                  already in aren't affected.
+                  This room has no password yet. Set one to invite people; members already in aren't affected.
                 </p>
                 <button className="primary wide" onClick={props.actions.changePassword}>
                   Set a new password
@@ -158,13 +164,57 @@ export function RoomColumn(props: {
               </button>
             ))}
           {room.catchingUp && <CatchingUp room={room} onStop={props.actions.stopCatchingUp} />}
+          <Handover room={room} actions={props.actions} />
           {props.pausedUntil != null && <PausedBanner until={props.pausedUntil} />}
-          <MemberList room={room} onBan={props.actions.ban} />
+          <MemberList room={room} onBan={props.actions.ban} onOffer={props.actions.offerRoom} />
         </div>
       )}
       {!room && <div className="column-body" />}
       <UserPanel profile={props.profile} info={props.info} onEdit={props.onEditName} onSettings={props.onSettings} />
     </aside>
+  );
+}
+
+/** An offer of the room standing (M13): the owner waits for an answer; the
+ * member offered answers. */
+function Handover(props: { room: RoomView; actions: RoomActions }) {
+  const { room, actions } = props;
+  if (room.offeringTo != null) {
+    const name = room.members.find((m) => m.id === room.offeringTo)?.name ?? "them";
+    return (
+      <>
+        <p className="banner" role="status">
+          You offered the room to {name}. Waiting for them to accept…
+        </p>
+        <button className="wide" onClick={actions.withdrawOffer}>
+          Withdraw the offer
+        </button>
+      </>
+    );
+  }
+  if (room.offered == null) return null;
+  const owner = room.members.find((m) => m.isOwner)?.name ?? "The owner";
+  if (room.offered) {
+    // Accepted for good: the owner may have signed already (M13).
+    return (
+      <p className="banner" role="status">
+        You accepted {owner}'s offer. The room becomes yours as soon as {owner} hands it over; until then you can't
+        leave it.
+      </p>
+    );
+  }
+  return (
+    <>
+      <p className="banner warn" role="status">
+        {owner} offers you the room: you'd let people in, ban, and close it.
+      </p>
+      <button className="primary wide" onClick={actions.acceptRoom}>
+        Accept…
+      </button>
+      <button className="wide" onClick={actions.declineRoom}>
+        Decline
+      </button>
+    </>
   );
 }
 
@@ -267,7 +317,11 @@ function otherVersionText(name: string, other: OtherVersion): string {
     : `${name} has Couch Co-App ${other.appVersion}, older than yours: they need to install the new version to play together.`;
 }
 
-function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void }) {
+function MemberList(props: {
+  room: RoomView;
+  onBan: (member: MemberView) => void;
+  onOffer: (member: MemberView) => void;
+}) {
   const { room } = props;
   return (
     <section className="members" aria-label="Members">
@@ -313,6 +367,16 @@ function MemberList(props: { room: RoomView; onBan: (member: MemberView) => void
                   {link.label}
                 </span>
               )}
+              {room.canOffer && (m.link === "direct" || m.link === "relay") && (
+                  <button
+                    className="make-owner"
+                    title={`Hand the room over to ${m.name}`}
+                    aria-label={`Make ${m.name} the owner`}
+                    onClick={() => props.onOffer(m)}
+                  >
+                    Make owner
+                  </button>
+                )}
               {room.isOwner && m.link !== "me" && (
                 <button className="ban" title={`Ban ${m.name}`} aria-label={`Ban ${m.name}`} onClick={() => props.onBan(m)}>
                   Ban

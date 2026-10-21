@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import type { MemberView } from "./bindings/MemberView";
 import type { RoomView } from "./bindings/RoomView";
-import { ChangePasswordDialog, ConfirmDialog, CreateRoomDialog, InviteDialog, JoinRoomDialog, NameDialog } from "./dialogs";
-import { request } from "./engine";
+import {
+  AcceptRoomDialog,
+  ChangePasswordDialog,
+  ConfirmDialog,
+  CreateRoomDialog,
+  InviteDialog,
+  JoinRoomDialog,
+  NameDialog,
+} from "./dialogs";
+import { errorText, request } from "./engine";
 import { useLobby } from "./lobby";
 import { RoomColumn, RoomRail, Welcome, type RoomActions } from "./rooms";
 import { Stage, StartSessionDialog, busyIn } from "./sessions";
@@ -21,6 +29,7 @@ type Dialog =
   | { kind: "startSession"; room: RoomView }
   | { kind: "settings" }
   | { kind: "password"; room: RoomView }
+  | { kind: "acceptRoom"; room: RoomView }
   | { kind: "confirm"; title: string; body: string; action: string; danger?: boolean; run: () => Promise<unknown> };
 
 const SELECTED_KEY = "selectedRoom";
@@ -165,6 +174,37 @@ function App() {
           lobby.putRoom(await request({ type: "banMember", room: room.id, member: member.id }, "room"));
         },
       }),
+    offerRoom: (member: MemberView) =>
+      room &&
+      setDialog({
+        kind: "confirm",
+        title: `Hand “${room.name}” over to ${member.name}?`,
+        body:
+          `If ${member.name} accepts, they own the room: they let people in, ban, and leaving closes it for ` +
+          `everyone. They choose a new password, and the invites you sent stop working. You stay as a member, ` +
+          `and can't take it back.`,
+        action: "Offer the room",
+        run: async () => {
+          lobby.putRoom(await request({ type: "offerRoom", room: room.id, member: member.id }, "room"));
+        },
+      }),
+    withdrawOffer: async () => {
+      if (!room) return;
+      try {
+        lobby.putRoom(await request({ type: "withdrawOffer", room: room.id }, "room"));
+      } catch (e) {
+        lobby.notify(errorText(e));
+      }
+    },
+    acceptRoom: () => room && setDialog({ kind: "acceptRoom", room }),
+    declineRoom: async () => {
+      if (!room) return;
+      try {
+        lobby.putRoom(await request({ type: "answerOffer", room: room.id, accept: false, password: null }, "room"));
+      } catch (e) {
+        lobby.notify(errorText(e));
+      }
+    },
     stopCatchingUp: () =>
       room &&
       setDialog({
@@ -270,6 +310,17 @@ function App() {
           onClose={close}
           onChanged={() => {
             lobby.notify(`The password of “${dialog.room.name}” was changed.`);
+            setDialog(null);
+          }}
+        />
+      )}
+      {dialog?.kind === "acceptRoom" && (
+        <AcceptRoomDialog
+          room={dialog.room}
+          ownerName={dialog.room.members.find((m) => m.isOwner)?.name ?? "The owner"}
+          onClose={close}
+          onAccepted={(accepted) => {
+            lobby.putRoom(accepted);
             setDialog(null);
           }}
         />
