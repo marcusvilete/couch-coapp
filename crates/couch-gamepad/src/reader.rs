@@ -15,12 +15,25 @@ use std::{
 
 use couch_input::{
     InputError, PadState, Rumble,
-    local::{ControllerIds, LOCAL_PAD_EVERY, LocalController, LocalPad, LocalPads},
+    local::{
+        ControllerChoice, ControllerIds, ControllerKind, LOCAL_PAD_EVERY, LocalController,
+        LocalPad, LocalPads,
+    },
 };
 use sdl3::{EventPump, GamepadSubsystem, event::Event, gamepad::Gamepad, joystick::JoystickId};
 
 use crate::{read_pad, rumble_strength};
 
+/// How often pads skipped are looked at again while a follower has none
+/// (one plugged anew may have had no player light yet when it came), and a
+/// remapper's pad a follower reads is checked against the hosts' serials
+/// (M22).
+const RECHECK_EVERY: Duration = Duration::from_secs(1);
+/// How often a remapper's pad a follower reads is looked up in full again
+/// (its device by its player light, then its chain): the Xbox driver's
+/// devices are enumerated and opened, so not every second (the second
+/// review's finding).
+const FULL_CHECK_EVERY: Duration = Duration::from_secs(5);
 /// How long the thread waits for an event before looking at its commands
 /// and reporting its followers. A pad's events wake it at once; this only
 /// delays a command.
@@ -53,8 +66,9 @@ enum Cmd {
     List(Sender<Vec<LocalController>>),
     Follow {
         id: u64,
-        ids: ControllerIds,
+        choice: ControllerChoice,
         on_state: Box<dyn Fn(PadState) + Send>,
+        on_device: Box<dyn Fn(Option<String>) + Send>,
     },
     Unfollow(u64),
     Rumble(u64, Rumble),
@@ -91,14 +105,20 @@ impl LocalPads for SdlPads {
 
     fn follow(
         &self,
-        ids: ControllerIds,
+        choice: ControllerChoice,
         on_state: Box<dyn Fn(PadState) + Send>,
+        on_device: Box<dyn Fn(Option<String>) + Send>,
     ) -> Result<Box<dyn LocalPad>, InputError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let tx = self.sender()?;
-        tx.send(Cmd::Follow { id, ids, on_state })
-            .map_err(|_| InputError::DriverUnavailable("the controller reader stopped".into()))?;
+        tx.send(Cmd::Follow {
+            id,
+            choice,
+            on_state,
+            on_device,
+        })
+        .map_err(|_| InputError::DriverUnavailable("the controller reader stopped".into()))?;
         Ok(Box::new(Followed { id, tx }))
     }
 }
@@ -151,14 +171,18 @@ fn start() -> Result<Sender<Cmd>, String> {
 struct Sdl {
     /// Controllers plugged in that could play a seat, by what SDL says of
     /// them without opening them.
-    present: Vec<(JoystickId, ControllerIds, String)>,
+    present: Vec<Present>,
     /// Those a follower reads now. Only these are open: opening one can
     /// change it (a DualSense's lights and report mode), so nothing is
     /// opened just to be listed.
     open: Vec<(JoystickId, Gamepad)>,
-    /// Pads not read: virtual ones, and those that could be our own. Looked
-    /// at again at each listing.
+    /// Pads not read: those whose origin can't be told, and those that may
+    /// be our own (a host was plugging one). Looked at again at each
+    /// listing, and every second while a follower has none.
     skipped: Vec<JoystickId>,
+    /// The hosts' own pads, proven by their serials: never looked at again
+    /// (a pad SDL lists keeps its owner, M22).
+    ours: Vec<JoystickId>,
     events: EventPump,
     gamepads: GamepadSubsystem,
     _sdl: sdl3::Sdl,
@@ -176,6 +200,7 @@ impl Sdl {
             present: Vec::new(),
             open: Vec::new(),
             skipped: Vec::new(),
+            ours: Vec::new(),
             events,
             gamepads,
             _sdl: sdl,
@@ -201,7 +226,10 @@ impl Sdl {
     }
 
     fn consider(&mut self, which: JoystickId, first: bool) {
-        if self.present.iter().any(|p| p.0 == which) || self.skipped.contains(&which) {
+        if self.present.iter().any(|p| p.which == which)
+            || self.skipped.contains(&which)
+            || self.ours.contains(&which)
+        {
             return;
         }
         // Looked at again but gone meanwhile (its removal not read yet):
@@ -218,50 +246,131 @@ impl Sdl {
             .name_for_id(which)
             .unwrap_or_else(|_| "Controller".into());
         let path = self.gamepads.path_for_id(which).ok();
-        if let Some(why) = not_the_hosts(path.as_deref(), ids) {
-            self.skipped.push(which);
-            if first {
-                tracing::info!(
-                    "not reading {name:?} ({:04x}:{:04x}): {why}",
-                    ids.vendor,
-                    ids.product
-                );
+        let (kind, device) = match whose(path.as_deref(), ids) {
+            Whose::Hosts(kind, device) => (kind, device),
+            Whose::Ours => {
+                self.ours.push(which);
+                if first {
+                    tracing::info!("not reading {name:?}: it's one of our virtual pads");
+                }
+                return;
             }
-            return;
-        }
+            Whose::Not(why) => {
+                self.skipped.push(which);
+                if first {
+                    tracing::info!(
+                        "not reading {name:?} ({:04x}:{:04x}): {why}",
+                        ids.vendor,
+                        ids.product
+                    );
+                }
+                return;
+            }
+        };
         tracing::info!(
-            "controller {name:?} ({:04x}:{:04x})",
+            "controller {name:?} ({:04x}:{:04x}){}",
             ids.vendor,
-            ids.product
+            ids.product,
+            match &device {
+                Some(device) => format!(", another program's virtual pad: {device}"),
+                None => String::new(),
+            }
         );
-        self.present.push((which, ids, name));
+        self.present.push(Present {
+            which,
+            ids,
+            name,
+            path,
+            kind,
+            device,
+        });
+    }
+
+    /// Looks again at a remapper's pad a follower reads, or is about to: if
+    /// it turns out to be one of ours (M22: something missed in between),
+    /// it is set aside for good and closed, and the follower reads it no
+    /// more. By its serial against the hosts' markers, cheap; with `full`,
+    /// its device looked up anew too (SDL may keep a number across a quick
+    /// swap on one XInput slot). Doubt keeps it: dropping it would stop the
+    /// host's seat on a passing hitch.
+    fn still_theirs(&mut self, which: JoystickId, full: bool) -> bool {
+        let Some(at) = self.present.iter().position(|p| p.which == which) else {
+            return false;
+        };
+        let p = &self.present[at];
+        let ours = p.device.as_deref().is_some_and(serial_is_a_hosts)
+            || (full && matches!(whose(p.path.as_deref(), p.ids), Whose::Ours));
+        if !ours {
+            return true;
+        }
+        tracing::warn!(
+            "{:?} is one of our virtual pads after all: not read any more",
+            p.name
+        );
+        self.present.remove(at);
+        self.open.retain(|o| o.0 != which);
+        self.ours.push(which);
+        false
     }
 
     fn removed(&mut self, which: JoystickId) {
-        self.present.retain(|p| p.0 != which);
+        self.present.retain(|p| p.which != which);
         self.open.retain(|p| p.0 != which);
         self.skipped.retain(|s| *s != which);
+        self.ours.retain(|s| *s != which);
+    }
+
+    /// The remapper pads plugged in now, with their devices.
+    fn remapper_pads(&self) -> Vec<Offer> {
+        self.present
+            .iter()
+            .filter(|p| p.kind == ControllerKind::OtherVirtual)
+            .map(|p| Offer {
+                which: p.which,
+                device: p.device.clone(),
+            })
+            .collect()
     }
 
     fn list(&self) -> Vec<LocalController> {
         self.present
             .iter()
-            .map(|(_, ids, name)| LocalController {
-                ids: *ids,
-                name: name.clone(),
+            .map(|p| LocalController {
+                ids: p.ids,
+                name: p.name.clone(),
+                kind: p.kind,
+                device: p.device.clone(),
             })
             .collect()
     }
 
-    /// The first plugged-in controller with `ids` that no other follower
-    /// reads (`taken`), opened: two controllers of one model are told apart
-    /// by the order they were found (M23).
-    fn attach(&mut self, ids: ControllerIds, taken: &[JoystickId]) -> Option<JoystickId> {
-        let which = self
+    fn device(&self, which: JoystickId) -> Option<String> {
+        self.present
+            .iter()
+            .find(|p| p.which == which)
+            .and_then(|p| p.device.clone())
+    }
+
+    /// A plugged-in controller of `f`'s choice that no other follower reads
+    /// (`taken`), as [`choose`] picks it, opened. A remapper's pad is looked
+    /// up in full first: one of ours after all is set aside.
+    fn attach(&mut self, f: &Follower, taken: &[JoystickId]) -> Option<JoystickId> {
+        let offers: Vec<Offer> = self
             .present
             .iter()
-            .find(|p| p.1 == ids && !taken.contains(&p.0))?
-            .0;
+            .filter(|p| {
+                p.ids == f.choice.ids && p.kind == f.choice.kind && !taken.contains(&p.which)
+            })
+            .map(|p| Offer {
+                which: p.which,
+                device: p.device.clone(),
+            })
+            .collect();
+        let remapper = f.choice.kind == ControllerKind::OtherVirtual;
+        let which = choose(&offers, remapper.then_some(&f.remapper))?;
+        if remapper && !self.still_theirs(which, true) {
+            return None;
+        }
         if !self.open.iter().any(|p| p.0 == which) {
             match self.gamepads.open(which) {
                 Ok(pad) => self.open.push((which, pad)),
@@ -292,41 +401,173 @@ impl Sdl {
     }
 }
 
-/// Why a controller can't be the host's own, if it can't: it's a virtual
-/// pad, ours or another program's (P9: only physical controllers play a
-/// seat as the host's); or its origin can't be told and it has our pads' ids.
-#[cfg(windows)]
-fn not_the_hosts(path: Option<&str>, ids: ControllerIds) -> Option<&'static str> {
-    use couch_platform_win::pad_origin::{self, Origin};
-    let origin = pad_origin::of_gamepad(path, ids);
-    if pad_origin::may_be_the_hosts(origin, ids) {
-        return None;
+/// A pad on offer to a follower: SDL's number for it, and a remapper's
+/// pad's device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Offer {
+    which: JoystickId,
+    device: Option<String>,
+}
+
+/// What a follower of a remapper's pad remembers (M22), so it never takes
+/// another player's pad when its own goes (the reviews' findings).
+#[derive(Debug, Default)]
+struct RemapperMemory {
+    /// Its last pad's device, taken again when it comes back.
+    pinned: Option<String>,
+    /// The remapper pads that were there when its own went, by number and
+    /// by device: another player's, never taken.
+    passed_over: Vec<Offer>,
+}
+
+impl RemapperMemory {
+    fn passes_over(&self, offer: &Offer) -> bool {
+        self.passed_over
+            .iter()
+            .any(|p| p.which == offer.which || (p.device.is_some() && p.device == offer.device))
     }
-    Some(match origin {
-        Origin::Ours => "it's one of our virtual pads",
-        Origin::OtherVirtual => "it's another program's virtual pad",
-        Origin::Physical | Origin::Unknown => UNTOLD,
-    })
+}
+
+/// Which of `offers` (in the order found) a follower takes. A physical
+/// controller's (`remapper` is `None`): the first, two of one model told
+/// apart by the order found (M23). A remapper's pad's:
+/// - never one passed over (there beside its own when that went);
+/// - the one under its last device (the remapper plugging it again);
+/// - with no device of its own yet (the session's start), the first;
+/// - otherwise another only if it is the one on offer: the remapper
+///   plugged its pad again under another id. Two on offer can't be told
+///   apart, and none is taken.
+///
+/// Another program's pad plugged under its last device, the serial its own
+/// freed, can't be told from its own coming back: ViGEm gives the lowest
+/// free serial.
+fn choose(offers: &[Offer], remapper: Option<&RemapperMemory>) -> Option<JoystickId> {
+    let Some(memory) = remapper else {
+        return offers.first().map(|o| o.which);
+    };
+    let open: Vec<&Offer> = offers.iter().filter(|o| !memory.passes_over(o)).collect();
+    match &memory.pinned {
+        None => open.first().map(|o| o.which),
+        Some(pinned) => open
+            .iter()
+            .find(|o| o.device.as_ref() == Some(pinned))
+            .or_else(|| (open.len() == 1).then(|| &open[0]))
+            .map(|o| o.which),
+    }
+}
+
+/// Whether a remapper's pad's device carries a serial a host's markers
+/// name: one of ours after all.
+#[cfg(windows)]
+fn serial_is_a_hosts(device: &str) -> bool {
+    device
+        .rsplit('\\')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .is_some_and(|serial| {
+            couch_platform_win::virtual_pads::host_pads()
+                .serials
+                .contains(&serial)
+        })
 }
 
 #[cfg(not(windows))]
-fn not_the_hosts(_path: Option<&str>, ids: ControllerIds) -> Option<&'static str> {
-    ids.could_be_ours().then_some(UNTOLD)
+fn serial_is_a_hosts(_device: &str) -> bool {
+    false
+}
+
+/// A controller that could play a seat.
+struct Present {
+    which: JoystickId,
+    ids: ControllerIds,
+    name: String,
+    /// SDL's path for it, to look it up again.
+    path: Option<String>,
+    kind: ControllerKind,
+    /// Another program's virtual pad's device.
+    device: Option<String>,
+}
+
+/// Whose a gamepad is.
+enum Whose {
+    /// It can be the host's own: a physical one (P9), or another program's
+    /// virtual pad, proven so, with its device (M22).
+    Hosts(ControllerKind, Option<String>),
+    /// One of the hosts' own virtual pads, by its serial.
+    Ours,
+    /// Not now, and why: its origin can't be told and it has our pads' ids,
+    /// or it may be ours (a host is plugging a pad). Looked at again later.
+    Not(&'static str),
+}
+
+#[cfg(windows)]
+fn whose(path: Option<&str>, ids: ControllerIds) -> Whose {
+    use couch_platform_win::{
+        pad_origin::{self, Origin},
+        virtual_pads,
+    };
+    let Some((device, chain)) = pad_origin::device_of_gamepad(path, ids) else {
+        return if pad_origin::may_be_the_hosts(Origin::Unknown, ids) {
+            Whose::Hosts(ControllerKind::Physical, None)
+        } else {
+            Whose::Not(UNTOLD)
+        };
+    };
+    let hosts = virtual_pads::host_pads();
+    if pad_origin::proven_ours(&chain, &hosts) {
+        return Whose::Ours;
+    }
+    if pad_origin::proven_theirs(&chain, &hosts) {
+        return Whose::Hosts(ControllerKind::OtherVirtual, Some(device));
+    }
+    match pad_origin::classify(&chain, &hosts) {
+        origin if pad_origin::may_be_the_hosts(origin, ids) => {
+            Whose::Hosts(ControllerKind::Physical, None)
+        }
+        Origin::Ours => Whose::Not("it may be one of our virtual pads"),
+        _ => Whose::Not(UNTOLD),
+    }
+}
+
+#[cfg(not(windows))]
+fn whose(_path: Option<&str>, ids: ControllerIds) -> Whose {
+    if ids.could_be_ours() {
+        Whose::Not(UNTOLD)
+    } else {
+        Whose::Hosts(ControllerKind::Physical, None)
+    }
 }
 
 const UNTOLD: &str = "it has our virtual pads' ids, and where it comes from can't be told";
 
 struct Follower {
     id: u64,
-    ids: ControllerIds,
+    choice: ControllerChoice,
     on_state: Box<dyn Fn(PadState) + Send>,
-    /// The pad followed now, if one with the ids is plugged in.
+    on_device: Box<dyn Fn(Option<String>) + Send>,
+    /// The pad followed now, if one of the choice is plugged in.
     on: Option<JoystickId>,
     sent: Option<(PadState, Instant)>,
+    /// The device last told to `on_device`.
+    device: Option<String>,
+    /// For a remapper's pad.
+    remapper: RemapperMemory,
+}
+
+impl Follower {
+    /// Its pad went (unplugged, or one of ours after all).
+    fn lost(&mut self, remapper_pads: Vec<Offer>) {
+        self.on = None;
+        if self.choice.kind == ControllerKind::OtherVirtual {
+            self.remapper.passed_over = remapper_pads;
+        }
+    }
 }
 
 fn run(mut sdl: Sdl, rx: Receiver<Cmd>) {
     let mut followers: Vec<Follower> = Vec::new();
+    let mut rechecked = Instant::now();
+    let mut checked_in_full = Instant::now();
     loop {
         loop {
             match rx.try_recv() {
@@ -349,8 +590,9 @@ fn run(mut sdl: Sdl, rx: Receiver<Cmd>) {
                 Event::GamepadAdded { which, .. } => sdl.added(which),
                 Event::GamepadRemoved { which, .. } => {
                     sdl.removed(which);
+                    let remapper_pads = sdl.remapper_pads();
                     for f in followers.iter_mut().filter(|f| f.on == Some(which)) {
-                        f.on = None;
+                        f.lost(remapper_pads.clone());
                     }
                 }
                 _ => {}
@@ -358,11 +600,56 @@ fn run(mut sdl: Sdl, rx: Receiver<Cmd>) {
             next = sdl.events.poll_event();
         }
         let now = Instant::now();
+        let remapping = followers
+            .iter()
+            .any(|f| f.on.is_some() && f.choice.kind == ControllerKind::OtherVirtual);
+        let lacking = followers.iter().any(|f| f.on.is_none());
+        if (remapping || lacking) && now.duration_since(rechecked) >= RECHECK_EVERY {
+            rechecked = now;
+            if lacking {
+                sdl.recheck();
+            }
+            // The remappers' pads read now, looked at again (M22).
+            let full = now.duration_since(checked_in_full) >= FULL_CHECK_EVERY;
+            if full {
+                checked_in_full = now;
+            }
+            for f in followers
+                .iter_mut()
+                .filter(|f| f.choice.kind == ControllerKind::OtherVirtual)
+            {
+                if let Some(which) = f.on
+                    && !sdl.still_theirs(which, full)
+                {
+                    let remapper_pads = sdl.remapper_pads();
+                    f.lost(remapper_pads);
+                }
+            }
+            sdl.close_unread(&followers);
+            // These look the pads up on the thread every controller's
+            // states wait on.
+            let took = now.elapsed();
+            if took > Duration::from_millis(5) {
+                tracing::debug!("looking at the pads again took {took:?}");
+            }
+        }
         let mut taken: Vec<JoystickId> = followers.iter().filter_map(|f| f.on).collect();
         for f in &mut followers {
             if f.on.is_none() {
-                f.on = sdl.attach(f.ids, &taken);
+                f.on = sdl.attach(f, &taken);
+                if f.on.is_some() {
+                    f.remapper.passed_over.clear();
+                }
                 taken.extend(f.on);
+            }
+            // Hiding follows another program's pad to each device it has.
+            let device = f.on.and_then(|which| sdl.device(which));
+            if f.choice.kind == ControllerKind::OtherVirtual && device != f.device {
+                if device.is_some() {
+                    f.remapper.pinned = device.clone();
+                }
+                f.device = device.clone();
+                (f.on_device)(device);
             }
             let state =
                 f.on.and_then(|which| sdl.pad(which))
@@ -384,12 +671,20 @@ fn command(sdl: &mut Sdl, followers: &mut Vec<Follower>, cmd: Cmd) {
             sdl.recheck();
             let _ = reply.send(sdl.list());
         }
-        Cmd::Follow { id, ids, on_state } => followers.push(Follower {
+        Cmd::Follow {
             id,
-            ids,
+            choice,
             on_state,
+            on_device,
+        } => followers.push(Follower {
+            id,
+            choice,
+            on_state,
+            on_device,
             on: None,
             sent: None,
+            device: None,
+            remapper: RemapperMemory::default(),
         }),
         Cmd::Unfollow(id) => {
             if let Some(f) = followers.iter().find(|f| f.id == id)
@@ -412,5 +707,68 @@ fn command(sdl: &mut Sdl, followers: &mut Vec<Follower>, cmd: Cmd) {
                 tracing::debug!("rumble failed: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offer(n: u32, device: &str) -> Offer {
+        Offer {
+            which: JoystickId::new(n),
+            device: Some(device.into()),
+        }
+    }
+
+    fn memory(pinned: Option<&str>, passed_over: Vec<Offer>) -> RemapperMemory {
+        RemapperMemory {
+            pinned: pinned.map(String::from),
+            passed_over,
+        }
+    }
+
+    #[test]
+    fn physical_controllers_go_in_the_order_found() {
+        let offers = [offer(3, "a"), offer(1, "b")];
+        assert_eq!(choose(&offers, None), Some(JoystickId::new(3)));
+        assert_eq!(choose(&[], None), None);
+    }
+
+    #[test]
+    fn a_remapper_follow_takes_its_own_pad_back_and_never_another_players() {
+        // The session's start: the first, as the keeper was told.
+        let offers = [offer(5, "01"), offer(6, "02")];
+        assert_eq!(
+            choose(&offers, Some(&memory(None, vec![]))),
+            Some(JoystickId::new(5))
+        );
+        // Its pad (01) went with a friend's (02) beside it; the remapper
+        // plugs it again under 01: that one, though the friend's is first.
+        let friend = offer(6, "02");
+        let back = [friend.clone(), offer(9, "01")];
+        let m = memory(Some("01"), vec![friend.clone()]);
+        assert_eq!(choose(&back, Some(&m)), Some(JoystickId::new(9)));
+        // Back under another id (01 taken meanwhile): the one on offer, the
+        // friend's passed over.
+        let elsewhere = [friend.clone(), offer(9, "03")];
+        assert_eq!(choose(&elsewhere, Some(&m)), Some(JoystickId::new(9)));
+        // The friend's pad plugged again (a new number, its device): still
+        // passed over, by its device.
+        let replugged = [offer(11, "02")];
+        assert_eq!(choose(&replugged, Some(&m)), None);
+    }
+
+    #[test]
+    fn two_unknown_remapper_pads_are_never_guessed_between() {
+        // Its pad gone with nothing beside it; two new ones, neither under
+        // its device: none taken.
+        let m = memory(Some("01"), vec![]);
+        let two = [offer(7, "03"), offer(8, "04")];
+        assert_eq!(choose(&two, Some(&m)), None);
+        // Only the friend's pad there: never taken.
+        let friend = offer(6, "02");
+        let m = memory(Some("01"), vec![friend.clone()]);
+        assert_eq!(choose(&[friend], Some(&m)), None);
     }
 }

@@ -17,7 +17,9 @@ use couch_engine::pipeline::{
     platform_backend,
     source::REPLACE_GRACE,
 };
-use couch_input::{MemberId, Permissions, SeatEpoch, SeatId, router::SeatStatus};
+use couch_input::{
+    MemberId, Permissions, SeatEpoch, SeatId, local::ControllerChoice, router::SeatStatus,
+};
 use couch_media::clock::LATENCY_CLOCK_TITLE;
 use couch_net::{
     Connection, NetError, admission, control, datagrams::Datagrams, endpoint, streams::Streams,
@@ -133,7 +135,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             );
             Some(LocalSeat {
                 member: MemberId(*endpoint.id().as_bytes()),
-                controllers: vec![chosen.ids],
+                controllers: vec![ControllerChoice {
+                    ids: chosen.ids,
+                    kind: chosen.kind,
+                }],
                 hide: args.hide_host_pad,
             })
         }

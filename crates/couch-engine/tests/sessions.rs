@@ -14,18 +14,22 @@ use std::{
 };
 
 use couch_engine::{
-    Command, Engine, EngineError, EngineOptions, Event, HidingView, HostController, InputSetup,
-    KeyboardMouseSeat, MemberLink, Profile, Response, RoomView, SessionEnd, SessionRole,
-    SessionView, SourceChoice, StreamStateView, WatchEnd,
+    Command, Engine, EngineError, EngineOptions, Event, HidingView, HostController,
+    HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile, Response, RoomView,
+    SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView, WatchEnd,
     pipeline::{
         AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, Source, Sources,
-        ViewerOptions, ViewerProcess, WindowSource, ipc,
+        ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
+        virtual_hiding::CHECK_EVERY,
     },
     secrets::Unprotected,
 };
 use couch_input::{
     HidUsage, InputError, KbmInjector, PadButtons, PadState, Rumble, VirtualPad, VirtualPadFactory,
-    local::{ControllerIds, LOCAL_PAD_EVERY, LocalController, LocalPad, LocalPads},
+    local::{
+        ControllerChoice, ControllerIds, ControllerKind, LOCAL_PAD_EVERY, LocalController,
+        LocalPad, LocalPads,
+    },
     shortcuts::Shortcut,
 };
 use couch_media::{
@@ -79,6 +83,11 @@ struct Fake {
     hidden: Arc<AtomicUsize>,
     /// Hiding it fails (HidHide busy).
     hide_fails: AtomicBool,
+    /// The remapper pads' devices hidden now (M22), and how many hides.
+    virtual_hidden: Arc<Mutex<Vec<String>>>,
+    virtual_hides: AtomicUsize,
+    /// Where each such device stands, if not plugged in and theirs.
+    virtual_now: Mutex<Vec<(String, VirtualDevice)>>,
     /// Frames on the GPU (M9b).
     gpu: FakeGpuSide,
     /// The capture's frame rate, if not the stream's: a screen refreshing
@@ -115,7 +124,7 @@ struct FakeGpuSide {
 
 /// The host's own controllers: a DualSense and a GameSir (M23), each
 /// followed by a thread that reports its state on change and every 100 ms,
-/// as the real reader does.
+/// as the real reader does; and a remapper's pad (M22) while it has a device.
 #[derive(Default)]
 struct FakeLocal {
     state: Arc<Mutex<PadState>>,
@@ -123,7 +132,20 @@ struct FakeLocal {
     /// The GameSir's.
     second_state: Arc<Mutex<PadState>>,
     second_rumble: Arc<Mutex<Vec<Rumble>>>,
+    /// The remapper's pad: its device while plugged in.
+    remapper_device: Arc<Mutex<Option<String>>>,
+    remapper_state: Arc<Mutex<PadState>>,
+    remapper_rumble: Arc<Mutex<Vec<Rumble>>>,
 }
+
+/// The device ids a remapper's pad takes (ViGEm's).
+const PAD_01: &str = r"USB\VID_045E&PID_028E\01";
+const PAD_02: &str = r"USB\VID_045E&PID_028E\02";
+
+const XBOX_360: ControllerIds = ControllerIds {
+    vendor: 0x045E,
+    product: 0x028E,
+};
 
 const DUALSENSE: ControllerIds = ControllerIds {
     vendor: 0x054C,
@@ -140,6 +162,7 @@ fn dualsense() -> HostController {
         name: "DualSense Wireless Controller".into(),
         vendor: DUALSENSE.vendor,
         product: DUALSENSE.product,
+        kind: HostControllerKind::Physical,
     }
 }
 
@@ -148,38 +171,81 @@ fn gamesir() -> HostController {
         name: "GameSir T4n Lite".into(),
         vendor: GAMESIR.vendor,
         product: GAMESIR.product,
+        kind: HostControllerKind::Physical,
+    }
+}
+
+/// DS4Windows's pad, say (M22).
+fn remapper() -> HostController {
+    HostController {
+        name: "Xbox 360 Controller".into(),
+        vendor: XBOX_360.vendor,
+        product: XBOX_360.product,
+        kind: HostControllerKind::OtherVirtual,
     }
 }
 
 impl LocalPads for FakeLocal {
     fn list(&self) -> Result<Vec<LocalController>, InputError> {
-        Ok(vec![
+        let mut list = vec![
             LocalController {
                 ids: DUALSENSE,
                 name: "DualSense Wireless Controller".into(),
+                kind: ControllerKind::Physical,
+                device: None,
             },
             LocalController {
                 ids: GAMESIR,
                 name: "GameSir T4n Lite".into(),
+                kind: ControllerKind::Physical,
+                device: None,
             },
-        ])
+        ];
+        if let Some(device) = self.remapper_device.lock().unwrap().clone() {
+            list.push(LocalController {
+                ids: XBOX_360,
+                name: "Xbox 360 Controller".into(),
+                kind: ControllerKind::OtherVirtual,
+                device: Some(device),
+            });
+        }
+        Ok(list)
     }
 
     fn follow(
         &self,
-        ids: ControllerIds,
+        choice: ControllerChoice,
         on_state: Box<dyn Fn(PadState) + Send>,
+        on_device: Box<dyn Fn(Option<String>) + Send>,
     ) -> Result<Box<dyn LocalPad>, InputError> {
-        let (state, rumble) = match ids {
-            DUALSENSE => (self.state.clone(), self.rumble.clone()),
-            GAMESIR => (self.second_state.clone(), self.second_rumble.clone()),
+        let (state, rumble, device) = match (choice.ids, choice.kind) {
+            (DUALSENSE, ControllerKind::Physical) => {
+                (self.state.clone(), self.rumble.clone(), None)
+            }
+            (GAMESIR, ControllerKind::Physical) => {
+                (self.second_state.clone(), self.second_rumble.clone(), None)
+            }
+            (XBOX_360, ControllerKind::OtherVirtual) => (
+                self.remapper_state.clone(),
+                self.remapper_rumble.clone(),
+                Some(self.remapper_device.clone()),
+            ),
             other => panic!("no such controller {other:?}"),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         std::thread::spawn(move || {
             let mut sent: Option<(PadState, Instant)> = None;
+            let mut told: Option<String> = None;
             while !stopped.load(Ordering::SeqCst) {
+                // As the reader: a remapper's pad tells each device it has.
+                if let Some(device) = &device {
+                    let now = device.lock().unwrap().clone();
+                    if now != told {
+                        told = now.clone();
+                        on_device(now);
+                    }
+                }
                 let now = *state.lock().unwrap();
                 if sent.is_none_or(|(s, at)| s != now || at.elapsed() >= LOCAL_PAD_EVERY) {
                     on_state(now);
@@ -206,6 +272,18 @@ impl LocalPad for FakeFollowed {
 impl Drop for FakeFollowed {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Shows a remapper's pad to games again when the engine drops it (M22).
+struct VirtualShown(Arc<Mutex<Vec<String>>>, String);
+
+impl Drop for VirtualShown {
+    fn drop(&mut self) {
+        let mut hidden = self.0.lock().unwrap();
+        if let Some(at) = hidden.iter().position(|d| *d == self.1) {
+            hidden.remove(at);
+        }
     }
 }
 
@@ -311,6 +389,26 @@ impl Fake {
 
     fn hidden_count(&self) -> usize {
         self.hidden.load(Ordering::SeqCst)
+    }
+
+    /// The remapper's pad, with these buttons down (M22).
+    fn remapper_press(&self, buttons: PadButtons) {
+        *self.local.remapper_state.lock().unwrap() = pressed(buttons);
+    }
+
+    /// The remapper's pad plugged in under `device`, or gone.
+    fn plug_remapper(&self, device: Option<&str>) {
+        *self.local.remapper_device.lock().unwrap() = device.map(String::from);
+    }
+
+    fn virtual_hidden(&self) -> Vec<String> {
+        self.virtual_hidden.lock().unwrap().clone()
+    }
+
+    fn set_virtual_now(&self, device: &str, now: VirtualDevice) {
+        let mut all = self.virtual_now.lock().unwrap();
+        all.retain(|(d, _)| d != device);
+        all.push((device.into(), now));
     }
 
     fn viewer(&self) -> Option<FakeViewer> {
@@ -427,6 +525,28 @@ impl Backend for Fake {
         }
         self.hidden.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(Shown(self.hidden.clone())))
+    }
+
+    fn hide_virtual(&self, device: &str) -> Result<Box<dyn std::any::Any + Send>, String> {
+        // As the platform: only another program's pad, by the markers now.
+        if self.virtual_device_now(device) != VirtualDevice::Theirs {
+            return Err("that pad isn't proven another program's".into());
+        }
+        self.virtual_hides.fetch_add(1, Ordering::SeqCst);
+        self.virtual_hidden.lock().unwrap().push(device.into());
+        Ok(Box::new(VirtualShown(
+            self.virtual_hidden.clone(),
+            device.into(),
+        )))
+    }
+
+    fn virtual_device_now(&self, device: &str) -> VirtualDevice {
+        self.virtual_now
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(d, _)| d == device)
+            .map_or(VirtualDevice::Theirs, |(_, now)| *now)
     }
 
     fn focus(&self, _window: NativeId) -> Focus {
@@ -3386,6 +3506,133 @@ async fn a_controller_that_cant_be_hidden_plays_outside_the_seats() {
     ));
     let b_window = watching(&room, &a, &b).await;
     give_seat(&room, &mut a, &b, &b_window, 0).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M22: a remapper's pad (DS4Windows's, say) as the host's controller:
+/// hidden by its device, never by ids (no physical controller is touched),
+/// kept hidden while the remapper plugs it again, and shown again as soon as
+/// the device could be something else's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remappers_pad_plays_a_seat_hidden_by_its_device() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.plug_remapper(Some(PAD_01));
+    let list = sources(&a).await;
+    assert_eq!(
+        list.host_controllers,
+        vec![dualsense(), gamesir(), remapper()]
+    );
+    let reply = a
+        .live(go_live_playing(
+            &room,
+            4,
+            InputSetup::default(),
+            vec![remapper()],
+        ))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert_eq!(a.fake.virtual_hidden(), [PAD_01], "hidden as it goes live");
+    assert_eq!(a.fake.hidden_count(), 0, "no physical controller hidden");
+    a.wait_session(&room, &a, "the host on the seat", |s| {
+        s.is_some_and(|s| {
+            host_on(s, 0, &a) && s.host_controllers == ["Xbox 360 Controller (a remapper's)"]
+        })
+    })
+    .await;
+    // Its remapped input drives the seat's pad, through the router.
+    a.fake.remapper_press(PadButtons::A);
+    wait("the remapper's A", || {
+        a.fake.pad() == Some(pressed(PadButtons::A))
+    })
+    .await;
+    // The game shakes the seat: the remapper's pad gets it.
+    let shake = Rumble {
+        low_frequency: 120,
+        high_frequency: 60,
+    };
+    a.fake.pads.plugged.lock().unwrap()[0].queue_rumble(shake);
+    wait("the rumble", || {
+        a.fake
+            .local
+            .remapper_rumble
+            .lock()
+            .unwrap()
+            .contains(&shake)
+    })
+    .await;
+
+    // The remapper plugs its pad again (its controller reconnecting): the
+    // device stays hidden while it is gone, and while it is back but the
+    // reader doesn't have it yet (its player light, its next look), so it
+    // is hidden as it comes back.
+    a.fake.plug_remapper(None);
+    a.fake.set_virtual_now(
+        PAD_01,
+        VirtualDevice::Gone {
+            hosts_plugging: false,
+        },
+    );
+    tokio::time::sleep(CHECK_EVERY * 5 / 2).await;
+    assert_eq!(a.fake.virtual_hidden(), [PAD_01], "kept while gone");
+    a.fake.set_virtual_now(PAD_01, VirtualDevice::Theirs);
+    tokio::time::sleep(CHECK_EVERY * 5 / 2).await;
+    assert_eq!(
+        a.fake.virtual_hidden(),
+        [PAD_01],
+        "kept while back but not yet read"
+    );
+    // A host here plugging a pad meanwhile: in doubt, but plugged in, so no
+    // other pad can have its id: kept.
+    a.fake.set_virtual_now(PAD_01, VirtualDevice::InDoubt);
+    tokio::time::sleep(CHECK_EVERY * 3 / 2).await;
+    assert_eq!(a.fake.virtual_hidden(), [PAD_01], "kept while in doubt");
+    a.fake.set_virtual_now(PAD_01, VirtualDevice::Theirs);
+    a.fake.plug_remapper(Some(PAD_01));
+    a.fake.remapper_press(PadButtons::B);
+    wait("the remapper's B", || {
+        a.fake.pad() == Some(pressed(PadButtons::B))
+    })
+    .await;
+    tokio::time::sleep(CHECK_EVERY * 3 / 2).await;
+    assert_eq!(a.fake.virtual_hidden(), [PAD_01]);
+    assert_eq!(
+        a.fake.virtual_hides.load(Ordering::SeqCst),
+        1,
+        "never hidden anew"
+    );
+
+    // Gone while a host here plugs a pad, which may take its id: the entry
+    // comes off. Back under another id: that one is hidden.
+    a.fake.plug_remapper(None);
+    a.fake.set_virtual_now(
+        PAD_01,
+        VirtualDevice::Gone {
+            hosts_plugging: true,
+        },
+    );
+    wait("the old entry off", || a.fake.virtual_hidden().is_empty()).await;
+    a.fake.plug_remapper(Some(PAD_02));
+    wait("the new device hidden", || {
+        a.fake.virtual_hidden() == [PAD_02]
+    })
+    .await;
+
+    // The device turns out to be one of ours: shown again, and never
+    // hidden again while it is.
+    a.fake.set_virtual_now(PAD_02, VirtualDevice::Ours);
+    wait("shown again", || a.fake.virtual_hidden().is_empty()).await;
+    tokio::time::sleep(CHECK_EVERY * 3 / 2).await;
+    assert!(a.fake.virtual_hidden().is_empty(), "not hidden again");
+
+    // Ending shows everything again.
+    a.fake.set_virtual_now(PAD_02, VirtualDevice::Theirs);
+    wait("hidden again once it is theirs", || {
+        a.fake.virtual_hidden() == [PAD_02]
+    })
+    .await;
+    a.ok(Command::EndSession).await;
+    wait("all shown again", || a.fake.virtual_hidden().is_empty()).await;
+    assert_eq!(a.fake.hidden_count(), 0);
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

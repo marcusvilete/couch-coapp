@@ -29,7 +29,7 @@ use couch_platform_win::{
 
 use super::{
     AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, ScreenSource, Source,
-    Sources, ViewerOptions, ViewerProcess, WindowSource,
+    Sources, ViewerOptions, ViewerProcess, VirtualDevice, WindowSource,
 };
 use crate::{DriverName, DriverState, ScreenArea};
 
@@ -236,6 +236,22 @@ impl Backend for WindowsBackend {
         hidhide::hide(ids)
             .map(|hidden| Box::new(hidden) as Box<dyn Any + Send>)
             .map_err(|e| e.to_string())
+    }
+
+    fn hide_virtual(&self, device: &str) -> Result<Box<dyn Any + Send>, String> {
+        hidhide::hide_virtual(device)
+            .map(|hidden| Box::new(hidden) as Box<dyn Any + Send>)
+            .map_err(|e| e.to_string())
+    }
+
+    fn virtual_device_now(&self, device: &str) -> VirtualDevice {
+        use couch_platform_win::pad_origin::{self, DeviceNow};
+        match pad_origin::device_now(device) {
+            DeviceNow::Theirs => VirtualDevice::Theirs,
+            DeviceNow::Ours => VirtualDevice::Ours,
+            DeviceNow::InDoubt => VirtualDevice::InDoubt,
+            DeviceNow::Gone { hosts_plugging } => VirtualDevice::Gone { hosts_plugging },
+        }
     }
 
     fn low_latency_network(&self) -> Option<Box<dyn Any + Send>> {

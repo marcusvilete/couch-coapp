@@ -2,13 +2,14 @@
 //! through a seat (P2).
 //!
 //! Without `--feed` it lists this PC's controllers (never our own virtual
-//! pads) and says whether HidHide can hide them. With `--feed N` it hides
-//! controller N from every other program (unless `--no-hide`), plugs a
-//! virtual Xbox 360 pad with real ids, and drives it from the controller for
-//! `--secs` through a seat router (as the host's own holder, as in the app),
-//! passing the game's rumble back. Watch with
-//! `scripts\xinput-watch.ps1` and `joy.cpl`: after reconnecting the
-//! controller once, only the virtual pad should be left, moving with it.
+//! pads; other programs' since M22, named so) and says whether HidHide can
+//! hide them. With `--feed N` it plugs a virtual Xbox 360 pad with real ids,
+//! hides controller N from every other program (unless `--no-hide`), and
+//! drives the pad from the controller for `--secs` through a seat router
+//! (as the host's own holder, as in the app), passing the game's rumble
+//! back. Watch with `scripts\xinput-watch.ps1` and `joy.cpl`: after
+//! reconnecting the controller once, only the virtual pad should be left,
+//! moving with it.
 
 use std::{
     sync::{Arc, Mutex, PoisonError},
@@ -19,6 +20,7 @@ use anyhow::{Context, bail};
 use couch_input::{
     HidUsage, InputError, KbmInjector, MemberId, MouseButton, PadState, Permissions, SeatId,
     VirtualPadFactory,
+    local::{ControllerChoice, ControllerKind},
     router::{self, Input, SeatRouter},
 };
 use couch_platform_win::{hidhide, vigem::VigemPadFactory};
@@ -33,15 +35,19 @@ pub fn run(feed: Option<usize>, secs: u64, hide: bool) -> anyhow::Result<()> {
     let pads = couch_gamepad::host_pads();
     let list = pads.list().context("listing controllers")?;
     if list.is_empty() {
-        println!("no controllers (virtual pads are never listed)");
+        println!("no controllers (our virtual pads are never listed)");
     }
     for (i, c) in list.iter().enumerate() {
         println!(
-            "{}: {} ({:04x}:{:04x})",
+            "{}: {} ({:04x}:{:04x}){}",
             i + 1,
             c.name,
             c.ids.vendor,
-            c.ids.product
+            c.ids.product,
+            match &c.device {
+                Some(device) => format!(", another program's virtual pad: {device}"),
+                None => String::new(),
+            }
         );
     }
     let Some(n) = feed else {
@@ -51,19 +57,28 @@ pub fn run(feed: Option<usize>, secs: u64, hide: bool) -> anyhow::Result<()> {
         bail!("there is no controller {n}");
     };
 
-    let hidden = if hide {
-        let hidden = hidhide::hide(chosen.ids).context("hiding it")?;
-        println!(
-            "{} is hidden from other programs. Reconnect it once (unplug and plug it back, or turn it off and on) so programs that had it open let go.",
-            chosen.name
-        );
-        Some(hidden)
-    } else {
-        None
-    };
-
+    // Declared before our pad, so however this ends (an error included),
+    // the controller is shown again only after our pad is unplugged.
+    let mut hidden: Option<hidhide::Hidden> = None;
+    // Our pad first: hiding a remapper's pad by its device (M22) while it
+    // is gone would hide whichever pad takes that id next, ours included.
     let factory = VigemPadFactory::connect(None).context("connecting to ViGEmBus")?;
     let mut virtual_pads = vec![Some(factory.plug().context("plugging a virtual pad")?)];
+    if hide {
+        // A remapper's pad by its device, kept hidden to the end even while
+        // the remapper plugs it again.
+        hidden = Some(
+            match (chosen.kind, &chosen.device) {
+                (ControllerKind::OtherVirtual, Some(device)) => hidhide::hide_virtual(device),
+                _ => hidhide::hide(chosen.ids),
+            }
+            .context("hiding it")?,
+        );
+        println!(
+            "{} is hidden from other programs. Reconnect it once (unplug and plug it back, or turn it off and on; for a remapper's pad, the controller behind it) so programs that had it open let go.",
+            chosen.name
+        );
+    }
     // Through a seat router, as the app does: the host's own holder on seat
     // 0, with the pad only (so the Guide button stays out too).
     let host = MemberId([0; 32]);
@@ -75,11 +90,19 @@ pub fn run(feed: Option<usize>, secs: u64, hide: bool) -> anyhow::Result<()> {
     let sink = latest.clone();
     let followed = pads
         .follow(
-            chosen.ids,
+            ControllerChoice {
+                ids: chosen.ids,
+                kind: chosen.kind,
+            },
             Box::new(move |state| {
                 let mut slot = sink.lock().unwrap_or_else(PoisonError::into_inner);
                 slot.0 = state;
                 slot.1 += 1;
+            }),
+            Box::new(|device| {
+                if let Some(device) = device {
+                    println!("reading {device}");
+                }
             }),
         )
         .context("following it")?;

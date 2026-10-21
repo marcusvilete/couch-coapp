@@ -45,7 +45,7 @@ use std::{
 use couch_codec_opus::OpusEncoder;
 use couch_input::{
     KbmInjector, MemberId, PadState, Permissions, Rumble, SeatEpoch, SeatId, VirtualPad,
-    local::{ControllerIds, LocalPad},
+    local::{ControllerChoice, ControllerIds, ControllerKind, LocalController, LocalPad},
     router::{self, Effect, Input, SeatRouter, SeatStatus},
 };
 use couch_media::{
@@ -79,6 +79,7 @@ use tokio::{
 use super::{
     AudioChoice, AudioKind, Backend, CaptureRequest, Focus, GameProcess, NativeId, Source,
     source::{self, Game, SourceWatch, Verdict},
+    virtual_hiding,
 };
 
 /// How often the dead-man timer, the foreground check and rumble run.
@@ -200,10 +201,12 @@ pub struct StreamOptions {
 pub struct LocalSeat {
     /// The host's own id, as the router's holder.
     pub member: MemberId,
-    /// By controller: two of one model are told apart by the order found.
-    pub controllers: Vec<ControllerIds>,
+    /// By controller: two of one model (or two remapper pads, M22) are told
+    /// apart by the order found.
+    pub controllers: Vec<ControllerChoice>,
     /// Hide them from games first, or they would see them beside their
-    /// seats' pads.
+    /// seats' pads: physical controllers by their ids, remapper pads by
+    /// their devices (kept hidden while they are gone, `virtual_hiding`).
     pub hide: bool,
 }
 
@@ -628,7 +631,7 @@ impl HostPipeline {
                     .iter()
                     .map(|kind| kind.has_pad().then(|| backend.plug_pad(real_ids)))
                     .collect::<Vec<_>>();
-                let local = local.map(|local| start_local(&*backend, local, local_tx));
+                let local = local.map(|local| start_local(&backend, local, local_tx));
                 (pads, local)
             })
             .await
@@ -702,7 +705,13 @@ impl HostPipeline {
                 let ids: Vec<String> = l
                     .controllers
                     .iter()
-                    .map(|c| format!("{:04x}:{:04x}", c.vendor, c.product))
+                    .map(|c| {
+                        let ids = format!("{:04x}:{:04x}", c.ids.vendor, c.ids.product);
+                        match c.kind {
+                            ControllerKind::Physical => ids,
+                            ControllerKind::OtherVirtual => format!("{ids} (a remapper's pad)"),
+                        }
+                    })
                     .collect();
                 shared.note(format!(
                     "the host's controllers {} play through seats{}",
@@ -1983,14 +1992,14 @@ type HiddenGuard = Box<dyn Any + Send>;
 /// hidden.
 type Followed = (Vec<Box<dyn LocalPad>>, Option<HiddenGuard>);
 
-/// Hides the host's controllers if asked (each model once: hiding goes by
-/// ids), then follows each, its states going to `states` with its index.
-/// Blocks: hiding and starting the reader take a moment. All or nothing: if
-/// one can't be hidden or followed, none plays through a seat, and those
-/// hidden are shown again. Returns the followed pads, by controller, and
-/// the hiding guard.
+/// Hides the host's controllers if asked (physical ones each model once:
+/// hiding goes by ids; remapper pads by device, M22), then follows each, its
+/// states going to `states` with its index. Blocks: hiding and starting the
+/// reader take a moment. All or nothing: if one can't be hidden or
+/// followed, none plays through a seat, and those hidden are shown again.
+/// Returns the followed pads, by controller, and the hiding guard.
 fn start_local(
-    backend: &dyn Backend,
+    backend: &Arc<dyn Backend>,
     local: LocalSeat,
     states: mpsc::Sender<(u8, PadState)>,
 ) -> Result<Followed, String> {
@@ -1998,31 +2007,76 @@ fn start_local(
         .local_pads()
         .ok_or_else(|| "this PC's controllers can't be read".to_string())?;
     let mut hidden: Vec<HiddenGuard> = Vec::new();
+    let mut keeper = None;
     if local.hide {
-        let mut models = local.controllers.clone();
+        let mut models: Vec<ControllerIds> = local
+            .controllers
+            .iter()
+            .filter(|c| c.kind == ControllerKind::Physical)
+            .map(|c| c.ids)
+            .collect();
         models.sort_by_key(|c| (c.vendor, c.product));
         models.dedup();
         for ids in models {
             hidden.push(backend.hide_controller(ids)?);
         }
+        if local
+            .controllers
+            .iter()
+            .any(|c| c.kind == ControllerKind::OtherVirtual)
+        {
+            let listed = pads.list().map_err(|e| e.to_string())?;
+            keeper = Some(virtual_hiding::Keeper::start(
+                backend.clone(),
+                devices_to_read(&local.controllers, &listed),
+            )?);
+        }
     }
-    // A failure here drops `hidden`: the controllers are shown again.
+    let news = keeper.as_ref().map(virtual_hiding::Keeper::news);
+    // A failure here drops `hidden` and the keeper: the controllers are
+    // shown again.
     let mut followed = Vec::new();
-    for (k, ids) in local.controllers.iter().enumerate() {
+    for (k, choice) in local.controllers.iter().enumerate() {
         let states = states.clone();
-        let k = k as u8;
+        let news = news.clone();
         followed.push(
             pads.follow(
-                *ids,
+                *choice,
                 Box::new(move |state| {
-                    let _ = states.try_send((k, state));
+                    let _ = states.try_send((k as u8, state));
+                }),
+                Box::new(move |device| {
+                    if let Some(news) = &news {
+                        news.reading(k, device);
+                    }
                 }),
             )
             .map_err(|e| e.to_string())?,
         );
     }
+    // The keeper last: what it hid stays hidden until the pads are gone.
+    hidden.extend(keeper.map(|k| Box::new(k) as HiddenGuard));
     let hidden = (!hidden.is_empty()).then(|| Box::new(hidden) as HiddenGuard);
     Ok((followed, hidden))
+}
+
+/// The device each remapper pad among `chosen` will be read from, as the
+/// reader takes them (the first of its kind and ids that no earlier follow
+/// takes, in `listed`'s order); `None` for a physical controller, or a pad
+/// not plugged in.
+fn devices_to_read(chosen: &[ControllerChoice], listed: &[LocalController]) -> Vec<Option<String>> {
+    let mut taken = vec![false; listed.len()];
+    chosen
+        .iter()
+        .map(|choice| {
+            let at = listed
+                .iter()
+                .enumerate()
+                .position(|(i, c)| !taken[i] && c.ids == choice.ids && c.kind == choice.kind)?;
+            taken[at] = true;
+            listed[at].device.clone()
+        })
+        .collect()
 }
 
 enum InputCmd {
@@ -2532,6 +2586,10 @@ async fn input_loop(
     for (_, (task, _)) in st.viewers.drain() {
         task.abort();
     }
+    // The host's controllers stop being read before our pads unplug: an
+    // unplugging pad of ours, its marker gone, must never be taken for a
+    // remapper's by a follow still looking (M22).
+    drop(st.local.take());
     drop(st);
     // The pads are gone: games may see the host's controller again. Showing
     // it talks to the driver, off the runtime's threads.

@@ -617,8 +617,15 @@ const TITLE_KEY = "couch.session.title";
 const FPS_KEY = "couch.stream.fps";
 const QUALITY_KEY = "couch.stream.quality";
 
+/** A controller's model: its ids, and for a remapper's pad (M22), which has
+ * a real Xbox 360 controller's ids, that it is one. */
 function padKey(c: HostController): string {
-  return `${c.vendor}:${c.product}`;
+  return c.kind === "otherVirtual" ? `${c.vendor}:${c.product}:remapper` : `${c.vendor}:${c.product}`;
+}
+
+/** How the dialog names a controller: a remapper's pad says so (M22). */
+function padName(c: HostController): string {
+  return c.kind === "otherVirtual" ? `${c.name} (a remapper's virtual pad)` : c.name;
 }
 
 /** Each listed controller's key: its ids, and for a second of one model its
@@ -1117,9 +1124,19 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
   const padSeat = controllers > 0;
   const hostControllers = sources?.hostControllers ?? [];
   const keys = padKeys(hostControllers);
-  const names = numbered(hostControllers.map((c) => c.name));
+  const names = numbered(hostControllers.map(padName));
   const chosenKeys = padSeat ? keys.filter((k) => myPads.includes(k)).slice(0, controllers) : [];
   const chosen = hostControllers.filter((_, i) => chosenKeys.includes(keys[i]));
+  // Playing through a remapper's pad (M22): the controller behind it stays
+  // in games' sight unless the remapper hides it.
+  const remapping = chosen.some((c) => c.kind === "otherVirtual");
+  const besides = names.filter((_, i) => hostControllers[i].kind === "physical" && !chosenKeys.includes(keys[i]));
+  // Another remapper pad left unticked: games see it too, so the general
+  // warning stays beside the remapper's.
+  const otherRemappers = hostControllers.some((c, i) => c.kind === "otherVirtual" && !chosenKeys.includes(keys[i]));
+  // A remapper's pad and the controller it reads both ticked: one press
+  // then drives two seats (seen in M22's run).
+  const alsoBehind = remapping && chosen.some((c) => c.kind === "physical");
   // Two of one model are told apart by the order found (the reader takes the
   // first free one): choosing "DualSense 2" chooses "DualSense 1" too, and
   // leaving out the first leaves out the second.
@@ -1257,12 +1274,27 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
               Give the guests at least one seat: a controller, or keyboard and mouse.
             </p>
           )}
-          {(sources?.controllers ?? 0) > chosen.length && padSeat && (
-            <p className="banner warn" role="status">
-              A controller is plugged into this PC. Games may give it a player's place, and then a guest's controller may not
-              work. Play on a seat with it (below), or unplug it.
+          {alsoBehind && (
+            <p className="hint">
+              If your remapper reads one of the other controllers you ticked, each press on it drives two seats: its own,
+              and the remapper's pad's. Tick only the remapper's pad for that controller.
             </p>
           )}
+          {remapping && besides.length > 0 && (
+            <p className="banner warn" role="status">
+              Games still see {besides.join(" and ")}, unless your remapper hides{" "}
+              {besides.length === 1 ? "it" : "them"}: then one player too many. Turn on the remapper's own hiding (in
+              DS4Windows, "Hide DS4 controller"), or tick {besides.length === 1 ? "it" : "them"} to play a seat too.
+            </p>
+          )}
+          {(!(remapping && besides.length > 0) || otherRemappers) &&
+            (sources?.controllers ?? 0) > chosen.length &&
+            padSeat && (
+              <p className="banner warn" role="status">
+                A controller is plugged into this PC. Games may give it a player's place, and then a guest's controller may
+                not work. Play on a seat with it (below), or unplug it.
+              </p>
+            )}
           {loadError && <p className="error">{loadError}</p>}
           {sources && hostControllers.length > 0 && padSeat && (
             <>
@@ -1295,7 +1327,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
                   : sources.hiding === "busy"
                     ? "HidHide is busy right now. If its configuration window is open, close it, then start the session again."
                     : chosen.length > 0
-                      ? `${chosen.length === 1 ? "It is" : "They are"} hidden from games for the whole session and ${chosen.length === 1 ? "plays its seat" : "each play their own seat"} through Couch Co-App, so every seat, yours included, can be handed over. Start the game after the session: a game already running keeps a controller until you reconnect it once. For a Steam game, turn Steam Input off for it (the game's Properties → Controller): otherwise Steam may keep a player for a hidden controller, and one seat gets none.`
+                      ? `${chosen.length === 1 ? "It is" : "They are"} hidden from games for the whole session and ${chosen.length === 1 ? "plays its seat" : "each play their own seat"} through Couch Co-App, so every seat, yours included, can be handed over. Start the game after the session: a game already running keeps a controller until you reconnect it once${remapping ? " (for a remapper's pad, reconnect the controller behind it)" : ""}. For a Steam game, turn Steam Input off for it (the game's Properties → Controller): otherwise Steam may keep a player for a hidden controller, and one seat gets none.`
                       : "You play outside the seats, as the game sees your controllers."}
               </p>
             </>

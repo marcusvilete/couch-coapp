@@ -56,8 +56,10 @@ use windows::{
 
 use crate::{
     controllers::{self, Device},
+    device_tree::{self, Node},
     markers::{self, own_start_time, process_state},
     pad_origin::{self, Origin},
+    virtual_pads,
 };
 
 /// What HidHide can do for us right now.
@@ -82,6 +84,10 @@ pub enum HideError {
         "only virtual pads, or controllers that can't be told from ours, have those ids: they're never hidden"
     )]
     Ours,
+    #[error(
+        "that pad isn't proven another program's virtual pad (it may be ours, or where it comes from can't be told): never hidden"
+    )]
+    NotAnotherProgramsPad,
     #[error("HidHide: {0}")]
     Failed(String),
 }
@@ -136,13 +142,50 @@ fn live() -> MutexGuard<'static, Vec<PathBuf>> {
 }
 
 /// Hides the host's controller with `ids` (every node of it) from every
-/// program but ours. A virtual pad, ours or another program's, is never
-/// hidden (P9): only devices the host's reader would list as its controller
-/// (`pad_origin::may_be_the_hosts`), and nothing under a virtual bus.
+/// program but ours. By ids, a virtual pad, ours or another program's, is
+/// never hidden (P9): only devices the host's reader would list as its
+/// physical controller (`pad_origin::may_be_the_hosts`), and nothing under a
+/// virtual bus. A remapper's pad goes through [`hide_virtual`] (M22).
 pub fn hide(ids: ControllerIds) -> Result<Hidden, HideError> {
     let devices = to_hide(&controllers::present(), ids, &|d| {
         pad_origin::of_device(&d.instance_id)
     })?;
+    hide_devices(
+        &devices,
+        &format!("controller {:04x}:{:04x}", ids.vendor, ids.product),
+        true,
+    )
+}
+
+/// Hides another program's virtual pad (M22: a remapper's, which the host
+/// plays through a seat), the device with `instance_id` and every node under
+/// it, from every program but ours. Only a pad proven another program's
+/// now, by the hosts' markers as they are: never ours, nor one whose origin
+/// is in doubt.
+///
+/// The entries stay while the guard lives, the pad gone or not: a remapper
+/// plugs its pad again under the same device id (DS4Windows does when its
+/// controller reconnects), and a pad hidden only after it appears is opened
+/// first by any game polling for pads (docs/m22-results.md). Whoever holds
+/// the guard drops it once the device could be something else's. Never on
+/// HidHide's session list, which is cleared as a whole: these guards drop
+/// one at a time.
+pub fn hide_virtual(instance_id: &str) -> Result<Hidden, HideError> {
+    let chain = device_tree::chain(instance_id);
+    if !pad_origin::proven_theirs(&chain, &virtual_pads::host_pads()) {
+        return Err(HideError::NotAnotherProgramsPad);
+    }
+    let devices = virtual_to_hide(&controllers::present(), instance_id, &device_tree::chain);
+    if devices.is_empty() {
+        return Err(HideError::NotFound);
+    }
+    hide_devices(&devices, &format!("virtual pad {instance_id}"), false)
+}
+
+/// Puts `devices` on HidHide's blacklist (with `session`, its session one
+/// if it has it), recorded in a marker first, our exe on the whitelist,
+/// HidHide active.
+fn hide_devices(devices: &[String], what: &str, session: bool) -> Result<Hidden, HideError> {
     // One handle throughout: HidHide takes one at a time, so an undo on the
     // way out must use this one, not open another.
     let control = Control::open_patiently()?;
@@ -161,13 +204,13 @@ pub fn hide(ids: ControllerIds) -> Result<Hidden, HideError> {
 
     let was_active = control.active()?;
     let blacklist = control.list(GET_BLACKLIST)?;
-    let session = control.add_session(&devices).is_ok();
+    let session = session && control.add_session(devices).is_ok();
     let record = Record {
         started: own_start_time(),
         devices: if session {
             Vec::new()
         } else {
-            ours_to_add(&devices, &blacklist)
+            ours_to_add(devices, &blacklist)
         },
     };
     // The marker goes down before the lists or the active flag change, so a
@@ -205,10 +248,8 @@ pub fn hide(ids: ControllerIds) -> Result<Hidden, HideError> {
     tracing::info!(
         session,
         turned_on = !was_active,
-        "hid {} device(s) of controller {:04x}:{:04x}",
+        "hid {} device(s) of {what}",
         devices.len(),
-        ids.vendor,
-        ids.product
     );
     Ok(Hidden {
         marker,
@@ -227,8 +268,8 @@ impl Drop for Hidden {
                 // HidHide would drop them when we exit anyway. This clears
                 // every session entry of ours, other `Hidden`s' included:
                 // fine while a host's guards (M23: one per controller model)
-                // all drop together, as the pipeline's do. Guards that drop
-                // apart would need each to remove only its own.
+                // all drop together, as the pipeline's do. Remapper pads'
+                // (M22), which drop apart, never use the session list.
                 let _ = control.clear_session();
             }
             undo_with(&control, &self.marker, &self.record)
@@ -239,6 +280,13 @@ impl Drop for Hidden {
             Err(e) => tracing::warn!("showing the host's controller again: {e}"),
         }
     }
+}
+
+/// HidHide's persistent blacklist as it is now: for `couch-cli
+/// remapper-probe` (M22), to see whether a remapper keeps our entries.
+#[doc(hidden)]
+pub fn blacklist() -> Result<Vec<String>, HideError> {
+    Control::open_patiently()?.list(GET_BLACKLIST)
 }
 
 /// Undoes what crashed hosts' markers recorded, and our own left by an undo
@@ -621,6 +669,30 @@ fn to_hide(
         !device.is_some_and(|d| matches!(origin(d), Origin::Ours | Origin::OtherVirtual))
     });
     Ok(out)
+}
+
+/// The instance ids to hide for another program's virtual pad, the device
+/// `pad`: it, and the devices of the classes HidHide filters under it
+/// (`chain` gives a device's chain, nearest first, itself included). Never
+/// by container: a virtual pad's may be the PC's own.
+fn virtual_to_hide(
+    devices: &[Device],
+    pad: &str,
+    chain: &dyn Fn(&str) -> Vec<Node>,
+) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|d| {
+            d.instance_id.eq_ignore_ascii_case(pad)
+                || (HIDDEN_CLASSES
+                    .iter()
+                    .any(|c| d.class.eq_ignore_ascii_case(c))
+                    && chain(&d.instance_id)
+                        .iter()
+                        .any(|n| n.instance_id.eq_ignore_ascii_case(pad)))
+        })
+        .map(|d| d.instance_id.clone())
+        .collect()
 }
 
 fn has_ids(device: &Device, ids: ControllerIds) -> bool {
@@ -1021,5 +1093,43 @@ mod tests {
             to_hide(&devices, DUALSENSE, &origin).unwrap(),
             s(&[r"USB\VID_054C&PID_0CE6\5", r"HID\VID_054C&PID_0CE6\6"])
         );
+    }
+
+    /// A remapper's pad (M22): it and the filtered devices under it, never
+    /// another pad sharing its container (ViGEm's pads may share the PC's),
+    /// nor a device under it of a class HidHide doesn't filter.
+    #[test]
+    fn a_remappers_pad_is_hidden_by_its_device_alone() {
+        let the_pc = Some(THE_PC);
+        let theirs = r"USB\VID_045E&PID_028E\40";
+        let theirs_hid = r"HID\VID_045E&PID_028E&IG_00\9&1&0&0000";
+        let ours = r"USB\VID_045E&PID_028E\51";
+        let ours_hid = r"HID\VID_045E&PID_028E&IG_00\9&2&0&0000";
+        let devices = vec![
+            device(theirs, r"USB\VID_045E&PID_028E", XUSB, the_pc),
+            device(theirs_hid, r"HID\VID_045E&PID_028E&IG_00", HID, the_pc),
+            device(r"SWD\SOMETHING\1", r"SWD\SOMETHING", USB, the_pc),
+            device(ours, r"USB\VID_045E&PID_028E", XUSB, the_pc),
+            device(ours_hid, r"HID\VID_045E&PID_028E&IG_00", HID, the_pc),
+        ];
+        let node = |id: &str| Node {
+            instance_id: id.into(),
+            ..Node::default()
+        };
+        let chain = |id: &str| match id {
+            _ if id == theirs_hid || id == r"SWD\SOMETHING\1" => vec![node(id), node(theirs)],
+            _ if id == ours_hid => vec![node(id), node(ours)],
+            _ => vec![node(id)],
+        };
+        assert_eq!(
+            virtual_to_hide(&devices, theirs, &chain),
+            s(&[theirs, theirs_hid])
+        );
+        // Case doesn't matter to HidHide, nor here.
+        assert_eq!(
+            virtual_to_hide(&devices, &theirs.to_lowercase(), &chain),
+            s(&[theirs, theirs_hid])
+        );
+        assert!(virtual_to_hide(&devices, r"USB\VID_045E&PID_028E\77", &chain).is_empty());
     }
 }

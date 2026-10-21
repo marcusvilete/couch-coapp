@@ -26,6 +26,8 @@ mod pad_origins;
 mod pad_test;
 mod probe;
 mod release_check;
+mod remapper_hop;
+mod remapper_probe;
 mod screen_probe;
 mod stats;
 mod view;
@@ -299,6 +301,35 @@ enum Cmd {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
         count: u8,
     },
+    /// M22's probe: watches the gamepads, and with `--hide` hides each other
+    /// program's virtual pad (a remapper's) through HidHide while still
+    /// reading it, again whenever it is plugged anew. Shown again at the end.
+    RemapperProbe {
+        #[arg(long, default_value_t = 120)]
+        secs: u64,
+        /// Hide other programs' virtual pads from every program but ours.
+        #[arg(long)]
+        hide: bool,
+        /// Keep a hidden pad's device on the blacklist when it goes, so the
+        /// same pad plugged again is hidden from its first moment.
+        #[arg(long, requires = "hide")]
+        sticky: bool,
+        /// Shake them every 5 s, to see the rumble reach the controller
+        /// behind them.
+        #[arg(long)]
+        rumble: bool,
+        /// Virtual pads that leave no marker to plug first, standing in for a
+        /// remapper's.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=4))]
+        unmarked: u8,
+    },
+    /// What a remapper's pad adds before the host's input reaches a seat
+    /// (M22): an unmarked pad stands in for it, and each press is timed from
+    /// its write to the host's reader.
+    RemapperHop {
+        #[arg(long, default_value_t = 200)]
+        presses: u32,
+    },
     /// Every gamepad SDL finds, where it sits in Windows' device tree, and the
     /// origin the app gives it (P9). Plugs pads only when asked to.
     PadOrigins {
@@ -556,6 +587,16 @@ async fn main() -> ExitCode {
             settle,
             hold,
         } => tokio::task::block_in_place(|| pad_origins::run(ours, unmarked, settle, hold)),
+        Cmd::RemapperHop { presses } => tokio::task::block_in_place(|| remapper_hop::run(presses)),
+        Cmd::RemapperProbe {
+            secs,
+            hide,
+            sticky,
+            rumble,
+            unmarked,
+        } => tokio::task::block_in_place(|| {
+            remapper_probe::run(secs, hide, sticky, rumble, unmarked)
+        }),
         Cmd::HostPad {
             feed,
             secs,
