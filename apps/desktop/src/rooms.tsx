@@ -118,6 +118,8 @@ export type RoomActions = {
   changePassword: () => void;
   leave: () => void;
   ban: (member: MemberView) => void;
+  /** Owner only, restored from a backup (M13). */
+  stopCatchingUp: () => void;
 };
 
 export function RoomColumn(props: {
@@ -138,11 +140,24 @@ export function RoomColumn(props: {
       </header>
       {room && (
         <div className="column-body">
-          {room.isOwner && (
-            <button className="primary wide" onClick={props.actions.invite}>
-              Invite people
-            </button>
-          )}
+          {room.isOwner &&
+            (room.needsPassword ? (
+              // Restored from a backup (M13): it came without a password.
+              <>
+                <p className="banner warn" role="status">
+                  This room came back from a backup without its password. Set a new one to invite people again; members
+                  already in aren't affected.
+                </p>
+                <button className="primary wide" onClick={props.actions.changePassword}>
+                  Set a new password
+                </button>
+              </>
+            ) : (
+              <button className="primary wide" onClick={props.actions.invite}>
+                Invite people
+              </button>
+            ))}
+          {room.catchingUp && <CatchingUp room={room} onStop={props.actions.stopCatchingUp} />}
           {props.pausedUntil != null && <PausedBanner until={props.pausedUntil} />}
           <MemberList room={room} onBan={props.actions.ban} />
         </div>
@@ -151,6 +166,34 @@ export function RoomColumn(props: {
       <UserPanel profile={props.profile} info={props.info} onEdit={props.onEditName} onSettings={props.onSettings} />
     </aside>
   );
+}
+
+/** A room restored from a backup (M13), until it has caught up: the owner
+ * waits for every member (one away may hold the newest state), a member for
+ * any one. */
+function CatchingUp(props: { room: RoomView; onStop: () => void }) {
+  const { room } = props;
+  const names = room.waitingFor.map((id) => room.members.find((m) => m.id === id)?.name ?? "a member");
+  return (
+    <>
+      <p className="banner" role="status">
+        {room.isOwner
+          ? `Restored from a backup: catching up with the room. Until ${listed(names)} ${names.length === 1 ? "has" : "have"} been online, nobody can be invited, let in or banned.`
+          : "Restored from a backup: catching up with the room until another member is online."}
+      </p>
+      {room.isOwner && (
+        <button className="wide" onClick={props.onStop}>
+          Stop waiting…
+        </button>
+      )}
+    </>
+  );
+}
+
+/** "Ana", "Ana and Bia", "Ana, Bia and Caio". */
+function listed(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "the others";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 function RoomMenu(props: { room: RoomView; actions: RoomActions }) {

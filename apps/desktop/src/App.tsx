@@ -165,6 +165,21 @@ function App() {
           lobby.putRoom(await request({ type: "banMember", room: room.id, member: member.id }, "room"));
         },
       }),
+    stopCatchingUp: () =>
+      room &&
+      setDialog({
+        kind: "confirm",
+        title: "Stop waiting for the others?",
+        body:
+          "Your room came back from a backup and may be older than the room is now. Members still away may hold " +
+          "newer changes, a ban made after the backup among them; if you stop waiting, those can be lost. Wait if " +
+          "they'll be back soon.",
+        action: "Stop waiting",
+        danger: true,
+        run: async () => {
+          lobby.putRoom(await request({ type: "stopCatchingUp", room: room.id }, "room"));
+        },
+      }),
   };
 
   if (lobby.failure) {
@@ -279,7 +294,9 @@ function App() {
           }}
         />
       )}
-      {dialog?.kind === "settings" && <SettingsDialog section="shortcuts" busy={busyIn(rooms)} onClose={close} />}
+      {dialog?.kind === "settings" && (
+        <SettingsDialog section="shortcuts" busy={busyIn(rooms)} hasRooms={rooms.length > 0} onClose={close} />
+      )}
       {splash && <Splash ready={lobby.loaded || lobby.failure != null} onDone={endSplash} />}
       {dialog?.kind === "confirm" && (
         <ConfirmDialog

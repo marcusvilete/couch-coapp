@@ -840,6 +840,7 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
         replace_grace: Duration::from_millis(500),
         reconnect_wait: Duration::from_secs(5),
         relay_only: false,
+        backup_files: None,
     }
 }
 

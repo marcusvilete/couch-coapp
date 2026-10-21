@@ -9,6 +9,7 @@
 //! iroh. Identity and remembered rooms live in the profile's folder
 //! ([`store`]), sealed with DPAPI on Windows ([`secrets`]).
 
+pub mod backup;
 pub mod build_config;
 pub mod pipeline;
 mod profile;
@@ -157,6 +158,25 @@ pub enum Command {
     /// The third-party licences installed next to the app
     /// (`THIRD-PARTY-NOTICES.txt`, `cargo xtask notices`), for Settings → About.
     GetNotices,
+    /// Writes a backup of this profile, sealed with `passphrase` (M13,
+    /// `backup`): the identity, the rooms (an owned room without its
+    /// password key or invites) and the settings. The app asks where
+    /// ([`BackupFiles`]); answers [`Response::Backup`].
+    ExportProfile {
+        passphrase: String,
+    },
+    /// Restores a backup into this profile, which must have no rooms; the
+    /// app asks which file ([`BackupFiles`]), then starts again
+    /// (`restart_app`) to use it. Answers [`Response::Backup`].
+    RestoreProfile {
+        passphrase: String,
+    },
+    /// Owner only, for a room restored from a backup (M13): stop waiting
+    /// for the members still away and sign again. A change made after the
+    /// backup that only they hold, a ban among them, may be lost.
+    StopCatchingUp {
+        room: String,
+    },
     /// Runs a driver's installer, shipped with the app, with Windows'
     /// administrator prompt; answers when it has finished, with every
     /// driver's state.
@@ -801,18 +821,37 @@ pub enum WatchEnd {
 #[ts(export)]
 pub enum Response {
     Info(EngineInfo),
-    Pong { nonce: u32 },
+    Pong {
+        nonce: u32,
+    },
     Profile(ProfileView),
-    Rooms { rooms: Vec<RoomView> },
+    Rooms {
+        rooms: Vec<RoomView>,
+    },
     Room(RoomView),
-    Invite { link: String },
+    Invite {
+        link: String,
+    },
     InvitePreview(InvitePreview),
-    OpenedInvite { link: Option<String> },
+    OpenedInvite {
+        link: Option<String>,
+    },
     Sources(SourceList),
-    Shortcuts { shortcuts: Vec<ShortcutView> },
+    Shortcuts {
+        shortcuts: Vec<ShortcutView>,
+    },
     Network(NetworkView),
-    Drivers { drivers: Vec<DriverView> },
-    Notices { text: String },
+    Drivers {
+        drivers: Vec<DriverView>,
+    },
+    Notices {
+        text: String,
+    },
+    /// A backup written or restored, at `path`; `None` if the user closed
+    /// the dialog.
+    Backup {
+        path: Option<String>,
+    },
     Done,
 }
 
@@ -865,6 +904,13 @@ impl fmt::Debug for Command {
             }
             Self::GetDrivers => f.write_str("GetDrivers"),
             Self::GetNotices => f.write_str("GetNotices"),
+            // The passphrase opens the whole identity.
+            Self::ExportProfile { .. } => f.write_str("ExportProfile { .. }"),
+            Self::RestoreProfile { .. } => f.write_str("RestoreProfile { .. }"),
+            Self::StopCatchingUp { room } => f
+                .debug_struct("StopCatchingUp")
+                .field("room", room)
+                .finish(),
             Self::InstallDriver { driver } => f
                 .debug_struct("InstallDriver")
                 .field("driver", driver)
@@ -970,6 +1016,11 @@ impl fmt::Debug for Response {
                 .debug_struct("Notices")
                 .field("bytes", &text.len())
                 .finish(),
+            // The path may name the user.
+            Self::Backup { path } => f
+                .debug_struct("Backup")
+                .field("path", &path.as_ref().map(|_| ".."))
+                .finish(),
             Self::Done => f.write_str("Done"),
         }
     }
@@ -1022,6 +1073,17 @@ pub struct RoomView {
     pub joins_paused_for_secs: Option<u32>,
     /// Live sessions: ours, and those of members connected to us.
     pub sessions: Vec<SessionView>,
+    /// Restored from a backup and not caught up with the members yet
+    /// (M13): no inviting, admitting or banning until they have been
+    /// online (a member's room: until one of them has), or the owner stops
+    /// waiting ([`Command::StopCatchingUp`]). Leaving is allowed.
+    pub catching_up: bool,
+    /// While catching up, the members not heard from yet: the owner waits
+    /// for all of them, a member for any one.
+    pub waiting_for: Vec<String>,
+    /// For the owner: restored from a backup, the room has no password
+    /// (M13: the backup never carries one); set a new one to invite again.
+    pub needs_password: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1181,6 +1243,10 @@ pub enum EngineError {
     OwnerOffline,
     #[error("passwords can't be empty")]
     EmptyPassword,
+    #[error("this room came back from a backup without its password: set a new one first")]
+    NeedsPassword,
+    #[error(transparent)]
+    Backup(#[from] backup::BackupError),
     #[error("no such room")]
     UnknownRoom,
     #[error("no such member")]
@@ -1233,6 +1299,17 @@ fn other_version_text(app_version: &str, newer: bool) -> String {
     }
 }
 
+/// Where a profile's backup is written or read (M13): the app asks the user
+/// in its own dialogs, so the webview never names a path (a script in it
+/// could otherwise write the identity anywhere, or read any file). Both
+/// block until the user answers; `None` if they closed the dialog.
+pub trait BackupFiles: Send + Sync {
+    /// Where to write a new backup, offering `suggested` as its name.
+    fn save_to(&self, suggested: &str) -> Option<std::path::PathBuf>;
+    /// Which backup to restore.
+    fn open_from(&self) -> Option<std::path::PathBuf>;
+}
+
 /// How the engine runs. Tests shorten the timings and turn relays off.
 #[derive(Clone)]
 pub struct EngineOptions {
@@ -1264,6 +1341,9 @@ pub struct EngineOptions {
     /// Use only the relay, no direct paths: tests proving traffic goes
     /// through it.
     pub relay_only: bool,
+    /// The app's file dialogs for backups (M13); without them, backups are
+    /// refused.
+    pub backup_files: Option<Arc<dyn BackupFiles>>,
 }
 
 impl EngineOptions {
@@ -1284,6 +1364,7 @@ impl EngineOptions {
             replace_grace: pipeline::source::REPLACE_GRACE,
             reconnect_wait: Duration::from_secs(30),
             relay_only: false,
+            backup_files: None,
         }
     }
 
@@ -1407,6 +1488,11 @@ async fn lock_profile(profile: &Profile, wait: Duration) -> Result<std::fs::File
 
 pub struct Engine {
     profile: Profile,
+    /// Seals what the profile keeps on disk (for backups, M13).
+    secrets: Arc<dyn secrets::SecretStore>,
+    backup_files: Option<Arc<dyn BackupFiles>>,
+    /// A backup is being written or restored: one at a time.
+    backing_up: AtomicBool,
     member_id: String,
     events: broadcast::Sender<Event>,
     actor: mpsc::Sender<rooms::Input>,
@@ -1440,9 +1526,14 @@ impl Engine {
         let (events, _) = broadcast::channel(256);
         let panic = Arc::new(Mutex::new(None));
         let relay_in_use = relay_in_use(&options.relays, build_config::relay().as_ref());
+        let secrets = options.secret_store.clone();
+        let backup_files = options.backup_files.clone();
         let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
         Ok(Self {
             profile,
+            secrets,
+            backup_files,
+            backing_up: AtomicBool::new(false),
             member_id: started.member_id.to_hex(),
             events,
             actor: started.inbox,
@@ -1454,6 +1545,101 @@ impl Engine {
             installing_driver: AtomicBool::new(false),
             _lock: lock,
         })
+    }
+
+    /// Runs a backup or restore, one at a time, with the app's dialogs.
+    async fn backing_up<F>(
+        &self,
+        run: impl FnOnce(Arc<dyn BackupFiles>) -> F,
+    ) -> Result<Response, EngineError>
+    where
+        F: Future<Output = Result<Response, EngineError>>,
+    {
+        let Some(files) = self.backup_files.clone() else {
+            return Err(EngineError::Refused("backups need the app's file dialogs"));
+        };
+        if self.backing_up.swap(true, Ordering::SeqCst) {
+            return Err(EngineError::Refused(
+                "a backup is already being written or restored",
+            ));
+        }
+        // Let go however this ends, a dropped future included.
+        struct Done<'a>(&'a AtomicBool);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _done = Done(&self.backing_up);
+        run(files).await
+    }
+
+    /// A backup of this profile, written where the user says (M13). Off the
+    /// async runtime: the dialog waits for the user, and Argon2 takes about
+    /// half a second.
+    async fn export_profile(&self, passphrase: String) -> Result<Response, EngineError> {
+        let passphrase = zeroize::Zeroizing::new(passphrase);
+        backup::check_passphrase(&passphrase)?;
+        let store = store::Store::new(self.profile.data_dir(), self.secrets.clone());
+        let suggested = format!("couch-coapp-{}.couchbackup", self.profile.name());
+        self.backing_up(|files| async move {
+            tokio::task::spawn_blocking(move || {
+                let Some(path) = files.save_to(&suggested) else {
+                    return Ok(Response::Backup { path: None });
+                };
+                let contents = store.backup_contents()?;
+                let sealed = backup::seal(&contents, &passphrase)?;
+                backup::write_file(&path, &sealed)?;
+                tracing::info!(
+                    rooms = contents.rooms.len(),
+                    "wrote a backup of this profile"
+                );
+                Ok(Response::Backup {
+                    path: Some(path.display().to_string()),
+                })
+            })
+            .await
+            .map_err(|_| EngineError::Stopped)?
+        })
+        .await
+    }
+
+    /// A backup the user picks, restored into this profile, which must have
+    /// no rooms (M13). The room actor writes it, so no room is created or
+    /// joined meanwhile; the app starts again afterwards to use it.
+    async fn restore_profile(&self, passphrase: String) -> Result<Response, EngineError> {
+        let passphrase = zeroize::Zeroizing::new(passphrase);
+        let store = store::Store::new(self.profile.data_dir(), self.secrets.clone());
+        // Before the dialog, to save the user picking a file for nothing;
+        // the actor checks again.
+        if store.has_rooms() {
+            return Err(store::StoreError::HasRooms.into());
+        }
+        self.backing_up(|files| async move {
+            let opened = tokio::task::spawn_blocking(move || {
+                let Some(path) = files.open_from() else {
+                    return Ok(None);
+                };
+                let contents = backup::open(&backup::read_file(&path)?, &passphrase)?;
+                Ok::<_, EngineError>(Some((path, contents)))
+            })
+            .await
+            .map_err(|_| EngineError::Stopped)??;
+            let Some((path, contents)) = opened else {
+                return Ok(Response::Backup { path: None });
+            };
+            let (reply, response) = oneshot::channel();
+            self.actor
+                .send(rooms::Input::Restore(Box::new(contents), reply))
+                .await
+                .map_err(|_| EngineError::Stopped)?;
+            response.await.map_err(|_| EngineError::Stopped)??;
+            tracing::info!("restored a backup into this profile");
+            Ok(Response::Backup {
+                path: Some(path.display().to_string()),
+            })
+        })
+        .await
     }
 
     /// Every driver's state, read off the async runtime (HidHide's may wait
@@ -1701,6 +1887,8 @@ impl Engine {
                 }))
             }
             Command::GetDrivers => self.drivers().await,
+            Command::ExportProfile { passphrase } => self.export_profile(passphrase).await,
+            Command::RestoreProfile { passphrase } => self.restore_profile(passphrase).await,
             Command::GetNotices => {
                 let path = std::env::current_exe()
                     .map_err(|e| EngineError::Notices(e.to_string()))?
@@ -2231,6 +2419,25 @@ mod tests {
                 "{:?}",
                 Command::PreviewInvite {
                     invite: secret.into()
+                }
+            ),
+            // A backup's passphrase opens the whole identity (M13).
+            format!(
+                "{:?}",
+                Command::ExportProfile {
+                    passphrase: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Command::RestoreProfile {
+                    passphrase: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Response::Backup {
+                    path: Some(secret.into())
                 }
             ),
             format!(

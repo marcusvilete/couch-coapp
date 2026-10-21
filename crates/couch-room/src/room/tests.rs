@@ -270,7 +270,7 @@ impl Sim {
                         self.members.get_mut(&who).unwrap().saved = Some(saved);
                     }
                 }
-                Effect::Changed => {}
+                Effect::Changed | Effect::CaughtUp => {}
                 Effect::Removed { banned } => removed = Some(banned),
                 Effect::Departed => departed = true,
             }
@@ -383,6 +383,21 @@ impl Sim {
         let saved = member.saved.clone().expect("remembered room");
         member.room =
             Some(Room::restore(member.key.clone(), saved, Timings::default(), now).unwrap());
+    }
+
+    /// Back online from a backup (M13): `saved`, maybe older than what the
+    /// member had, catching up first. Returns whether it waits to.
+    fn restore_from_backup(&mut self, id: MemberId, saved: SavedRoom) -> bool {
+        let now = self.now;
+        let member = self.members.get_mut(&id).unwrap();
+        member.online = true;
+        let mut room = Room::restore(member.key.clone(), saved, Timings::default(), now).unwrap();
+        let fx = room.catch_up_first();
+        let waits = room.is_catching_up();
+        member.saved = Some(room.saved());
+        member.room = Some(room);
+        self.apply(id, fx);
+        waits
     }
 
     /// Every pair of these members shares exactly one connection, and both
@@ -628,6 +643,282 @@ fn a_ban_removes_the_member_everywhere_and_keeps_them_out() {
     sim.join(d, &fresh).unwrap();
     sim.settle(2);
     sim.assert_full_mesh(&[a, b, d]);
+}
+
+/// M13: an owner restored from a backup older than the room signs nothing
+/// (no ban, departure or closing, no admission) until a member's snapshot
+/// brings it up to date: signing from the older state would reuse versions
+/// the members hold, and they would ignore it. Caught up, it holds the
+/// room's newest policy (a ban made after the backup included) and signs
+/// above it.
+#[test]
+fn a_restored_owner_signs_nothing_until_a_member_catches_it_up() {
+    let (mut sim, a, b, c) = three(30);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    let at_backup = backup.policy.body.version;
+    // After the backup, the owner bans C; B holds that policy.
+    let fx = sim.room_mut(a).ban(c).unwrap();
+    sim.apply(a, fx);
+    sim.settle(1);
+    let newest = sim.room(b).policy().body.version;
+    assert!(newest > at_backup);
+    // The owner's PC is lost; the backup comes back while B is away.
+    sim.crash(a);
+    sim.crash(b);
+    assert!(sim.restore_from_backup(a, backup), "others on its roster");
+    assert!(sim.room(a).is_catching_up());
+    assert_eq!(sim.room_mut(a).ban(b), Err(RoomError::CatchingUp));
+    let invite = sim.invite(a);
+    let d = sim.add(4);
+    assert_eq!(
+        sim.join(d, &invite),
+        Err(close_code::UNKNOWN_ROOM),
+        "nobody admitted"
+    );
+    assert_eq!(sim.room(a).version(), at_backup, "nothing signed");
+    // B comes back: its snapshot catches the owner up, and the owner signs
+    // the room again, skipping ahead.
+    sim.restart(b);
+    sim.settle(2);
+    assert!(!sim.room(a).is_catching_up());
+    assert_eq!(sim.room(a).version(), newest + RESTORE_SKIP);
+    assert!(
+        sim.room(a).policy().body.banned.contains(&c),
+        "the ban is back"
+    );
+    assert_eq!(sim.room(b).version(), newest + RESTORE_SKIP);
+    // And it signs above what B holds, so B takes it.
+    let fresh = sim.invite(a);
+    sim.join(d, &fresh).unwrap();
+    sim.settle(2);
+    assert!(sim.room(b).version() > newest + RESTORE_SKIP);
+    assert!(sim.room(b).is_member(d));
+    sim.assert_full_mesh(&[a, b, d]);
+}
+
+/// The review's finding: the first member back may hold old state. A ban
+/// made after the backup, held only by C, must not be outvoted by what the
+/// restored owner signs after hearing from a stale B: the owner waits for
+/// every member, and X, banned meanwhile, stops counting once C is heard.
+#[test]
+fn a_stale_first_snapshot_doesnt_end_the_catching_up() {
+    let (mut sim, a, b, c) = three(33);
+    let invite = sim.invite(a);
+    let x = sim.add(5);
+    sim.join(x, &invite).unwrap();
+    sim.settle(2);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    // B is away when the owner bans X; C holds the ban.
+    sim.crash(b);
+    let fx = sim.room_mut(a).ban(x).unwrap();
+    sim.apply(a, fx);
+    sim.settle(1);
+    assert!(sim.room(c).policy().body.banned.contains(&x));
+    sim.crash(a);
+    sim.crash(c);
+    assert!(sim.restore_from_backup(a, backup));
+    // B, stale, comes back first: still catching up, waiting for C and X.
+    sim.restart(b);
+    sim.settle(2);
+    assert!(sim.room(a).is_catching_up());
+    let waiting: BTreeSet<MemberId> = sim.room(a).catching_up_with().into_iter().collect();
+    assert_eq!(waiting, BTreeSet::from([c, x]));
+    // C brings the ban: X is off the roster, and nobody is left to wait for.
+    sim.restart(c);
+    sim.settle(2);
+    assert!(!sim.room(a).is_catching_up());
+    assert!(sim.room(a).policy().body.banned.contains(&x));
+    // What the owner signs now keeps X out everywhere.
+    let fresh = sim.invite(a);
+    let d = sim.add(4);
+    sim.join(d, &fresh).unwrap();
+    sim.settle(2);
+    for id in [a, b, c] {
+        assert!(sim.room(id).policy().body.banned.contains(&x), "{id:?}");
+        assert!(sim.room(id).is_member(d));
+    }
+}
+
+/// Members who may never come back: the owner can stop waiting, knowing a
+/// change only they hold can then be undone. Only the owner.
+#[test]
+fn the_owner_can_stop_waiting() {
+    let (mut sim, a, b, c) = three(34);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    sim.crash(a);
+    sim.crash(b);
+    sim.crash(c);
+    assert!(sim.restore_from_backup(a, backup));
+    assert_eq!(sim.room_mut(a).ban(b), Err(RoomError::CatchingUp));
+    let fx = sim.room_mut(a).stop_catching_up().unwrap();
+    assert!(fx.contains(&Effect::CaughtUp));
+    assert!(!sim.room(a).is_catching_up());
+    let fx = sim.room_mut(a).ban(b).unwrap();
+    sim.apply(a, fx);
+}
+
+/// A restored member signs nothing that matters: any member's snapshot
+/// catches it up, and its newer records supersede what it held.
+#[test]
+fn a_restored_member_catches_up_from_anyone() {
+    let (mut sim, a, b, c) = three(35);
+    let backup = sim.members[&b].saved.clone().unwrap();
+    sim.crash(b);
+    sim.crash(a);
+    assert!(sim.restore_from_backup(b, backup));
+    assert_eq!(sim.room_mut(b).stop_catching_up(), Err(RoomError::NotOwner));
+    sim.settle(2);
+    assert!(!sim.room(b).is_catching_up(), "C's snapshot was enough");
+    sim.assert_full_mesh(&[b, c]);
+}
+
+/// A backup made while the owner was alone in the room: nobody to wait
+/// for, so it is caught up at once and signs the room again, skipping ahead.
+/// Someone the lost PC let in after the backup (F) finds that, and is no
+/// longer listed: dropped, never left holding a second room under the same
+/// version (the second review's finding).
+#[test]
+fn a_lone_owner_restored_has_nobody_to_catch_up_with() {
+    let mut sim = Sim::new(31);
+    let a = sim.add(1);
+    sim.create(a);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    let at_backup = backup.policy.body.version;
+    let invite = sim.invite(a);
+    let f = sim.add(6);
+    sim.join(f, &invite).unwrap();
+    sim.settle(1);
+    sim.crash(a);
+    sim.crash(f);
+    assert!(!sim.restore_from_backup(a, backup));
+    assert!(!sim.room(a).is_catching_up());
+    assert_eq!(sim.room(a).version(), at_backup + RESTORE_SKIP);
+    // Before the owner signs anything more: what it signed on restoring is
+    // already ahead of F's.
+    sim.restart(f);
+    sim.settle(3);
+    assert_eq!(sim.members[&f].removed, Some(false), "F was dropped");
+    assert!(!sim.room(a).is_member(f));
+    let invite = sim.invite(a);
+    let g = sim.add(2);
+    sim.join(g, &invite).unwrap();
+    sim.settle(1);
+    sim.assert_full_mesh(&[a, g]);
+}
+
+/// Someone let in after the backup while every other member was away (F)
+/// is known to nobody the restored owner hears from. The owner catches up
+/// with the others and signs ahead; F, back, is dropped rather than left on
+/// a second policy under the version it holds (the second review's
+/// finding).
+#[test]
+fn a_member_only_the_lost_pc_knew_is_dropped_not_forked() {
+    let (mut sim, a, b, c) = three(36);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    sim.crash(b);
+    sim.crash(c);
+    let invite = sim.invite(a);
+    let f = sim.add(6);
+    sim.join(f, &invite).unwrap();
+    sim.settle(1);
+    let f_holds = sim.room(f).version();
+    sim.crash(a);
+    sim.crash(f);
+    assert!(sim.restore_from_backup(a, backup));
+    sim.restart(b);
+    sim.restart(c);
+    sim.settle(2);
+    assert!(!sim.room(a).is_catching_up());
+    assert!(sim.room(a).version() > f_holds);
+    let invite = sim.invite(a);
+    let g = sim.add(7);
+    sim.join(g, &invite).unwrap();
+    sim.restart(f);
+    sim.settle(3);
+    assert_eq!(sim.members[&f].removed, Some(false), "F was dropped");
+    for id in [a, b, c, g] {
+        assert!(!sim.room(id).policy().body.lists(f), "{id:?}");
+        assert!(sim.room(id).is_member(g), "{id:?}");
+    }
+    sim.assert_full_mesh(&[a, b, c, g]);
+}
+
+/// Closing a room while catching up: the closing policy skips ahead of
+/// whatever the members hold that is newer than the backup (D let in after
+/// it), so it closes the room for them too.
+#[test]
+fn closing_while_catching_up_closes_for_members_holding_newer() {
+    let (mut sim, a, b, c) = three(37);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    let invite = sim.invite(a);
+    let d = sim.add(4);
+    sim.join(d, &invite).unwrap();
+    sim.settle(2);
+    sim.crash(a);
+    sim.crash(b);
+    sim.crash(c);
+    assert!(sim.restore_from_backup(a, backup));
+    let now = sim.now;
+    let fx = sim.room_mut(a).leave(now).unwrap();
+    sim.apply(a, fx);
+    sim.restart(b);
+    sim.restart(c);
+    sim.settle(4);
+    for id in [b, c] {
+        assert_eq!(sim.members[&id].removed, Some(false), "{id:?} still in it");
+    }
+}
+
+/// A restored member leaving while catching up: its last record skips ahead
+/// of the ones the lost PC signed after the backup, so the owner takes it.
+#[test]
+fn a_restored_member_leaving_while_catching_up_is_heard() {
+    let (mut sim, a, b, c) = three(38);
+    let backup = sim.members[&b].saved.clone().unwrap();
+    // After the backup, B's lost PC signs newer records of B.
+    for name in ["B two", "B three"] {
+        let fx = sim
+            .room_mut(b)
+            .set_profile(name, PeerAddr::default())
+            .unwrap();
+        sim.apply(b, fx);
+        sim.settle(1);
+    }
+    sim.crash(a);
+    sim.crash(b);
+    sim.crash(c);
+    assert!(sim.restore_from_backup(b, backup));
+    let now = sim.now;
+    let fx = sim.room_mut(b).leave(now).unwrap();
+    sim.apply(b, fx);
+    sim.restart(a);
+    sim.restart(c);
+    sim.settle(4);
+    for id in [a, c] {
+        assert!(!sim.room(id).policy().body.lists(b), "{id:?} still lists B");
+    }
+}
+
+/// M13: a member who left while the owner was away is taken off the roster
+/// once the restored owner has caught up, not before.
+#[test]
+fn a_departure_heard_while_catching_up_is_taken_once_caught_up() {
+    let (mut sim, a, b, c) = three(32);
+    let backup = sim.members[&a].saved.clone().unwrap();
+    sim.crash(a);
+    // B leaves; only C hears it.
+    let now = sim.now;
+    let fx = sim.room_mut(b).leave(now).unwrap();
+    sim.apply(b, fx);
+    sim.settle(1);
+    assert!(sim.members[&b].departed);
+    assert!(sim.restore_from_backup(a, backup));
+    sim.settle(2);
+    assert!(!sim.room(a).is_catching_up());
+    for id in [a, c] {
+        assert!(!sim.room(id).policy().body.lists(b), "B is off the roster");
+    }
+    sim.assert_full_mesh(&[a, c]);
 }
 
 #[test]

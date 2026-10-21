@@ -3,14 +3,14 @@
 //! shortened; the rules are the real ones.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use couch_engine::{
-    Command, Engine, EngineError, EngineOptions, Event, InvitePreview, InviteStatus, MemberLink,
-    Profile, Response, RoomGone, RoomView, secrets::Unprotected,
+    BackupFiles, Command, Engine, EngineError, EngineOptions, Event, InvitePreview, InviteStatus,
+    MemberLink, Profile, Response, RoomGone, RoomView, secrets::Unprotected,
 };
 use couch_net::endpoint::{RelayChoice, RelayToken};
 use couch_proto::invite::Invite;
@@ -568,6 +568,277 @@ async fn a_member_banned_while_offline_finds_out_on_return() {
     c.wait_roomless("C never learned of the ban").await;
     full_mesh(&room, &[&a, &b]).await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+const PASSPHRASE: &str = "a long passphrase for the couch";
+
+/// The app's file dialogs, always answered with one file.
+struct FileAt(PathBuf);
+
+impl BackupFiles for FileAt {
+    fn save_to(&self, _suggested: &str) -> Option<PathBuf> {
+        Some(self.0.clone())
+    }
+
+    fn open_from(&self) -> Option<PathBuf> {
+        Some(self.0.clone())
+    }
+}
+
+fn with_file(port: u16, file: &Path) -> EngineOptions {
+    EngineOptions {
+        backup_files: Some(Arc::new(FileAt(file.to_path_buf()))),
+        ..options(port)
+    }
+}
+
+impl Member {
+    async fn export(&self) {
+        let written = self
+            .handle(Command::ExportProfile {
+                passphrase: PASSPHRASE.into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(written, Response::Backup { path: Some(_) }),
+            "{written:?}"
+        );
+    }
+
+    /// A new profile, as on a new PC, restored from `file` and started
+    /// again with it. On `port`, the lost PC's, so invites from there reach
+    /// it (there is no relay here to find it by id).
+    async fn restored(name: &'static str, port: u16, file: &Path) -> Self {
+        let mut member = Self::with_options(name, with_file(port, file)).await;
+        let restored = member
+            .handle(Command::RestoreProfile {
+                passphrase: PASSPHRASE.into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(restored, Response::Backup { path: Some(_) }),
+            "{restored:?}"
+        );
+        member.restart_with(with_file(port, file)).await;
+        member
+    }
+
+    async fn restart_with(&mut self, options: EngineOptions) {
+        self.stop().await;
+        self.engine = Some(start_with(self.dir.path(), self.name, options).await);
+    }
+}
+
+/// M13: the owner backs up their profile, loses the PC, and restores the
+/// backup into a new profile elsewhere. The room comes back owned, without
+/// its password or invites, and catching up: it signs or invites nothing
+/// until its members have been online, a restart included, then holds the
+/// room as it is now (a ban made after the backup included). With a new
+/// password, it invites again; invites from before the backup stay dead.
+#[tokio::test]
+async fn an_owner_restored_from_a_backup_catches_up_and_invites_again() {
+    let backups = tempfile::tempdir().unwrap();
+    let file = backups.path().join("ana.couchbackup");
+    let (a, mut b, mut c, room) = three().await;
+    // The app's dialogs are needed: a webview never names the file.
+    let err = b
+        .handle(Command::ExportProfile {
+            passphrase: PASSPHRASE.into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Refused(_)), "{err}");
+    let mut a = {
+        let mut a = a;
+        a.restart_with(with_file(a.port, &file)).await;
+        a
+    };
+    full_mesh(&room, &[&a, &b, &c]).await;
+    // An invite made before the backup: it must not come back.
+    let old_invite = a.invite(&room).await;
+    let short = a
+        .handle(Command::ExportProfile {
+            passphrase: "short".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(short, EngineError::Backup(_)), "{short}");
+    a.export().await;
+    // After the backup, the owner bans C; B holds that policy.
+    a.handle(Command::BanMember {
+        room: room.clone(),
+        member: c.id(),
+    })
+    .await
+    .unwrap();
+    c.wait_roomless("C never learned of the ban").await;
+    b.wait_connected(&room, &[&a], Some(2)).await;
+    let (a_id, b_id, port) = (a.id(), b.id(), a.port);
+    // The owner's PC is lost; B is away while the backup comes back.
+    a.stop().await;
+    b.stop().await;
+    let mut moved = Member::with_options("Ana", with_file(port, &file)).await;
+    let wrong = moved
+        .handle(Command::RestoreProfile {
+            passphrase: "the wrong passphrase, long".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(wrong, EngineError::Backup(_)), "{wrong}");
+    moved
+        .handle(Command::RestoreProfile {
+            passphrase: PASSPHRASE.into(),
+        })
+        .await
+        .unwrap();
+    // Until the restart, nothing new under the old identity.
+    let err = moved
+        .handle(Command::CreateRoom {
+            name: "Another".into(),
+            password: PASSWORD.into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Refused(_)), "{err}");
+    moved.restart_with(with_file(port, &file)).await;
+    assert_eq!(moved.id(), a_id, "the same identity");
+    let view = moved.room(&room).await.expect("the room is back");
+    assert!(
+        view.is_owner && view.needs_password && view.catching_up,
+        "{view:#?}"
+    );
+    // C too: the backup predates the ban. B's newer policy will drop C.
+    let mut waiting = view.waiting_for.clone();
+    waiting.sort();
+    let mut expected = vec![b_id.clone(), c.id()];
+    expected.sort();
+    assert_eq!(waiting, expected);
+    let err = moved
+        .handle(Command::BanMember {
+            room: room.clone(),
+            member: b_id.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    let err = moved.try_invite(&room).await.unwrap_err();
+    assert!(matches!(err, EngineError::NeedsPassword), "{err}");
+    // The invite from before the backup: no password key, so expired.
+    let mut d = Member::new("Davi").await;
+    let err = d.join(&old_invite, PASSWORD).await.unwrap_err();
+    assert!(refused_because(&err, "expired or was revoked"), "{err}");
+    // A new password while catching up: still no invite from before, and
+    // none made until caught up.
+    moved
+        .handle(Command::ChangePassword {
+            room: room.clone(),
+            password: PASSWORD.into(),
+        })
+        .await
+        .unwrap();
+    assert!(!moved.room(&room).await.unwrap().needs_password);
+    let err = d.join(&old_invite, PASSWORD).await.unwrap_err();
+    assert!(refused_because(&err, "expired or was revoked"), "{err}");
+    let err = moved.try_invite(&room).await.unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    // A restart before anyone came back: still catching up.
+    moved.restart_with(with_file(port, &file)).await;
+    assert!(moved.room(&room).await.unwrap().catching_up);
+    // A profile with rooms takes no backup.
+    let err = moved
+        .handle(Command::RestoreProfile {
+            passphrase: PASSPHRASE.into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Store(_)), "{err}");
+
+    // B comes back: the owner catches up, the ban included.
+    b.restart().await;
+    moved
+        .wait_for(&room, "caught up", |v| {
+            v.is_some_and(|v| !v.catching_up && v.members.len() == 2)
+        })
+        .await;
+    full_mesh(&room, &[&moved, &b]).await;
+    d.join(&moved.invite(&room).await, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&moved, &b, &d]).await;
+    stop_all(&mut [&mut a, &mut b, &mut c, &mut moved, &mut d]).await;
+}
+
+/// M13: a restored owner waits for every member, not just the first back
+/// (one away may hold the newest state), unless the owner stops waiting.
+#[tokio::test]
+async fn a_restored_owner_waits_for_every_member_or_stops_waiting() {
+    let backups = tempfile::tempdir().unwrap();
+    let file = backups.path().join("ana.couchbackup");
+    let (mut a, mut b, mut c, room) = three().await;
+    a.restart_with(with_file(a.port, &file)).await;
+    full_mesh(&room, &[&a, &b, &c]).await;
+    a.export().await;
+    let (port, c_id) = (a.port, c.id());
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+    let mut moved = Member::restored("Ana", port, &file).await;
+    b.restart().await;
+    moved
+        .wait_for(&room, "B heard, C still awaited", |v| {
+            v.is_some_and(|v| v.catching_up && v.waiting_for == [c_id.clone()])
+        })
+        .await;
+    // Only the owner may stop waiting.
+    let err = b
+        .handle(Command::StopCatchingUp { room: room.clone() })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    let stopped = moved
+        .handle(Command::StopCatchingUp { room: room.clone() })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&stopped, Response::Room(v) if !v.catching_up && v.waiting_for.is_empty()),
+        "{stopped:?}"
+    );
+    // It signs again: a new password, and a newcomer gets in.
+    moved
+        .handle(Command::ChangePassword {
+            room: room.clone(),
+            password: PASSWORD.into(),
+        })
+        .await
+        .unwrap();
+    let mut d = Member::new("Davi").await;
+    d.join(&moved.invite(&room).await, PASSWORD).await.unwrap();
+    // Caught up for good: no waiting after a restart.
+    moved.restart_with(with_file(port, &file)).await;
+    assert!(!moved.room(&room).await.unwrap().catching_up);
+    stop_all(&mut [&mut a, &mut b, &mut c, &mut moved, &mut d]).await;
+}
+
+/// M13: a restored member whose room's members never come back can still
+/// leave it.
+#[tokio::test]
+async fn a_restored_member_may_leave_while_catching_up() {
+    let backups = tempfile::tempdir().unwrap();
+    let file = backups.path().join("bia.couchbackup");
+    let mut a = Member::new("Ana").await;
+    let mut b = Member::new("Bia").await;
+    let room = a.create("Sofá").await.id;
+    b.join(&a.invite(&room).await, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+    b.restart_with(with_file(b.port, &file)).await;
+    b.export().await;
+    stop_all(&mut [&mut a, &mut b]).await;
+    let mut moved = Member::restored("Bia", b.port, &file).await;
+    assert!(moved.room(&room).await.unwrap().catching_up);
+    moved
+        .handle(Command::LeaveRoom { room: room.clone() })
+        .await
+        .unwrap();
+    assert!(moved.rooms().await.is_empty());
+    stop_all(&mut [&mut a, &mut b, &mut moved]).await;
 }
 
 #[tokio::test]

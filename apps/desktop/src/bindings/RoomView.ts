@@ -27,4 +27,21 @@ joinsPausedForSecs: number | null,
 /**
  * Live sessions: ours, and those of members connected to us.
  */
-sessions: Array<SessionView>, };
+sessions: Array<SessionView>, 
+/**
+ * Restored from a backup and not caught up with the members yet
+ * (M13): no inviting, admitting or banning until they have been
+ * online (a member's room: until one of them has), or the owner stops
+ * waiting ([`Command::StopCatchingUp`]). Leaving is allowed.
+ */
+catchingUp: boolean, 
+/**
+ * While catching up, the members not heard from yet: the owner waits
+ * for all of them, a member for any one.
+ */
+waitingFor: Array<string>, 
+/**
+ * For the owner: restored from a backup, the room has no password
+ * (M13: the backup never carries one); set a new one to invite again.
+ */
+needsPassword: boolean, };

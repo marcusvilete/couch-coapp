@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -58,6 +58,8 @@ naga = { version = "30", features = ["wgsl-in"] }
 tauri = "2.12"
 tauri-build = "2.7"
 tauri-plugin-deep-link = "2.6"
+# The save and open dialogs for a profile's backup (M13).
+tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = { version = "2.5", features = ["deep-link"] }
 
 # General
@@ -80,6 +82,10 @@ tempfile = "3"
 ed25519-dalek = "3"
 hkdf = "0.13"
 hmac = "0.13"
+# A profile's backup (M13): its key from the passphrase, and the sealing.
+argon2 = "0.6"
+chacha20poly1305 = "0.11"
+zeroize = "1"
 sha2 = "0.11"
 spake2 = { version = "=0.5.0-pre.0", features = ["getrandom"] }
 unicode-normalization = "0.1"
