@@ -26,7 +26,10 @@ use std::{
 };
 
 use build_config::BuiltInRelay;
-use couch_input::shortcuts::{ShortcutError, Shortcuts};
+use couch_input::{
+    local::ControllerKind,
+    shortcuts::{ShortcutError, Shortcuts},
+};
 use couch_net::endpoint::RelayChoice;
 use couch_proto::{invite::InviteError, session::SeatKind};
 use couch_room::{
@@ -399,7 +402,8 @@ pub struct SourceList {
     /// can take a guest's place, so Go live warns.
     pub controllers: u32,
     /// This PC's own controllers that could play through a seat: physical
-    /// ones, never a virtual pad (P9).
+    /// ones (P9), and other programs' virtual pads proven so (a remapper's,
+    /// M22); never one of ours.
     pub host_controllers: Vec<HostController>,
     /// Whether a controller can be hidden from games (HidHide).
     pub hiding: HidingView,
@@ -417,6 +421,48 @@ pub struct HostController {
     /// Its USB ids, which find it again after it is reconnected.
     pub vendor: u16,
     pub product: u16,
+    /// A remapper's pad has our virtual pads' ids (a real Xbox 360
+    /// controller's): the kind tells it from a real one (M22).
+    #[serde(default)]
+    pub kind: HostControllerKind,
+}
+
+/// What one of the host's controllers is (M22).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum HostControllerKind {
+    #[default]
+    Physical,
+    /// Another program's virtual pad, a remapper's (DS4Windows, say):
+    /// played through a seat with its remaps, hidden from games by its
+    /// device.
+    OtherVirtual,
+}
+
+impl HostController {
+    /// Its name as the host panel shows it: a remapper's pad has a real
+    /// controller's ("Xbox 360 Controller"), so it says whose it is.
+    pub fn shown_name(&self) -> String {
+        match self.kind {
+            HostControllerKind::Physical => self.name.clone(),
+            HostControllerKind::OtherVirtual => format!("{} (a remapper's)", self.name),
+        }
+    }
+
+    pub fn choice(&self) -> couch_input::local::ControllerChoice {
+        use couch_input::local::{ControllerChoice, ControllerIds};
+        ControllerChoice {
+            ids: ControllerIds {
+                vendor: self.vendor,
+                product: self.product,
+            },
+            kind: match self.kind {
+                HostControllerKind::Physical => ControllerKind::Physical,
+                HostControllerKind::OtherVirtual => ControllerKind::OtherVirtual,
+            },
+        }
+    }
 }
 
 /// Whether the host's controller can be hidden from games.
@@ -1640,6 +1686,10 @@ impl Engine {
                             name: c.name,
                             vendor: c.ids.vendor,
                             product: c.ids.product,
+                            kind: match c.kind {
+                                ControllerKind::Physical => HostControllerKind::Physical,
+                                ControllerKind::OtherVirtual => HostControllerKind::OtherVirtual,
+                            },
                         })
                         .collect(),
                     hiding: match hiding {

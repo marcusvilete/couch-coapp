@@ -43,18 +43,22 @@ pub fn of_gamepad(path: Option<&str>, ids: ControllerIds) -> Origin {
 
 /// [`of_gamepad`], with the hosts' pads already read.
 pub fn of_gamepad_given(path: Option<&str>, ids: ControllerIds, hosts: &HostPads) -> Origin {
-    let Some(instance) = path.and_then(device_for) else {
-        return Origin::Unknown;
-    };
+    match device_of_gamepad(path, ids) {
+        Some((_, chain)) => classify(&chain, hosts),
+        None => Origin::Unknown,
+    }
+}
+
+/// The device of the gamepad SDL lists with `path` and `ids`, with its chain
+/// (nearest first): `None` if it can't be found, or doesn't carry the ids.
+pub fn device_of_gamepad(path: Option<&str>, ids: ControllerIds) -> Option<(String, Vec<Node>)> {
+    let instance = path.and_then(device_for)?;
     let chain = device_tree::chain(&instance);
     // SDL's slot and the driver's light must agree on which pad this is.
-    if !chain
+    chain
         .iter()
         .any(|n| controllers::names_ids(&n.hardware_ids, ids))
-    {
-        return Origin::Unknown;
-    }
-    classify(&chain, hosts)
+        .then_some((instance, chain))
 }
 
 /// The origin of the device with `instance_id`, any ViGEm pad counting as
@@ -67,10 +71,69 @@ pub fn of_device(instance_id: &str) -> Origin {
     classify(&device_tree::chain(instance_id), &any_host)
 }
 
+/// Whether a device's chain shows another program's virtual pad that the
+/// host may read and hide (M22): its origin so, and, if it has our pads'
+/// ids, under ViGEmBus with a serial no host has. Any other software bus
+/// with our ids stays unknown: should ViGEmBus ever not be recognised,
+/// our own pads would look like that.
+pub fn proven_theirs(chain: &[Node], hosts: &HostPads) -> bool {
+    if classify(chain, hosts) != Origin::OtherVirtual {
+        return false;
+    }
+    let our_ids = chain.iter().any(|n| {
+        [couch_input::XBOX_360_IDS, couch_input::DEV_PAD_IDS]
+            .into_iter()
+            .any(|(vendor, product)| {
+                controllers::names_ids(&n.hardware_ids, ControllerIds { vendor, product })
+            })
+    });
+    !our_ids || vigem_serial(chain).is_some()
+}
+
+/// Whether a device's chain shows one of the hosts' own pads, by its serial
+/// in their markers: proven, not merely in doubt.
+pub fn proven_ours(chain: &[Node], hosts: &HostPads) -> bool {
+    vigem_serial(chain).is_some_and(|serial| hosts.serials.contains(&serial))
+}
+
+/// Where a device another program's virtual pad had stands now (M22: a
+/// host keeps it hidden while it is gone, for when it comes back).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceNow {
+    /// Plugged in, still another program's virtual pad.
+    Theirs,
+    /// Plugged in, and one of the hosts' own pads, by its serial.
+    Ours,
+    /// Plugged in, but whose can't be told now (a host plugging a pad, the
+    /// markers unreadable, no serial).
+    InDoubt,
+    /// Not plugged in; `hosts_plugging`: a host here is plugging a pad,
+    /// which may take its id.
+    Gone { hosts_plugging: bool },
+}
+
+pub fn device_now(instance_id: &str) -> DeviceNow {
+    let hosts = virtual_pads::host_pads();
+    let chain = device_tree::chain(instance_id);
+    if chain.is_empty() {
+        DeviceNow::Gone {
+            hosts_plugging: hosts.plugging,
+        }
+    } else if proven_ours(&chain, &hosts) {
+        DeviceNow::Ours
+    } else if proven_theirs(&chain, &hosts) {
+        DeviceNow::Theirs
+    } else {
+        DeviceNow::InDoubt
+    }
+}
+
 /// Whether a controller of `origin` with `ids` may be the host's own
-/// controller: listed as one, followed, hidden. A physical one may; a
-/// virtual pad never; one whose origin can't be told only without our pads'
-/// ids, the rule before P9.
+/// physical controller: listed as one, followed, hidden by its ids. A
+/// physical one may; a virtual pad never; one whose origin can't be told
+/// only without our pads' ids, the rule before P9. Another program's
+/// virtual pad is listed apart (M22) and hidden by its device alone
+/// (`hidhide::hide_virtual`); ours never.
 pub fn may_be_the_hosts(origin: Origin, ids: ControllerIds) -> bool {
     match origin {
         Origin::Physical => true,
@@ -295,6 +358,49 @@ mod tests {
         ];
         assert_eq!(classify(&odd, &none), Origin::Unknown);
         assert_eq!(classify(&[], &none), Origin::Unknown);
+    }
+
+    /// M22: what the host may read and hide as a remapper's pad, and what is
+    /// proven theirs or ours rather than merely in doubt.
+    #[test]
+    fn a_remappers_pad_is_proven_by_vigem_and_a_serial_nobody_has() {
+        let with_our_ids = |mut chain: Vec<Node>| {
+            for n in &mut chain {
+                n.hardware_ids = vec![r"USB\VID_045E&PID_028E".into()];
+            }
+            chain
+        };
+        let none = hosts(&[], false);
+        let theirs = with_our_ids(vigem_pad(36));
+        assert!(proven_theirs(&theirs, &hosts(&[51], false)));
+        assert!(!proven_ours(&theirs, &hosts(&[51], false)));
+        // A host's serial: ours, proven.
+        assert!(proven_ours(
+            &with_our_ids(vigem_pad(51)),
+            &hosts(&[51], false)
+        ));
+        assert!(!proven_theirs(
+            &with_our_ids(vigem_pad(51)),
+            &hosts(&[51], false)
+        ));
+        // A host plugging: neither, in doubt.
+        assert!(!proven_theirs(&theirs, &hosts(&[51], true)));
+        assert!(!proven_ours(&theirs, &hosts(&[51], true)));
+        // Another software bus with our ids: never theirs (ViGEmBus not
+        // recognised would look so); without our ids, it may be.
+        let soft = |ids: &str| {
+            vec![
+                Node {
+                    hardware_ids: vec![ids.into()],
+                    ..node(r"HID\VID_X\1&2", "HID", "")
+                },
+                node(r"ROOT\SOMEBUS\0000", "ROOT", "SomeRemapperBus"),
+            ]
+        };
+        assert!(!proven_theirs(&soft(r"HID\VID_045E&PID_028E"), &none));
+        assert!(proven_theirs(&soft(r"HID\VID_054C&PID_05C4"), &none));
+        // Physical: not a remapper's.
+        assert!(!proven_theirs(&dualsense_bluetooth(), &none));
     }
 
     /// The bus is known by its hardware id too: with its driver's name

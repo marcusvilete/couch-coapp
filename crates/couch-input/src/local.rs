@@ -2,7 +2,9 @@
 //! like a guest's (docs/protocol.md, Seats).
 //!
 //! Its input still reaches a virtual pad only through the seat router, as the
-//! host's holder: the reader only reports what the controller does.
+//! host's holder: the reader only reports what the controller does. Since
+//! M22 it may be another program's virtual pad (a remapper's), read like a
+//! physical controller.
 
 use std::time::Duration;
 
@@ -28,34 +30,62 @@ impl ControllerIds {
     /// development ids), so by its ids alone a pad with them can't be told
     /// from ours. Since P9 where it comes from decides
     /// (`couch_platform_win::pad_origin`); this is the rule where that can't
-    /// be told: such a pad is never read as the host's, nor hidden.
+    /// be told: such a pad is never read as the host's, nor hidden, unless
+    /// it is proven another program's (M22).
     pub fn could_be_ours(self) -> bool {
         let ids = (self.vendor, self.product);
         ids == XBOX_360_IDS || ids == DEV_PAD_IDS
     }
 }
 
-/// A physical controller plugged into the host.
+/// What a host's controller is (M22).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ControllerKind {
+    /// A controller plugged into the PC, or one whose origin can't be told
+    /// that hasn't our pads' ids (P9's rule).
+    #[default]
+    Physical,
+    /// Another program's virtual pad (a remapper's, DS4Windows's say),
+    /// proven not ours: a pad of ours, or one in doubt, is never listed.
+    OtherVirtual,
+}
+
+/// Which of the host's controllers: its ids and kind. A remapper's pad has
+/// our pads' ids, so the ids alone can't say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ControllerChoice {
+    pub ids: ControllerIds,
+    pub kind: ControllerKind,
+}
+
+/// A controller plugged into the host that can play a seat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalController {
     pub ids: ControllerIds,
     pub name: String,
+    pub kind: ControllerKind,
+    /// Another program's virtual pad's device (its instance id), which
+    /// hiding takes; `None` for a physical controller, hidden by its ids.
+    pub device: Option<String>,
 }
 
-/// Reads the host's physical controllers, never our own virtual pads.
+/// Reads the host's controllers, never our own virtual pads.
 pub trait LocalPads: Send + Sync {
-    /// The controllers plugged in now.
+    /// The controllers plugged in now, in the order follows take them.
     fn list(&self) -> Result<Vec<LocalController>, InputError>;
 
-    /// Follows the first controller with `ids` that no other follow reads
+    /// Follows the first controller of `choice` that no other follow reads
     /// (M23: two of one model go to two follows, in the order found), until
     /// the returned handle drops: `on_state` gets its state on every change
-    /// and every [`LOCAL_PAD_EVERY`], neutral while none is plugged in. It
-    /// runs on the reader's thread and must return at once.
+    /// and every [`LOCAL_PAD_EVERY`], neutral while none is plugged in. For
+    /// another program's virtual pad, `on_device` hears of each device it
+    /// reads (M22: hiding follows it), `None` when it goes. Both run on the
+    /// reader's thread and must return at once.
     fn follow(
         &self,
-        ids: ControllerIds,
+        choice: ControllerChoice,
         on_state: Box<dyn Fn(PadState) + Send>,
+        on_device: Box<dyn Fn(Option<String>) + Send>,
     ) -> Result<Box<dyn LocalPad>, InputError>;
 }
 

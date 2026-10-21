@@ -81,16 +81,10 @@ impl VigemPadFactory {
         }
         // Marked before it appears, so a stream window on this PC never
         // opens it (see `virtual_pads`), and given its serial once it has
-        // one; until then every ViGEm pad counts as ours. A failed plug
-        // drops the marker.
-        let marker = self
-            .marked
-            .then(|| {
-                virtual_pads::mark()
-                    .inspect_err(|e| tracing::warn!("marking the virtual pad: {e}"))
-                    .ok()
-            })
-            .flatten();
+        // one; until then every ViGEm pad counts as ours. In this process
+        // the mark can't fail (M22: the host's reader must never take its
+        // own pad for a remapper's). A failed plug drops the marker.
+        let marker = self.marked.then(virtual_pads::mark);
         let pad = builder
             .plug()
             .map_err(driver)?

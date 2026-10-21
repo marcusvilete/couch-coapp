@@ -15,7 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use couch_input::{HidUsage, local::ControllerIds, shortcuts::Shortcut};
+use couch_input::{HidUsage, shortcuts::Shortcut};
 use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
@@ -954,13 +954,7 @@ impl Actor {
             replace_grace: self.replace_grace,
             local: (!controllers.is_empty()).then(|| LocalSeat {
                 member: self.me,
-                controllers: controllers
-                    .iter()
-                    .map(|c| ControllerIds {
-                        vendor: c.vendor,
-                        product: c.product,
-                    })
-                    .collect(),
+                controllers: controllers.iter().map(HostController::choice).collect(),
                 hide: true,
             }),
         };
@@ -980,7 +974,7 @@ impl Actor {
             overlay_area: self.backend.overlay_area(&Source::PrimaryScreen),
             in_front: None,
             controllers: (!controllers.is_empty())
-                .then(|| Ok(controllers.into_iter().map(|c| c.name).collect())),
+                .then(|| Ok(controllers.iter().map(HostController::shown_name).collect())),
             sound_level: crate::store::host_level(&self.data_dir),
         });
         Ok((session, options))

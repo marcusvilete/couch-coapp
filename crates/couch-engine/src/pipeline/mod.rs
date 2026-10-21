@@ -19,6 +19,7 @@ pub mod ipc;
 #[cfg(windows)]
 pub mod platform;
 pub mod source;
+pub mod virtual_hiding;
 pub mod watch;
 
 use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
@@ -141,6 +142,22 @@ pub enum Hiding {
     Busy,
 }
 
+/// Where the device of a remapper's pad the host keeps hidden stands now
+/// ([`Backend::virtual_device_now`], M22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualDevice {
+    /// Plugged in, still another program's virtual pad.
+    Theirs,
+    /// Plugged in, and one of the hosts' own pads, by its serial.
+    Ours,
+    /// Plugged in, but whose can't be told now (a host plugging a pad, the
+    /// markers unreadable). While plugged in, no other pad can have its id.
+    InDoubt,
+    /// Not plugged in; `hosts_plugging`: a host on this PC is plugging a
+    /// pad, which may take its id.
+    Gone { hosts_plugging: bool },
+}
+
 /// Where keyboard and mouse would land, checked right before every input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Focus {
@@ -240,6 +257,19 @@ pub trait Backend: Send + Sync + 'static {
     /// the returned guard drops (HidHide on Windows). Blocks briefly.
     fn hide_controller(&self, _ids: ControllerIds) -> Result<Box<dyn Any + Send>, String> {
         Err("hiding controllers isn't available here".into())
+    }
+
+    /// Hides another program's virtual pad, the device `device` (its
+    /// instance id), from every program but this one until the returned
+    /// guard drops (M22), the pad gone or not: never ours, nor one in doubt.
+    /// Blocks briefly.
+    fn hide_virtual(&self, _device: &str) -> Result<Box<dyn Any + Send>, String> {
+        Err("hiding controllers isn't available here".into())
+    }
+
+    /// Where a remapper pad's device kept hidden stands now (M22).
+    fn virtual_device_now(&self, _device: &str) -> VirtualDevice {
+        VirtualDevice::InDoubt
     }
 
     /// Tunes this PC's network for streaming until the returned guard drops

@@ -24,10 +24,13 @@
 //! decides, and any doubt in finding it makes the pad's origin unknown.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use crate::markers::{self, Process, own_start_time, process_state};
@@ -35,23 +38,48 @@ use crate::markers::{self, Process, own_start_time, process_state};
 /// Tells apart the markers of several pads in one process.
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
+/// This process's own pads, by marker number: their serials once known.
+/// Kept beside the files (M22: a host reads other programs' virtual pads,
+/// and must never take its own for one, whatever happens to the files).
+static OWN: Mutex<BTreeMap<u32, Option<u32>>> = Mutex::new(BTreeMap::new());
+
+fn own() -> MutexGuard<'static, BTreeMap<u32, Option<u32>>> {
+    OWN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A plugged pad's marker. Dropping it removes the marker.
 #[derive(Debug)]
 pub struct PadMarker {
-    path: PathBuf,
+    /// Its file, unless it couldn't be written: the pad is then this
+    /// process's in memory alone, which other processes can't see.
+    path: Option<PathBuf>,
     started: Option<u64>,
+    /// Its number in [`OWN`], for a marker of this process's own pad.
+    own: Option<u32>,
 }
 
 impl Drop for PadMarker {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if let Some(path) = &self.path {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(n) = self.own {
+            own().remove(&n);
+        }
     }
 }
 
 impl PadMarker {
-    /// Records the pad's ViGEm serial, once it has one.
+    /// Records the pad's ViGEm serial, once it has one: in memory always,
+    /// in its file if it has one.
     pub fn set_serial(&self, serial: u32) -> io::Result<()> {
-        write_atomically(&self.path, &encode(self.started, Some(serial)))
+        if let Some(n) = self.own {
+            own().insert(n, Some(serial));
+        }
+        match &self.path {
+            Some(path) => write_atomically(path, &encode(self.started, Some(serial))),
+            None => Ok(()),
+        }
     }
 }
 
@@ -71,16 +99,60 @@ impl HostPads {
     }
 }
 
-/// Marks a virtual pad as plugged in by this process, before it is.
-pub fn mark() -> io::Result<PadMarker> {
-    let dir = markers_dir().ok_or_else(|| io::Error::other("LOCALAPPDATA is not set"))?;
+/// Marks a virtual pad as plugged in by this process, before it is: in
+/// memory always (this process never takes the pad for another program's,
+/// M22), and in a file for the others. A file that can't be written is
+/// logged: other processes on this PC then can't tell the pad is a host's.
+pub fn mark() -> PadMarker {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    mark_in(&dir, std::process::id(), n, own_start_time())
+    let marker = match markers_dir() {
+        Some(dir) => mark_own_in(&dir, n),
+        None => Err((own_marker(n), io::Error::other("LOCALAPPDATA is not set"))),
+    };
+    marker.unwrap_or_else(|(marker, e)| {
+        tracing::warn!("marking the virtual pad for other processes: {e}");
+        marker
+    })
 }
 
-/// The pads of the hosts still running here.
+/// A marker of this process's own pad, in memory alone.
+fn own_marker(n: u32) -> PadMarker {
+    // Ours before the file: a pad without a serial yet makes every ViGEm
+    // pad possibly ours.
+    own().insert(n, None);
+    PadMarker {
+        path: None,
+        started: own_start_time(),
+        own: Some(n),
+    }
+}
+
+/// [`own_marker`], with its file in `dir`; the marker without a file if it
+/// can't be written.
+fn mark_own_in(dir: &Path, n: u32) -> Result<PadMarker, (PadMarker, io::Error)> {
+    let mut marker = own_marker(n);
+    match mark_in(dir, std::process::id(), n, own_start_time()) {
+        Ok(mut file) => {
+            marker.path = file.path.take();
+            Ok(marker)
+        }
+        Err(e) => Err((marker, e)),
+    }
+}
+
+/// The pads of the hosts still running here, this process's own included
+/// even if their files can't be read.
 pub fn host_pads() -> HostPads {
-    markers_dir().map_or_else(HostPads::default, |dir| live_in(&dir, process_state))
+    let mut pads = markers_dir().map_or_else(HostPads::default, |dir| live_in(&dir, process_state));
+    for serial in own().values() {
+        match serial {
+            Some(serial) => {
+                pads.serials.insert(*serial);
+            }
+            None => pads.plugging = true,
+        }
+    }
+    pads
 }
 
 /// A host that is still running has a virtual pad plugged in on this PC.
@@ -143,7 +215,11 @@ fn mark_in(dir: &Path, pid: u32, n: u32, started: Option<u64>) -> io::Result<Pad
     fs::create_dir_all(dir)?;
     let path = dir.join(marker_name(pid, n));
     write_atomically(&path, &encode(started, None))?;
-    Ok(PadMarker { path, started })
+    Ok(PadMarker {
+        path: Some(path),
+        started,
+        own: None,
+    })
 }
 
 /// The pads whose markers belong to running hosts. A marker is removed only
@@ -154,8 +230,15 @@ fn mark_in(dir: &Path, pid: u32, n: u32, started: Option<u64>) -> io::Result<Pad
 /// host's.
 fn live_in(dir: &Path, process: impl Fn(u32) -> Process) -> HostPads {
     let mut pads = HostPads::default();
-    let Ok(entries) = fs::read_dir(dir) else {
-        return pads;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // No host has made one yet.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return pads,
+        // Markers that can't be read may name any ViGEm pad.
+        Err(_) => {
+            pads.plugging = true;
+            return pads;
+        }
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -287,6 +370,49 @@ mod tests {
         first.set_serial(1).unwrap();
         second.set_serial(2).unwrap();
         assert_eq!(live_in(&dir, process_state).serials, BTreeSet::from([1, 2]));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// M22: a host reads other programs' virtual pads, so it must know its
+    /// own without their files.
+    #[test]
+    fn this_processs_pads_count_without_their_files() {
+        let dir = scratch("in-memory");
+        // A number no other marker of this process takes.
+        let n = u32::MAX - 7;
+        let marker = mark_own_in(&dir, n).unwrap();
+        assert!(
+            host_pads().plugging,
+            "no serial yet: any ViGEm pad may be it"
+        );
+        marker.set_serial(4242).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(host_pads().serials.contains(&4242), "its file is gone");
+        drop(marker);
+        assert!(!host_pads().serials.contains(&4242));
+
+        // A file that can't be written: still ours in this process.
+        let not_a_dir = scratch("in-memory-file");
+        fs::write(&not_a_dir, "").unwrap();
+        let (marker, _) = mark_own_in(&not_a_dir, n - 1).unwrap_err();
+        marker.set_serial(4243).unwrap();
+        assert!(host_pads().serials.contains(&4243));
+        drop(marker);
+        assert!(!host_pads().serials.contains(&4243));
+        let _ = fs::remove_file(&not_a_dir);
+    }
+
+    #[test]
+    fn markers_that_cant_be_read_may_name_any_pad() {
+        let dir = scratch("unreadable");
+        fs::create_dir_all(&dir).unwrap();
+        let not_a_dir = dir.join("file");
+        fs::write(&not_a_dir, "").unwrap();
+        assert!(live_in(&not_a_dir, process_state).plugging);
+        assert!(
+            !live_in(&dir.join("missing"), process_state).any(),
+            "no folder: no host yet"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
