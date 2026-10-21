@@ -11,7 +11,7 @@ use couch_net::{
 use couch_proto::{
     control::{ControlMessage, close_code},
     ids::{InviteTag, InviteToken, MemberId, RoomId, Signature},
-    room::{RoomPolicy, RoomSnapshot, RosterEntry, Signed},
+    room::{OwnedPolicy, RoomPolicy, RoomSnapshot, RosterEntry, Signed},
 };
 use iroh::endpoint::ConnectionError;
 
@@ -30,8 +30,8 @@ fn id(endpoint: &Endpoint) -> MemberId {
     MemberId(*endpoint.id().as_bytes())
 }
 
-fn policy(roster: Vec<MemberId>, banned: Vec<MemberId>) -> Signed<RoomPolicy> {
-    Signed {
+fn policy(roster: Vec<MemberId>, banned: Vec<MemberId>) -> OwnedPolicy {
+    OwnedPolicy::founders(Signed {
         body: RoomPolicy {
             room: ROOM,
             version: 3,
@@ -43,7 +43,7 @@ fn policy(roster: Vec<MemberId>, banned: Vec<MemberId>) -> Signed<RoomPolicy> {
             banned,
         },
         sig: Signature([2; 32], [3; 32]),
-    }
+    })
 }
 
 /// A newcomer joining an owner: the password check on both ends.
@@ -120,7 +120,7 @@ async fn a_wrong_password_fails_on_both_sides() {
 /// or refuses showing `proof`.
 async fn hello(
     snapshot: Option<RoomSnapshot>,
-    proof: Option<Signed<RoomPolicy>>,
+    proof: Option<OwnedPolicy>,
 ) -> Result<RoomSnapshot, AdmissionError> {
     let (a, b) = (bind(None).await, bind(None).await);
     let a_id = id(&a);
@@ -141,7 +141,7 @@ async fn hello(
             panic!("expected a member hello");
         };
         assert_eq!(hello.room, ROOM);
-        assert!(hello.policy.body.lists(a_id));
+        assert!(hello.policy.policy.body.lists(a_id));
         if let Some(snapshot) = snapshot {
             tx.send(&ControlMessage::RoomSnapshot(Box::new(snapshot)))
                 .await

@@ -21,11 +21,15 @@ use crate::{
 
 pub const LINK_PREFIX: &str = "couchco://join#";
 pub const MAGIC: [u8; 2] = *b"CC";
-pub const VERSION: u8 = 1;
+/// The newest layout read. Version 1 is the invite of a room its founder
+/// owns, version 2 (M13) of a room handed over since: the same fields, then
+/// the founder. Both are written, so a room never handed over keeps making
+/// the invites earlier builds read.
+pub const VERSION: u8 = 2;
 /// Longest text [`Invite::parse`] looks at.
 pub const MAX_CHARS: usize = 4096;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invite {
     /// The room's owner, the only member who admits newcomers.
     pub owner: MemberId,
@@ -38,6 +42,28 @@ pub struct Invite {
     pub expires: u64,
     /// Where to reach the owner: its relay, or direct addresses on a LAN.
     pub addr: PeerAddr,
+    /// Who founded the room, if not its owner now (M13): the room id binds
+    /// the founder, and the chain of handovers from it names the owner.
+    pub founder: Option<MemberId>,
+}
+
+/// Version 1's layout, and the start of version 2's: the invite page reads
+/// the name at a fixed offset after `owner` and `nonce`.
+#[derive(Serialize, Deserialize)]
+struct Layout {
+    owner: MemberId,
+    nonce: RoomNonce,
+    name: String,
+    token: InviteToken,
+    expires: u64,
+    addr: PeerAddr,
+}
+
+/// Version 2: version 1's fields, then the founder.
+#[derive(Serialize, Deserialize)]
+struct HandedOver {
+    invite: Layout,
+    founder: MemberId,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -51,12 +77,47 @@ pub enum InviteError {
 }
 
 impl Invite {
+    /// The room's founder, whom the room id binds.
+    pub fn founder(&self) -> MemberId {
+        self.founder.unwrap_or(self.owner)
+    }
+
+    fn layout(&self) -> Layout {
+        Layout {
+            owner: self.owner,
+            nonce: self.nonce,
+            name: self.name.clone(),
+            token: self.token,
+            expires: self.expires,
+            addr: self.addr.clone(),
+        }
+    }
+
+    fn from_layout(invite: Layout, founder: Option<MemberId>) -> Self {
+        Self {
+            owner: invite.owner,
+            nonce: invite.nonce,
+            name: invite.name,
+            token: invite.token,
+            expires: invite.expires,
+            addr: invite.addr,
+            founder,
+        }
+    }
+
     /// The payload alone: what follows `#` in the link.
     pub fn payload(&self) -> String {
-        encode(
-            VERSION,
-            &postcard::to_stdvec(self).expect("postcard into a Vec"),
-        )
+        let body = match self.founder.filter(|f| *f != self.owner) {
+            None => (1, postcard::to_stdvec(&self.layout())),
+            Some(founder) => (
+                2,
+                postcard::to_stdvec(&HandedOver {
+                    invite: self.layout(),
+                    founder,
+                }),
+            ),
+        };
+        encode(body.0, &body.1.expect("postcard into a Vec"))
     }
 
     pub fn to_link(&self) -> String {
@@ -88,9 +149,19 @@ impl Invite {
         if *version > VERSION {
             return Err(InviteError::NewerVersion);
         }
-        let (invite, rest): (Invite, _) =
-            postcard::take_from_bytes(body).map_err(|_| InviteError::Damaged)?;
-        if !rest.is_empty() || !invite.is_valid() {
+        let invite = match version {
+            1 => Self::from_layout(whole(body)?, None),
+            _ => {
+                let handed: HandedOver = whole(body)?;
+                // Only one way to write each invite: a founder who owns the
+                // room makes version 1.
+                if handed.founder == handed.invite.owner {
+                    return Err(InviteError::Damaged);
+                }
+                Self::from_layout(handed.invite, Some(handed.founder))
+            }
+        };
+        if !invite.is_valid() {
             return Err(InviteError::Damaged);
         }
         Ok(invite)
@@ -98,6 +169,14 @@ impl Invite {
 
     fn is_valid(&self) -> bool {
         valid_name(&self.name) && self.addr.is_valid()
+    }
+}
+
+/// `body` decoded, with nothing left over.
+fn whole<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, InviteError> {
+    match postcard::take_from_bytes(body) {
+        Ok((value, [])) => Ok(value),
+        _ => Err(InviteError::Damaged),
     }
 }
 
@@ -125,7 +204,51 @@ mod tests {
                 relay: Some("https://relay.example.com./".into()),
                 ips: vec![],
             },
+            founder: None,
         }
+    }
+
+    /// M13: a room handed over names its founder too, in version 2.
+    #[test]
+    fn a_handed_over_room_names_its_founder() {
+        let handed = Invite {
+            founder: Some(MemberId([9; 32])),
+            ..invite()
+        };
+        let payload = handed.payload();
+        assert_eq!(Invite::parse(&payload), Ok(handed.clone()));
+        assert_eq!(handed.founder(), MemberId([9; 32]));
+        assert_eq!(invite().founder(), invite().owner);
+        // Version 2 starts as version 1 does, so the invite page finds the
+        // name at the same offset.
+        let bytes = |p: &str| BASE32_NOPAD.decode(p.to_uppercase().as_bytes()).unwrap();
+        let (v1, v2) = (bytes(&invite().payload()), bytes(&payload));
+        assert_eq!((v1[2], v2[2]), (1, 2));
+        assert_eq!(v1[3..], v2[3..v1.len()]);
+        // A founder who owns the room writes version 1, and only that.
+        let same = Invite {
+            founder: Some(invite().owner),
+            ..invite()
+        };
+        assert_eq!(same.payload(), invite().payload());
+        let non_canonical = HandedOver {
+            invite: invite().layout(),
+            founder: invite().owner,
+        };
+        assert_eq!(
+            Invite::parse(&encode(2, &postcard::to_stdvec(&non_canonical).unwrap())),
+            Err(InviteError::Damaged)
+        );
+        let mut trailing = postcard::to_stdvec(&HandedOver {
+            invite: invite().layout(),
+            founder: MemberId([9; 32]),
+        })
+        .unwrap();
+        trailing.push(0);
+        assert_eq!(
+            Invite::parse(&encode(2, &trailing)),
+            Err(InviteError::Damaged)
+        );
     }
 
     #[test]
@@ -170,12 +293,9 @@ mod tests {
 
     #[test]
     fn trailing_bytes_and_bad_fields_are_rejected() {
-        let mut body = postcard::to_stdvec(&invite()).unwrap();
+        let mut body = postcard::to_stdvec(&invite().layout()).unwrap();
         body.push(0);
-        assert_eq!(
-            Invite::parse(&encode(VERSION, &body)),
-            Err(InviteError::Damaged)
-        );
+        assert_eq!(Invite::parse(&encode(1, &body)), Err(InviteError::Damaged));
         let mut nameless = invite();
         nameless.name = " ".into();
         assert_eq!(
@@ -198,6 +318,18 @@ mod tests {
     fn the_layout_is_pinned() {
         assert_eq!(invite().payload(), PINNED_PAYLOAD);
     }
+
+    /// The same for version 2 (M13), which `check.js` reads too.
+    #[test]
+    fn the_handed_over_layout_is_pinned() {
+        let handed = Invite {
+            founder: Some(MemberId([9; 32])),
+            ..invite()
+        };
+        assert_eq!(handed.payload(), PINNED_V2_PAYLOAD);
+    }
+
+    const PINNED_V2_PAYLOAD: &str = "inbqeaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayarw2duoryhgorpf5zgk3dbpexgk6dbnvygyzjomnxw2lrpaaeqscijbeeqscijbeeqscijbeeqscijbeeqscijbeeqscijbeeqs";
 
     const PINNED_PAYLOAD: &str = "inbqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayarw2duoryhgorpf5zgk3dbpexgk6dbnvygyzjomnxw2lrpaa";
 

@@ -85,6 +85,12 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 
 Each feature's notes sit under its area, tagged with the milestone that added it. Add a new feature's notes to the area it belongs to (or a new area), not as a section of its own.
 
+### Rooms: a profile's backup (M13 part B), handing a room over (M13 part A)
+
+- **Backup:** Settings → Backup opens the app's own save dialog; restoring works only in a profile with no rooms (a new `COUCH_PROFILE`), then the app starts again as that identity. A restored room catches up (its banner names who it waits for; **Stop waiting…** warns first) and an owned one asks for a new password.
+- **Handing over:** **Make owner** shows beside Ban, on hover, for members online now. The owner confirms, then sees "Waiting for … to accept" with **Withdraw**. The member offered gets a notice and a banner with **Accept…** (a dialog for the new password, twice) and **Decline**. Once accepted, every member shows the ♛ on the new owner and a notice ("… now owns …"); the old owner's invites are refused as expired and its Invite button is gone; the new owner's invites work with the new password.
+- On one PC, three profiles show it all (default, alice, bob): no game or second PC needed.
+
 ### Sessions and streams (M19), lifecycle (M6), the picture (P8)
 
 - **Start a session** (the dialog): a title, how many can watch, the seats, and the host's controller. Nothing is captured yet. The pads are plugged in and the controller hidden at once, so a game started afterwards never sees the controller and finds the seats' pads.

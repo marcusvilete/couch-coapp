@@ -25,7 +25,7 @@ use couch_input::shortcuts::Shortcuts;
 use couch_media::audio::MAX_BOOST_PERCENT;
 use couch_net::SecretKey;
 use couch_proto::{ids::RoomId, ipc::StreamVolume};
-use couch_room::room::SavedRoom;
+use couch_room::room::{RestoreMark, SavedRoom};
 use serde::{Deserialize, Serialize};
 
 use crate::{RelaySetting, backup, secrets::SecretStore};
@@ -44,8 +44,13 @@ const AUDIO_FILE: &str = "audio.json";
 const HOST_AUDIO_FILE: &str = "host-audio.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
-/// recognized rather than misread.
-const ROOM_MAGIC: &[u8] = b"CCR2";
+/// recognized rather than misread. `CCR3` (M13) adds the chain of
+/// handovers; `CCR2` files are read through [`legacy`] and written back as
+/// `CCR3` the next time the room is saved.
+const ROOM_MAGIC: &[u8] = b"CCR3";
+const ROOM_MAGIC_2: &[u8] = b"CCR2";
+/// A restored room's mark once its owner stopped waiting (M13).
+const STOPPED_MARK: &[u8] = b"stopped";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -186,12 +191,14 @@ impl Store {
             source,
         })?;
         let bytes = self.secrets.unprotect(&sealed).map_err(|_| unreadable())?;
-        let body = bytes.strip_prefix(ROOM_MAGIC).ok_or_else(unreadable)?;
-        let (room, rest) = postcard::take_from_bytes(body).map_err(|_| unreadable())?;
-        if !rest.is_empty() {
-            return Err(unreadable());
+        if let Some(body) = bytes.strip_prefix(ROOM_MAGIC) {
+            return whole(body).ok_or_else(unreadable);
         }
-        Ok(room)
+        // From before M13: the same room, its founder as its owner.
+        let body = bytes.strip_prefix(ROOM_MAGIC_2).ok_or_else(unreadable)?;
+        whole::<legacy::RememberedRoom>(body)
+            .map(Into::into)
+            .ok_or_else(unreadable)
     }
 
     pub fn save_room(&self, id: RoomId, room: &RememberedRoom) -> Result<(), StoreError> {
@@ -233,7 +240,34 @@ impl Store {
             .join(format!("{}.restored", id.to_hex()))
     }
 
+    /// The room came from a backup and hasn't caught up with its members
+    /// (the mark is empty), or its owner stopped waiting and it hasn't heard
+    /// everyone yet (the mark says `stopped`, M13). Anything else in it
+    /// reads as catching up, the safer of the two.
+    pub fn restore_mark(&self, id: RoomId) -> Option<RestoreMark> {
+        let bytes = fs::read(self.restored_path(id)).ok()?;
+        Some(if bytes == STOPPED_MARK {
+            RestoreMark::Unconfirmed
+        } else {
+            RestoreMark::CatchingUp
+        })
+    }
+
+    /// Where the restored room stands now; [`RestoreMark::Done`] takes the
+    /// mark away.
+    pub fn set_restore_mark(&self, id: RoomId, mark: RestoreMark) {
+        let body: &[u8] = match mark {
+            RestoreMark::Done => return self.clear_restored(id),
+            RestoreMark::CatchingUp => b"",
+            RestoreMark::Unconfirmed => STOPPED_MARK,
+        };
+        if let Err(e) = write_atomic(&self.restored_path(id), body) {
+            tracing::warn!("room {id:?}'s restore mark: {e}");
+        }
+    }
+
     /// The room came from a backup and hasn't caught up with its members.
+    #[cfg(test)]
     pub fn is_restored(&self, id: RoomId) -> bool {
         self.restored_path(id).exists()
     }
@@ -356,7 +390,7 @@ impl Store {
             let mut room = room.clone();
             room.password = None;
             room.saved.invites.clear();
-            let id = couch_room::signing::room_id(room.saved.owner, room.saved.nonce);
+            let id = couch_room::signing::room_id(room.saved.founder, room.saved.nonce);
             undo.rooms.push(id);
             // The mark first: a room on disk without one would sign at once
             // after a crash here.
@@ -474,6 +508,77 @@ pub(crate) fn save_host_level(dir: &Path, percent: u16) -> Result<(), StoreError
     };
     let bytes = serde_json::to_vec_pretty(&audio).expect("level serialize");
     write_atomic(&dir.join(HOST_AUDIO_FILE), &bytes)
+}
+
+/// `bytes` decoded, with nothing left over.
+fn whole<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    match postcard::take_from_bytes(bytes) {
+        Ok((value, [])) => Some(value),
+        _ => None,
+    }
+}
+
+/// What rooms were saved as before M13 (room files `CCR2`, backups of
+/// format 1): no chain of handovers, the founder named the owner.
+pub(crate) mod legacy {
+    use couch_proto::{
+        ids::{MemberId, RoomNonce},
+        room::{MemberRecord, RoomPolicy, Signed},
+    };
+    use couch_room::room::{Leaving, SavedInvite, SavedRoom};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    pub(crate) struct Room {
+        owner: MemberId,
+        nonce: RoomNonce,
+        policy: Signed<RoomPolicy>,
+        records: Vec<Signed<MemberRecord>>,
+        invites: Vec<SavedInvite>,
+        leaving: Option<Leaving>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub(crate) struct RememberedRoom {
+        saved: Room,
+        password: Option<[u8; 32]>,
+    }
+
+    impl From<RememberedRoom> for super::RememberedRoom {
+        fn from(old: RememberedRoom) -> Self {
+            let room = old.saved;
+            Self {
+                saved: SavedRoom {
+                    founder: room.owner,
+                    nonce: room.nonce,
+                    policy: room.policy,
+                    handovers: Vec::new(),
+                    records: room.records,
+                    invites: room.invites,
+                    leaving: room.leaving,
+                },
+                password: old.password,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl RememberedRoom {
+        pub(crate) fn from_new(new: &super::RememberedRoom) -> Self {
+            let s = new.saved.clone();
+            Self {
+                saved: Room {
+                    owner: s.founder,
+                    nonce: s.nonce,
+                    policy: s.policy,
+                    records: s.records,
+                    invites: s.invites,
+                    leaving: s.leaving,
+                },
+                password: new.password,
+            }
+        }
+    }
 }
 
 /// Writes a sibling temporary file and renames it over `path`, so a crash
@@ -714,6 +819,75 @@ mod tests {
         assert!(!target.has_rooms());
         assert!(!target.is_restored(room.id()));
         assert_eq!(fs::read(to.path().join(SHORTCUTS_FILE)).unwrap(), b"mine");
+    }
+
+    /// M13: a room saved before handovers existed (`CCR2`) still reads, its
+    /// founder as owner, and is saved as `CCR3` from then on.
+    #[test]
+    fn a_room_saved_before_handovers_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let room = owned_room(1);
+        let remembered = RememberedRoom {
+            saved: room.saved(),
+            password: Some([4; 32]),
+        };
+        let mut bytes = ROOM_MAGIC_2.to_vec();
+        bytes.extend(postcard::to_stdvec(&legacy::RememberedRoom::from_new(&remembered)).unwrap());
+        let sealed = Unprotected.protect(&bytes).unwrap();
+        fs::create_dir_all(dir.path().join(ROOMS_DIR)).unwrap();
+        fs::write(store.room_path(room.id()), sealed).unwrap();
+        assert_eq!(store.rooms(), vec![remembered.clone()]);
+        store.save_room(room.id(), &remembered).unwrap();
+        let saved = Unprotected
+            .unprotect(&fs::read(store.room_path(room.id())).unwrap())
+            .unwrap();
+        assert!(saved.starts_with(ROOM_MAGIC));
+        assert_eq!(store.rooms(), vec![remembered]);
+    }
+
+    /// M13: a restore keeps a room's chain of handovers (it is no secret).
+    #[test]
+    fn a_restore_keeps_the_chain_of_handovers() {
+        use couch_proto::{
+            ids::{MemberId, Signature},
+            room::{Handover, Signed},
+        };
+
+        let room = owned_room(1);
+        let mut saved = room.saved();
+        saved.handovers = vec![Signed {
+            body: Handover {
+                room: room.id(),
+                from: room.me(),
+                to: MemberId([2; 32]),
+                after: 0,
+            },
+            sig: Signature([1; 32], [1; 32]),
+        }];
+        let contents = backup::Contents {
+            identity: [7; 32],
+            rooms: vec![RememberedRoom {
+                saved: saved.clone(),
+                password: None,
+            }],
+            files: Vec::new(),
+        };
+        let to = tempfile::tempdir().unwrap();
+        let target = store(to.path());
+        target.restore(&contents).unwrap();
+        assert_eq!(target.rooms()[0].saved.handovers, saved.handovers);
+        assert_eq!(
+            target.restore_mark(room.id()),
+            Some(RestoreMark::CatchingUp)
+        );
+        target.set_restore_mark(room.id(), RestoreMark::Unconfirmed);
+        assert_eq!(
+            target.restore_mark(room.id()),
+            Some(RestoreMark::Unconfirmed)
+        );
+        target.set_restore_mark(room.id(), RestoreMark::Done);
+        assert_eq!(target.restore_mark(room.id()), None);
     }
 
     /// A mark left without its room is swept, and counts as no room.

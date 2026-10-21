@@ -220,6 +220,23 @@ export function useLobby(): Lobby {
           refreshRooms().catch(() => {});
           break;
         }
+        // M13: the room changed hands, or its owner offers it to us.
+        case "ownerChanged": {
+          const room = roomsRef.current[event.room];
+          const owner = room?.members.find((m) => m.id === event.owner);
+          const name = room?.name ?? "the room";
+          notify(
+            owner?.link === "me" ? `You now own “${name}”.` : `${owner?.name ?? "Someone"} now owns “${name}”.`,
+          );
+          break;
+        }
+        case "roomOffered": {
+          const room = roomsRef.current[event.room];
+          const owner = room?.members.find((m) => m.isOwner)?.name ?? "The owner";
+          notify(`${owner} offers you “${room?.name ?? "their room"}”. Answer in the room.`);
+          flashTaskbar();
+          break;
+        }
         case "controlRequested": {
           const room = roomsRef.current[event.room];
           const name = room?.members.find((m) => m.id === event.member)?.name ?? "Someone";

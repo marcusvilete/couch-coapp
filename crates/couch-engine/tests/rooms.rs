@@ -13,7 +13,7 @@ use couch_engine::{
     MemberLink, Profile, Response, RoomGone, RoomView, secrets::Unprotected,
 };
 use couch_net::endpoint::{RelayChoice, RelayToken};
-use couch_proto::invite::Invite;
+use couch_proto::{ids::MemberId, invite::Invite};
 use couch_room::{limits::LimitConfig, room::Timings};
 use couch_testkit::relay::TestRelay;
 use tempfile::TempDir;
@@ -839,6 +839,176 @@ async fn a_restored_member_may_leave_while_catching_up() {
         .unwrap();
     assert!(moved.rooms().await.is_empty());
     stop_all(&mut [&mut a, &mut b, &mut moved]).await;
+}
+
+impl Member {
+    async fn offer(&self, room: &str, to: &Member) -> Result<Response, EngineError> {
+        self.handle(Command::OfferRoom {
+            room: room.into(),
+            member: to.id(),
+        })
+        .await
+    }
+
+    async fn answer(
+        &self,
+        room: &str,
+        accept: bool,
+        password: Option<&str>,
+    ) -> Result<Response, EngineError> {
+        self.handle(Command::AnswerOffer {
+            room: room.into(),
+            accept,
+            password: password.map(Into::into),
+        })
+        .await
+    }
+}
+
+/// M13: A hands the room to B in two steps; B sets a new password, owns
+/// the room everywhere (C, away meanwhile, included) and lets D in with
+/// its own invite, while A's old invite is refused and A can't invite or
+/// change the password any more.
+#[tokio::test]
+async fn a_room_is_handed_over_and_the_new_owner_lets_people_in() {
+    const NEW_PASSWORD: &str = "the new couch";
+    let (mut a, mut b, mut c, room) = three().await;
+    let old_invite = a.invite(&room).await;
+    let c_id = c.id();
+    c.stop().await;
+    let mut b_events = b.engine().subscribe();
+    let offered = a.offer(&room, &b).await.unwrap();
+    assert!(
+        matches!(&offered, Response::Room(v) if v.offering_to.as_ref() == Some(&b.id())),
+        "{offered:?}"
+    );
+    b.wait_for(&room, "the offer", |v| {
+        v.is_some_and(|v| v.offered == Some(false))
+    })
+    .await;
+    let mut events = Vec::new();
+    while let Ok(event) = b_events.try_recv() {
+        events.push(event);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::RoomOffered { room: r } if *r == room)),
+        "{events:?}"
+    );
+    // Accepting takes a password.
+    let err = b.answer(&room, true, None).await.unwrap_err();
+    assert!(matches!(err, EngineError::EmptyPassword), "{err}");
+    b.answer(&room, true, Some(NEW_PASSWORD)).await.unwrap();
+    b.wait_for(&room, "owning it", |v| {
+        v.is_some_and(|v| v.is_owner && !v.needs_password && v.offered.is_none())
+    })
+    .await;
+    a.wait_for(&room, "handing it over", |v| {
+        v.is_some_and(|v| {
+            !v.is_owner
+                && v.offering_to.is_none()
+                && v.members.iter().any(|m| m.is_owner && m.id == b.id())
+        })
+    })
+    .await;
+    let mut owner_changed = false;
+    while let Ok(event) = b_events.try_recv() {
+        owner_changed |= matches!(&event, Event::OwnerChanged { room: r, owner } if *r == room && *owner == b.id());
+    }
+    assert!(owner_changed, "B was told it owns the room");
+    // A is a member now.
+    let err = a.try_invite(&room).await.unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    let err = a
+        .handle(Command::ChangePassword {
+            room: room.clone(),
+            password: "mine again".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    // A's old invite: expired.
+    let mut d = Member::new("Davi").await;
+    let err = d.join(&old_invite, PASSWORD).await.unwrap_err();
+    assert!(refused_because(&err, "expired or was revoked"), "{err}");
+    // B's invite, with B's password.
+    let invite = b.invite(&room).await;
+    let parsed = Invite::parse(&invite).unwrap();
+    assert_eq!(parsed.founder(), MemberId::from_hex(&a.id()).unwrap());
+    let err = d.join(&invite, PASSWORD).await.unwrap_err();
+    assert!(matches!(err, EngineError::WrongPassword), "{err}");
+    let mut e = Member::new("Eva").await;
+    e.join(&invite, NEW_PASSWORD).await.unwrap();
+    // C comes back and finds B owns it.
+    c.restart().await;
+    assert_eq!(c.id(), c_id);
+    full_mesh(&room, &[&a, &b, &c, &e]).await;
+    c.wait_for(&room, "B as owner", |v| {
+        v.is_some_and(|v| v.members.iter().any(|m| m.is_owner && m.id == b.id()))
+    })
+    .await;
+    // Ownership survives B's restart, password included.
+    b.restart().await;
+    let view = b.room(&room).await.unwrap();
+    assert!(view.is_owner && !view.needs_password, "{view:#?}");
+    stop_all(&mut [&mut a, &mut b, &mut c, &mut d, &mut e]).await;
+}
+
+/// M13: an offer can be declined, or withdrawn; nothing changes hands.
+#[tokio::test]
+async fn an_offer_declined_or_withdrawn_changes_nothing() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.offer(&room, &b).await.unwrap();
+    b.wait_for(&room, "the offer", |v| {
+        v.is_some_and(|v| v.offered.is_some())
+    })
+    .await;
+    b.answer(&room, false, None).await.unwrap();
+    a.wait_for(&room, "the decline", |v| {
+        v.is_some_and(|v| v.is_owner && v.offering_to.is_none())
+    })
+    .await;
+    a.offer(&room, &c).await.unwrap();
+    c.wait_for(&room, "the offer", |v| {
+        v.is_some_and(|v| v.offered.is_some())
+    })
+    .await;
+    a.handle(Command::WithdrawOffer { room: room.clone() })
+        .await
+        .unwrap();
+    c.wait_for(&room, "the withdrawal", |v| {
+        v.is_some_and(|v| v.offered.is_none())
+    })
+    .await;
+    let err = c.answer(&room, true, Some("too late")).await.unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    assert!(a.room(&room).await.unwrap().is_owner);
+    // Only the owner offers, and only to someone online.
+    let err = b.offer(&room, &c).await.unwrap_err();
+    assert!(matches!(err, EngineError::Room(_)), "{err}");
+    let c_id = c.id();
+    c.stop().await;
+    a.wait_for(&room, "C offline", |v| {
+        v.is_some_and(|v| {
+            v.members
+                .iter()
+                .any(|m| m.name == "Caio" && matches!(m.link, MemberLink::Offline))
+        })
+    })
+    .await;
+    let offline = a
+        .handle(Command::OfferRoom {
+            room: room.clone(),
+            member: c_id,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        offline.to_string().contains("online"),
+        "C is offline: {offline}"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
 #[tokio::test]

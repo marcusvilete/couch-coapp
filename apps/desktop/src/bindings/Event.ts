@@ -7,7 +7,7 @@ import type { WatchEnd } from "./WatchEnd";
 /**
  * Things the engine announces on its own.
  */
-export type Event = { "type": "pong", nonce: number, } | { "type": "roomChanged", room: RoomView, } | { "type": "streamLevel", room: string, peak_db: number, average_db: number, } | { "type": "roomRemoved", room: string, reason: RoomGone, } | { "type": "joinsPaused", room: string, minutes: number, } | { "type": "inviteOpened" } | { "type": "controlRequested", room: string, member: string, 
+export type Event = { "type": "pong", nonce: number, } | { "type": "roomChanged", room: RoomView, } | { "type": "streamLevel", room: string, peak_db: number, average_db: number, } | { "type": "roomRemoved", room: string, reason: RoomGone, } | { "type": "joinsPaused", room: string, minutes: number, } | { "type": "ownerChanged", room: string, owner: string, } | { "type": "roomOffered", room: string, } | { "type": "inviteOpened" } | { "type": "controlRequested", room: string, member: string, 
 /**
  * The seat's label, such as "Controller 2".
  */

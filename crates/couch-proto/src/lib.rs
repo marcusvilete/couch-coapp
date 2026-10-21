@@ -47,7 +47,10 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// 4: several seats for one viewer (M18): `ViewerControllers`, a viewer on
 /// several seats in `SessionStatus`, and giving back one seat.
 /// 5: several seats for the host (M23): `SessionStatus.host_seats`.
-pub const PROTOCOL_MINOR: u16 = 5;
+/// 6: handing a room over (M13): policies travel with their chain of
+/// handovers (`OwnedPolicy`), `HandoverOffer`, `HandoverAnswer`,
+/// `HandoverWithdraw`, and invites of version 2.
+pub const PROTOCOL_MINOR: u16 = 6;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -60,6 +63,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (3, "0.11"),
     (4, "0.11"),
     (5, "0.12"),
+    (6, "0.16"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

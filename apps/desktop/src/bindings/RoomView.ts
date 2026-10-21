@@ -41,7 +41,22 @@ catchingUp: boolean,
  */
 waitingFor: Array<string>, 
 /**
- * For the owner: restored from a backup, the room has no password
- * (M13: the backup never carries one); set a new one to invite again.
+ * For the owner: the room has no password (M13: restored from a
+ * backup, which never carries one, or handed to us before we chose
+ * one); set a new one to invite again.
  */
-needsPassword: boolean, };
+needsPassword: boolean, 
+/**
+ * The member we offered the room to, while the offer stands (M13).
+ */
+offeringTo: string | null, 
+/**
+ * The owner offers us the room: whether we accepted already (M13).
+ */
+offered: boolean | null, 
+/**
+ * We own the room and can offer it to a member now (M13): not after a
+ * restore until confirmed, not with an offer standing, not past the
+ * 32 handovers a room's chain holds.
+ */
+canOffer: boolean, };
