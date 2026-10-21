@@ -25,6 +25,8 @@ Every gate also needs a full run with 0 decode errors. Two checks are regression
 
 **The gates run in H.264** (M12c): `gates` sets `COUCH_HOST_CODEC=h264` for the host it starts. HEVC, the default between NVIDIA PCs, sends only about 0.3 Mbit/s on the latency clock: the throttles never touch it, so G5 read "settled never" and G3's and G7's numbers said nothing about rate control. H.264 fills its target on the clock, as the gates assume. A plain `latency-probe` follows `COUCH_HOST_CODEC` as set, so it measures HEVC there.
 
+**The memory path too** (M12a): after touching the read-back after pacing (`pipeline::host::send`, `gpu_frames`' mapped frames), run them a second time with `$env:COUCH_HOST_ENCODER = 'h264_nvenc'`, which feeds NVENC from memory as an AMD or Intel host's encoder is fed; the gate logs then say "read back to memory after pacing". Both passed in M12a with G1 p50 / p95 about 12 / 13 ms on either path.
+
 ## Run
 
 ```powershell
