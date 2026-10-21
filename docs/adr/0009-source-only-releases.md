@@ -27,6 +27,7 @@ The app is GPL-3.0-only ([ADR 0008](0008-gpl-3.0.md)). The source can be public 
   - **the wire-format freeze:** `PROTOCOL_MINOR` stays a wire revision for good. It is bumped with every change to what members exchange, and builds of different revisions refuse each other with "update needed". Payloads may keep changing in place. Different people's builds never need to talk: each group runs one builder's installers, on that builder's relay.
   - **our relay serving the public:** it serves the maintainer's friends. Other builds can't use it anyway: they don't have its token.
 - **Optional now:** the fallback encoder (a host without a GPU encoder), and the outside review of the admission composition. The review is still worth having before encouraging strangers to rely on the app.
+  - *2026-10-21:* the fallback encoder was dropped as not needed (M14 in `docs/architecture.md`): Media Foundation, part of Windows, already gives such a host Microsoft's licensed software encoder, ahead of the OpenH264 compiled into FFmpeg.
 - **Still required, because friends' installers are a distribution:**
   - the third-party notices in every installer;
   - the app's source: a link to the public repository at the installer's commit;

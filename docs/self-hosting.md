@@ -91,7 +91,7 @@ You need a small Linux server (Ubuntu 24.04) with a name pointing at it. A free 
 
 **What your friends will see when installing:** after the app installs, it offers the two drivers, one question each, with the buttons in Windows' own language:
 - **ViGEmBus:** say yes if they'll host games, so guests' controllers reach the game;
-- **HidHide:** optional. It lets the host's own controller play through a seat.
+- **HidHide:** optional. It lets the host's own controllers play through seats, one seat each.
 
 Each one opens its own setup, and Windows asks for administrator rights.
 
