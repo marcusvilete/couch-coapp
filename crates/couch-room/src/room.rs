@@ -109,6 +109,9 @@ pub enum Effect {
     Removed { banned: bool },
     /// We left (or closed the room) and the word got out: forget the room.
     Departed,
+    /// A room restored from a backup has caught up with its members (or the
+    /// owner stopped waiting): it may sign again ([`Room::catch_up_first`]).
+    CaughtUp,
 }
 
 /// Who we are in a room: our key, and what our record says about us.
@@ -163,6 +166,10 @@ pub enum RoomError {
     Exhausted,
     #[error("names must be 1 to 96 bytes, with nothing invisible in them")]
     InvalidName,
+    #[error(
+        "this room was restored from a backup and is catching up with its members: try again once they have been online, or stop waiting"
+    )]
+    CatchingUp,
 }
 
 /// An invite the owner keeps.
@@ -256,7 +263,32 @@ pub struct Room {
     next_repair: Instant,
     /// Over: removed, or left with the word out. The engine forgets it.
     gone: bool,
+    /// Restored from a backup (M13): what we hold may be older than the
+    /// room, so the owner admits, bans and removes nobody until it has
+    /// heard every member's state (`heard`, see [`Room::catching_up_with`]).
+    /// Signing from older state forks the room: a ban made after the
+    /// backup, held by one absent member, could be outvoted by what the
+    /// owner signs next (the review's finding). A member signs nothing that
+    /// matters (its own records, which the room's newer ones supersede), so
+    /// any snapshot catches it up.
+    catching_up: bool,
+    /// While catching up: members whose snapshot arrived this run.
+    heard: BTreeSet<MemberId>,
+    /// Restored from a backup: the next policy we sign skips ahead
+    /// ([`RESTORE_SKIP`]).
+    skip_next: bool,
 }
+
+/// How far a restored room's first policy skips ahead (M13): past whatever
+/// the lost PC signed after the backup, which a member we never heard from
+/// may hold (one admitted after it, say). That member then finds the room's
+/// newer state instead of a second, different policy under the same
+/// version: a change only it held is lost, but the room never forks. Covers
+/// 65,536 changes after a backup, and as many restores.
+pub const RESTORE_SKIP: u32 = 1 << 16;
+/// The same for the record a member leaves with while catching up: its own
+/// records on the lost PC may have gone on after the backup.
+const RESTORE_RECORD_SKIP: u64 = 1 << 32;
 
 impl std::fmt::Debug for Room {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -411,7 +443,67 @@ impl Room {
             next_repair: now + timings.repair_every,
             timings,
             gone: false,
+            catching_up: false,
+            heard: BTreeSet::new(),
+            skip_next: false,
         }
+    }
+
+    /// The room was restored from a backup (M13): catch up with the members
+    /// before signing, then sign ahead of anything since the backup
+    /// ([`RESTORE_SKIP`]). A room with nobody else on its roster has no one
+    /// to catch up with: it is caught up at once, its owner signing the room
+    /// again ahead (whoever the lost PC let in after the backup finds it,
+    /// and is no longer listed). The effects are applied as usual
+    /// ([`Effect::CaughtUp`] among them, if so).
+    pub fn catch_up_first(&mut self) -> Vec<Effect> {
+        self.catching_up = true;
+        self.skip_next = true;
+        self.heard.clear();
+        let mut fx = Vec::new();
+        if self.catching_up_with().is_empty() {
+            self.caught_up(&mut fx);
+        }
+        fx
+    }
+
+    pub fn is_catching_up(&self) -> bool {
+        self.catching_up
+    }
+
+    /// While catching up, the members not heard from yet: everyone on the
+    /// roster as we know it now (a newer policy may have dropped someone
+    /// banned after the backup), but us and whoever left. A member catches
+    /// up from anyone, so for one this is empty or just the first.
+    pub fn catching_up_with(&self) -> Vec<MemberId> {
+        if !self.catching_up {
+            return Vec::new();
+        }
+        self.policy
+            .body
+            .roster
+            .iter()
+            .map(|e| e.id)
+            .filter(|id| {
+                *id != self.me
+                    && !self.heard.contains(id)
+                    && !self.records.get(id).is_some_and(|r| r.body.left)
+            })
+            .collect()
+    }
+
+    /// Owner only, the user's choice: stop waiting for members who may
+    /// never come back, and sign from what we hold. A change made after the
+    /// backup that only they hold can then be undone (a ban among them).
+    pub fn stop_catching_up(&mut self) -> Result<Vec<Effect>, RoomError> {
+        if !self.is_owner() {
+            return Err(RoomError::NotOwner);
+        }
+        let mut fx = Vec::new();
+        if self.catching_up {
+            self.caught_up(&mut fx);
+        }
+        Ok(fx)
     }
 
     /// Verified records of the current stays from a snapshot or saved state;
@@ -717,6 +809,11 @@ impl Room {
         if self.is_banned(member) {
             return Err(close_code::BANNED);
         }
+        // Restored from a backup and not caught up: signing now could reuse
+        // a version the members already hold (M13).
+        if self.catching_up {
+            return Err(close_code::UNKNOWN_ROOM);
+        }
         if self.usable_invite(invite, now_unix).is_none() {
             return Err(close_code::INVITE_EXPIRED);
         }
@@ -971,12 +1068,29 @@ impl Room {
                 for record in members {
                     self.merge_record(record, Some(from), now, &mut fx);
                 }
+                // A member's whole view. An owner caught up with everyone
+                // holds anything newer it signed before the backup was
+                // restored; a member, from anyone.
+                if self.catching_up {
+                    self.heard.insert(from);
+                    if !self.is_owner() || self.catching_up_with().is_empty() {
+                        self.caught_up(&mut fx);
+                    }
+                }
             }
             ControlMessage::MemberUpdate(record) => {
                 self.merge_record(*record, Some(from), now, &mut fx);
+                // Someone we waited for may have left.
+                if self.catching_up && self.is_owner() && self.catching_up_with().is_empty() {
+                    self.caught_up(&mut fx);
+                }
             }
             ControlMessage::PolicyUpdate(policy) => {
                 self.merge_policy(*policy, Some(from), &mut fx);
+                // A newer roster may have dropped someone we waited for.
+                if self.catching_up && self.is_owner() && self.catching_up_with().is_empty() {
+                    self.caught_up(&mut fx);
+                }
             }
             ControlMessage::Presence(presence) => {
                 // Kept even for ids whose record hasn't arrived yet: a
@@ -1100,6 +1214,9 @@ impl Room {
         if member == self.me {
             return Err(RoomError::CantBanSelf);
         }
+        if self.catching_up {
+            return Err(RoomError::CatchingUp);
+        }
         let roster: Vec<RosterEntry> = self
             .policy
             .body
@@ -1128,6 +1245,10 @@ impl Room {
         if self.gone || self.leaving.is_some() {
             return Ok(Vec::new());
         }
+        // Allowed while catching up (M13): a room whose members never come
+        // back must still be leavable. The closing policy, or our last
+        // record, skips ahead of whatever the members may hold that is
+        // newer than ours, so it isn't ignored.
         let others: Vec<(MemberId, PeerAddr)> = self
             .records
             .values()
@@ -1136,12 +1257,7 @@ impl Room {
             .collect();
         let closing = self.is_owner();
         if closing {
-            let version = self
-                .policy
-                .body
-                .version
-                .checked_add(1)
-                .ok_or(RoomError::Exhausted)?;
+            let version = self.next_policy_version()?;
             self.policy = sign_policy(
                 &self.key,
                 RoomPolicy {
@@ -1155,7 +1271,13 @@ impl Room {
             self.invites.clear();
         } else {
             let mine = self.records[&self.me].body.clone();
-            self.publish_mine(mine.version + 1, mine.name, mine.addr, true);
+            let step = if self.catching_up {
+                RESTORE_RECORD_SKIP
+            } else {
+                1
+            };
+            let version = mine.version.checked_add(step).ok_or(RoomError::Exhausted)?;
+            self.publish_mine(version, mine.name, mine.addr, true);
         }
         self.leaving = Some(Leaving {
             closing,
@@ -1408,8 +1530,9 @@ impl Room {
             if let Some(link) = self.links.get_mut(&peer) {
                 link.next_dial = None;
             }
-            // The owner takes a departing member off the roster.
-            if self.is_owner() {
+            // The owner takes a departing member off the roster; catching
+            // up, once caught up (`caught_up`).
+            if self.is_owner() && !self.catching_up {
                 let roster: Vec<RosterEntry> = self
                     .policy
                     .body
@@ -1433,6 +1556,43 @@ impl Room {
         fx.push(Effect::Changed);
     }
 
+    /// Caught up after a restore (M13): signing may resume. The owner signs
+    /// the room again at once, [`RESTORE_SKIP`] ahead, taking off the roster
+    /// whoever left meanwhile: saved before [`Effect::CaughtUp`] clears the
+    /// mark, so a restart never loses the skip, and from then on whatever
+    /// the lost PC signed after the backup is superseded wherever it is
+    /// held, never forked.
+    fn caught_up(&mut self, fx: &mut Vec<Effect>) {
+        self.catching_up = false;
+        self.heard.clear();
+        if !self.is_owner() {
+            self.skip_next = false;
+            fx.push(Effect::CaughtUp);
+            fx.push(Effect::Changed);
+            return;
+        }
+        let departed: Vec<MemberId> = self
+            .records
+            .values()
+            .filter(|r| r.body.left && r.body.id != self.me && self.in_roster(r.body.id))
+            .map(|r| r.body.id)
+            .collect();
+        let roster: Vec<RosterEntry> = self
+            .policy
+            .body
+            .roster
+            .iter()
+            .copied()
+            .filter(|e| !departed.contains(&e.id))
+            .collect();
+        let banned = self.policy.body.banned.clone();
+        if let Ok(more) = self.issue_policy(roster, banned) {
+            fx.extend(more);
+        }
+        fx.push(Effect::CaughtUp);
+        fx.push(Effect::Changed);
+    }
+
     fn merge_policy(
         &mut self,
         policy: Signed<RoomPolicy>,
@@ -1447,17 +1607,27 @@ impl Room {
         self.install_policy(policy, from, fx);
     }
 
+    /// The version our next policy takes: the next one, or for the first
+    /// after a restore, [`RESTORE_SKIP`] ahead.
+    fn next_policy_version(&mut self) -> Result<u32, RoomError> {
+        let step = if std::mem::take(&mut self.skip_next) {
+            RESTORE_SKIP
+        } else {
+            1
+        };
+        self.policy
+            .body
+            .version
+            .checked_add(step)
+            .ok_or(RoomError::Exhausted)
+    }
+
     fn issue_policy(
         &mut self,
         roster: Vec<RosterEntry>,
         banned: Vec<MemberId>,
     ) -> Result<Vec<Effect>, RoomError> {
-        let version = self
-            .policy
-            .body
-            .version
-            .checked_add(1)
-            .ok_or(RoomError::Exhausted)?;
+        let version = self.next_policy_version()?;
         let policy = sign_policy(
             &self.key,
             RoomPolicy {

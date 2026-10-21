@@ -11,6 +11,8 @@
 //! - `rooms/<room id>.room`: one remembered room each, sealed: its saved
 //!   state and, for rooms we own, the invites and the password key (never
 //!   the password).
+//! - `rooms/<room id>.restored`: the room came from a backup and hasn't
+//!   caught up with its members yet (M13, `crate::backup`); empty.
 
 use std::{
     collections::BTreeMap,
@@ -26,7 +28,7 @@ use couch_proto::{ids::RoomId, ipc::StreamVolume};
 use couch_room::room::SavedRoom;
 use serde::{Deserialize, Serialize};
 
-use crate::{RelaySetting, secrets::SecretStore};
+use crate::{RelaySetting, backup, secrets::SecretStore};
 
 /// `network.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +53,21 @@ pub enum StoreError {
     Io { path: PathBuf, source: io::Error },
     #[error("{0} is damaged or was sealed by another Windows user")]
     Unreadable(PathBuf),
+    #[error(
+        "this profile already has rooms: a backup is restored only into a new profile (or on a new PC)"
+    )]
+    HasRooms,
 }
+
+/// The settings files a backup carries, as they are (`crate::backup`).
+/// Not the webview's own storage (the room order, the last session setup).
+const BACKED_UP_FILES: [&str; 5] = [
+    SETTINGS_FILE,
+    SHORTCUTS_FILE,
+    NETWORK_FILE,
+    AUDIO_FILE,
+    HOST_AUDIO_FILE,
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -77,6 +93,13 @@ impl std::fmt::Debug for RememberedRoom {
 pub struct Store {
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
+}
+
+/// What a restore wrote so far, to take back if it fails.
+struct Undo {
+    rooms: Vec<RoomId>,
+    /// Each settings file written, with what it held before.
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
 }
 
 impl Store {
@@ -188,16 +211,173 @@ impl Store {
     pub fn forget_room(&self, id: RoomId) -> Result<(), StoreError> {
         let path = self.room_path(id);
         match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(StoreError::Io { path, source }),
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StoreError::Io { path, source }),
         }
+        // The mark after its room: a crash between the two leaves a mark
+        // alone (swept at start), never a restored room without one.
+        self.clear_restored(id);
+        Ok(())
     }
 
     fn room_path(&self, id: RoomId) -> PathBuf {
         self.dir
             .join(ROOMS_DIR)
             .join(format!("{}.room", id.to_hex()))
+    }
+
+    fn restored_path(&self, id: RoomId) -> PathBuf {
+        self.dir
+            .join(ROOMS_DIR)
+            .join(format!("{}.restored", id.to_hex()))
+    }
+
+    /// The room came from a backup and hasn't caught up with its members.
+    pub fn is_restored(&self, id: RoomId) -> bool {
+        self.restored_path(id).exists()
+    }
+
+    /// The room has caught up: it may sign again after a restart too.
+    pub fn clear_restored(&self, id: RoomId) {
+        let path = self.restored_path(id);
+        if let Err(e) = fs::remove_file(&path)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!("{}: {e}", path.display());
+        }
+    }
+
+    /// Removes marks whose room isn't there: what a restore cut short, or a
+    /// room forgotten between the two, leaves.
+    pub fn sweep_restored(&self) {
+        let Ok(entries) = fs::read_dir(self.dir.join(ROOMS_DIR)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "restored")
+                && !path.with_extension("room").exists()
+            {
+                tracing::info!("{}: a mark without its room", path.display());
+                if let Err(e) = fs::remove_file(&path) {
+                    tracing::warn!("{}: {e}", path.display());
+                }
+            }
+        }
+    }
+
+    /// Whether this profile remembers any room, even one it can't read or
+    /// one it is leaving: a backup restores only into a profile with none.
+    pub fn has_rooms(&self) -> bool {
+        fs::read_dir(self.dir.join(ROOMS_DIR)).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.path().extension().is_some_and(|e| e == "room"))
+        })
+    }
+
+    /// What a backup of this profile carries (M13): the identity, the rooms
+    /// (not those on their way out), and the settings files. An owned
+    /// room's password key and invites stay out: an old backup must never
+    /// bring back an invite revoked or a password changed since.
+    pub fn backup_contents(&self) -> Result<backup::Contents, StoreError> {
+        let identity = self.identity()?.to_bytes();
+        let rooms = self
+            .rooms()
+            .into_iter()
+            .filter(|r| r.saved.leaving.is_none())
+            .map(|mut r| {
+                r.password = None;
+                r.saved.invites.clear();
+                r
+            })
+            .collect();
+        let files = BACKED_UP_FILES
+            .iter()
+            .filter_map(|name| {
+                fs::read(self.dir.join(name))
+                    .ok()
+                    .map(|bytes| ((*name).to_string(), bytes))
+            })
+            .collect();
+        Ok(backup::Contents {
+            identity,
+            rooms,
+            files,
+        })
+    }
+
+    /// Puts a backup into this profile, which must have no rooms: its
+    /// identity replaces this one's (sealed for this Windows user), each
+    /// room is marked to catch up before it signs anything, and the settings
+    /// files are written. The engine must start again to use it. A restore
+    /// that fails partway is undone: the profile is left as it was.
+    pub fn restore(&self, contents: &backup::Contents) -> Result<(), StoreError> {
+        if self.has_rooms() {
+            return Err(StoreError::HasRooms);
+        }
+        let mut undo = Undo {
+            rooms: Vec::new(),
+            files: Vec::new(),
+        };
+        let result = self.restore_into(contents, &mut undo);
+        if result.is_err() {
+            for id in &undo.rooms {
+                let _ = self.forget_room(*id);
+            }
+            // Last write first: a file named twice gets its first "before".
+            for (path, before) in undo.files.iter().rev() {
+                match before {
+                    Some(bytes) => drop(write_atomic(path, bytes)),
+                    None => drop(fs::remove_file(path)),
+                }
+            }
+        }
+        result
+    }
+
+    fn restore_into(&self, contents: &backup::Contents, undo: &mut Undo) -> Result<(), StoreError> {
+        let path = self.dir.join(IDENTITY_FILE);
+        let sealed = self
+            .secrets
+            .protect(&contents.identity)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        let mut restored = 0;
+        for room in &contents.rooms {
+            // What a backup never carries, whatever the file says: a room on
+            // its way out, an owned room's password key and invites.
+            if room.saved.leaving.is_some() {
+                continue;
+            }
+            let mut room = room.clone();
+            room.password = None;
+            room.saved.invites.clear();
+            let id = couch_room::signing::room_id(room.saved.owner, room.saved.nonce);
+            undo.rooms.push(id);
+            // The mark first: a room on disk without one would sign at once
+            // after a crash here.
+            write_atomic(&self.restored_path(id), b"")?;
+            self.save_room(id, &room)?;
+            restored += 1;
+        }
+        for (name, bytes) in &contents.files {
+            // Only names we write ourselves: a crafted backup can't place a
+            // file anywhere else.
+            if BACKED_UP_FILES.contains(&name.as_str()) {
+                let file = self.dir.join(name);
+                undo.files.push((file.clone(), fs::read(&file).ok()));
+                write_atomic(&file, bytes)?;
+            }
+        }
+        // The identity last: a failure before it is undone above, and the
+        // profile keeps its own identity.
+        write_atomic(&path, &sealed)?;
+        tracing::info!(rooms = restored, "restored a backup");
+        Ok(())
     }
 }
 
@@ -372,6 +552,194 @@ mod tests {
         store.forget_room(room.id()).unwrap();
         assert!(store.rooms().is_empty());
         store.forget_room(room.id()).unwrap();
+    }
+
+    fn owned_room(seed: u8) -> Room {
+        Room::create(
+            Identity {
+                key: SigningKey::from_bytes(&[seed; 32]),
+                name: "Ana".into(),
+                addr: Default::default(),
+            },
+            RoomNonce([seed; 16]),
+            "Couch",
+            Default::default(),
+            std::time::Instant::now(),
+        )
+        .unwrap()
+    }
+
+    /// M13: a backup carries the identity, the rooms and the settings, but
+    /// never an owned room's password key or invites, nor a room being left.
+    #[test]
+    fn a_backup_leaves_out_passwords_invites_and_rooms_being_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let identity = store.identity().unwrap();
+        let mut room = owned_room(1);
+        room.create_invite(couch_proto::ids::InviteToken([9; 32]), 1_000, 3600, true)
+            .unwrap();
+        let mut remembered = RememberedRoom {
+            saved: room.saved(),
+            password: Some([4; 32]),
+        };
+        assert_eq!(remembered.saved.invites.len(), 1);
+        store.save_room(room.id(), &remembered).unwrap();
+        let mut leaving = owned_room(2);
+        leaving.leave(std::time::Instant::now()).unwrap();
+        store
+            .save_room(
+                leaving.id(),
+                &RememberedRoom {
+                    saved: leaving.saved(),
+                    password: None,
+                },
+            )
+            .unwrap();
+        store
+            .save_settings(&Settings {
+                display_name: Some("Ana".into()),
+            })
+            .unwrap();
+
+        let contents = store.backup_contents().unwrap();
+        assert_eq!(contents.identity, identity.to_bytes());
+        remembered.password = None;
+        remembered.saved.invites.clear();
+        assert_eq!(contents.rooms, vec![remembered], "only the room being kept");
+        assert_eq!(contents.files.len(), 1);
+        assert_eq!(contents.files[0].0, SETTINGS_FILE);
+    }
+
+    /// M13: restored only into a profile with no rooms; the identity is
+    /// replaced, each room marked to catch up, and only our own files
+    /// written.
+    #[test]
+    fn a_backup_restores_into_an_empty_profile_only() {
+        let from = tempfile::tempdir().unwrap();
+        let source = store(from.path());
+        source.identity().unwrap();
+        let room = owned_room(1);
+        source
+            .save_room(
+                room.id(),
+                &RememberedRoom {
+                    saved: room.saved(),
+                    password: Some([4; 32]),
+                },
+            )
+            .unwrap();
+        let mut contents = source.backup_contents().unwrap();
+        contents.files.push(("..\\evil.txt".into(), b"no".to_vec()));
+
+        let to = tempfile::tempdir().unwrap();
+        let target = store(to.path());
+        let own = target.identity().unwrap();
+        target.restore(&contents).unwrap();
+        assert_eq!(target.identity().unwrap().to_bytes(), contents.identity);
+        assert_ne!(own.to_bytes(), contents.identity);
+        assert_eq!(target.rooms().len(), 1);
+        assert_eq!(target.rooms()[0].password, None);
+        assert!(target.is_restored(room.id()));
+        assert!(!to.path().join("..").join("evil.txt").exists());
+        // Caught up: the mark goes, and forgetting the room takes it too.
+        target.clear_restored(room.id());
+        assert!(!target.is_restored(room.id()));
+
+        // A profile with rooms is refused, and left as it was.
+        let before = target.identity().unwrap().to_bytes();
+        assert!(matches!(
+            target.restore(&contents),
+            Err(StoreError::HasRooms)
+        ));
+        assert_eq!(target.identity().unwrap().to_bytes(), before);
+    }
+
+    /// M13: whatever a crafted backup holds, no password key, invite or
+    /// room being left is restored.
+    #[test]
+    fn a_restore_drops_what_a_backup_never_carries() {
+        let mut room = owned_room(1);
+        room.create_invite(couch_proto::ids::InviteToken([9; 32]), 1_000, 3600, true)
+            .unwrap();
+        let mut leaving = owned_room(2);
+        leaving.leave(std::time::Instant::now()).unwrap();
+        let contents = backup::Contents {
+            identity: [7; 32],
+            rooms: vec![
+                RememberedRoom {
+                    saved: room.saved(),
+                    password: Some([4; 32]),
+                },
+                RememberedRoom {
+                    saved: leaving.saved(),
+                    password: None,
+                },
+            ],
+            files: Vec::new(),
+        };
+        let to = tempfile::tempdir().unwrap();
+        let target = store(to.path());
+        target.restore(&contents).unwrap();
+        let rooms = target.rooms();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].password, None);
+        assert!(rooms[0].saved.invites.is_empty());
+        assert!(!target.is_restored(leaving.id()));
+    }
+
+    /// M13: a restore that fails partway leaves the profile as it was.
+    #[test]
+    fn a_failed_restore_is_undone() {
+        let room = owned_room(1);
+        let contents = backup::Contents {
+            identity: [7; 32],
+            rooms: vec![RememberedRoom {
+                saved: room.saved(),
+                password: None,
+            }],
+            files: vec![
+                (SHORTCUTS_FILE.into(), b"{}".to_vec()),
+                (SETTINGS_FILE.into(), b"{}".to_vec()),
+            ],
+        };
+        let to = tempfile::tempdir().unwrap();
+        let target = store(to.path());
+        let own = target.identity().unwrap().to_bytes();
+        fs::write(to.path().join(SHORTCUTS_FILE), b"mine").unwrap();
+        // settings.json can't be written: a folder is in its way.
+        fs::create_dir_all(to.path().join(SETTINGS_FILE).join("x")).unwrap();
+        assert!(target.restore(&contents).is_err());
+        assert_eq!(target.identity().unwrap().to_bytes(), own);
+        assert!(!target.has_rooms());
+        assert!(!target.is_restored(room.id()));
+        assert_eq!(fs::read(to.path().join(SHORTCUTS_FILE)).unwrap(), b"mine");
+    }
+
+    /// A mark left without its room is swept, and counts as no room.
+    #[test]
+    fn a_mark_without_its_room_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let room = owned_room(1);
+        write_atomic(&store.restored_path(room.id()), b"").unwrap();
+        assert!(!store.has_rooms());
+        store.sweep_restored();
+        assert!(!store.is_restored(room.id()));
+        // With its room, it stays.
+        write_atomic(&store.restored_path(room.id()), b"").unwrap();
+        store
+            .save_room(
+                room.id(),
+                &RememberedRoom {
+                    saved: room.saved(),
+                    password: None,
+                },
+            )
+            .unwrap();
+        store.sweep_restored();
+        assert!(store.is_restored(room.id()));
+        assert!(store.has_rooms());
     }
 
     #[test]

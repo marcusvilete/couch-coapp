@@ -1,6 +1,7 @@
 // Settings: the keyboard shortcuts (each can move to another key), the
 // overlay, the network (which relay to use, applied when the app restarts),
-// the drivers, and About (the version, the licence and the notices).
+// the drivers, a backup of the profile (M13), and About (the version, the
+// licence and the notices).
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState, type FormEvent } from "react";
 import type { DriverName } from "./bindings/DriverName";
@@ -13,11 +14,17 @@ import type { ShortcutView } from "./bindings/ShortcutView";
 import { errorText, request } from "./engine";
 import { overlaySettings, setOverlaySettings, type OverlaySettings } from "./overlaySettings";
 import type { Busy } from "./sessions";
-import { Modal } from "./ui";
+import { Modal, PasswordInput } from "./ui";
 
-export type SettingsSection = "shortcuts" | "overlay" | "network" | "drivers" | "about";
+export type SettingsSection = "shortcuts" | "overlay" | "network" | "drivers" | "backup" | "about";
 
-export function SettingsDialog(props: { section: SettingsSection; busy: Busy; onClose: () => void }) {
+export function SettingsDialog(props: {
+  section: SettingsSection;
+  busy: Busy;
+  /** The profile remembers rooms: a backup can't be restored into it. */
+  hasRooms: boolean;
+  onClose: () => void;
+}) {
   const [section, setSection] = useState<SettingsSection>(props.section);
   // While a shortcut waits for its key, Escape cancels that, not the dialog.
   const [capturing, setCapturing] = useState(false);
@@ -42,6 +49,7 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
             ["overlay", "Overlay"],
             ["network", "Network"],
             ["drivers", "Drivers"],
+            ["backup", "Backup"],
             ["about", "About"],
           ] as const
         ).map(([id, label]) => (
@@ -61,6 +69,9 @@ export function SettingsDialog(props: { section: SettingsSection; busy: Busy; on
       {section === "overlay" && <OverlaySection />}
       {section === "network" && <NetworkSection busy={props.busy} onRestarting={setRestarting} />}
       {section === "drivers" && <DriversSection />}
+      {section === "backup" && (
+        <BackupSection busy={props.busy} hasRooms={props.hasRooms} onRestarting={setRestarting} />
+      )}
       {section === "about" && <AboutSection />}
       {restarting && <Restarting />}
     </Modal>
@@ -556,5 +567,146 @@ function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean)
         )}
       </div>
     </form>
+  );
+}
+
+// ---- Backup (M13) ----
+
+/** The engine's minimum (`backup::MIN_PASSPHRASE_CHARS`), counted after
+ * trimming, as it counts. */
+const MIN_PASSPHRASE = 12;
+
+/** A backup of this profile, sealed with a passphrase, and restoring one
+ * into a profile with no rooms (which then starts again). */
+function BackupSection(props: { busy: Busy; hasRooms: boolean; onRestarting: (restarting: boolean) => void }) {
+  const [passphrase, setPassphrase] = useState("");
+  const [again, setAgain] = useState("");
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [restorePass, setRestorePass] = useState("");
+  /** Restored in a development build: it can't start itself again. */
+  const [restoredDev, setRestoredDev] = useState(false);
+
+  // Characters after trimming and NFKC, as the engine counts them.
+  const tooShort = [...passphrase.trim().normalize("NFKC")].length < MIN_PASSPHRASE;
+  const mismatch = passphrase !== again;
+
+  const backUp = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSaved(null);
+    if (tooShort) {
+      setError(`Use at least ${MIN_PASSPHRASE} characters: a few words make a good passphrase.`);
+      return;
+    }
+    if (mismatch) {
+      setError("The passphrases don't match.");
+      return;
+    }
+    setWorking(true);
+    try {
+      // The app asks where, in its own dialog.
+      const { path } = await request({ type: "exportProfile", passphrase }, "backup");
+      if (path == null) return;
+      setSaved(path);
+      setPassphrase("");
+      setAgain("");
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const restore = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setWorking(true);
+    try {
+      // The app asks which file, in its own dialog.
+      const { path } = await request({ type: "restoreProfile", passphrase: restorePass }, "backup");
+      if (path == null) return;
+      setRestorePass("");
+      if (DEV_BUILD) {
+        setRestoredDev(true);
+        return;
+      }
+      // The restored identity takes over from the next start.
+      props.onRestarting(true);
+      await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
+      await invoke("restart_app");
+    } catch (err) {
+      props.onRestarting(false);
+      setError(errorText(err));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <div className="form">
+      <form className="form" onSubmit={backUp}>
+        <p className="hint">
+          A backup takes you to another PC, or back after reinstalling Windows: your identity, your rooms and your
+          settings, in one file sealed with a passphrase. Rooms you own come back without their password and invites:
+          you set a new password there before inviting anyone.
+        </p>
+        <label>
+          Passphrase
+          <PasswordInput autoComplete="new-password" value={passphrase} onChange={setPassphrase} disabled={working} />
+        </label>
+        <label>
+          Passphrase again
+          <PasswordInput autoComplete="new-password" value={again} onChange={setAgain} disabled={working} />
+        </label>
+        <p className="hint">
+          The file and its passphrase together are you, in every room: keep them apart, and the passphrase long. Nobody
+          can open the file without it, us included.
+        </p>
+        <div className="settings-row">
+          <button type="submit" className="primary" disabled={working || passphrase === ""}>
+            {working ? "Working…" : "Back up to a file…"}
+          </button>
+          {saved && <span className="hint">Saved to {saved}.</span>}
+        </div>
+      </form>
+
+      <form className="form" onSubmit={restore}>
+        <h3>Restore a backup</h3>
+        {props.hasRooms ? (
+          <p className="hint">
+            This profile already has rooms, so a backup can't be restored into it. Restore on a new PC, or into a new
+            profile.
+          </p>
+        ) : (
+          <>
+            <label>
+              The backup's passphrase
+              <PasswordInput autoComplete="current-password" value={restorePass} onChange={setRestorePass} disabled={working} />
+            </label>
+            <p className="banner warn">
+              Use one identity on one PC at a time: once the backup runs here, stop using Couch Co-App with it on the
+              old PC. Your rooms catch up with their members before you can invite or ban.
+            </p>
+            {restoredDev ? (
+              <p className="hint warn-text">Restored. Close the app and start it again to use it.</p>
+            ) : (
+              <div className="settings-row">
+                <button type="submit" disabled={working || restorePass.trim() === "" || props.busy.hosting}>
+                  {working ? "Working…" : "Choose the backup and restore…"}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </form>
+
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }

@@ -5,11 +5,18 @@
 //! own webview data. `couchco://` invite links open in the default profile:
 //! Windows runs one command per link scheme, without our environment.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-use couch_engine::{Command, Engine, EngineOptions, Profile, Response};
+use couch_engine::{BackupFiles, Command, Engine, EngineOptions, Profile, Response};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::{DialogExt, FileDialogBuilder};
 use tokio::sync::broadcast::error::RecvError;
 
 /// The event the UI listens on for `couch_engine::Event`s.
@@ -76,6 +83,9 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
+        // Where a profile's backup goes, and which to restore (M13): opened
+        // from Rust only ([`BackupDialogs`]); no window may call it.
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let config = app
                 .config()
@@ -137,7 +147,10 @@ pub fn run() {
     }
     tracing::info!(profile = profile.name(), data_dir = %profile.data_dir().display(), "starting");
     // With the relay chosen in Settings → Network.
-    let options = EngineOptions::desktop(&profile);
+    let options = EngineOptions {
+        backup_files: Some(Arc::new(BackupDialogs(app.handle().clone()))),
+        ..EngineOptions::desktop(&profile)
+    };
     let engine =
         tauri::async_runtime::block_on(Engine::start(profile, options)).unwrap_or_else(|e| fail(e));
     app.manage(engine);
@@ -160,6 +173,44 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+/// A profile's backup files (M13), chosen in the system's dialogs opened from
+/// here: the webview never names a path, so a script in it can't write the
+/// identity elsewhere or read another file.
+struct BackupDialogs(AppHandle);
+
+impl BackupDialogs {
+    fn dialog(&self) -> FileDialogBuilder<tauri::Wry> {
+        let dialog = self
+            .0
+            .dialog()
+            .file()
+            .add_filter("Couch Co-App backup", &["couchbackup"]);
+        match self.0.get_webview_window(MAIN_WINDOW) {
+            Some(window) => dialog.set_parent(&window),
+            None => dialog,
+        }
+    }
+}
+
+impl BackupFiles for BackupDialogs {
+    fn save_to(&self, suggested: &str) -> Option<PathBuf> {
+        self.dialog()
+            .set_title("Save a backup of this profile")
+            .set_file_name(suggested)
+            .blocking_save_file()?
+            .into_path()
+            .ok()
+    }
+
+    fn open_from(&self) -> Option<PathBuf> {
+        self.dialog()
+            .set_title("Restore a backup")
+            .blocking_pick_file()?
+            .into_path()
+            .ok()
+    }
 }
 
 /// The log: in development, the console (or the file `profiles.ps1` sends

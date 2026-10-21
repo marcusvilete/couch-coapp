@@ -9,7 +9,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+argon2.workspace = true
 bytes.workspace = true
+chacha20poly1305.workspace = true
 couch-codec-ffmpeg.workspace = true
 couch-codec-opus.workspace = true
 couch-input.workspace = true
@@ -26,6 +28,8 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
+unicode-normalization.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 couch-gamepad.workspace = true

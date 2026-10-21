@@ -92,6 +92,9 @@ pub(crate) enum Input {
     /// For tests: drop the connection with a member, as a dead path would.
     DropConnection(String, String),
     Shutdown(oneshot::Sender<()>),
+    /// A backup, opened, to restore into this profile (M13): here, so no
+    /// room is created or joined under the old identity meanwhile.
+    Restore(Box<crate::backup::Contents>, Reply),
     /// An accept task asks how to answer a newcomer's `JoinStart`.
     JoinQuery {
         room: RoomId,
@@ -272,6 +275,10 @@ struct Actor {
     /// Numbers every room view as it is made ([`RoomView::revision`]): the
     /// actor is the only writer, so a later view is never older.
     views: AtomicU64,
+    /// A backup was restored into this profile (M13): until the app starts
+    /// again with its identity, nothing is created, joined or renamed under
+    /// the old one.
+    restored: bool,
 }
 
 fn lock(limits: &Mutex<AdmissionLimits>) -> MutexGuard<'_, AdmissionLimits> {
@@ -374,6 +381,7 @@ pub(crate) async fn start(
         sessions: sessions::Sessions::default(),
         other_versions: BTreeMap::new(),
         views: AtomicU64::new(0),
+        restored: false,
     };
     actor.restore_rooms(now);
     tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
@@ -386,6 +394,8 @@ pub(crate) async fn start(
 
 impl Actor {
     fn restore_rooms(&mut self, now: Instant) {
+        // A restore cut short may have left a mark without its room.
+        self.store.sweep_restored();
         for remembered in self.store.rooms() {
             let id = room_id(remembered.saved.owner, remembered.saved.nonce);
             match Room::restore(
@@ -395,6 +405,16 @@ impl Actor {
                 now,
             ) {
                 Ok(mut room) => {
+                    // From a backup (M13), and not caught up yet: it signs
+                    // nothing until its members' state arrives. With nobody
+                    // to wait for, it is caught up at once (applied below).
+                    let mut fx = Vec::new();
+                    if self.store.is_restored(id) {
+                        fx = room.catch_up_first();
+                        if room.is_catching_up() {
+                            tracing::info!(room = ?id, "restored from a backup: catching up first");
+                        }
+                    }
                     // Addresses change between runs; the name may have too.
                     if let Err(e) = room.set_profile(&self.name, self.addr.clone()) {
                         tracing::warn!("room {id:?}: {e}");
@@ -407,6 +427,7 @@ impl Actor {
                         },
                     );
                     self.save(id);
+                    self.apply(id, fx, now);
                 }
                 Err(RoomError::Banned | RoomError::NotMember) => {
                     let _ = self.store.forget_room(id);
@@ -458,6 +479,9 @@ impl Actor {
             }
             Input::HomeRelay(reply) => {
                 let _ = reply.send(self.addr.relay.clone());
+            }
+            Input::Restore(contents, reply) => {
+                let _ = reply.send(self.restore_backup(&contents));
             }
             Input::DropConnection(room, member) => {
                 let conn = RoomId::from_hex(&room)
@@ -599,7 +623,42 @@ impl Actor {
         }
     }
 
+    /// A backup put into this profile (M13), here so nothing is created or
+    /// joined under the old identity while it is written. Then until the app
+    /// starts again, nothing more is.
+    fn restore_backup(
+        &mut self,
+        contents: &crate::backup::Contents,
+    ) -> Result<Response, EngineError> {
+        if self.restored {
+            return Err(EngineError::Refused(
+                "a backup was restored already: start the app again first",
+            ));
+        }
+        if !self.rooms.is_empty() || !self.joining.is_empty() || self.store.has_rooms() {
+            return Err(StoreError::HasRooms.into());
+        }
+        self.store.restore(contents)?;
+        self.restored = true;
+        Ok(Response::Done)
+    }
+
     fn command(&mut self, command: Command, reply: Reply, now: Instant) {
+        // After a restore, this run still has the old identity: nothing new
+        // under it (the restored rooms and name would be overwritten).
+        if self.restored
+            && matches!(
+                command,
+                Command::CreateRoom { .. }
+                    | Command::JoinRoom { .. }
+                    | Command::SetDisplayName { .. }
+            )
+        {
+            let _ = reply.send(Err(EngineError::Refused(
+                "a backup was restored: start the app again first",
+            )));
+            return;
+        }
         let result = match command {
             // Answered by the engine itself.
             Command::GetInfo | Command::Ping { .. } | Command::TakeOpenedInvite => {
@@ -624,6 +683,13 @@ impl Actor {
                 return;
             }
             Command::GetInvite { room } => match self.owned(&room) {
+                // A room restored from a backup comes back without its
+                // password key (M13): a new password first.
+                Ok(id) if self.rooms[&id].password.is_none() => Err(EngineError::NeedsPassword),
+                // Its invites couldn't admit anyone until it has caught up.
+                Ok(id) if self.rooms[&id].room.is_catching_up() => {
+                    Err(RoomError::CatchingUp.into())
+                }
                 Ok(id) => {
                     // May answer later, once the relay is known.
                     self.invite(id, reply, now);
@@ -635,6 +701,7 @@ impl Actor {
             Command::RevokeInvites { room } => self.revoke_invites(&room, now),
             Command::LeaveRoom { room } => self.leave(&room, now),
             Command::BanMember { room, member } => self.ban(&room, &member, now),
+            Command::StopCatchingUp { room } => self.stop_catching_up(&room, now),
             // Answered by the engine itself.
             Command::GetShortcuts
             | Command::SetShortcut { .. }
@@ -643,6 +710,8 @@ impl Actor {
             | Command::SetNetwork { .. }
             | Command::GetDrivers
             | Command::GetNotices
+            | Command::ExportProfile { .. }
+            | Command::RestoreProfile { .. }
             | Command::InstallDriver { .. }
             | Command::ListSources => Err(EngineError::Stopped),
             Command::StartSession {
@@ -1028,6 +1097,19 @@ impl Actor {
         Ok(Response::Room(self.view(id, now).expect("present")))
     }
 
+    /// Owner only, restored from a backup (M13): signs again without
+    /// waiting for the members still away. A change only they hold (a ban
+    /// made after the backup, say) may then be lost.
+    fn stop_catching_up(&mut self, room: &str, now: Instant) -> Result<Response, EngineError> {
+        let id = self.owned(room)?;
+        let entry = self.rooms.get_mut(&id).expect("owned");
+        let waiting = entry.room.catching_up_with().len();
+        let fx = entry.room.stop_catching_up()?;
+        tracing::warn!(room = ?id, waiting, "stopped waiting to catch up");
+        self.apply(id, fx, now);
+        Ok(Response::Room(self.view(id, now).expect("present")))
+    }
+
     fn join_query(
         &mut self,
         room: RoomId,
@@ -1043,8 +1125,14 @@ impl Actor {
             return JoinAnswer::Refuse(close_code::UNKNOWN_ROOM);
         };
         let Some(password) = entry.password else {
-            // Only the owner admits, and only the owner has the key.
-            return JoinAnswer::Refuse(close_code::PROTOCOL);
+            // Only the owner admits, and only the owner has the key. An owner
+            // restored from a backup has none until a new password is set
+            // (M13): the invite is one from before.
+            return JoinAnswer::Refuse(if entry.room.is_owner() {
+                close_code::INVITE_EXPIRED
+            } else {
+                close_code::PROTOCOL
+            });
         };
         match entry.room.join_request(dialer, invite, unix_now()) {
             JoinDecision::Proceed { token } => {
@@ -1186,6 +1274,10 @@ impl Actor {
                 Effect::Send { conn, message } => self.send(conn, Outgoing::Message(message)),
                 Effect::Close { conn, code } => self.send(conn, Outgoing::Close(code)),
                 Effect::Changed => changed = true,
+                Effect::CaughtUp => {
+                    tracing::info!(room = ?room, "caught up with the room after a restore");
+                    self.store.clear_restored(room);
+                }
                 Effect::Save | Effect::Removed { .. } | Effect::Departed => {}
             }
         }
@@ -1402,6 +1494,14 @@ impl Actor {
             members,
             joins_paused_for_secs: paused,
             sessions: self.session_views(room),
+            catching_up: entry.room.is_catching_up(),
+            waiting_for: entry
+                .room
+                .catching_up_with()
+                .into_iter()
+                .map(|m| m.to_hex())
+                .collect(),
+            needs_password: entry.room.is_owner() && entry.password.is_none(),
         })
     }
 
