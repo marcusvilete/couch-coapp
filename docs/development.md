@@ -29,7 +29,7 @@ How to set up a Windows PC to build, run and test the app. If you only want an i
 
 **Drivers are optional for development:**
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus) lets guests' controllers reach games you host;
-- [HidHide](https://github.com/nefarius/HidHide) lets your own controller play through a seat.
+- [HidHide](https://github.com/nefarius/HidHide) lets your own controllers play through seats, one seat each (a remapper's virtual pad, DS4Windows's say, included).
 
 The app's Settings → Drivers installs either.
 
