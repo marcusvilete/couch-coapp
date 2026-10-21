@@ -19,7 +19,7 @@ use std::{
     ffi::c_void,
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -64,6 +64,8 @@ pub struct TexturePool {
     textures: Vec<Arc<PooledTexture>>,
     /// Every texture again, for encoders to keep alive past the pool.
     kept: Arc<Kept>,
+    /// Staging textures for frames read back mapped (M12a).
+    mapped: Arc<StagingSet>,
     /// The last copy's timings, in microseconds: waiting for the device's
     /// lock, queuing the copy, and flushing it (M9f: `COUCH_CAPTURE_TRACE`).
     pub last_timings: (u64, u64, u64),
@@ -105,6 +107,11 @@ impl TexturePool {
             source: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             textures: Vec::new(),
             kept: Arc::new(Kept(Mutex::new(Vec::new()))),
+            mapped: Arc::new(StagingSet {
+                free: Mutex::new(Vec::new()),
+                made: std::sync::atomic::AtomicUsize::new(0),
+                gave_up: AtomicBool::new(false),
+            }),
             last_timings: (0, 0, 0),
         })
     }
@@ -153,6 +160,7 @@ impl TexturePool {
                     texture: made,
                     height: self.height,
                     staging: Mutex::new(None),
+                    mapped: self.mapped.clone(),
                     kept: self.kept.clone(),
                 });
                 self.textures.push(slot.clone());
@@ -207,10 +215,127 @@ struct PooledTexture {
     device: ID3D11Device,
     texture: ID3D11Texture2D,
     height: u32,
-    /// For [`GpuTexture::download`], made on first use.
+    /// For [`GpuTexture::download`] by memcpy, made on first use.
     staging: Mutex<Option<ID3D11Texture2D>>,
+    /// The pool's staging textures handed out mapped, as frames (M12a).
+    mapped: Arc<StagingSet>,
     /// Its pool's textures, for [`GpuTexture::keep_alive`].
     kept: Arc<Kept>,
+}
+
+/// How many staging textures one pool hands out mapped at once (M12a):
+/// each stays mapped while any viewer's encoder holds its frame (with 4
+/// viewers about 5 to 9 at a time). Beyond that, frames are copied out by
+/// memcpy as before.
+const MAX_MAPPED: usize = 16;
+/// And how much memory they may take together: 16 at 1080p (8 MB each),
+/// 8 at 4K (33 MB each). They stay made while the pool lives.
+const MAX_MAPPED_BYTES: usize = 256 << 20;
+
+/// A frame read back is handed out as its staging texture's own mapped
+/// memory, with no memcpy (M12a: at 1080p with 4 encoders busy, the memcpy
+/// was 2.9 ms of a 4.8 ms read-back), unless `COUCH_HOST_MAPPED_FRAMES=0`,
+/// the switch for measuring against the memcpy. Read once.
+fn mapped_frames() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("COUCH_HOST_MAPPED_FRAMES").map_or(true, |v| v.trim() != "0"))
+}
+
+/// A pool's staging textures for frames handed out mapped.
+struct StagingSet {
+    free: Mutex<Vec<ID3D11Texture2D>>,
+    /// How many were made.
+    made: std::sync::atomic::AtomicUsize,
+    /// Making one failed (memory short, say): no more are made, and frames
+    /// beyond those there go by memcpy rather than fail.
+    gave_up: AtomicBool,
+}
+
+// SAFETY: the textures are used only through the multithread-protected
+// device (Map and Unmap on its immediate context), one frame at a time each:
+// a texture is either in `free` or owned by exactly one `MappedStaging`.
+unsafe impl Send for StagingSet {}
+unsafe impl Sync for StagingSet {}
+
+impl StagingSet {
+    /// The most this set makes for textures like `desc`.
+    fn limit(desc: &D3D11_TEXTURE2D_DESC) -> usize {
+        let each = (desc.Width as usize * desc.Height as usize * 4).max(1);
+        (MAX_MAPPED_BYTES / each).clamp(1, MAX_MAPPED)
+    }
+
+    /// A free staging texture, or a new one while fewer than [`Self::limit`]
+    /// were made; `None` when every one is out, or one couldn't be made (the
+    /// caller then copies by memcpy, as before M12a).
+    fn take(&self, device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC) -> Option<ID3D11Texture2D> {
+        if let Some(t) = self
+            .free
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+        {
+            return Some(t);
+        }
+        if self.gave_up.load(Ordering::Relaxed) {
+            return None;
+        }
+        if self.made.fetch_add(1, Ordering::Relaxed) >= Self::limit(desc) {
+            self.made.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        match staging_texture(device, desc) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                self.made.fetch_sub(1, Ordering::Relaxed);
+                if !self.gave_up.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("no more mapped frames ({e}): frames read back are copied out");
+                }
+                None
+            }
+        }
+    }
+
+    fn give_back(&self, texture: ID3D11Texture2D) {
+        self.free
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(texture);
+    }
+}
+
+/// A frame's pixels: a staging texture's mapped memory, unmapped and given
+/// back to its set when the last `Bytes` pointing into it drops.
+struct MappedStaging {
+    context: ID3D11DeviceContext,
+    staging: Option<ID3D11Texture2D>,
+    set: Arc<StagingSet>,
+    data: *const u8,
+    len: usize,
+}
+
+// SAFETY: the mapping stays valid until `Drop` unmaps it, on the device's
+// multithread-protected immediate context, from whichever thread drops the
+// last reference; nothing writes to it meanwhile (the texture is in no
+// set while mapped, and the GPU never writes a mapped resource).
+unsafe impl Send for MappedStaging {}
+unsafe impl Sync for MappedStaging {}
+
+impl AsRef<[u8]> for MappedStaging {
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: `len` bytes from `Map`, valid until `Drop` unmaps them.
+        unsafe { std::slice::from_raw_parts(self.data, self.len) }
+    }
+}
+
+impl Drop for MappedStaging {
+    fn drop(&mut self) {
+        if let Some(staging) = self.staging.take() {
+            // SAFETY: mapped by `download`, unmapped once, here; no slice of
+            // it outlives this owner.
+            unsafe { self.context.Unmap(&staging, 0) };
+            self.set.give_back(staging);
+        }
+    }
 }
 
 // SAFETY: as for `TexturePool`; the texture is only used through the
@@ -236,6 +361,11 @@ impl GpuTexture for PooledTexture {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: fills a local description of a live texture.
         unsafe { self.texture.GetDesc(&mut desc) };
+        if mapped_frames()
+            && let Some(staging) = self.mapped.take(&self.device, &desc)
+        {
+            return self.download_mapped(staging);
+        }
         let mut staging = self.staging.lock().unwrap_or_else(PoisonError::into_inner);
         let staging = match &*staging {
             Some(staging) => staging.clone(),
@@ -262,6 +392,35 @@ impl GpuTexture for PooledTexture {
             context.Unmap(&staging, 0);
             Ok((mapped.RowPitch, data))
         }
+    }
+}
+
+impl PooledTexture {
+    /// The texture copied into `staging`, mapped, and handed out as the
+    /// frame's memory itself (M12a): no memcpy.
+    fn download_mapped(&self, staging: ID3D11Texture2D) -> Result<(u32, Bytes), MediaError> {
+        // SAFETY: a plain getter on a live device.
+        let context = unsafe { self.device.GetImmediateContext() }.map_err(backend)?;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: same device, size and format; `staging` is this call's
+        // alone (taken from the set), and Map waits for the copy. On failure
+        // it goes back to the set unmapped.
+        let result = unsafe {
+            context.CopyResource(&staging, &self.texture);
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        };
+        if let Err(e) = result {
+            self.mapped.give_back(staging);
+            return Err(backend(e));
+        }
+        let owner = MappedStaging {
+            context,
+            staging: Some(staging),
+            set: self.mapped.clone(),
+            data: mapped.pData.cast::<u8>().cast_const(),
+            len: mapped.RowPitch as usize * self.height as usize,
+        };
+        Ok((mapped.RowPitch, Bytes::from_owner(owner)))
     }
 }
 
@@ -435,5 +594,75 @@ mod tests {
         uploader.new_pool().unwrap();
         let next = uploader.upload(&frame(64, 32, 101)).unwrap().unwrap();
         assert_ne!(next.source, old);
+    }
+
+    /// M12a: a frame read back as its staging texture's mapped memory has
+    /// the right pixels; its staging texture is out of the set while the GPU
+    /// frame (which keeps its copy in memory) or any copy of its pixels
+    /// lives, back once the last drops; and when every one is out, frames
+    /// are copied by memcpy instead.
+    #[test]
+    #[ignore = "needs a D3D11 device"]
+    fn frames_read_back_mapped_give_their_staging_back() {
+        if !mapped_frames() {
+            eprintln!("COUCH_HOST_MAPPED_FRAMES=0 is set: skipped");
+            return;
+        }
+        let mut uploader = Uploader::new(64, 32).unwrap();
+        let set = uploader.pool.mapped.clone();
+        let free = || set.free.lock().unwrap().len();
+        let source = frame(64, 32, 1);
+
+        let first = uploader.upload(&source).unwrap().unwrap();
+        let back = first.cpu().unwrap();
+        for (x, y) in [(0, 0), (63, 31), (17, 9)] {
+            assert_eq!(back.pixel(x, y), source.pixel(x, y), "({x}, {y})");
+        }
+        assert_eq!(set.made.load(Ordering::SeqCst), 1);
+        assert_eq!(free(), 0, "mapped while the frame lives");
+        // The GPU frame keeps its copy in memory, so it keeps it mapped.
+        drop(back);
+        assert_eq!(free(), 0, "the GPU frame still holds its copy");
+        // And so does a copy of the pixels, once the GPU frame is gone.
+        let pixels = first.cpu().unwrap().data.clone();
+        drop(first);
+        assert_eq!(free(), 0, "a copy of its pixels still points into it");
+        assert_eq!(pixels[..4], source.data[..4]);
+        drop(pixels);
+        assert_eq!(free(), 1, "given back");
+
+        // Taken again rather than made anew.
+        let again = uploader.upload(&source).unwrap().unwrap();
+        let held = again.cpu().unwrap();
+        assert_eq!(set.made.load(Ordering::SeqCst), 1);
+        drop((held, again));
+
+        // A 64x32 frame is small: the count caps, not the bytes.
+        let mut desc = D3D11_TEXTURE2D_DESC {
+            Width: 64,
+            Height: 32,
+            ..Default::default()
+        };
+        assert_eq!(StagingSet::limit(&desc), MAX_MAPPED);
+        (desc.Width, desc.Height) = (3840, 2160);
+        assert_eq!(StagingSet::limit(&desc), 8, "4K: the bytes cap");
+
+        // Every one out: copied by memcpy, still the right pixels.
+        let mut out = Vec::new();
+        for i in 0..MAX_MAPPED {
+            let f = uploader.upload(&frame(64, 32, i as u64)).unwrap().unwrap();
+            out.push(f.cpu().unwrap());
+        }
+        assert_eq!(set.made.load(Ordering::SeqCst), MAX_MAPPED);
+        let extra = uploader.upload(&source).unwrap().unwrap();
+        let copied = extra.cpu().unwrap();
+        assert_eq!(copied.pixel(17, 9), source.pixel(17, 9));
+        assert_eq!(
+            set.made.load(Ordering::SeqCst),
+            MAX_MAPPED,
+            "none made beyond"
+        );
+        drop(out);
+        assert_eq!(free(), MAX_MAPPED);
     }
 }

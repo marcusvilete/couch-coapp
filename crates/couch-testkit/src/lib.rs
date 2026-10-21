@@ -25,8 +25,14 @@ use couch_media::{
 pub struct FakeGpu {
     /// The texture pool frames come from; changing it is a new capture device.
     pub source: Arc<AtomicU64>,
-    /// How many frames were copied to memory, by any encoder.
+    /// How many frames were copied to memory, by any encoder or by the
+    /// capture after pacing (M12a).
     pub downloads: Arc<AtomicU32>,
+    /// Copies to memory fail while set.
+    pub download_fails: Arc<AtomicBool>,
+    /// Each copy to memory takes this long, in milliseconds: a GPU busy
+    /// with a game (M12a).
+    pub download_ms: Arc<AtomicU32>,
 }
 
 /// A "GPU" texture that is really memory, counting its downloads.
@@ -34,6 +40,8 @@ struct FakeGpuTexture {
     pixels: Bytes,
     stride: u32,
     downloads: Arc<AtomicU32>,
+    fails: Arc<AtomicBool>,
+    delay_ms: Arc<AtomicU32>,
 }
 
 impl GpuTexture for FakeGpuTexture {
@@ -46,6 +54,13 @@ impl GpuTexture for FakeGpuTexture {
     }
 
     fn download(&self) -> Result<(u32, Bytes), MediaError> {
+        if self.fails.load(Ordering::SeqCst) {
+            return Err(MediaError::Backend("the fake GPU won't copy".into()));
+        }
+        let delay = self.delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(u64::from(delay)));
+        }
         self.downloads.fetch_add(1, Ordering::SeqCst);
         Ok((self.stride, self.pixels.clone()))
     }
@@ -131,6 +146,8 @@ impl Capturer for FakeCapturer {
                     pixels,
                     stride,
                     downloads: gpu.downloads.clone(),
+                    fails: gpu.download_fails.clone(),
+                    delay_ms: gpu.download_ms.clone(),
                 }),
                 self.width,
                 self.height,

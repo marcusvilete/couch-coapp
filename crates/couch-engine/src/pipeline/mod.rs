@@ -97,11 +97,15 @@ pub struct ScreenSource {
 pub struct CaptureRequest {
     /// The stream's frame rate.
     pub fps: u32,
-    /// Frames in memory: no encoder in this stream reads them on the GPU.
+    /// Frames in memory: the capture can't keep them on the GPU, or no
+    /// encoder in this stream reads them there and they aren't read back
+    /// after pacing (M12a: unpaced, or `COUCH_HOST_MEMORY_PACING=0`).
     pub in_memory: bool,
     /// The stream paces frames itself (M9d, `couch_media::pacing`), so
     /// frames on the GPU may come faster than `fps`. Frames in memory never
-    /// do: each costs a copy.
+    /// do: each costs a copy. (Since M12a a host whose encoders take frames
+    /// in memory still captures on the GPU, paced, and reads back only the
+    /// frames sent.)
     pub paced: bool,
 }
 
