@@ -19,17 +19,28 @@ export function TooltipProvider(props: { children: ReactNode }) {
 export const Tooltip = forwardRef<
   HTMLElement,
   HTMLAttributes<HTMLElement> & { label: ReactNode; side?: "top" | "right" | "bottom" | "left"; children: ReactNode }
->(function Tooltip({ label, side, children, ...rest }, ref) {
+>(function Tooltip({ label, side, children, onFocus, ...rest }, ref) {
   if (label == null || label === "") {
     return (
-      <Slot ref={ref} {...rest}>
+      <Slot ref={ref} onFocus={onFocus} {...rest}>
         {children}
       </Slot>
     );
   }
   return (
     <RT.Root>
-      <RT.Trigger asChild ref={ref as React.Ref<HTMLButtonElement>} {...rest}>
+      <RT.Trigger
+        asChild
+        ref={ref as React.Ref<HTMLButtonElement>}
+        {...rest}
+        // Focus opens the label only when it came from the keyboard: a
+        // dialog placing the focus, or focus coming back after a click,
+        // shows nothing until hovered.
+        onFocus={(e) => {
+          onFocus?.(e);
+          if (!e.currentTarget.matches(":focus-visible")) e.preventDefault();
+        }}
+      >
         {children}
       </RT.Trigger>
       <RT.Portal>

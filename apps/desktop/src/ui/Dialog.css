@@ -22,6 +22,11 @@
   animation: dialog-in var(--slow) var(--ease);
 }
 
+/* The dialog takes the focus itself when nothing in it should: no ring. */
+.dialog:focus-visible {
+  outline: none;
+}
+
 .dialog-s {
   width: min(440px, calc(100vw - 32px));
 }

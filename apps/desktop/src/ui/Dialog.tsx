@@ -35,16 +35,15 @@ export function Dialog(props: {
           onInteractOutside={hold}
           onOpenAutoFocus={(e) => {
             // The first field, or what the dialog marks (`data-autofocus`:
-            // Cancel, in a dialog that would destroy something), never the
-            // close button.
+            // Cancel, in a dialog that would destroy something; the first
+            // choice), else its main button, else the dialog itself: never
+            // the close button.
+            e.preventDefault();
             const box = e.currentTarget as HTMLElement;
             const first = box.querySelector<HTMLElement>(
-              "[data-autofocus], .dialog-body input:not(:disabled), .dialog-body textarea:not([readonly]), .dialog-footer .btn-primary",
+              "[data-autofocus]:not(:disabled), .dialog-body input:not(:disabled), .dialog-body textarea:not([readonly]):not(:disabled), .dialog-footer .btn-primary:not(:disabled)",
             );
-            if (first) {
-              e.preventDefault();
-              first.focus();
-            }
+            (first ?? box).focus();
           }}
         >
           <header className="dialog-header">
