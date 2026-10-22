@@ -5,6 +5,25 @@
 const click = (name) => async (page) => page.getByRole("button", { name, exact: false }).first().click();
 /** Right-clicks a member, opening the members drawer first in a narrow
  * window. */
+/** The patch bay in the middle of the view: a mouse can't press what is
+ * scrolled away. */
+async function centreBay(page) {
+  await page.locator(".bay").evaluate((el) => el.scrollIntoView({ block: "center" }));
+  await page.waitForTimeout(150);
+}
+
+/** Drags `from` onto `to` with the mouse, letting go or not. */
+async function dragTo(page, from, to, release) {
+  await centreBay(page);
+  const a = await page.locator(from).first().boundingBox();
+  const b = await page.locator(to).first().boundingBox();
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(a.x + a.width / 2 + 30, a.y + a.height / 2 + 10, { steps: 4 });
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 12 });
+  if (release) await page.mouse.up();
+}
+
 /** A menu must open: a right-click that opens nothing fails the run. */
 const menuOpens = async (page) => page.getByRole("menu").first().waitFor({ timeout: 2000 });
 const member = (name) => async (page) => {
@@ -46,7 +65,11 @@ export const SHOTS = [
     await page.getByRole("button", { name: /^Sofá/ }).click({ button: "right" });
     await menuOpens(page);
   }],
-  ["menu-member", "member-room", member("Caio")],
+  // In a room you own (in another's, a member has no menu: nothing to do).
+  ["menu-member", "lobby", async (page) => {
+    await page.getByRole("button", { name: /^Sofá/ }).click();
+    await member("Caio")(page);
+  }],
   [
     "confirm-ban",
     "lobby",
@@ -78,19 +101,43 @@ export const SHOTS = [
   [
     "menu-seat",
     "hosting-live",
-    async (page) => page.locator(".board-seat", { hasText: "Controller 4" }).click({ button: "right" }),
+    async (page) => {
+      await centreBay(page);
+      await page.locator(".bay-seat", { hasText: "Controller 4" }).click({ button: "right" });
+      await menuOpens(page);
+    },
   ],
   [
     "menu-watcher",
     "hosting-live",
     async (page) => {
-      await page.locator(".watcher", { hasText: "Dani" }).scrollIntoViewIfNeeded();
-      await page.locator(".watcher", { hasText: "Dani" }).click({ button: "right" });
+      await centreBay(page);
+      await page.locator(".bay-person.viewer", { hasText: "Dani" }).click({ button: "right" });
+      await menuOpens(page);
     },
   ],
   ["end-session", "hosting-live", async (page) => {
     await page.getByRole("button", { name: "Session options" }).click();
     await page.getByRole("menuitem", { name: "End session…" }).click();
+  }],
+  // The patch bay: dragging Dani onto Controller 4, held over it; then let go;
+  // then Bia's plug pulled off Controller 3 into the open, held.
+  ["patch-drag", "hosting-live", async (page) => dragTo(page, ".bay-plug.viewer >> text=Dani", ".bay-seat:has-text('Controller 4')", false)],
+  ["patch-drop", "hosting-live", async (page) => {
+    await dragTo(page, ".bay-plug.viewer >> text=Dani", ".bay-seat:has-text('Controller 4')", true);
+    await page.waitForTimeout(400);
+  }],
+  ["patch-keyboard-yours", "hosting-keyboard-yours", async (page) => centreBay(page)],
+  ["patch-controller-keys", "hosting-controller-keys", async (page) => centreBay(page)],
+  ["patch-pull", "hosting-live", async (page) => {
+    await centreBay(page);
+    const plug = page.locator(".bay-seat:has-text('Controller 3') .bay-socket.plugged");
+    const a = await plug.boundingBox();
+    const bay = await page.locator(".bay").boundingBox();
+    await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(a.x - 40, a.y + 10, { steps: 4 });
+    await page.mouse.move(bay.x + bay.width * 0.45, bay.y + 40, { steps: 8 });
   }],
   ["hosting-elsewhere", "hosting-live", async (page) => page.getByRole("button", { name: "Settings (Ctrl+,)" }).click()],
 

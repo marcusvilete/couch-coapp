@@ -98,7 +98,7 @@ try {
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const which = scenario === "sheet" ? "sheet" : `scenario=${scenario}`;
-        await page.goto(`${base}?${which}&bare&nosplash&latency=0`);
+        await page.goto(`${base}?${which}&bare&nosplash&latency=0&theme=system`);
         await page.waitForLoadState("networkidle");
         await page.waitForTimeout(250);
         if (steps) {
@@ -134,7 +134,7 @@ try {
   for (const [name, scenario, regions, moves] of STABLE.filter(([n]) => n.includes(only))) {
     const context = await browser.newContext({ viewport: { width: 1200, height: 760 }, reducedMotion: "reduce" });
     const page = await context.newPage();
-    await page.goto(`${base}?scenario=${scenario}&bare&nosplash&latency=0`);
+    await page.goto(`${base}?scenario=${scenario}&bare&nosplash&latency=0&theme=system`);
     await page.waitForLoadState("networkidle");
     const boxes = async () =>
       Promise.all(

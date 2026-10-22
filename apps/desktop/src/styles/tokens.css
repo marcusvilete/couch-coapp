@@ -1,9 +1,10 @@
 /* The app's design tokens (M21): every colour, size and shadow the screens
-   use. Two themes in one list, `light-dark(day, night)`: "living room at
-   night" (dark) and day (light). The one shown follows Windows unless
-   Settings → Appearance picks one (`data-theme` on <html>, which sets
-   `color-scheme`). Windows' High Contrast themes override colours through
-   `forced-colors` (base.css). */
+   use. Two themes in one list, `light-dark(day, night)`, near-neutral greys
+   in the manner of claude.ai's own settings: clay only for the brand,
+   blue for what you interact with, and main buttons in the text's colour.
+   The one shown follows Windows unless Settings → Appearance picks one
+   (`data-theme` on <html>, which sets `color-scheme`). Windows' High
+   Contrast themes override colours through `forced-colors` (base.css). */
 
 :root {
   color-scheme: light dark;
@@ -46,30 +47,42 @@
   --ease: cubic-bezier(0.2, 0, 0, 1);
 
   /* Surfaces, from the window's floor up. */
-  --bg-app: light-dark(#ece8e3, #121014);
-  --bg-base: light-dark(#f8f6f3, #18161b);
-  --bg-raised: light-dark(#ffffff, #1f1c23);
-  --bg-raised-2: light-dark(#f3f0ec, #26222b);
-  --bg-overlay: light-dark(#ffffff, #2a2630);
-  --bg-input: light-dark(#ffffff, #141216);
-  --hover: light-dark(rgb(40 28 16 / 0.05), rgb(255 244 230 / 0.05));
-  --active: light-dark(rgb(40 28 16 / 0.09), rgb(255 244 230 / 0.09));
-  --selected: light-dark(rgb(40 28 16 / 0.08), rgb(255 244 230 / 0.11));
+  --bg-app: light-dark(#f2f1ec, #1f1e1d);
+  --bg-base: light-dark(#faf9f5, #262624);
+  --bg-raised: light-dark(#ffffff, #2c2c2a);
+  --bg-raised-2: light-dark(#f4f3ee, #343432);
+  --bg-overlay: light-dark(#ffffff, #30302e);
+  --bg-input: light-dark(#ffffff, #1f1e1d);
+  --hover: light-dark(rgb(20 20 19 / 0.045), rgb(250 249 245 / 0.05));
+  --active: light-dark(rgb(20 20 19 / 0.08), rgb(250 249 245 / 0.08));
+  --selected: light-dark(rgb(20 20 19 / 0.07), rgb(250 249 245 / 0.09));
 
-  --border: light-dark(#e0d9d1, #2f2a34);
-  --border-strong: light-dark(#cbc2b8, #433c49);
-  --divider: light-dark(#e8e3dc, #252128);
+  --border: light-dark(#e6e4dc, #3a3936);
+  --border-strong: light-dark(#d4d1c6, #4b4a46);
+  --divider: light-dark(#ecebe4, #32312f);
 
-  --text: light-dark(#1f1a17, #f2ede7);
-  --text-muted: light-dark(#5f5650, #aaa29e);
-  --text-faint: light-dark(#877e77, #7b7471);
+  --text: light-dark(#141413, #faf9f5);
+  --text-muted: light-dark(#5e5d59, #c2c0b6);
+  --text-faint: light-dark(#87867f, #9c9a92);
 
-  /* The accent: warm amber, always with dark text on it. */
-  --accent: light-dark(#f29b2a, #f6a53a);
-  --accent-hover: light-dark(#f7ab48, #ffb75c);
-  --accent-soft: light-dark(rgb(242 155 42 / 0.16), rgb(246 165 58 / 0.14));
-  --accent-text: light-dark(#9a5300, #ffbe6b);
-  --accent-fg: #1d1305;
+  /* What you interact with: switches, sliders, checks, links, the chosen
+     item, the focus ring. */
+  --accent: light-dark(#2c84db, #4a9ff0);
+  --accent-hover: light-dark(#2474c4, #67b0f5);
+  --accent-soft: light-dark(rgb(44 132 219 / 0.1), rgb(74 159 240 / 0.14));
+  --accent-text: light-dark(#1d6bb8, #7fbaf5);
+  --accent-fg: #ffffff;
+
+  /* Main buttons: the text's colour, the page's on them. */
+  --primary: light-dark(#141413, #faf9f5);
+  --primary-hover: light-dark(#30302e, #e3e1d9);
+  --primary-fg: light-dark(#faf9f5, #141413);
+
+  /* The brand: clay, for the app's mark and the owner's crown only. */
+  --brand: light-dark(#c96442, #d97757);
+  --brand-soft: light-dark(rgb(201 100 66 / 0.1), rgb(217 119 87 / 0.14));
+  --brand-text: light-dark(#b0542f, #e8936f);
+  --brand-fg: #ffffff;
 
   /* Red is only for LIVE and danger. */
   --live: light-dark(#d93a35, #f1544f);
@@ -88,14 +101,14 @@
   --link-direct: light-dark(#1f9a55, #57c785);
   --link-relay: light-dark(#c08d0c, #e9c255);
   --link-online: light-dark(#3b78cc, #79aef2);
-  --link-offline: light-dark(#a8a09a, #6c6569);
+  --link-offline: light-dark(#a3a29b, #6f6e69);
 
-  --focus: light-dark(#b25f00, #ffbe6b);
-  --shadow-color: light-dark(rgb(60 40 20 / 0.12), rgb(0 0 0 / 0.42));
+  --focus: var(--accent);
+  --shadow-color: light-dark(rgb(20 20 19 / 0.08), rgb(0 0 0 / 0.35));
   --shadow-sm: 0 1px 2px var(--shadow-color);
   --shadow-md: 0 6px 18px var(--shadow-color);
   --shadow-lg: 0 18px 48px var(--shadow-color), 0 2px 6px var(--shadow-color);
-  --scrim: light-dark(rgb(40 30 20 / 0.36), rgb(8 6 10 / 0.62));
+  --scrim: light-dark(rgb(20 20 19 / 0.32), rgb(0 0 0 / 0.55));
 }
 
 :root[data-theme="dark"] {

@@ -124,7 +124,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **The overlay page stays apart:** no theme tokens, no global styles, no Radix (`overlay/main.tsx`, `overlay.css` scoped to `.overlay`, `page.css` for the transparent window).
 - **Nothing jumps:** the shell's regions and dialogs keep their sizes as you move about; state appears in reserved space or below what you use. `npm run shots` checks it (`scripts/shots.config.mjs`'s `STABLE`); add a view there with its moves.
 - **Every action on an object is on its button and its right-click** (one `MenuEntry[]` for both, `ui/Menu.tsx`); nothing only in a context menu. The webview's own context menu and browser keys are off (`shell/guards.ts`), but in text fields and `.selectable` text.
-- **No key in the webview answers a request or passes a seat** (only the low-level hook does); a request's Accept waits 1 s and is disabled while control is paused (`sessions/HostConsole.tsx`).
+- **No key in the webview answers a request or passes a seat** (only the low-level hook does); a request's Accept waits 1 s and is disabled while control is paused (`sessions/HostConsole.tsx`). The patch bay (`sessions/PatchBay.tsx`) hands seats over by dragging with the mouse; its drops send the same commands as the menus, and `dropOn` refuses what the menus refuse (tested).
 - **A new screen or state gets a preview scenario** (`preview/scenarios.ts`), so it can be seen and shot without a session.
 
 **Crate boundaries.** Keep these intact:

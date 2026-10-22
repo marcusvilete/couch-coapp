@@ -8,9 +8,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background:
-    radial-gradient(900px 420px at 50% 40%, var(--accent-soft), transparent 70%),
-    var(--bg-app);
+  background: var(--bg-app);
   overflow: hidden;
   cursor: default;
   transition: opacity 0.5s ease-out;
@@ -38,7 +36,7 @@
 /* The controllers land on the couch's seat. */
 .splash-pad {
   top: 1.2em;
-  color: var(--accent-text);
+  color: var(--brand-text);
   animation: splash-slide-left 1.1s cubic-bezier(0.2, 0.7, 0.3, 1) 0.1s both;
 }
 
@@ -80,19 +78,21 @@
   left: 0;
   right: 0;
   text-align: center;
-  font-family: var(--font-display);
   font-size: 1.4rem;
   font-weight: 700;
   color: var(--text);
 }
 
-/* Typed out, one letter at a time (12 letters). */
+/* Typed out, one letter at a time (12 letters), in the stage's monospace
+   font: each step reveals exactly one letter. The caret keeps a little
+   gap after the last one. */
 .splash-title span {
   display: inline-block;
   overflow: hidden;
   white-space: nowrap;
   vertical-align: bottom;
-  border-right: 2px solid var(--accent);
+  padding-right: 0.15em;
+  border-right: 2px solid var(--brand);
   animation:
     splash-type 0.5s steps(12) 1.25s both,
     splash-caret 0.5s steps(1) 1.75s 3;
@@ -149,8 +149,9 @@
   from {
     max-width: 0;
   }
+  /* Twelve letters, the gap and the caret (the box counts both). */
   to {
-    max-width: 12ch;
+    max-width: calc(12ch + 0.15em + 2px);
   }
 }
 

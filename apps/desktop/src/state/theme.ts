@@ -1,15 +1,16 @@
-// Settings → Appearance (M21): the theme follows Windows, or is chosen. The
-// choice is this profile's (web storage), applied to the page (`data-theme`)
-// and to the window's title bar.
+// Settings → Appearance (M21): dark unless chosen otherwise, light, or
+// following Windows. The choice is this profile's (web storage), applied to
+// the page (`data-theme`) and to the window's title bar.
 import { useCallback, useEffect, useState } from "react";
 import { platform } from "../platform";
 import { KEYS, readStored, writeStored } from "./storage";
 
 export type ThemeChoice = "system" | "dark" | "light";
 
+/** The choice made, or dark until one is (the user's, 2026-10-21). */
 function stored(): ThemeChoice {
   const value = readStored(KEYS.theme);
-  return value === "dark" || value === "light" ? value : "system";
+  return value === "system" || value === "light" ? value : "dark";
 }
 
 function apply(choice: ThemeChoice) {

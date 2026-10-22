@@ -67,11 +67,11 @@
 }
 
 .btn-primary {
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--primary);
+  color: var(--primary-fg);
 
   &:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: var(--primary-hover);
   }
 }
 

@@ -32,9 +32,9 @@
 }
 
 .callout-accent {
-  --tone: var(--accent-text);
-  --tone-bg: var(--accent-soft);
-  --tone-border: color-mix(in srgb, var(--accent) 35%, transparent);
+  --tone: var(--brand-text);
+  --tone-bg: var(--brand-soft);
+  --tone-border: color-mix(in srgb, var(--brand) 35%, transparent);
 }
 
 .callout-icon {

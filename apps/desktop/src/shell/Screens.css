@@ -4,9 +4,7 @@
   height: 100%;
   overflow-y: auto;
   padding: var(--s8) var(--s6);
-  background:
-    radial-gradient(1200px 500px at 50% -10%, var(--accent-soft), transparent 70%),
-    var(--bg-base);
+  background: var(--bg-base);
 }
 
 .welcome-inner {
@@ -24,8 +22,8 @@
   height: 64px;
   margin-bottom: var(--s2);
   border-radius: 20px;
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--brand);
+  color: var(--brand-fg);
   box-shadow: var(--shadow-md);
 
   & svg {

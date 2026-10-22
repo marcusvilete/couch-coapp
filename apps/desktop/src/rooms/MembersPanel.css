@@ -120,7 +120,7 @@
   width: 13px;
   height: 13px;
   flex: none;
-  color: var(--accent-text);
+  color: var(--brand-text);
 }
 
 .member-detail {

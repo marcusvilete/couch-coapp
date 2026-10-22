@@ -67,12 +67,13 @@
   }
 
   &.primary {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    background: var(--accent-soft);
+    border-color: var(--border-strong);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-sm);
   }
 
   &.primary:hover {
-    border-color: var(--accent);
+    border-color: var(--text-faint);
   }
 }
 
@@ -93,8 +94,8 @@
 }
 
 .choice-card.primary .choice-icon {
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--primary);
+  color: var(--primary-fg);
 }
 
 /* ---- Join ---- */

@@ -115,8 +115,8 @@
   height: 56px;
   margin-bottom: var(--s2);
   border-radius: 16px;
-  background: var(--accent-soft);
-  color: var(--accent-text);
+  background: var(--active);
+  color: var(--text-muted);
 
   & svg {
     width: 28px;

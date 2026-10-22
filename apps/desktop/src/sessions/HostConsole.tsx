@@ -1,36 +1,24 @@
 // Our session (we host): what's streamed and its controls; the requests to
 // play, in a strip that is always there so a new one never moves anything
-// under the pointer; a tile per seat with who plays it; who's watching; the
-// sound guests hear. Every action is also on the right-click of its tile or
-// row. Answering a request is never bound to a key here: only the low-level
-// hook answers with keys (CLAUDE.md), and only a request pending for 1 s.
-import {
-  Gamepad2,
-  Hand,
-  Keyboard,
-  MonitorPlay,
-  MoreHorizontal,
-  Play,
-  Power,
-  ShieldAlert,
-  Square,
-  TriangleAlert,
-  Users,
-} from "lucide-react";
+// under the pointer; who plays what, as a patch bay of cables (drag to hand
+// a seat over); the sound guests hear. Every action is also on a menu (⋯ or
+// right-click). Answering a request is never bound to a key here: only the
+// low-level hook answers with keys (CLAUDE.md), and only a request pending
+// for 1 s.
+import { Gamepad2, Hand, Keyboard, MonitorPlay, MoreHorizontal, Play, Power, ShieldAlert, Square, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { hostIdleText, isLive, listed, nameOf, seatPhrase, seatsOf } from "../model/sessions";
+import { hostIdleText, isLive, listed, nameOf, seatPhrase } from "../model/sessions";
 import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
 import { Button, IconButton } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { Badge, Kbd } from "../ui/Feedback";
-import { ContextMenu, DropdownMenu } from "../ui/Menu";
-import { Tooltip } from "../ui/Tooltip";
+import { DropdownMenu } from "../ui/Menu";
 import { Why } from "../ui/Why";
-import { controllersOf, ourPads, PAUSED_REASON, seatEntries, viewerEntries } from "./hostMenus";
-import { SeatIcon } from "./SessionCard";
+import { ourPads, PAUSED_REASON } from "./hostMenus";
+import { PatchBay } from "./PatchBay";
 import { SoundLevel } from "./SoundLevel";
 import { streamsElevated } from "./streamMemory";
 import { useRun, type Notify } from "./useRun";
@@ -131,37 +119,32 @@ export function HostConsole(props: {
 
       <ConsoleBanners room={room} session={s} busy={busy} run={run} pads={pads} />
 
-      <div className="console-grid">
-        <div className="console-col">
-          <RequestStrip room={room} session={s} busy={busy} run={run} />
-          <section className="panel" aria-label="Seats">
-            <header className="panel-head">
-              <h3>Seats</h3>
-              <span className="panel-count tabular">{s.seats.length}</span>
-              <span className="panel-why">
-                <Why>
-                  {pads.length > 0
-                    ? `Every player in the game is one of these seats, yours included, so any of them can be handed over. A seat you take back or leave stays empty; Play here puts ${pads.length === 1 ? "your controller" : "one of your controllers"} on one. The game numbers its players itself, usually in the order controllers join.`
-                    : "The game numbers its players itself, usually in the order controllers join, and your own controller counts: it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat doesn't respond, move them to another one."}
-                </Why>
-              </span>
-            </header>
-            <SeatBoard room={room} session={s} busy={busy} run={run} />
-            <p className="panel-foot">{whatYouPlay(room, s, pads)}</p>
-          </section>
-        </div>
-        <div className="console-col">
-          <Watching room={room} session={s} busy={busy} run={run} />
-          {s.soundLevel != null && (
-            <section className="panel" aria-label="Sound">
-              <header className="panel-head">
-                <h3>Stream volume</h3>
-              </header>
-              <SoundLevel roomId={room.id} level={s.soundLevel} onRoom={props.onRoom} notify={props.notify} />
-            </section>
-          )}
-        </div>
-      </div>
+      <RequestStrip room={room} session={s} busy={busy} run={run} />
+      <section className="panel" aria-label="Players and seats">
+        <header className="panel-head">
+          <h3>Who plays what</h3>
+          <span className="panel-lead">Drag a player onto a seat to hand it over; pull a plug off a seat to take it back.</span>
+          <span className="panel-why">
+            <Why>
+              {pads.length > 0
+                ? `Every player in the game is one of these seats, yours included, so any of them can be handed over. A seat you take back or leave stays empty; dragging ${pads.length === 1 ? "your controller" : "one of your controllers"} onto a seat plays it. The game numbers its players itself, usually in the order controllers join. Each seat's ⋯ and right-click do the same as dragging.`
+                : "The game numbers its players itself, usually in the order controllers join, and your own controller counts: it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat doesn't respond, move them to another one. Each seat's ⋯ and right-click do the same as dragging."}
+            </Why>
+          </span>
+        </header>
+        <PatchBay room={room} session={s} busy={busy} run={run} />
+        <p className="panel-foot">
+          {whatYouPlay(room, s, pads)} {s.viewers.length} of {s.maxViewers} watching.
+        </p>
+      </section>
+      {s.soundLevel != null && (
+        <section className="panel" aria-label="Sound">
+          <header className="panel-head">
+            <h3>Stream volume</h3>
+          </header>
+          <SoundLevel roomId={room.id} level={s.soundLevel} onRoom={props.onRoom} notify={props.notify} />
+        </section>
+      )}
     </section>
   );
 }
@@ -336,158 +319,3 @@ function RequestStrip(props: {
   );
 }
 
-function SeatBoard(props: {
-  room: RoomView;
-  session: SessionView;
-  busy: string | null;
-  run: ReturnType<typeof useRun>["run"];
-}) {
-  const { room, session: s, run } = props;
-  const pads = ourPads(s);
-  const single = s.seats.length === 1;
-  return (
-    <ul className={`seat-board${single ? " single" : ""}`}>
-      {s.seats.map((seat, i) => {
-        const entries = seatEntries(room, s, i, run);
-        const holder = seat.host ? "You" : seat.holder ? nameOf(room, seat.holder) : "Free";
-        const detail = seat.host
-          ? ((seat.hostController != null ? pads[seat.hostController] : undefined) ?? "your controller")
-          : seat.holder
-            ? "guest"
-            : "nobody plays it";
-        return (
-          <ContextMenu key={i} items={entries}>
-            <li className={`board-seat${seat.holder ? "" : " free"}${seat.host ? " yours" : ""}`}>
-              <div className="board-seat-top">
-                <SeatIcon seat={seat} />
-                <span className="board-seat-label">{seat.label}</span>
-                {entries.length > 0 && (
-                  <DropdownMenu items={entries}>
-                    <IconButton label={`${seat.label}: actions`} size="sm" disabled={props.busy != null}>
-                      <MoreHorizontal />
-                    </IconButton>
-                  </DropdownMenu>
-                )}
-              </div>
-              <div className="board-seat-holder">
-                {seat.holder && <Avatar id={seat.holder} name={nameOf(room, seat.holder)} size={24} />}
-                <span className="board-seat-who">
-                  <span>{holder}</span>
-                  <span className="board-seat-detail">{detail}</span>
-                </span>
-              </div>
-              {seat.keyboardMouse && (
-                <Tooltip label="Whoever holds this seat types only into the game, and only while its window is in front; the Windows key, Alt+Tab, Alt+F4, Ctrl+Esc and Ctrl+Shift+Esc never go through.">
-                  <span className="board-seat-warn">
-                    <ShieldAlert aria-hidden="true" /> Control of your PC
-                  </span>
-                </Tooltip>
-              )}
-              {seat.holder && (
-                <Tooltip label={seat.host ? `Your ${detail} stops playing it; it stays empty` : "It stays empty"}>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="board-seat-take"
-                    disabled={props.busy != null}
-                    onClick={() => void run(`take-${i}`, { type: "takeBackControl", seat: i })}
-                  >
-                    {seat.host ? "Leave" : "Take back"}
-                  </Button>
-                </Tooltip>
-              )}
-            </li>
-          </ContextMenu>
-        );
-      })}
-      {!s.hostOnSeats && (
-        <li className="board-seat beside">
-          <div className="board-seat-top">
-            <span className="seat-icon" aria-hidden="true">
-              <Users />
-            </span>
-            <span className="board-seat-label">Beside the seats</span>
-          </div>
-          <div className="board-seat-holder">
-            <span>{pads.length > 0 ? "Your keyboard and mouse" : "You · own controller, keyboard and mouse"}</span>
-          </div>
-        </li>
-      )}
-    </ul>
-  );
-}
-
-function Watching(props: {
-  room: RoomView;
-  session: SessionView;
-  busy: string | null;
-  run: ReturnType<typeof useRun>["run"];
-}) {
-  const { room, session: s, run } = props;
-  const single = s.seats.length === 1;
-  return (
-    <section className="panel" aria-label="Watching">
-      <header className="panel-head">
-        <h3>Watching</h3>
-        <span className="panel-count tabular">
-          {s.viewers.length} of {s.maxViewers}
-        </span>
-      </header>
-      {s.viewers.length === 0 ? (
-        <p className="panel-empty">Nobody yet. The others in the room see your session and a Watch button.</p>
-      ) : (
-        <ul className="watchers">
-          {s.viewers.map((id) => {
-            const held = seatsOf(s, id);
-            const controllers = controllersOf(s, id);
-            const entries = viewerEntries(room, s, id, run);
-            const blocked = props.busy != null || s.controlPaused;
-            return (
-              <ContextMenu key={id} items={entries}>
-                <li className="watcher">
-                  <Avatar id={id} name={nameOf(room, id)} size={32} />
-                  <span className="watcher-text">
-                    <span className="watcher-name">{nameOf(room, id)}</span>
-                    <span className="watcher-detail">
-                      {held.length > 0 ? (
-                        <>
-                          <Gamepad2 aria-hidden="true" /> {listed(held.map((i) => s.seats[i].label))}
-                        </>
-                      ) : (
-                        "watching"
-                      )}
-                      {!single && ` · ${controllers === 1 ? "1 controller" : `${controllers} controllers`}`}
-                    </span>
-                  </span>
-                  {single ? (
-                    held.length > 0 ? (
-                      <Button size="sm" disabled={props.busy != null} onClick={() => void run("take", { type: "takeBackControl", seat: 0 })}>
-                        Take back
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        disabled={blocked}
-                        reason={s.controlPaused ? PAUSED_REASON : null}
-                        onClick={() => void run(`pass-${id}`, { type: "passControl", member: id, seat: 0 })}
-                      >
-                        Pass control
-                      </Button>
-                    )
-                  ) : (
-                    <DropdownMenu items={entries}>
-                      <Button size="sm" icon={<Hand />} disabled={props.busy != null}>
-                        {held.length > 0 ? "Pass another seat…" : "Pass a seat…"}
-                      </Button>
-                    </DropdownMenu>
-                  )}
-                </li>
-              </ContextMenu>
-            );
-          })}
-        </ul>
-      )}
-    </section>
-  );
-}

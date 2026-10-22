@@ -4,8 +4,9 @@
 import type { MemberLink } from "../bindings/MemberLink";
 import "./Avatar.css";
 
-/** Hues that read well behind white initials in both themes. */
-const HUES = [18, 36, 152, 172, 200, 222, 262, 292, 330, 350];
+/** Hues that read well behind white initials in both themes; no yellows
+ * or browns, which tint the whole page. */
+const HUES = [8, 152, 172, 192, 210, 228, 250, 272, 300, 330];
 
 export function hueOf(id: string): number {
   let h = 2166136261;

@@ -260,6 +260,28 @@ export const SCENARIOS: Record<string, Scenario> = {
     world: () => base([sofa({ sessions: [hostSession(ME, "Game night", 4, { controllers: 1, keyboardMouse: "none" }, [])] })]),
   },
   "hosting-live": { title: "Hosting: live, five seats, two requests", world: () => base([sofa({ sessions: [hosting()] })]) },
+  "hosting-keyboard-yours": {
+    title: "Hosting: the keyboard seat still yours (no guest on it)",
+    world: () => {
+      const s = hosting({ requests: [{ member: dani.id, seat: 4 }] });
+      s.seats[4].holder = null;
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
+  "hosting-controller-keys": {
+    title: "Hosting: keyboard and mouse with Controller 1, played by you",
+    world: () => {
+      const s = hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "withController1" }, [
+        "DualSense Wireless Controller",
+      ]);
+      s.viewers = [bia.id, caio.id];
+      s.viewerControllers = [1, 1];
+      s.seats[1].holder = bia.id;
+      s.stream = { state: "live" };
+      s.streaming = { name: "Stardew Valley", fps: 60, maxMbps: 20, uploadMbps: null };
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
   "hosting-paused": {
     title: "Hosting: control paused",
     world: () => base([sofa({ sessions: [hosting({ controlPaused: true, requests: [] })] })]),

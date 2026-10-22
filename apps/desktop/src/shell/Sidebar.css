@@ -32,8 +32,8 @@
   height: 28px;
   flex: none;
   border-radius: 8px;
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--brand);
+  color: var(--brand-fg);
 }
 
 .brand-name {
@@ -87,7 +87,7 @@
     bottom: 12px;
     width: 4px;
     border-radius: 0 4px 4px 0;
-    background: var(--accent);
+    background: var(--text);
   }
 
   &.dragging {
