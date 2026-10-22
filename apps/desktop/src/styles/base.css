@@ -1,0 +1,141 @@
+/* The page's ground rules (M21): type, the focus ring, scrollbars, motion,
+   High Contrast. Components style themselves (`ui/*.css`). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html {
+  font-family: var(--font);
+  font-size: var(--text-base);
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg-app);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  /* An app, not a page: text is chosen only where it is meant to be copied
+     (`.selectable`, fields). */
+  user-select: none;
+  cursor: default;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+a {
+  color: var(--accent-text);
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+.selectable,
+input,
+textarea {
+  user-select: text;
+  cursor: auto;
+}
+
+/* `hidden` wins over any component's own display (Radix leaves inactive
+   tab panels in the page, hidden). */
+[hidden] {
+  display: none !important;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Thin scrollbars where the window's own overlay scrollbars aren't used
+   (the preview in a browser). Scroll areas never reflow when one shows. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Windows' "Animation effects" off: no motion, but the splash, which plays
+   anyway (short and skippable: the user's choice, 2026-10-07). */
+@media (prefers-reduced-motion: reduce) {
+  :not(.splash, .splash *),
+  :not(.splash, .splash *)::before,
+  :not(.splash, .splash *)::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Windows' High Contrast themes: the system's colours everywhere, borders
+   where the design relied on shades. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+}

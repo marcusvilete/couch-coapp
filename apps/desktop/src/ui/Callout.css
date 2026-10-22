@@ -1,0 +1,85 @@
+.callout {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--tone-border);
+  border-radius: var(--r-md);
+  background: var(--tone-bg);
+  font-size: var(--text-md);
+
+  &.compact {
+    padding: var(--s2) var(--s3);
+  }
+}
+
+.callout-info {
+  --tone: var(--info);
+  --tone-bg: var(--info-soft);
+  --tone-border: color-mix(in srgb, var(--info) 30%, transparent);
+}
+
+.callout-warn {
+  --tone: var(--warn);
+  --tone-bg: var(--warn-soft);
+  --tone-border: color-mix(in srgb, var(--warn) 32%, transparent);
+}
+
+.callout-danger {
+  --tone: var(--danger);
+  --tone-bg: var(--danger-soft);
+  --tone-border: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.callout-accent {
+  --tone: var(--brand-text);
+  --tone-bg: var(--brand-soft);
+  --tone-border: color-mix(in srgb, var(--brand) 35%, transparent);
+}
+
+.callout-icon {
+  display: inline-grid;
+  align-self: flex-start;
+  margin-top: 1px;
+  color: var(--tone);
+
+  & svg {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+.callout-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--s2);
+  row-gap: 2px;
+}
+
+.callout-title {
+  font-weight: 600;
+}
+
+.callout-body {
+  color: var(--text);
+}
+
+.callout-title + .callout-body {
+  flex-basis: 100%;
+  color: var(--text-muted);
+}
+
+.callout-actions {
+  display: flex;
+  gap: var(--s2);
+  flex: none;
+}
+
+@media (forced-colors: active) {
+  .callout {
+    border-color: CanvasText;
+  }
+}

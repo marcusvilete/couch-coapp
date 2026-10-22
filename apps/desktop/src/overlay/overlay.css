@@ -1,0 +1,78 @@
+/* The host overlay's toasts (M8), dark whatever the app's theme: they sit
+   over a game. Everything is scoped to `.overlay`, so the preview can draw
+   them inside the main page; the overlay page's own `page.css` makes its
+   window transparent. */
+.overlay {
+  --bg: rgba(0, 0, 0, 0.88);
+  --fg: #ffffff;
+  --fg-muted: #b8b8b8;
+  --border: #6fc3df;
+  --border-quiet: #3a3a3a;
+  --focus: #f38518;
+  --radius: 6px;
+
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 2px;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--fg);
+  color-scheme: dark;
+  box-sizing: border-box;
+}
+
+.overlay * {
+  box-sizing: border-box;
+}
+
+.overlay .toast {
+  max-width: 100%;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border-quiet);
+  border-radius: var(--radius);
+  animation: toast-in 0.18s ease-out both;
+}
+
+.overlay .toast.request {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-color: var(--border);
+}
+
+.overlay .toast.request.first {
+  border-color: var(--focus);
+  border-width: 2px;
+}
+
+.overlay .toast.event {
+  color: var(--fg-muted);
+  font-size: 0.9rem;
+}
+
+.overlay .keys {
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+
+.overlay kbd {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em;
+  padding: 0 5px;
+  border: 1px solid var(--border-quiet);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}

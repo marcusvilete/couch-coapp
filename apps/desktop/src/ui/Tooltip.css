@@ -1,0 +1,19 @@
+.tooltip {
+  z-index: 60;
+  max-width: 300px;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-md);
+  animation: tooltip-in var(--fast) var(--ease);
+}
+
+@keyframes tooltip-in {
+  from {
+    opacity: 0;
+  }
+}

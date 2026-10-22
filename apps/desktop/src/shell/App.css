@@ -1,0 +1,48 @@
+/* The shell's fixed regions (the no-jump rule): the sidebar and the members
+   panel never change size; only the room's own area scrolls. */
+.shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.main {
+  container-type: inline-size;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-base);
+}
+
+.app-banner {
+  flex: none;
+  padding: var(--s3) var(--s6) 0;
+}
+
+.room-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.room-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.room-content {
+  display: grid;
+  gap: var(--s4);
+  max-width: 1280px;
+  padding: var(--s5) var(--s6) var(--s10);
+}
+
+.callouts {
+  display: grid;
+  gap: var(--s2);
+}

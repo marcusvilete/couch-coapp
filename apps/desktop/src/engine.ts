@@ -1,13 +1,13 @@
-// The only place the UI talks to the Rust side: one command and one event
-// channel, typed with the bindings ts-rs generates from couch-engine.
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+// The UI's way to the Rust side: one command and one event channel, typed
+// with the bindings ts-rs generates from couch-engine, through the platform
+// the page's entry installed.
 import type { Command } from "./bindings/Command";
 import type { Event as EngineEvent } from "./bindings/Event";
 import type { Response } from "./bindings/Response";
+import { platform, type Unlisten } from "./platform";
 
 export function engineCommand(command: Command): Promise<Response> {
-  return invoke<Response>("engine_command", { command });
+  return platform().command(command);
 }
 
 /** Sends `command` and checks the reply is the `expected` kind. Rejects with
@@ -28,8 +28,8 @@ export async function request<K extends Response["type"]>(
   return reply as Extract<Response, { type: K }>;
 }
 
-export function onEngineEvent(handler: (event: EngineEvent) => void): Promise<UnlistenFn> {
-  return listen<EngineEvent>("engine-event", (e) => handler(e.payload));
+export function onEngineEvent(handler: (event: EngineEvent) => void): Promise<Unlisten> {
+  return platform().onEvent(handler);
 }
 
 export function errorText(e: unknown): string {

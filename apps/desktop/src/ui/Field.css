@@ -1,0 +1,100 @@
+.field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.field-hint {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+.field-error {
+  min-height: 1.4em;
+  font-size: var(--text-sm);
+  color: var(--danger);
+  user-select: text;
+}
+
+.input {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--s3);
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  transition: border-color var(--fast) var(--ease);
+
+  &::placeholder {
+    color: var(--text-faint);
+  }
+
+  &:hover:not(:disabled) {
+    border-color: var(--text-faint);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -1px;
+    border-color: transparent;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+  }
+
+  /* WebView2's own reveal button: it hides for good once the field blurs. */
+  &::-ms-reveal {
+    display: none;
+  }
+}
+
+.textarea {
+  height: auto;
+  padding: var(--s2) var(--s3);
+  resize: none;
+  line-height: 1.5;
+}
+
+.password {
+  position: relative;
+  display: block;
+
+  & .input {
+    padding-right: 40px;
+  }
+}
+
+.password-reveal {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  font-size: var(--text-md);
+  cursor: pointer;
+
+  & input {
+    width: 16px;
+    height: 16px;
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+    flex: none;
+  }
+
+  &.disabled {
+    color: var(--text-faint);
+    cursor: default;
+  }
+}

@@ -1,0 +1,69 @@
+/* The preview's own controls: plain, out of the app's way. */
+.preview-panel {
+  position: fixed;
+  left: 8px;
+  bottom: 8px;
+  z-index: 2147483000;
+  width: 300px;
+  padding: 6px;
+  font: 12px/1.4 "Segoe UI", system-ui, sans-serif;
+  color: #111;
+  background: #ffe9a8;
+  border: 1px solid #b38b00;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.35);
+}
+
+.preview-panel.closed {
+  width: auto;
+}
+
+.preview-panel button,
+.preview-panel select {
+  font: inherit;
+  color: #111;
+  background: #fff;
+  border: 1px solid #b38b00;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.preview-toggle {
+  font-weight: 600;
+}
+
+.preview-body {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.preview-body select {
+  width: 100%;
+}
+
+.preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.preview-overlay {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 2147482000;
+  width: 380px;
+  padding: 24px 8px 8px;
+  background: repeating-linear-gradient(45deg, #2a3b2a, #2a3b2a 12px, #243324 12px, #243324 24px);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.preview-overlay-label {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  font: 11px "Segoe UI", system-ui, sans-serif;
+  color: #cfe;
+}

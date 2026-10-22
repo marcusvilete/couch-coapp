@@ -81,6 +81,13 @@ cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
 - **Expect** the guest's pad to go neutral, "control paused" in the host panel, no Backspace in the game, and `panic key:` in the host's log.
 - **If it fails only in our own window:** something registered the process for raw keyboard input (see `windows-ffi-pitfalls`).
 
+## Seeing the UI yourself (M21)
+
+- **Before asking the user,** look: `npm run shots` (in `apps/desktop`) shoots every preview scenario in dark, light and High Contrast at three sizes into `target\ui-shots\latest`, and fails on text spilling out of its box, a menu that doesn't open, or a region that moves as you navigate. Read the PNGs.
+- **A state no scenario shows:** add one to `src/preview/scenarios.ts` (the fake engine's world) and, for clicks, a step to `scripts/shots.config.mjs`.
+- **The real app:** start a profile of its own (`$env:COUCH_PROFILE='probe'`) with `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'` in that launch's shell only, then Playwright's `chromium.connectOverCDP("http://localhost:9222")` drives and shoots it. Delete that profile's folder afterwards.
+- **What only the user sees:** their own screen's scaling and text size, how it feels, two PCs, games and controllers.
+
 ## What to expect, by area
 
 Each feature's notes sit under its area, tagged with the milestone that added it. Add a new feature's notes to the area it belongs to (or a new area), not as a section of its own.
@@ -88,13 +95,13 @@ Each feature's notes sit under its area, tagged with the milestone that added it
 ### Rooms: a profile's backup (M13 part B), handing a room over (M13 part A)
 
 - **Backup:** Settings → Backup opens the app's own save dialog; restoring works only in a profile with no rooms (a new `COUCH_PROFILE`), then the app starts again as that identity. A restored room catches up (its banner names who it waits for; **Stop waiting…** warns first) and an owned one asks for a new password.
-- **Handing over:** **Make owner** shows beside Ban, on hover, for members online now. The owner confirms, then sees "Waiting for … to accept" with **Withdraw**. The member offered gets a notice and a banner with **Accept…** (a dialog for the new password, twice) and **Decline**. Once accepted, every member shows the ♛ on the new owner and a notice ("… now owns …"); the old owner's invites are refused as expired and its Invite button is gone; the new owner's invites work with the new password.
+- **Handing over:** **Make owner…** is in a member's menu (right-click the member, or its "⋯"), beside Ban, for members connected now. The owner confirms, then sees "Waiting for … to accept" with **Withdraw**. The member offered gets a notice and a banner with **Accept…** (a dialog for the new password, twice) and **Decline**. Once accepted, every member shows the ♛ on the new owner and a notice ("… now owns …"); the old owner's invites are refused as expired and its Invite button is gone; the new owner's invites work with the new password.
 - On one PC, three profiles show it all (default, alice, bob): no game or second PC needed.
 
 ### Sessions and streams (M19), lifecycle (M6), the picture (P8)
 
 - **Start a session** (the dialog): a title, how many can watch, the seats, and the host's controller. Nothing is captured yet. The pads are plugged in and the controller hidden at once, so a game started afterwards never sees the controller and finds the seats' pads.
-- **The host panel** shows SESSION (LIVE while streaming), End session, and a Stream section: the windows and screens, frame rate, quality and upload limit, then Start streaming. While live it says what is streamed, with Stop streaming; picking something else and "Stream this instead" switches.
+- **The host console** (M21) shows LIVE or "Not streaming", Start streaming… (a dialog: windows and screens in two tabs, frame rate, quality, upload limit under it), and End session in its "⋯" (confirmed when anyone watches). While live it says what is streamed, with Stop streaming and Stream something else…; under it the request strip (always there), the patch bay (players left, seats right, a cable per held seat, dashed for a request: drag a player or one of the host's controllers onto a seat, pull a plug off a seat to take it back; the seats' ⋯ and right-click do the same) and the stream volume. While hosting, a bar at the top of every view (another room, Settings) shows the requests waiting, with Answer.
 - **Watchers between streams:** the room card says "Ana isn't streaming anything yet" (or why the last stream stopped); a stream window stays open, black, with that line in the middle and "Your seat stays yours". Their input does nothing until the next stream (the host's log shows no seat change). The next stream arrives by itself, from a keyframe.
 - **A session with a keyboard-and-mouse seat** streams only windows: the Stream section says so if a screen is picked.
 - **The host's own controller** plays its seat between streams too, so the host can start the game with it.
@@ -104,7 +111,7 @@ Each feature's notes sit under its area, tagged with the milestone that added it
 - **Killing the host app** (Task Manager): its viewers see the connection lost after about 5 s (log: `the peer went silent; closing`).
 - **A dropped connection while watching**: the stream card says "Reconnecting…", the stream window stays, and the stream comes back by itself within 30 s. The guest must ask for control again. Log: `lost the host's connection; waiting for it to come back`, then `the host is back; joining its stream again`.
 - **Killing `couch-viewer.exe`**: use Task Manager's **Details** tab (End task there kills). The window comes back by itself once; a second kill within a minute ends watching ("crashed twice"). Log: `the stream window crashed and was started again`. The Processes tab's End task asks the window to close instead, which counts as leaving: watching just stops.
-- **A program run as administrator** is marked "admin" in the Stream section's list, with a warning when picked. Keyboard and mouse can't reach it, and the panic key doesn't work while it is in front (measured in M6); Take back does.
+- **A program run as administrator** is marked "admin" in the stream dialog's list, with a warning when picked, and the console keeps warning while it is streamed. Keyboard and mouse can't reach it, and the panic key doesn't work while it is in front (measured in M6); Take back does.
 - On one PC, the network can't be dropped for one pair; two PCs (turn off the guest's network for about 10 s) or the `sessions` scenarios cover it.
 - **The stream window scales with bicubic** on luma (P8); the stats panel's decoder line says "…, bicubic scaling, …". `COUCH_VIEWER_SCALER=bilinear` in the watcher's environment gives the old one, to compare. The difference is small, most visible on text.
 - **A soft picture is mostly the upscale and the bitrate,** not the scaler: a game in a window smaller than the watcher's screen is stretched to fit, and a stream starts at 10 Mbit/s and climbs only up to the host's quality setting. When the user reports blur, suggest the game borderless at the host's screen resolution, and the quality at 20 Mbit/s or higher (30 or 50 on a fast connection); the stats panel shows the size streamed and the bitrate.
@@ -149,7 +156,7 @@ Each feature's notes sit under its area, tagged with the milestone that added it
 ### Settings and the splash (P3), the host overlay (M8)
 
 - **The splash** ("Player 2 joins") plays at every start for about 3 s: two controllers slide in, land on a couch, the name types out, the picture holds a second, then fades. A click or a key skips it. It animates even with Windows' animation effects off (the user's choice; their PC has them off). It covers the lobby's first load only; the engine is already running.
-- **⚙ Settings** in the user panel, two tabs:
+- **⚙ Settings** (your card at the sidebar's foot, or Ctrl+,) is a page with its own list (M21): Profile, Appearance (Like Windows, Dark, Light; the title bar follows), Shortcuts, Overlay and sounds, Network, Drivers, Backup, About. Esc goes back. Among them:
   - **Shortcuts:** Change waits for a key (Esc cancels; Ctrl, Alt and Shift needn't be held, and are ignored). A refused key says why under its row ("Ctrl+Alt+Shift+P already does this: …", "that key can't be used", "only F1 to F12 (but F4)"). Default and Reset all put keys back. Saved in the profile's `shortcuts.json`. The panic key changes from the next session (the host panel's reminder names the key in use); the stream window's keys from the next window opened (its bar's hint names them).
   - **Network** (M7):
     - **The choices:**
@@ -164,7 +171,7 @@ Each feature's notes sit under its area, tagged with the milestone that added it
   - **Unset them afterwards,** or every later build in that terminal has them.
   - **The relay's own log** is in its window. With `$env:RUST_LOG='iroh_relay=debug'` it shows each connection, and "denied our authentication" for a client without the token.
 - **Keys are checked within one profile only.** On one PC, a viewer profile's chord set to the hosting profile's panic key is swallowed by the host's hook and presses the panic key. Not a bug (on two PCs they never meet); keep them apart when testing.
-- **Restart now** shows a "Restarting Couch Co-App…" screen with a spinner, goes through the normal exit (the rooms hear we go; a second or two), then starts the same profile again, which opens with the splash; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the installed app): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`import.meta.env.DEV`). Pressing it under `tauri dev` once ended both, leaving no app running.
+- **Restart now** shows a "Restarting Couch Co-App…" screen with a spinner, goes through the normal exit (the rooms hear we go; a second or two), then starts the same profile again, which opens with the splash; the new instance waits up to 5 s for the old one's profile lock. **Release builds only** (the installed app): `npm run tauri dev` stops with its app, and the Vite server with it, so in development the app says to close it and start it again (`platform().canRestartItself`). Pressing it under `tauri dev` once ended both, leaving no app running.
 
 **The host overlay (M8):**
 - **When it shows:** only while this profile streams, something is pending or just happened, and the app's own window isn't in front (it shows the same). A corner window, top right of the monitor showing the streamed window (or the streamed screen), opened for each burst and closed when empty, so there's a short delay (about a third of a second) before the first toast.

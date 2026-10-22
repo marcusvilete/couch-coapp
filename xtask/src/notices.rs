@@ -316,7 +316,7 @@ fn npm_licences(root: &Path) -> anyhow::Result<Vec<Group>> {
             .as_str()
             .unwrap_or("see below")
             .to_string();
-        let file = fs::read_dir(&dir)?
+        let shipped = fs::read_dir(&dir)?
             .filter_map(Result::ok)
             .map(|e| e.path())
             .find(|p| {
@@ -324,10 +324,29 @@ fn npm_licences(root: &Path) -> anyhow::Result<Vec<Group>> {
                     let n = n.to_ascii_uppercase();
                     n.starts_with("LICENSE") || n.starts_with("LICENCE") || n.starts_with("COPYING")
                 })
-            })
-            .with_context(|| format!("npm package {name} has no licence file"))?;
+            });
+        // A package published without its licence file: the text from its
+        // repository, pinned in `xtask/licences/npm/` (M21), and said so.
+        let (file, title) = match shipped {
+            Some(file) => (file, format!("{name} {version} ({licence})")),
+            None => {
+                let pinned = root
+                    .join("xtask/licences/npm")
+                    .join(format!("{}.LICENSE", name.replace('/', "__")));
+                if !pinned.is_file() {
+                    bail!(
+                        "npm package {name} has no licence file: pin its repository's in {}",
+                        pinned.display()
+                    );
+                }
+                let title = format!(
+                    "{name} {version} ({licence}; the package ships no licence file, this is its repository's)"
+                );
+                (pinned, title)
+            }
+        };
         groups.push(Group {
-            title: format!("{name} {version} ({licence})"),
+            title,
             text: read(&file)?,
             users: BTreeSet::new(),
         });

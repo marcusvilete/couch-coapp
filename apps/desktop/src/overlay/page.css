@@ -1,0 +1,10 @@
+/* The overlay window's page: transparent, so only the toasts show over the
+   game, and never a pointer target (the window ignores the cursor too). */
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+}

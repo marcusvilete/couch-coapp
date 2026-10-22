@@ -1,0 +1,41 @@
+.why {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent-text);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+
+  &:hover {
+    text-decoration-style: solid;
+  }
+}
+
+.why-popover {
+  z-index: 55;
+  display: grid;
+  gap: var(--s2);
+  max-width: 380px;
+  padding: var(--s3) var(--s4);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  user-select: text;
+  animation: menu-in var(--fast) var(--ease);
+
+  & p + p {
+    margin-top: var(--s2);
+  }
+}
+
+.why-arrow {
+  fill: var(--bg-overlay);
+}

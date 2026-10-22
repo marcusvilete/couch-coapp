@@ -46,6 +46,14 @@ To try rooms on one PC, start more profiles from that build (alice, bob and caro
 ```
 A development build uses iroh's public relays.
 
+**The UI without the engine** (M21): a preview of the app on a fake engine, with a scenario for every state (an empty room, a full session, requests waiting, a handover…), so screens can be seen and changed without starting sessions:
+```powershell
+cd apps\desktop
+npx vite                   # then http://localhost:1420/preview.html (the panel bottom left picks a scenario)
+npm run shots              # every scenario in dark, light and High Contrast at three sizes, into target\ui-shots\latest
+```
+`npm run shots` uses the Microsoft Edge already on Windows (nothing to download) and also fails on text spilling out of its box, a menu that doesn't open, or a region that moves as you go between rooms, Settings pages or a dialog's tabs. A development build can be looked at from a script too: start it with `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'` in its own shell (never a shared one: the port lets any program on the PC drive the app; release builds ignore the variable), then attach with Playwright's `connectOverCDP`.
+
 **The stream window and the developer CLI:** `couch-viewer` is the window that shows a stream. `couch-cli` runs hosts, viewers and the measurements without the app.
 ```powershell
 cargo build --release -p couch-cli -p couch-viewer
@@ -71,6 +79,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 cargo fmt --all
 cargo deny check                                        # licences and advisories
 cd apps\desktop; npx tsc --noEmit                       # the front end's types
+cd apps\desktop; npx vitest run                         # the front end's logic
+cd apps\desktop; npm run shots                          # the screens (above)
 ```
 The end-to-end scenarios run with the tests:
 - several engines over real iroh on loopback (`couch-engine`'s `rooms`, `sessions` and `relay` tests);
