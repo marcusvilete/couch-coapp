@@ -1,0 +1,162 @@
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  height: 32px;
+  padding: 0 var(--s4);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  font-weight: 600;
+  font-size: var(--text-md);
+  white-space: nowrap;
+  transition:
+    background var(--fast) var(--ease),
+    border-color var(--fast) var(--ease),
+    color var(--fast) var(--ease);
+
+  &:disabled {
+    opacity: 0.45;
+  }
+}
+
+.btn-sm {
+  height: 26px;
+  padding: 0 var(--s3);
+  font-size: var(--text-sm);
+  gap: 6px;
+}
+
+.btn-lg {
+  height: 40px;
+  padding: 0 var(--s5);
+  font-size: var(--text-base);
+}
+
+.btn-wide {
+  width: 100%;
+}
+
+.btn-icon {
+  display: inline-flex;
+  margin-left: -2px;
+}
+
+.btn-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.btn-sm .btn-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Every label in one cell: the widest sets the width, one shows. */
+.btn-labels {
+  display: inline-grid;
+}
+
+.btn-labels > * {
+  grid-area: 1 / 1;
+  text-align: center;
+}
+
+.btn-reserve {
+  visibility: hidden;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+
+  &:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+}
+
+.btn-secondary {
+  background: var(--bg-raised-2);
+  border-color: var(--border);
+  color: var(--text);
+
+  &:hover:not(:disabled) {
+    background: var(--active);
+    border-color: var(--border-strong);
+  }
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+
+  &:hover:not(:disabled) {
+    background: var(--hover);
+    color: var(--text);
+  }
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+
+  &:hover:not(:disabled) {
+    background: var(--danger-hover);
+  }
+}
+
+.btn-danger-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--danger);
+
+  &:hover:not(:disabled) {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+  }
+}
+
+.btn-reason {
+  display: inline-flex;
+  border-radius: var(--r-sm);
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  flex: none;
+  transition:
+    background var(--fast) var(--ease),
+    color var(--fast) var(--ease);
+
+  & svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  &:disabled {
+    opacity: 0.4;
+  }
+}
+
+.icon-btn-sm {
+  width: 26px;
+  height: 26px;
+
+  & svg {
+    width: 15px;
+    height: 15px;
+  }
+}
+
+@media (forced-colors: active) {
+  .btn,
+  .icon-btn {
+    border-color: ButtonText;
+  }
+}

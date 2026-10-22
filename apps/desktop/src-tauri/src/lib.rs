@@ -19,6 +19,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, FileDialogBuilder};
 use tokio::sync::broadcast::error::RecvError;
 
+mod window_state;
+
 /// The event the UI listens on for `couch_engine::Event`s.
 const ENGINE_EVENT: &str = "engine-event";
 const MAIN_WINDOW: &str = "main";
@@ -38,8 +40,22 @@ async fn engine_command(
 /// ([`start_again`]).
 #[tauri::command]
 fn restart_app(app: AppHandle) {
+    save_window(&app);
     RESTART.store(true, Ordering::SeqCst);
     app.exit(0);
+}
+
+/// Where the main window's place is remembered: this profile's
+/// `window.json` (M21).
+struct WindowFile(PathBuf);
+
+fn save_window(app: &AppHandle) {
+    if let (Some(window), Some(file)) = (
+        app.get_webview_window(MAIN_WINDOW),
+        app.try_state::<WindowFile>(),
+    ) {
+        window_state::save(&window, &file.0);
+    }
 }
 
 /// Set by [`restart_app`]: the exit handler starts the app again.
@@ -95,12 +111,17 @@ pub fn run() {
                 .find(|w| w.label == MAIN_WINDOW)
                 .cloned()
                 .ok_or("no main window in tauri.conf.json")?;
+            // Hidden until it is back where it was (M21).
             let mut window = WebviewWindowBuilder::from_config(app.handle(), &config)?
-                .data_directory(window_profile.data_dir().join("webview"));
+                .data_directory(window_profile.data_dir().join("webview"))
+                .visible(false);
             if !window_profile.is_default() {
                 window = window.title(format!("{} · {}", config.title, window_profile.name()));
             }
-            window.build()?;
+            let window = window.build()?;
+            let file = window_state::path(window_profile.data_dir());
+            window_state::restore(&window, &file);
+            app.manage(WindowFile(file));
 
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -156,6 +177,11 @@ pub fn run() {
     app.manage(engine);
 
     app.run(|app, event| match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { .. },
+            ..
+        } if label == MAIN_WINDOW => save_window(app),
         // The app is its main window: closing it while the host overlay is
         // up (M8) must still end the app.
         RunEvent::WindowEvent {

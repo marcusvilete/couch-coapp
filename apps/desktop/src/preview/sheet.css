@@ -1,0 +1,58 @@
+.sheet {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--s6);
+  background: var(--bg-base);
+  display: grid;
+  gap: var(--s6);
+  align-content: start;
+}
+
+.sheet section {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s5);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+
+.sheet h2 {
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.sheet .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.sheet .stack {
+  display: grid;
+  gap: var(--s2);
+}
+
+.sheet .grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+  align-items: start;
+}
+
+.sheet .pad {
+  padding: var(--s3);
+  color: var(--text-muted);
+}
+
+.sheet .target {
+  display: grid;
+  place-items: center;
+  height: 60px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  color: var(--text-muted);
+}

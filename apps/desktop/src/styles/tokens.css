@@ -1,0 +1,107 @@
+/* The app's design tokens (M21): every colour, size and shadow the screens
+   use. Two themes in one list, `light-dark(day, night)`: "living room at
+   night" (dark) and day (light). The one shown follows Windows unless
+   Settings → Appearance picks one (`data-theme` on <html>, which sets
+   `color-scheme`). Windows' High Contrast themes override colours through
+   `forced-colors` (base.css). */
+
+:root {
+  color-scheme: light dark;
+
+  /* Type: Windows' own faces, nothing bundled. */
+  --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 26px;
+
+  /* Space, on a 4 px grid. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 14px;
+  --r-full: 999px;
+
+  /* The shell's fixed regions (the no-jump rule: these never change). */
+  --sidebar-w: 248px;
+  --rail-w: 72px;
+  --members-w: 256px;
+  --header-h: 56px;
+
+  --fast: 120ms;
+  --slow: 180ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Surfaces, from the window's floor up. */
+  --bg-app: light-dark(#ece8e3, #121014);
+  --bg-base: light-dark(#f8f6f3, #18161b);
+  --bg-raised: light-dark(#ffffff, #1f1c23);
+  --bg-raised-2: light-dark(#f3f0ec, #26222b);
+  --bg-overlay: light-dark(#ffffff, #2a2630);
+  --bg-input: light-dark(#ffffff, #141216);
+  --hover: light-dark(rgb(40 28 16 / 0.05), rgb(255 244 230 / 0.05));
+  --active: light-dark(rgb(40 28 16 / 0.09), rgb(255 244 230 / 0.09));
+  --selected: light-dark(rgb(40 28 16 / 0.08), rgb(255 244 230 / 0.11));
+
+  --border: light-dark(#e0d9d1, #2f2a34);
+  --border-strong: light-dark(#cbc2b8, #433c49);
+  --divider: light-dark(#e8e3dc, #252128);
+
+  --text: light-dark(#1f1a17, #f2ede7);
+  --text-muted: light-dark(#5f5650, #aaa29e);
+  --text-faint: light-dark(#877e77, #7b7471);
+
+  /* The accent: warm amber, always with dark text on it. */
+  --accent: light-dark(#f29b2a, #f6a53a);
+  --accent-hover: light-dark(#f7ab48, #ffb75c);
+  --accent-soft: light-dark(rgb(242 155 42 / 0.16), rgb(246 165 58 / 0.14));
+  --accent-text: light-dark(#9a5300, #ffbe6b);
+  --accent-fg: #1d1305;
+
+  /* Red is only for LIVE and danger. */
+  --live: light-dark(#d93a35, #f1544f);
+  --live-soft: light-dark(rgb(217 58 53 / 0.11), rgb(241 84 79 / 0.16));
+  --danger: light-dark(#c7332c, #f06a62);
+  --danger-hover: light-dark(#b0281f, #ff8079);
+  --danger-soft: light-dark(rgb(199 51 44 / 0.1), rgb(240 106 98 / 0.14));
+  --warn: light-dark(#835f00, #e9c255);
+  --warn-soft: light-dark(rgb(222 168 30 / 0.16), rgb(233 194 85 / 0.12));
+  --ok: light-dark(#1d8a4c, #57c785);
+  --ok-soft: light-dark(rgb(29 138 76 / 0.1), rgb(87 199 133 / 0.13));
+  --info: light-dark(#2f6cc0, #79aef2);
+  --info-soft: light-dark(rgb(47 108 192 / 0.1), rgb(121 174 242 / 0.12));
+
+  /* How a member is connected to us. */
+  --link-direct: light-dark(#1f9a55, #57c785);
+  --link-relay: light-dark(#c08d0c, #e9c255);
+  --link-online: light-dark(#3b78cc, #79aef2);
+  --link-offline: light-dark(#a8a09a, #6c6569);
+
+  --focus: light-dark(#b25f00, #ffbe6b);
+  --shadow-color: light-dark(rgb(60 40 20 / 0.12), rgb(0 0 0 / 0.42));
+  --shadow-sm: 0 1px 2px var(--shadow-color);
+  --shadow-md: 0 6px 18px var(--shadow-color);
+  --shadow-lg: 0 18px 48px var(--shadow-color), 0 2px 6px var(--shadow-color);
+  --scrim: light-dark(rgb(40 30 20 / 0.36), rgb(8 6 10 / 0.62));
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}

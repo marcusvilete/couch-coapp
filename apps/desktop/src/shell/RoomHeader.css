@@ -1,0 +1,50 @@
+.room-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: var(--header-h);
+  flex: none;
+  padding: 0 var(--s4) 0 var(--s5);
+  border-bottom: 1px solid var(--divider);
+  background: var(--bg-base);
+}
+
+.room-titles {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.room-title {
+  font-size: var(--text-lg);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  white-space: nowrap;
+
+  & svg {
+    width: 12px;
+    height: 12px;
+    color: var(--accent-text);
+  }
+}
+
+.room-sub-sep {
+  color: var(--border-strong);
+}
+
+.room-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
+}

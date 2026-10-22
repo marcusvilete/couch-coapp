@@ -1,0 +1,249 @@
+.sidebar {
+  --ring: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  width: var(--sidebar-w);
+  min-height: 0;
+  background: var(--bg-app);
+  border-right: 1px solid var(--divider);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  height: var(--header-h);
+  padding: 0 var(--s3) 0 var(--s4);
+  flex: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.brand-name {
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.sidebar-rooms {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s1) var(--s2) var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.room-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  height: 52px;
+  flex: none;
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: var(--r-md);
+  background: none;
+  text-align: left;
+  color: var(--text-muted);
+  transition: background var(--fast) var(--ease);
+
+  &:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+
+  &.selected {
+    background: var(--selected);
+    color: var(--text);
+  }
+
+  &.selected::before {
+    content: "";
+    position: absolute;
+    left: -8px;
+    top: 12px;
+    bottom: 12px;
+    width: 4px;
+    border-radius: 0 4px 4px 0;
+    background: var(--accent);
+  }
+
+  &.dragging {
+    opacity: 0.4;
+  }
+
+  &.drop-before {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+
+  &.drop-after {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+}
+
+.room-icon {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.room-live {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--live);
+  box-shadow: 0 0 0 2px var(--bg-app);
+}
+
+.room-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.room-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-row.selected .room-name,
+.room-row:hover .room-name {
+  color: var(--text);
+}
+
+.room-line {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-attention {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.you {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 60px;
+  flex: none;
+  padding: 0 var(--s2) 0 var(--s3);
+  border-top: 1px solid var(--divider);
+  background: color-mix(in srgb, var(--bg-app) 70%, var(--bg-base));
+  --ring: color-mix(in srgb, var(--bg-app) 70%, var(--bg-base));
+}
+
+.you-avatar {
+  display: inline-flex;
+  border-radius: 50%;
+}
+
+.you-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.you-name {
+  font-size: var(--text-md);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.you-line {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow windows: a rail of room icons, as the app had before M21. */
+@media (max-width: 899px) {
+  .sidebar {
+    width: var(--rail-w);
+  }
+
+  .sidebar-header {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .brand {
+    display: none;
+  }
+
+  .room-row {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .room-text {
+    display: none;
+  }
+
+  /* Something waits there: a dot in the icon's corner. */
+  .room-attention {
+    position: absolute;
+    top: 6px;
+    right: 10px;
+    box-shadow: 0 0 0 2px var(--bg-app);
+  }
+
+  .you {
+    flex-direction: column;
+    justify-content: center;
+    height: auto;
+    padding: var(--s2) 0;
+    gap: var(--s1);
+  }
+
+  .you-text,
+  .you-edit {
+    display: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .room-row.selected {
+    outline: 2px solid Highlight;
+  }
+}

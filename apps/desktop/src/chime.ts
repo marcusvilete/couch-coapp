@@ -5,7 +5,7 @@
 // The webview lets a page start sound only after a click, so the audio
 // context is made by the Go live click (`prepareChime`) and kept.
 
-import { overlaySettings } from "./overlaySettings";
+import { overlaySettings } from "./state/overlaySettings";
 
 let context: AudioContext | null = null;
 

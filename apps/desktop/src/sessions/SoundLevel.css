@@ -1,0 +1,78 @@
+.sound {
+  display: grid;
+  gap: var(--s3);
+}
+
+.sound-row {
+  display: grid;
+  grid-template-columns: 76px 1fr 112px;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.sound-icon {
+  display: inline-grid;
+  color: var(--text-muted);
+
+  & svg {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+.sound-value,
+.sound-state,
+.sound-label {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.sound-boost {
+  color: var(--accent-text);
+}
+
+.sound-state.limiting {
+  color: var(--warn);
+}
+
+.level-meter {
+  position: relative;
+  height: 8px;
+  border-radius: var(--r-full);
+  background: var(--active);
+  overflow: hidden;
+}
+
+.level-average {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--ok), color-mix(in srgb, var(--ok) 60%, var(--warn)) 80%, var(--warn));
+  transition: width 90ms linear;
+}
+
+.level-peak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  transition: left 90ms linear;
+}
+
+.sound-note {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+@media (forced-colors: active) {
+  .level-meter {
+    border: 1px solid CanvasText;
+  }
+
+  .level-average {
+    background: Highlight;
+  }
+}
