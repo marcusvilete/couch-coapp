@@ -28,7 +28,7 @@ export function AddRoomDialog(props: { onClose: () => void; onCreate: () => void
 export function ChoiceCards(props: { onCreate: () => void; onJoin: () => void }) {
   return (
     <div className="choice-cards">
-      <button className="choice-card primary" onClick={props.onCreate}>
+      <button className="choice-card primary" onClick={props.onCreate} data-autofocus>
         <span className="choice-icon">
           <Plus />
         </span>
