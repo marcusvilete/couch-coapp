@@ -67,6 +67,6 @@ A controller seat and the keyboard-and-mouse seat for one guest worked: alice he
 
 **With friends** (the 0.11.0 installer, 2026-10-17 and 18): one controller each, as before; nobody had two, so several seats for one guest weren't tried.
 
-**With friends again** (the 0.17.1 installer, reported 2026-10-26): a guest with several controllers played several seats, and it worked. It felt confusing, though: the host's patch bay shows that guest as one player, so which controller drives which seat can't be seen. P11 gives each of a guest's controllers a plug of its own, named.
+**With friends again** (the 0.17.1 installer, reported 2026-10-26): a guest with several controllers played several seats, and it worked. It felt confusing, though: the host's patch bay shows that guest as one player, so which controller drives which seat can't be seen. P12 gives each of a guest's controllers a plug of its own, named.
 
 **Still to come:** two controllers on a guest's own PC (the other PC with a `-TestRelay` build of this branch, or a friend), ideally two players in a co-op game (Fling to the Finish).

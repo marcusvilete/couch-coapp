@@ -92,6 +92,12 @@ struct Hosting {
     /// How loud guests hear the sound, 0 to 400% (P7): the profile's,
     /// applied to the pipeline once it has started.
     sound_level: u16,
+    /// The seats whose pads Windows is still setting up (P10), and since
+    /// when.
+    pads_setting_up: Vec<SeatId>,
+    pads_since: Option<Instant>,
+    /// The seats left without a pad for the session.
+    pads_missing: Vec<SeatId>,
 }
 
 struct Watching {
@@ -883,7 +889,8 @@ impl Actor {
     // ---- Our session ----
 
     /// Starts our session, with nothing streamed yet (M19). Answers through
-    /// `reply` once the pads are plugged in and our controllers hidden; the
+    /// `reply` once the pads are plugged in (or still being set up by Windows,
+    /// waited for in the background: P10) and our controllers hidden; the
     /// error comes back too, for the caller's log.
     pub(super) fn start_session(
         &mut self,
@@ -952,6 +959,7 @@ impl Actor {
             rc_trace: None,
             netem_elapsed: None,
             replace_grace: self.replace_grace,
+            pad_setup_limit: couch_input::PAD_SETUP_LIMIT,
             local: (!controllers.is_empty()).then(|| LocalSeat {
                 member: self.me,
                 controllers: controllers.iter().map(HostController::choice).collect(),
@@ -976,6 +984,9 @@ impl Actor {
             controllers: (!controllers.is_empty())
                 .then(|| Ok(controllers.iter().map(HostController::shown_name).collect())),
             sound_level: crate::store::host_level(&self.data_dir),
+            pads_setting_up: Vec::new(),
+            pads_since: None,
+            pads_missing: Vec::new(),
         });
         Ok((session, options))
     }
@@ -1468,6 +1479,26 @@ impl Actor {
                 tracing::error!("capture failed: {error}");
                 self.end_stream_on_its_own(stream, EndReason::Error, now);
             }
+            HostEvent::PadsSettingUp { seats, since } => {
+                if let Some(h) = self.hosting_mut() {
+                    h.pads_setting_up = seats;
+                    h.pads_since = Some(since);
+                }
+                self.announce(room, now);
+            }
+            HostEvent::PadReady { seat } => {
+                if let Some(h) = self.hosting_mut() {
+                    h.pads_setting_up.retain(|s| *s != seat);
+                }
+                self.announce(room, now);
+            }
+            HostEvent::PadsMissing { seats } => {
+                if let Some(h) = self.hosting_mut() {
+                    h.pads_setting_up.retain(|s| !seats.contains(s));
+                    h.pads_missing.extend(seats);
+                }
+                self.announce(room, now);
+            }
             HostEvent::Note(text) => tracing::info!("{text}"),
             HostEvent::Seat { seat, status, .. } => tracing::debug!(?seat, ?status, "seat"),
             HostEvent::ViewerGone { member, .. } => {
@@ -1561,6 +1592,15 @@ impl Actor {
         now: Instant,
     ) -> Result<Response, EngineError> {
         self.our_session(|s| Ok(s.play(seat, controller)?), now)
+    }
+
+    /// Stops waiting for the pads Windows is still setting up (P10): the
+    /// pipeline gives them up and says which seats went without.
+    pub(super) fn stop_waiting_for_pads(&mut self) -> Result<Response, EngineError> {
+        self.pipeline()
+            .ok_or(EngineError::NotLive)?
+            .stop_waiting_for_pads();
+        Ok(Response::Done)
     }
 
     pub(super) fn allow_control(&mut self, now: Instant) -> Result<Response, EngineError> {
@@ -2190,6 +2230,11 @@ impl Actor {
                 stream,
                 streaming: streaming.cloned(),
                 sound_level: Some(h.sound_level),
+                pads_setting_up: h.pads_setting_up.iter().map(|seat| seat.0).collect(),
+                pads_setting_up_secs: h
+                    .pads_since
+                    .map_or(0, |since| since.elapsed().as_secs() as u32),
+                pads_missing: h.pads_missing.iter().map(|seat| seat.0).collect(),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -2240,6 +2285,9 @@ impl Actor {
                 stream: stream_view(status.map_or(StreamState::Waiting, |s| s.stream)),
                 streaming: None,
                 sound_level: None,
+                pads_setting_up: Vec::new(),
+                pads_setting_up_secs: 0,
+                pads_missing: Vec::new(),
             });
         }
         views

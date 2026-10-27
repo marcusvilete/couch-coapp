@@ -30,6 +30,9 @@ function view(over: Partial<SessionView>): SessionView {
     stream: { state: "live" },
     streaming: null,
     soundLevel: null,
+    padsSettingUp: [],
+    padsSettingUpSecs: 0,
+    padsMissing: [],
     ...over,
   };
 }

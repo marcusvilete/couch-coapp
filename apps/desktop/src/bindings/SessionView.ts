@@ -91,4 +91,18 @@ streaming: StreamView | null,
  * For the host: how loud guests hear the sound, 0 to 400% of the game's
  * (P7); `None` for others' sessions.
  */
-soundLevel: number | null, };
+soundLevel: number | null, 
+/**
+ * For the host: the seats whose virtual pads Windows is still setting
+ * up (P10), each taking its seat's input once ready.
+ */
+padsSettingUp: Array<number>, 
+/**
+ * How long that has taken so far, in seconds, when this view was made.
+ */
+padsSettingUpSecs: number, 
+/**
+ * For the host: the seats with a pad that have none, for the rest of the
+ * session (it couldn't be plugged, or setting it up was given up).
+ */
+padsMissing: Array<number>, };

@@ -14,7 +14,7 @@ import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
 import { Button, IconButton } from "../ui/Button";
 import { Callout } from "../ui/Callout";
-import { Badge, Kbd } from "../ui/Feedback";
+import { Badge, Kbd, Spinner } from "../ui/Feedback";
 import { DropdownMenu } from "../ui/Menu";
 import { Why } from "../ui/Why";
 import { ourPads, PAUSED_REASON } from "./hostMenus";
@@ -194,6 +194,28 @@ function ConsoleBanners(props: {
           {pads.length > 0 ? "; you still can" : ""}.
         </Callout>
       )}
+      {s.padsSettingUp.length > 0 && (
+        <Callout
+          tone="info"
+          icon={<Spinner size={16} />}
+          actions={
+            <Button size="sm" disabled={props.busy != null} onClick={() => void props.run("stopWaiting", { type: "stopWaitingForPads" })}>
+              Stop waiting
+            </Button>
+          }
+          why="Each virtual controller is a new device to Windows the first time it's plugged in on a PC, and setting it up can take a few minutes. It happens once: the next sessions start at once. Stop waiting unplugs the ones not ready yet, and those seats go without a controller this session."
+        >
+          Windows is setting up the virtual controller for {seatLabels(s, s.padsSettingUp)}, the first time on this PC.
+          Guests can take {s.padsSettingUp.length === 1 ? "that seat" : "those seats"}: their gamepad works once it's ready.{" "}
+          <Elapsed secs={s.padsSettingUpSecs} />
+        </Callout>
+      )}
+      {s.padsMissing.length > 0 && (
+        <Callout tone="warn" icon={<Gamepad2 />}>
+          {seatLabels(s, s.padsMissing)} {s.padsMissing.length === 1 ? "has" : "have"} no virtual controller this
+          session, so a gamepad there does nothing. End the session and start it again to try again.
+        </Callout>
+      )}
       {s.panicKey == null && (
         <Callout tone="danger" icon={<ShieldAlert />}>
           The panic key couldn't be set up this time: use Take back on a seat to stop someone playing.
@@ -212,7 +234,7 @@ function ConsoleBanners(props: {
           still works.
         </Callout>
       )}
-      {pads.length > 0 && (
+      {pads.length > 0 && s.padsSettingUp.length === 0 && (
         <Callout
           tone="info"
           compact
@@ -224,6 +246,29 @@ function ConsoleBanners(props: {
         </Callout>
       )}
     </div>
+  );
+}
+
+/** The seats `seats` by their labels: "Controller 1 and Controller 2". */
+function seatLabels(s: SessionView, seats: number[]): string {
+  return listed(seats.map((i) => s.seats[i]?.label ?? `Seat ${i + 1}`));
+}
+
+/** How long something has taken, "0:42", counting on from `secs`: the seconds
+ * when the engine made the view. */
+function Elapsed(props: { secs: number }) {
+  const [base, setBase] = useState(() => ({ secs: props.secs, at: Date.now() }));
+  const [, tick] = useState(0);
+  useEffect(() => setBase({ secs: props.secs, at: Date.now() }), [props.secs]);
+  useEffect(() => {
+    const timer = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const total = base.secs + Math.floor((Date.now() - base.at) / 1000);
+  return (
+    <span className="tabular">
+      {Math.floor(total / 60)}:{String(total % 60).padStart(2, "0")}
+    </span>
   );
 }
 

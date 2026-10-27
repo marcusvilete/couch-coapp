@@ -16,6 +16,8 @@ pub mod local;
 pub mod router;
 pub mod shortcuts;
 
+use std::time::{Duration, Instant};
+
 use bitflags::bitflags;
 use couch_proto::input::{PadSnapshot, mouse_button};
 use serde::{Deserialize, Serialize};
@@ -190,7 +192,66 @@ pub trait VirtualPad: Send {
 }
 
 pub trait VirtualPadFactory: Send + Sync {
+    /// Plugs a pad and waits for it, up to [`PAD_SETUP_LIMIT`].
     fn plug(&self) -> Result<Box<dyn VirtualPad>, InputError>;
+
+    /// Plugs a pad, waiting only a moment for it: one that Windows is still
+    /// setting up comes back pending.
+    fn plug_pending(&self) -> Result<Plugged, InputError> {
+        self.plug().map(Plugged::Ready)
+    }
+}
+
+/// How long a pad Windows is still setting up may take before it is given up
+/// (P10): the first time a virtual controller is plugged on a PC, Windows
+/// installs its device, which has taken minutes.
+pub const PAD_SETUP_LIMIT: Duration = Duration::from_secs(5 * 60);
+
+/// A virtual pad just plugged in.
+pub enum Plugged {
+    Ready(Box<dyn VirtualPad>),
+    /// Plugged, but not taking input yet: Windows is still setting its
+    /// device up.
+    SettingUp(Box<dyn PendingPad>),
+}
+
+/// A virtual pad plugged in that doesn't take input yet (P10). Dropping it
+/// unplugs it.
+pub trait PendingPad: Send {
+    /// Waits up to `wait` for the pad to take input: `Ok(None)` while it
+    /// still doesn't, `Err` when it never will (it's gone). Once it has
+    /// answered `Some`, the pad is the caller's and this is spent.
+    fn poll(&mut self, wait: Duration) -> Result<Option<Box<dyn VirtualPad>>, InputError>;
+
+    /// Gives the pad up: unplugs it now, and returns what must stay until
+    /// the session ends (its marker: a pad whose unplug doesn't take must
+    /// still read as ours while the host's controllers are followed).
+    fn give_up(self: Box<Self>) -> Box<dyn Send> {
+        Box::new(())
+    }
+}
+
+impl Plugged {
+    /// The pad, waiting for it up to `limit` if it's still being set up.
+    pub fn wait(self, limit: Duration) -> Result<Box<dyn VirtualPad>, InputError> {
+        let mut pending = match self {
+            Plugged::Ready(pad) => return Ok(pad),
+            Plugged::SettingUp(pending) => pending,
+        };
+        let until = Instant::now() + limit;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(InputError::DriverUnavailable(
+                    "the virtual pad wasn't ready in time: Windows may still be setting it up"
+                        .into(),
+                ));
+            }
+            if let Some(pad) = pending.poll(left.min(Duration::from_millis(500)))? {
+                return Ok(pad);
+            }
+        }
+    }
 }
 
 /// Keyboard and mouse injection on the host.

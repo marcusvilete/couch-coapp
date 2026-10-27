@@ -800,6 +800,7 @@ impl Actor {
             Command::TakeBackControl { seat } => self.take_back_control(seat.map(SeatId), now),
             Command::PlaySeat { seat, controller } => self.play_seat(SeatId(seat), controller, now),
             Command::AllowControl => self.allow_control(now),
+            Command::StopWaitingForPads => self.stop_waiting_for_pads(),
         };
         let _ = reply.send(result);
     }

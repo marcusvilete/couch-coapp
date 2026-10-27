@@ -25,7 +25,8 @@ use couch_engine::{
     secrets::Unprotected,
 };
 use couch_input::{
-    HidUsage, InputError, KbmInjector, PadButtons, PadState, Rumble, VirtualPad, VirtualPadFactory,
+    HidUsage, InputError, KbmInjector, PadButtons, PadState, PendingPad, Plugged, Rumble,
+    VirtualPad, VirtualPadFactory,
     local::{
         ControllerChoice, ControllerIds, ControllerKind, LOCAL_PAD_EVERY, LocalController,
         LocalPad, LocalPads,
@@ -57,10 +58,46 @@ const WINDOW: NativeId = 7;
 
 // ---- The fake machine ----
 
+/// A pad Windows is still setting up (P10): it becomes a recording pad once
+/// the test says so, and counts as given up if dropped before.
+struct FakePending {
+    pads: RecordingPadFactory,
+    set_up: Arc<AtomicBool>,
+    given_up: Arc<AtomicUsize>,
+    done: bool,
+}
+
+impl PendingPad for FakePending {
+    fn poll(&mut self, wait: Duration) -> Result<Option<Box<dyn VirtualPad>>, InputError> {
+        if self.set_up.load(Ordering::SeqCst) {
+            self.done = true;
+            return self.pads.plug().map(Some);
+        }
+        std::thread::sleep(wait);
+        Ok(None)
+    }
+}
+
+impl Drop for FakePending {
+    fn drop(&mut self) {
+        if !self.done {
+            self.given_up.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 #[derive(Default)]
 struct Fake {
     kbm: RecordingInjector,
     pads: RecordingPadFactory,
+    /// The next this many pads plugged come back pending, Windows still
+    /// setting them up (P10), until `pads_set_up`.
+    pads_setting_up: AtomicUsize,
+    pads_set_up: Arc<AtomicBool>,
+    /// Pending pads given up, so unplugged, so far.
+    pads_given_up: Arc<AtomicUsize>,
+    /// How many had been given up when the host's controller last showed.
+    given_up_when_shown: Arc<Mutex<Option<usize>>>,
     viewers: Mutex<Vec<FakeViewer>>,
     /// The game: its process, and the window it shows.
     game: Arc<FakeGame>,
@@ -287,12 +324,18 @@ impl Drop for VirtualShown {
     }
 }
 
-/// Shows the host's controller to games again when the engine drops it.
-struct Shown(Arc<AtomicUsize>);
+/// Shows the host's controller to games again when the engine drops it,
+/// noting how many pads being set up had been given up by then (P10).
+struct Shown {
+    hidden: Arc<AtomicUsize>,
+    given_up: Arc<AtomicUsize>,
+    given_up_when_shown: Arc<Mutex<Option<usize>>>,
+}
 
 impl Drop for Shown {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        *self.given_up_when_shown.lock().unwrap() = Some(self.given_up.load(Ordering::SeqCst));
+        self.hidden.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -502,8 +545,20 @@ impl Backend for Fake {
         }
     }
 
-    fn plug_pad(&self, _real_ids: bool) -> Result<Box<dyn VirtualPad>, InputError> {
-        self.pads.plug()
+    fn plug_pad(&self, _real_ids: bool) -> Result<Plugged, InputError> {
+        let pending = self
+            .pads_setting_up
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if !pending {
+            return self.pads.plug().map(Plugged::Ready);
+        }
+        Ok(Plugged::SettingUp(Box::new(FakePending {
+            pads: self.pads.clone(),
+            set_up: self.pads_set_up.clone(),
+            given_up: self.pads_given_up.clone(),
+            done: false,
+        })))
     }
 
     fn kbm(&self) -> Box<dyn KbmInjector> {
@@ -524,7 +579,11 @@ impl Backend for Fake {
             return Err("HidHide's configuration window is open".into());
         }
         self.hidden.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(Shown(self.hidden.clone())))
+        Ok(Box::new(Shown {
+            hidden: self.hidden.clone(),
+            given_up: self.pads_given_up.clone(),
+            given_up_when_shown: self.given_up_when_shown.clone(),
+        }))
     }
 
     fn hide_virtual(&self, device: &str) -> Result<Box<dyn std::any::Any + Send>, String> {
@@ -2501,6 +2560,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             netem_elapsed: None,
             replace_grace: Duration::from_millis(300),
             local: None,
+            pad_setup_limit: couch_input::PAD_SETUP_LIMIT,
         },
     )
     .await;
@@ -3877,4 +3937,144 @@ async fn sources(m: &Member) -> couch_engine::SourceList {
         Response::Sources(s) => s,
         other => panic!("sources: {other:?}"),
     }
+}
+
+/// P10: a pad Windows is still setting up doesn't hold the session back; a
+/// guest on its seat plays nothing until it's ready, then plays it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pad_windows_sets_up_late_takes_its_seat_when_ready() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.pads_setting_up.store(1, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    assert_eq!(a.fake.pads_plugged(), 0, "no pad yet");
+    a.wait_session(&room, &a, "the seat's pad being set up", |s| {
+        s.is_some_and(|s| s.pads_setting_up == [0] && s.pads_missing.is_empty())
+    })
+    .await;
+    let b_window = watching(&room, &a, &b).await;
+    give_seat(&room, &mut a, &b, &b_window, 0).await;
+    b_window.pad(PadButtons::A);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(a.fake.pads_plugged(), 0, "nothing to press yet");
+
+    a.fake.pads_set_up.store(true, Ordering::SeqCst);
+    wait("the pad, set up", || a.fake.pads_plugged() == 1).await;
+    a.wait_session(&room, &a, "nothing being set up", |s| {
+        s.is_some_and(|s| s.pads_setting_up.is_empty() && s.pads_missing.is_empty())
+    })
+    .await;
+    b_window.pad(PadButtons::B);
+    wait("B's press on it", || {
+        a.fake.pad() == Some(pressed(PadButtons::B))
+    })
+    .await;
+    assert_eq!(a.fake.pads_given_up.load(Ordering::SeqCst), 0);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// P10: Stop waiting unplugs the pads still being set up; their seats go on
+/// without one, and none comes up later.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_wait_unplugs_the_pads_still_being_set_up() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.pads_setting_up.store(1, Ordering::SeqCst);
+    let reply = a.live(go_live_with(&room, 4, TWO_PADS)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert_eq!(a.fake.pads_plugged(), 1, "the second seat's pad is ready");
+    a.wait_session(&room, &a, "the first seat's pad being set up", |s| {
+        s.is_some_and(|s| s.pads_setting_up == [0])
+    })
+    .await;
+    a.ok(Command::StopWaitingForPads).await;
+    wait("given up", || {
+        a.fake.pads_given_up.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    a.wait_session(&room, &a, "the first seat without a pad", |s| {
+        s.is_some_and(|s| s.pads_setting_up.is_empty() && s.pads_missing == [0])
+    })
+    .await;
+    a.fake.pads_set_up.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(a.fake.pads_plugged(), 1, "no pad after giving up");
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// P10: ending the session gives a pad still being set up up first, before
+/// the host's own controller shows to games again; none comes up after.
+#[tokio::test(flavor = "multi_thread")]
+async fn ending_the_session_gives_up_a_pad_still_being_set_up() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.pads_setting_up.store(1, Ordering::SeqCst);
+    let reply = a
+        .live(go_live_playing(
+            &room,
+            4,
+            InputSetup::default(),
+            vec![dualsense()],
+        ))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert!(a.fake.hidden(), "hidden while the pad is set up");
+    a.ok(Command::EndSession).await;
+    wait("shown again", || !a.fake.hidden()).await;
+    assert_eq!(
+        *a.fake.given_up_when_shown.lock().unwrap(),
+        Some(1),
+        "given up before the controller showed"
+    );
+    a.fake.pads_set_up.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(a.fake.pads_plugged(), 0, "no pad after the end");
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// P10: a pad that isn't set up within the session's limit is given up,
+/// and says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pad_not_set_up_in_time_is_given_up() {
+    use couch_engine::pipeline::host::{HostEvent, HostOptions, HostPipeline};
+    use couch_input::{SeatEpoch, SeatId};
+
+    let fake = Arc::new(Fake::default());
+    fake.pads_setting_up.store(1, Ordering::SeqCst);
+    let (pipeline, mut events) = HostPipeline::start(
+        fake.clone(),
+        HostOptions {
+            seats: vec![SeatKind::Controller],
+            real_pad_ids: false,
+            session: 1,
+            first_epoch: SeatEpoch(0),
+            rc_trace: None,
+            netem_elapsed: None,
+            replace_grace: Duration::from_millis(300),
+            local: None,
+            pad_setup_limit: Duration::from_millis(400),
+        },
+    )
+    .await;
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !seen
+        .iter()
+        .any(|e| matches!(e, HostEvent::PadsMissing { .. }))
+    {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("the limit passes")
+            .expect("events flow");
+        if matches!(
+            event,
+            HostEvent::PadsSettingUp { .. }
+                | HostEvent::PadsMissing { .. }
+                | HostEvent::PadReady { .. }
+        ) {
+            seen.push(event);
+        }
+    }
+    assert!(matches!(&seen[0], HostEvent::PadsSettingUp { seats, .. } if seats == &[SeatId(0)]));
+    assert!(matches!(&seen[1], HostEvent::PadsMissing { seats } if seats == &[SeatId(0)]));
+    assert_eq!(fake.pads_given_up.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.pads_plugged(), 0);
+    pipeline.stop().await;
 }

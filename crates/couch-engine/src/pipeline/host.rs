@@ -44,7 +44,8 @@ use std::{
 
 use couch_codec_opus::OpusEncoder;
 use couch_input::{
-    KbmInjector, MemberId, PadState, Permissions, Rumble, SeatEpoch, SeatId, VirtualPad,
+    KbmInjector, MemberId, PadState, PendingPad, Permissions, Plugged, Rumble, SeatEpoch, SeatId,
+    VirtualPad,
     local::{ControllerChoice, ControllerIds, ControllerKind, LocalController, LocalPad},
     router::{self, Effect, Input, SeatRouter, SeatStatus},
 };
@@ -191,6 +192,10 @@ pub struct HostOptions {
     pub replace_grace: Duration,
     /// The host's own controllers, each played through a seat.
     pub local: Option<LocalSeat>,
+    /// How long pads Windows is still setting up are waited for before
+    /// they're given up (P10: [`couch_input::PAD_SETUP_LIMIT`]; shorter in
+    /// tests).
+    pub pad_setup_limit: Duration,
 }
 
 /// One stream inside a session (M19): what to capture, and how.
@@ -228,6 +233,14 @@ pub struct LocalSeat {
 /// What a host stream reports.
 #[derive(Debug, Clone)]
 pub enum HostEvent {
+    /// These seats' pads are plugged in, but Windows is still setting them up
+    /// (P10): each comes as [`HostEvent::PadReady`], or is given up.
+    PadsSettingUp { seats: Vec<SeatId>, since: Instant },
+    /// A seat's pad, set up at last, takes the seat's input from now on.
+    PadReady { seat: SeatId },
+    /// These seats have no pad for the rest of the session: it couldn't be
+    /// plugged, or setting it up was given up (the log says which).
+    PadsMissing { seats: Vec<SeatId> },
     /// The router handed `seat` to `member`: tell it (`SeatAssigned`).
     Granted {
         member: MemberId,
@@ -316,6 +329,8 @@ pub struct HostPipeline {
     housekeeping: AbortHandle,
     /// Whether the host's controller plays through a seat, or why not.
     local: Option<Result<(), String>>,
+    /// Set to stop waiting for pads Windows is still setting up (P10).
+    pads_give_up: Arc<AtomicBool>,
     /// The network tuned for streaming while live (Wi-Fi media streaming
     /// mode, M9a); undone when this drops.
     _network: Option<Box<dyn std::any::Any + Send>>,
@@ -638,7 +653,8 @@ impl Stream {
 
 impl HostPipeline {
     /// Plugs in a virtual pad for each seat that has one, in seat order
-    /// (which can take seconds), hides the host's controller if asked, and
+    /// (which can take seconds; pads Windows is still setting up are waited
+    /// for in the background, P10), hides the host's controller if asked, and
     /// starts the input task, with viewers' input held off: nothing is
     /// streamed until [`Self::start_stream`].
     pub async fn start(
@@ -647,6 +663,8 @@ impl HostPipeline {
     ) -> (Self, mpsc::UnboundedReceiver<HostEvent>) {
         let (events, events_rx) = mpsc::unbounded_channel();
         let (local_tx, local_rx) = mpsc::channel::<(u8, PadState)>(LOCAL_QUEUE);
+        // The console counts the wait from here (P10).
+        let plugging_since = Instant::now();
         let plugged = {
             let backend = backend.clone();
             let real_ids = options.real_pad_ids;
@@ -700,31 +718,49 @@ impl HostPipeline {
             sound_gain: AtomicU32::new(1.0f32.to_bits()),
             grants_paused: Arc::new(AtomicBool::new(false)),
         });
-        // By seat: a seat without a pad (a keyboard seat, or one whose pad
-        // failed) drops gamepad input.
+        // By seat: a seat without a pad (a keyboard seat, one whose pad
+        // failed, or one Windows is still setting up) drops gamepad input.
+        let mut pending: Vec<(SeatId, Box<dyn PendingPad>)> = Vec::new();
+        let mut missing = Vec::new();
         let pads: Vec<Option<Box<dyn VirtualPad>>> = match plugged {
             Ok(plugged) => plugged
                 .into_iter()
                 .enumerate()
                 .map(|(seat, pad)| match pad {
                     None => None,
-                    Some(Ok(pad)) => {
+                    Some(Ok(Plugged::Ready(pad))) => {
                         shared.note(format!("seat {seat}: virtual Xbox 360 pad plugged in"));
                         Some(pad)
+                    }
+                    Some(Ok(Plugged::SettingUp(pad))) => {
+                        shared.note(format!(
+                            "seat {seat}: virtual Xbox 360 pad plugged in; Windows is still setting it up"
+                        ));
+                        pending.push((SeatId(seat as u8), pad));
+                        None
                     }
                     Some(Err(e)) => {
                         shared.note(format!(
                             "seat {seat}: no virtual pad ({e}); its gamepad input will be dropped"
                         ));
+                        missing.push(SeatId(seat as u8));
                         None
                     }
                 })
                 .collect(),
             Err(e) => {
                 shared.note(format!("no virtual pads ({e})"));
+                missing.extend(
+                    (0..shared.options.seats.len())
+                        .filter(|&seat| shared.options.seats[seat].has_pad())
+                        .map(|seat| SeatId(seat as u8)),
+                );
                 Vec::new()
             }
         };
+        if !missing.is_empty() {
+            shared.event(HostEvent::PadsMissing { seats: missing });
+        }
         let local_seat = shared.options.local.clone();
         match (&local_seat, &local_status) {
             (Some(l), Some(Ok(()))) => {
@@ -759,8 +795,33 @@ impl HostPipeline {
             pads,
             states: local_rx,
         });
+        // The pads Windows is still setting up come to the input task as each
+        // is ready (P10).
+        let pads_give_up = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready) = mpsc::unbounded_channel();
+        let plugger = (!pending.is_empty()).then(|| {
+            shared.event(HostEvent::PadsSettingUp {
+                seats: pending.iter().map(|(seat, _)| *seat).collect(),
+                since: plugging_since,
+            });
+            let shared = shared.clone();
+            let give_up = pads_give_up.clone();
+            tokio::task::spawn_blocking(move || set_up_pads(&shared, pending, &ready_tx, &give_up))
+        });
+        let setting_up = SettingUp {
+            ready,
+            kept: Vec::new(),
+            plugger: plugger.map(|task| (task, pads_give_up.clone())),
+        };
         let (input, cmds) = mpsc::unbounded_channel();
-        let input_task = tokio::spawn(input_loop(shared.clone(), pads, local, hidden, cmds));
+        let input_task = tokio::spawn(input_loop(
+            shared.clone(),
+            pads,
+            setting_up,
+            local,
+            hidden,
+            cmds,
+        ));
         let housekeeping = tokio::spawn(housekeeping(Arc::downgrade(&shared))).abort_handle();
         let (stream_ops_tx, ops) = mpsc::unbounded_channel();
         tokio::spawn(stream_ops(Arc::downgrade(&shared), input.clone(), ops));
@@ -773,6 +834,7 @@ impl HostPipeline {
                 input_task: Some(input_task),
                 housekeeping,
                 local: local_status,
+                pads_give_up,
                 _network: network,
             },
             events_rx,
@@ -1120,6 +1182,12 @@ impl HostPipeline {
         self.shared.grants_paused.store(false, Ordering::SeqCst);
     }
 
+    /// Stops waiting for the pads Windows is still setting up (P10): they
+    /// are unplugged, and their seats go on without a pad.
+    pub fn stop_waiting_for_pads(&self) {
+        self.pads_give_up.store(true, Ordering::SeqCst);
+    }
+
     /// For the panic key's hook: [`HostPipeline::panic`] without going through
     /// whoever owns the stream.
     pub fn panic_handle(&self) -> PanicHandle {
@@ -1182,6 +1250,9 @@ impl Drop for HostPipeline {
         // The input task releases everything as it ends. Told explicitly: a
         // panic handle may still hold its channel open. The threads stop on
         // their own.
+        // Pads still being set up are given up even if the input task never
+        // gets to its end (P10).
+        self.pads_give_up.store(true, Ordering::SeqCst);
         let (ack, _) = oneshot::channel();
         let _ = self.input.send(InputCmd::Shutdown(ack));
         drop(self.halt());
@@ -2518,6 +2589,7 @@ impl Inputs {
 async fn input_loop(
     shared: Arc<Shared>,
     pads: Vec<Option<Box<dyn VirtualPad>>>,
+    mut setting_up: SettingUp,
     local: Option<LocalFeed>,
     hidden: Option<HiddenGuard>,
     mut cmds: mpsc::UnboundedReceiver<InputCmd>,
@@ -2676,6 +2748,17 @@ async fn input_loop(
                 // The stream was dropped without stopping.
                 None => break,
             },
+            // A pad Windows was still setting up (P10). After stopping it
+            // comes too late, and goes at once.
+            Some(news) = setting_up.ready.recv() => match news {
+                SetUp::Ready(seat, pad) => match st.pads.get_mut(usize::from(seat.0)) {
+                    Some(slot) if !released => *slot = Some(pad),
+                    _ => drop(pad),
+                },
+                // Its marker, kept until the host's controllers stop being
+                // followed: should its unplug not take, it is still ours.
+                SetUp::GivenUp(marker) => setting_up.kept.push(marker),
+            },
             Some((member, input)) = inputs.recv() => {
                 let mut effects = st.refresh_focus();
                 effects.extend(st.router.handle(member, input, Instant::now()));
@@ -2701,6 +2784,14 @@ async fn input_loop(
     // unplugging pad of ours, its marker gone, must never be taken for a
     // remapper's by a follow still looking (M22).
     drop(st.local.take());
+    // No pad may come up after the end (P10): the pads still being set up
+    // are given up, unplugged by the plugger, and any already on their way
+    // go with the others, before the host's controllers show again.
+    if let Some((plugger, give_up)) = setting_up.plugger.take() {
+        give_up.store(true, Ordering::SeqCst);
+        let _ = plugger.await;
+    }
+    drop(setting_up);
     drop(st);
     // The pads are gone: games may see the host's controller again. Showing
     // it talks to the driver, off the runtime's threads.
@@ -2709,6 +2800,89 @@ async fn input_loop(
     }
     if let Some(ack) = done {
         let _ = ack.send(());
+    }
+}
+
+/// The pads Windows was still setting up when the session started (P10).
+struct SettingUp {
+    /// Each as it comes up, or is given up.
+    ready: mpsc::UnboundedReceiver<SetUp>,
+    /// The markers of the pads given up, dropped at the end, once the host's
+    /// controllers are no longer followed (M22).
+    kept: Vec<Box<dyn Send>>,
+    /// What waits for them, and its flag to give the rest up.
+    plugger: Option<(tokio::task::JoinHandle<()>, Arc<AtomicBool>)>,
+}
+
+/// What the plugger sends the input task (P10).
+enum SetUp {
+    /// A seat's pad, taking input now.
+    Ready(SeatId, Box<dyn VirtualPad>),
+    /// What a pad given up leaves (its marker).
+    GivenUp(Box<dyn Send>),
+}
+
+/// How long one round over the pads being set up takes.
+const SETUP_POLL: Duration = Duration::from_millis(500);
+
+/// Waits for the pads Windows is still setting up (P10), handing each to the
+/// input task as it comes up. At the session's limit, when `give_up` is set
+/// (Stop waiting, the session ending, the pipeline dropped) or once the input
+/// task is gone, the rest are given up: unplugged, their markers sent to the
+/// input task to keep until its end.
+fn set_up_pads(
+    shared: &Shared,
+    mut pending: Vec<(SeatId, Box<dyn PendingPad>)>,
+    ready: &mpsc::UnboundedSender<SetUp>,
+    give_up: &AtomicBool,
+) {
+    let started = Instant::now();
+    let until = started + shared.options.pad_setup_limit;
+    while !pending.is_empty() {
+        let asked = give_up.load(Ordering::SeqCst) || ready.is_closed();
+        if asked || Instant::now() >= until {
+            let seats: Vec<SeatId> = pending.iter().map(|(seat, _)| *seat).collect();
+            shared.note(format!(
+                "seats {seats:?}: {} for their virtual pads after {} s; unplugging them",
+                if asked {
+                    "stopped waiting"
+                } else {
+                    "gave up waiting"
+                },
+                started.elapsed().as_secs()
+            ));
+            for (_, pad) in pending {
+                let _ = ready.send(SetUp::GivenUp(pad.give_up()));
+            }
+            shared.event(HostEvent::PadsMissing { seats });
+            return;
+        }
+        let each = SETUP_POLL / pending.len() as u32;
+        let mut i = 0;
+        while i < pending.len() {
+            match pending[i].1.poll(each) {
+                Ok(None) => i += 1,
+                Ok(Some(pad)) => {
+                    let (seat, _) = pending.remove(i);
+                    shared.note(format!(
+                        "seat {}: virtual Xbox 360 pad ready after {} s",
+                        seat.0,
+                        started.elapsed().as_secs()
+                    ));
+                    shared.event(HostEvent::PadReady { seat });
+                    // The input task has ended: the pad goes with this.
+                    if ready.send(SetUp::Ready(seat, pad)).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let (seat, pad) = pending.remove(i);
+                    shared.note(format!("seat {}: no virtual pad after all ({e})", seat.0));
+                    let _ = ready.send(SetUp::GivenUp(pad.give_up()));
+                    shared.event(HostEvent::PadsMissing { seats: vec![seat] });
+                }
+            }
+        }
     }
 }
 

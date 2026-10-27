@@ -25,7 +25,7 @@ pub mod watch;
 use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
 
 use couch_input::{
-    HidUsage, InputError, KbmInjector, VirtualPad,
+    HidUsage, InputError, KbmInjector, Plugged,
     local::{ControllerIds, LocalPads},
     shortcuts::Shortcut,
 };
@@ -231,10 +231,11 @@ pub trait Backend: Send + Sync + 'static {
 
     fn audio(&self, kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError>;
 
-    /// Plugs in a virtual pad. Blocks: that can take seconds. `real_ids`
-    /// gives it a real Xbox 360 controller's ids instead of the development
-    /// ids a viewer on this machine skips.
-    fn plug_pad(&self, real_ids: bool) -> Result<Box<dyn VirtualPad>, InputError>;
+    /// Plugs in a virtual pad. Blocks for a few seconds at most: a pad that
+    /// isn't taking input by then comes back pending, Windows still setting
+    /// its device up (P10). `real_ids` gives it a real Xbox 360 controller's
+    /// ids instead of the development ids a viewer on this machine skips.
+    fn plug_pad(&self, real_ids: bool) -> Result<Plugged, InputError>;
 
     fn kbm(&self) -> Box<dyn KbmInjector>;
 
@@ -391,7 +392,7 @@ impl Backend for Unsupported {
     fn audio(&self, _: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
         Err(unsupported())
     }
-    fn plug_pad(&self, _: bool) -> Result<Box<dyn VirtualPad>, InputError> {
+    fn plug_pad(&self, _: bool) -> Result<Plugged, InputError> {
         Err(InputError::DriverUnavailable("not on this platform".into()))
     }
     fn kbm(&self) -> Box<dyn KbmInjector> {
