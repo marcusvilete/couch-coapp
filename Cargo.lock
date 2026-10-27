@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "couch-cli"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "couch-codec-ffmpeg"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "bytes",
  "couch-media",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "couch-codec-opus"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "couch-media",
  "couch-proto",
@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "couch-desktop"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "couch-engine",
  "serde",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "couch-engine"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "argon2",
  "bytes",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "couch-gamepad"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "couch-input",
  "couch-platform-win",
@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "couch-input"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "bitflags 2.13.2",
  "couch-proto",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "couch-media"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "bytes",
  "proptest",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "couch-net"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "couch-platform-win"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "couch-proto"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "bitflags 2.13.2",
  "data-encoding",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "couch-room"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "couch-proto",
  "ed25519-dalek",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "couch-testkit"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "couch-viewer"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "anyhow",
  "couch-codec-ffmpeg",
@@ -1465,9 +1465,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "fe3e9d21d39e6f39ff46e03d5b621424f88ee23d8a1672c6bfc9ccc7f2da4f6a"
 dependencies = [
  "cmov",
 ]
@@ -7156,9 +7156,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -8768,7 +8768,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.17.3"
+version = "0.17.4"
 dependencies = [
  "anyhow",
  "bindgen 0.73.2",
