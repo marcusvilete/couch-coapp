@@ -235,6 +235,7 @@ export function hostSession(
     maxViewers,
     viewers: [],
     viewerControllers: [],
+    viewerPads: [],
     seats,
     hostOnSeats: homes.length > 0,
     controlPaused: false,
@@ -260,24 +261,43 @@ export function hostSession(
 }
 
 function free(seat: SeatView) {
-  Object.assign(seat, { holder: null, host: false, hostController: null });
+  Object.assign(seat, { holder: null, host: false, hostController: null, guestController: null });
 }
 
 /** The host passes `seat` to `member`, as `HostSession` does: added to the
  * seats they hold while they have a controller to spare, otherwise they move
- * (their other pad seats go first). */
-function pass(s: SessionView, member: string, seat: number) {
-  if (s.controlPaused) throw "control is paused; allow it again first";
+ * (their other pad seats go first). With `controller`, that one of theirs
+ * drives it, as their side decides (`couch_input::forward`, P12): a seat it
+ * drove swaps; to a seat they hold, only that changes. */
+function pass(s: SessionView, member: string, seat: number, controller?: number) {
   const target = s.seats[seat];
   if (!target) throw "there is no such seat";
   const i = s.viewers.indexOf(member);
   if (i < 0) throw "that member isn't watching";
+  const pads = (s.viewerPads[i] ?? []).map((p) => p.slot);
+  const chosen = controller != null && pads.includes(controller) ? controller : undefined;
   const held = seatsOf(s, member);
+  if (held.includes(seat)) {
+    if (chosen == null || !target.pad) return;
+    const other = held.find((j) => j !== seat && s.seats[j].guestController === chosen);
+    if (other != null) s.seats[other].guestController = target.guestController;
+    target.guestController = chosen;
+    return;
+  }
+  if (s.controlPaused) throw "control is paused; allow it again first";
   if (held.length > 0 && !keeps(s, held, s.viewerControllers[i] ?? 1, seat)) {
     for (const h of held) if (s.seats[h].pad) free(s.seats[h]);
   }
   free(target);
   target.holder = member;
+  if (target.pad) {
+    const theirs = seatsOf(s, member).filter((j) => j !== seat && s.seats[j].pad);
+    const used = theirs.map((j) => s.seats[j].guestController);
+    const spare = pads.find((c) => !used.includes(c)) ?? null;
+    target.guestController = chosen ?? spare;
+    const other = theirs.find((j) => chosen != null && s.seats[j].guestController === chosen);
+    if (other != null) s.seats[other].guestController = spare;
+  }
   s.requests = s.requests.filter((r) => r.member !== member);
 }
 
@@ -713,7 +733,7 @@ function handle(cmd: Command): Response | Promise<Response> {
     }
     case "passControl": {
       const { room, session: s } = hosting();
-      pass(s, cmd.member, cmd.seat);
+      pass(s, cmd.member, cmd.seat, cmd.controller);
       return roomReply(room);
     }
     case "takeBackControl": {

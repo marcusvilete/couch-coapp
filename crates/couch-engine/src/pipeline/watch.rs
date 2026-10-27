@@ -36,14 +36,15 @@ use couch_net::{
     video::{VideoFrameIn, ViewerVideo},
 };
 use couch_proto::{
-    control::{SeatAssigned, SeatReleased},
+    control::{SeatAssigned, SeatController, SeatReleased},
     input::RumbleDatagram,
     ipc::{
-        self, AudioPacket, AudioStats, FrameTiming, HudState, IpcFrame, LocalInput, NetStats,
-        RumbleState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader, WindowRequest,
-        WindowState,
+        self, AudioPacket, AudioStats, ControllerNames, FrameTiming, HudState, IpcFrame,
+        LocalInput, NetStats, RumbleState, ShortcutKeys, StreamVolume, UserAction,
+        VideoFrameHeader, WindowRequest, WindowState,
     },
     media::{AudioDatagram, datagram, decode_payload},
+    session::ControllerReport,
 };
 use tokio::{io::AsyncWrite, sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 
@@ -92,9 +93,9 @@ pub enum WatchEvent {
     /// The host's game rumbles this member's gamepad (`couch-cli view`
     /// prints it).
     Rumble(RumbleState),
-    /// How many controllers the viewer window has changed (M18): tell the
-    /// host (`ViewerControllers`).
-    Controllers(u8),
+    /// The viewer window's controllers changed, or which drives a seat we
+    /// hold (M18, P12): tell the host (`ViewerControllers`).
+    Controllers(ControllerReport),
     /// The user changed the stream volume in the window (P6): remember it.
     Volume(StreamVolume),
     /// The window's full screen, bar or stats, as they are now (P11).
@@ -116,6 +117,7 @@ pub enum WatchEvent {
 enum WatchCmd {
     SeatAssigned(SeatAssigned),
     SeatReleased(SeatReleased),
+    SeatController(SeatController),
     Hud(HudState),
     /// The app changed the stream volume (P11).
     Volume(StreamVolume),
@@ -167,6 +169,7 @@ impl Watch {
             events,
             last_hud: None,
             last_restart: None,
+            reported: ControllerReport::default(),
         };
         let task = tokio::spawn(run(ctx, cmds_rx));
         Ok((
@@ -201,6 +204,11 @@ impl Watch {
     /// The host ended this member's hold on a seat.
     pub fn seat_released(&self, message: SeatReleased) {
         let _ = self.cmds.send(WatchCmd::SeatReleased(message));
+    }
+
+    /// The host moved a seat we hold to another of our controllers (P12).
+    pub fn seat_controller(&self, message: SeatController) {
+        let _ = self.cmds.send(WatchCmd::SeatController(message));
     }
 
     pub fn set_hud(&self, hud: HudState) {
@@ -360,11 +368,22 @@ struct Ctx {
     /// For a restarted window.
     last_hud: Option<HudState>,
     last_restart: Option<Instant>,
+    /// What the host was last told of our controllers (P12).
+    reported: ControllerReport,
 }
 
 impl Ctx {
     fn event(&self, event: WatchEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// Tells the host of our controllers if that changed (P12).
+    fn report(&mut self, forwarder: &Forwarder) {
+        let report = forwarder.report();
+        if report != self.reported {
+            self.reported = report.clone();
+            self.event(WatchEvent::Controllers(report));
+        }
     }
 }
 
@@ -395,7 +414,6 @@ async fn restart(ctx: &mut Ctx, forwarder: &mut Forwarder) -> bool {
     ctx.last_restart = Some(Instant::now());
     // Whatever the old window had down is up now: tell the host at once,
     // or the heartbeat would keep repeating it.
-    let had = forwarder.controllers();
     let released = forwarder.viewer_replaced(Instant::now());
     if let Some(link) = &ctx.link {
         for out in released {
@@ -403,9 +421,7 @@ async fn restart(ctx: &mut Ctx, forwarder: &mut Forwarder) -> bool {
         }
     }
     // The new window counts its controllers again as it opens them.
-    if had != 0 {
-        ctx.event(WatchEvent::Controllers(0));
-    }
+    ctx.report(forwarder);
     if !hello(ctx, forwarder).await {
         return false;
     }
@@ -518,6 +534,7 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
                     ctx.link = None;
                     forwarder.connection_lost();
                     ctx.event(WatchEvent::ConnectionLost { link: ctx.link_id });
+                    ctx.report(&forwarder);
                     send_seat(&mut ctx.window.to, &forwarder).await
                 }
             },
@@ -543,16 +560,34 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
             }
             cmd = cmds.recv() => match cmd {
                 Some(WatchCmd::SeatAssigned(s)) => {
-                    let out = forwarder.seat_assigned(s.seat, s.seat_epoch, s.permissions, Instant::now());
+                    let out = forwarder.seat_assigned(
+                        s.seat,
+                        s.seat_epoch,
+                        s.permissions,
+                        s.controller,
+                        Instant::now(),
+                    );
                     if let Some(link) = &ctx.link {
                         for out in out {
                             link.input.send(out);
                         }
                     }
+                    ctx.report(&forwarder);
                     send_seat(&mut ctx.window.to, &forwarder).await
                 }
                 Some(WatchCmd::SeatReleased(s)) => {
                     forwarder.seat_released(s.seat, s.seat_epoch);
+                    ctx.report(&forwarder);
+                    send_seat(&mut ctx.window.to, &forwarder).await
+                }
+                Some(WatchCmd::SeatController(s)) => {
+                    let out = forwarder.drive(s.seat, s.controller, Instant::now());
+                    if let Some(link) = &ctx.link {
+                        for out in out {
+                            link.input.send(out);
+                        }
+                    }
+                    ctx.report(&forwarder);
                     send_seat(&mut ctx.window.to, &forwarder).await
                 }
                 Some(WatchCmd::Hud(hud)) => {
@@ -580,6 +615,7 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
                     ctx.link = Some(*link);
                     ctx.link_id = id;
                     forwarder.connection_lost();
+                    ctx.report(&forwarder);
                     send_seat(&mut ctx.window.to, &forwarder).await
                 }
                 Some(WatchCmd::Stop) | None => return None,
@@ -636,16 +672,23 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
                         link.input.send(out);
                     }
                 }
-                let after = forwarder.controllers();
-                if after != before.0 {
-                    ctx.event(WatchEvent::Controllers(after.min(255) as u8));
+                let seats = forwarder.seat_state();
+                if forwarder.controllers() != before.0 || seats != before.1 {
+                    ctx.report(forwarder);
                 }
                 // With several seats, a controller that went leaves its seat
                 // (M18): given back, as the user would.
                 for seat in forwarder.take_left() {
                     ctx.event(WatchEvent::Action(UserAction::GiveBack(seat.0)));
                 }
-                return forwarder.seat_state() != before.1;
+                return seats != before.1;
+            }
+        }
+        // Right after the slots that say they changed (P12).
+        ipc::kinds::CONTROLLER_NAMES => {
+            if let Some(names) = ipc::from_payload::<ControllerNames>(&frame.payload) {
+                forwarder.name_controllers(&names.controllers);
+                ctx.report(forwarder);
             }
         }
         ipc::kinds::FRAME_TIMING if ctx.options.measure => {

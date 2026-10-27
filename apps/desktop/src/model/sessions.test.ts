@@ -23,6 +23,7 @@ const seat = (label: string, pad: boolean, holder: string | null = null, host = 
   holder,
   host,
   hostController: null,
+  guestController: null,
 });
 
 function session(seats: SeatView[], hostOnSeats = true): SessionView {
@@ -32,6 +33,13 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     maxViewers: 4,
     viewers: ["a", "b"],
     viewerControllers: [2, 1],
+    viewerPads: [
+      [
+        { slot: 0, name: "DualSense" },
+        { slot: 1, name: "DualSense" },
+      ],
+      [{ slot: 0, name: "Xbox Controller" }],
+    ],
     seats,
     hostOnSeats,
     controlPaused: false,

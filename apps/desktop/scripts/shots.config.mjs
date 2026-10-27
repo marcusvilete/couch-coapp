@@ -127,6 +127,14 @@ export const SHOTS = [
     await dragTo(page, ".bay-plug.viewer >> text=Dani", ".bay-seat:has-text('Controller 4')", true);
     await page.waitForTimeout(400);
   }],
+  // P12: Bia's Xbox controller held over Controller 4, which her first
+  // DualSense drives: the seat says they swap; then let go.
+  ["patch-guest-pad-drag", "hosting-guest-controllers", async (page) =>
+    dragTo(page, `[aria-label="Bia's Xbox Wireless Controller: drag onto a seat"]`, ".bay-seat:has-text('Controller 4')", false)],
+  ["patch-guest-pad-drop", "hosting-guest-controllers", async (page) => {
+    await dragTo(page, `[aria-label="Bia's Xbox Wireless Controller: drag onto a seat"]`, ".bay-seat:has-text('Controller 4')", true);
+    await page.waitForTimeout(400);
+  }],
   ["patch-keyboard-yours", "hosting-keyboard-yours", async (page) => centreBay(page)],
   ["patch-controller-keys", "hosting-controller-keys", async (page) => centreBay(page)],
   ["patch-pull", "hosting-live", async (page) => {
@@ -230,6 +238,17 @@ export const STABLE = [
       ["bar off", async (page) => page.getByRole("switch", { name: "Bar" }).click()],
       ["back", click("Back to a window")],
       ["bar on", async (page) => page.getByRole("switch", { name: "Bar" }).click()],
+    ],
+  ],
+  [
+    // P12: a guest's controller moved to another seat of theirs, and back:
+    // the cables move, the plugs and seats stay.
+    "guest controllers",
+    "hosting-guest-controllers",
+    [".bay-people", ".bay-seats"],
+    [
+      ["swap", async (page) => dragTo(page, `[aria-label="Bia's Xbox Wireless Controller: drag onto a seat"]`, ".bay-seat:has-text('Controller 4')", true)],
+      ["back", async (page) => dragTo(page, `[aria-label="Bia's DualSense Wireless Controller 1: drag onto a seat"]`, ".bay-seat:has-text('Controller 4')", true)],
     ],
   ],
   [

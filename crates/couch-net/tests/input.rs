@@ -74,7 +74,7 @@ async fn local_input_reaches_the_router_and_rumble_comes_back() {
     };
 
     let mut forwarder = Forwarder::new();
-    let mut out = forwarder.seat_assigned(SEAT, epoch, permissions, now);
+    let mut out = forwarder.seat_assigned(SEAT, epoch, permissions, None, now);
     for input in [
         LocalInput::Pad {
             controller: 0,

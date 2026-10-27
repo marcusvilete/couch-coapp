@@ -310,6 +310,7 @@ fn on_event(
                     seat,
                     seat_epoch: epoch,
                     permissions,
+                    controller: None,
                 }));
             }
         }

@@ -248,7 +248,11 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     println!("rumble from the host: seat {} low {} high {}", r.seat, r.low, r.high);
                 }
                 // `couch-cli host` seats each viewer once, by its connection.
-                Some(WatchEvent::Controllers(n)) => println!("the viewer has {n} controller(s)"),
+                Some(WatchEvent::Controllers(report)) => {
+                    let names: Vec<&str> =
+                        report.controllers.iter().map(|c| c.name.as_str()).collect();
+                    println!("the viewer has {} controller(s): {names:?}", names.len());
+                }
                 Some(WatchEvent::Volume(v)) => {
                     println!("stream volume {}%{}", v.percent, if v.muted { ", muted" } else { "" });
                 }

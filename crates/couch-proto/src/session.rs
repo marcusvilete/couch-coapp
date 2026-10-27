@@ -275,13 +275,96 @@ pub enum Cancel {
     Seat(Option<SeatId>),
 }
 
-/// Viewer to host, optional: how many controllers this viewer has (M18),
-/// after joining and on every change. A viewer holds one seat with a pad
-/// per controller; a seat beyond that moves it. Capped at 4 by the host.
+/// Viewer to host, optional: this viewer's controllers and which drives each
+/// pad seat it holds (M18, P12), after joining and on every change. A viewer
+/// holds one seat with a pad per controller (the host caps the count at 4);
+/// a seat beyond that moves it. The host shows each controller as a plug of
+/// its own, and a seat's cable at the controller driving it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewerControllers {
     pub session: SessionId,
-    pub count: u8,
+    pub report: ControllerReport,
+}
+
+/// What a viewer says of its controllers (P12).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerReport {
+    /// Its connected controllers, by slot, at most [`MAX_GUEST_CONTROLLERS`].
+    pub controllers: Vec<GuestController>,
+    /// Each pad seat it holds, in seat order, and the controller slot
+    /// driving it (`None` while none does). The viewer alone decides this
+    /// (`couch_input::forward`), following the host's choice when it can.
+    pub seats: Vec<SeatDriver>,
+}
+
+impl ControllerReport {
+    /// What a peer's report may hold: at most [`MAX_GUEST_CONTROLLERS`]
+    /// controllers on distinct slots below it, their names cleaned
+    /// ([`controller_name`]), and at most as many seats, each once, each
+    /// driven by one of those controllers or none. `None` if it can't be
+    /// read so.
+    pub fn checked(mut self) -> Option<Self> {
+        let max = MAX_GUEST_CONTROLLERS;
+        let slots: Vec<u8> = self.controllers.iter().map(|c| c.slot).collect();
+        let distinct = |v: &[u8]| v.iter().enumerate().all(|(i, a)| !v[..i].contains(a));
+        let seats: Vec<u8> = self.seats.iter().map(|s| s.seat.0).collect();
+        if slots.len() > max
+            || self.seats.len() > max
+            || !distinct(&slots)
+            || !distinct(&seats)
+            || slots.iter().any(|s| usize::from(*s) >= max)
+            || self
+                .seats
+                .iter()
+                .any(|s| s.controller.is_some_and(|c| !slots.contains(&c)))
+        {
+            return None;
+        }
+        for c in &mut self.controllers {
+            c.name = controller_name(&c.name);
+        }
+        Some(self)
+    }
+}
+
+/// One of a viewer's controllers (P12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestController {
+    /// Its slot in the stream window, kept while it is connected.
+    pub slot: u8,
+    /// As the system names it ("DualSense Wireless Controller"), cleaned by
+    /// [`controller_name`].
+    pub name: String,
+}
+
+/// A pad seat a viewer holds and the controller slot driving it (P12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatDriver {
+    pub seat: SeatId,
+    pub controller: Option<u8>,
+}
+
+/// Controller slots a viewer has: its stream window's
+/// (`couch_input::forward::MAX_LOCAL_CONTROLLERS`).
+pub const MAX_GUEST_CONTROLLERS: usize = 8;
+/// A controller's name, at most this many characters.
+pub const MAX_CONTROLLER_NAME: usize = 40;
+
+/// A controller's name as it may be shown: no control characters, spaces
+/// trimmed, at most [`MAX_CONTROLLER_NAME`] characters, "Controller" if
+/// nothing is left.
+pub fn controller_name(raw: &str) -> String {
+    let clean: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let name: String = clean.trim().chars().take(MAX_CONTROLLER_NAME).collect();
+    let name = name.trim_end();
+    if name.is_empty() {
+        "Controller".into()
+    } else {
+        name.into()
+    }
 }
 
 /// Host to viewer: your request was declined (or dropped: the host took
@@ -466,5 +549,90 @@ mod tests {
         };
         let len = postcard::to_stdvec(&status).unwrap().len();
         assert!(len + 2 <= crate::envelope::MAX_FRAME_LEN, "{len} bytes");
+    }
+
+    #[test]
+    fn controller_names_are_cleaned() {
+        assert_eq!(controller_name("  Xbox\u{0}Pad\n "), "Xbox Pad");
+        assert_eq!(controller_name("\u{7}\t "), "Controller");
+        let long = "é".repeat(100);
+        assert_eq!(controller_name(&long).chars().count(), MAX_CONTROLLER_NAME);
+    }
+
+    fn controller(slot: u8) -> GuestController {
+        GuestController {
+            slot,
+            name: format!("Pad\u{1b} {slot}"),
+        }
+    }
+
+    fn driver(seat: u8, controller: Option<u8>) -> SeatDriver {
+        SeatDriver {
+            seat: SeatId(seat),
+            controller,
+        }
+    }
+
+    #[test]
+    fn a_controller_report_is_checked() {
+        let good = ControllerReport {
+            controllers: vec![controller(0), controller(3)],
+            seats: vec![driver(0, Some(3)), driver(2, None)],
+        };
+        let checked = good.clone().checked().unwrap();
+        assert_eq!(checked.controllers[0].name, "Pad  0");
+        assert_eq!(checked.seats, good.seats);
+        let bad = [
+            // Two controllers on one slot.
+            ControllerReport {
+                controllers: vec![controller(1), controller(1)],
+                seats: vec![],
+            },
+            // A slot beyond the window's.
+            ControllerReport {
+                controllers: vec![controller(MAX_GUEST_CONTROLLERS as u8)],
+                seats: vec![],
+            },
+            // Too many.
+            ControllerReport {
+                controllers: (0..=MAX_GUEST_CONTROLLERS as u8).map(controller).collect(),
+                seats: vec![],
+            },
+            // A seat driven by a controller it doesn't have.
+            ControllerReport {
+                controllers: vec![controller(0)],
+                seats: vec![driver(0, Some(1))],
+            },
+            // A seat twice.
+            ControllerReport {
+                controllers: vec![controller(0)],
+                seats: vec![driver(1, Some(0)), driver(1, None)],
+            },
+        ];
+        for report in bad {
+            assert_eq!(report.clone().checked(), None, "{report:?}");
+        }
+    }
+
+    /// The fullest report fits a control frame.
+    #[test]
+    fn the_fullest_controller_report_fits() {
+        let report = ControllerReport {
+            controllers: (0..MAX_GUEST_CONTROLLERS as u8)
+                .map(|slot| GuestController {
+                    slot,
+                    name: "\u{10FFFF}".repeat(MAX_CONTROLLER_NAME),
+                })
+                .collect(),
+            seats: (0..MAX_GUEST_CONTROLLERS as u8)
+                .map(|s| driver(s, Some(s)))
+                .collect(),
+        };
+        let message = ViewerControllers {
+            session: SessionId(u64::MAX),
+            report,
+        };
+        let len = postcard::to_stdvec(&message).unwrap().len();
+        assert!(len < 2048, "{len} bytes");
     }
 }

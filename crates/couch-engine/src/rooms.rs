@@ -798,7 +798,11 @@ impl Actor {
             Command::CancelControl => self.cancel_control(now),
             Command::GiveBackSeat { seat } => self.give_back_seat(SeatId(seat)),
             Command::AnswerControl { member, accept } => self.answer_control(&member, accept, now),
-            Command::PassControl { member, seat } => self.pass_control(&member, SeatId(seat), now),
+            Command::PassControl {
+                member,
+                seat,
+                controller,
+            } => self.pass_control(&member, SeatId(seat), controller, now),
             Command::TakeBackControl { seat } => self.take_back_control(seat.map(SeatId), now),
             Command::PlaySeat { seat, controller } => self.play_seat(SeatId(seat), controller, now),
             Command::AllowControl => self.allow_control(now),

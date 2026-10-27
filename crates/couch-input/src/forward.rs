@@ -22,6 +22,14 @@
 //!   one seat is left: only a seat never pinned, or whose controller went,
 //!   is driven by the controller touched last.
 //!
+//! **The host's choice** (P12). A grant may name one of our controllers
+//! (`SeatAssigned::controller`), and the host may move a seat we hold to
+//! another (`SeatController`): while that controller is connected, it is
+//! pinned to the seat, even a seat on its own, and a seat it drove before
+//! swaps with it. A controller that isn't connected is no choice: the seat
+//! is pinned as above. What we decided goes back to the host
+//! ([`Forwarder::report`]), whose patch bay shows it.
+//!
 //! The heartbeat stands for the viewer, not this process: it only goes out
 //! while the viewer has been heard from within [`VIEWER_QUIET`]
 //! ([`LocalInput::Alive`] comes every 100 ms). A hung viewer stops it, and the
@@ -38,6 +46,7 @@ use couch_proto::{
         MouseButtonEvent, MouseDatagram, MouseTotals, PadDatagram, PadSnapshot,
     },
     ipc::{HeldSeat, LocalInput, SeatState},
+    session::{ControllerReport, GuestController, SeatDriver, controller_name},
 };
 
 use crate::{MouseButton, Permissions, SeatEpoch, SeatId};
@@ -80,6 +89,8 @@ pub struct Forwarder {
     holds: BTreeMap<SeatId, Hold>,
     /// Each controller slot's state; `None` while nothing is connected there.
     pads: [Option<PadSnapshot>; MAX_LOCAL_CONTROLLERS],
+    /// Each controller slot's name, as the viewer last said (P12).
+    names: [Option<String>; MAX_LOCAL_CONTROLLERS],
     last_touched: Option<u8>,
     /// Seats whose controller went, not yet taken by [`Self::take_left`].
     left: Vec<SeatId>,
@@ -129,6 +140,42 @@ impl Forwarder {
     /// How many controllers the viewer has connected, as it last said.
     pub fn controllers(&self) -> usize {
         self.pads.iter().flatten().count()
+    }
+
+    /// The viewer's controllers' names (P12). It sends them just before the
+    /// slots that say a controller came, so the host hears the new one by
+    /// name at once; a name stays until its controller goes.
+    pub fn name_controllers(&mut self, names: &[GuestController]) {
+        for c in names {
+            if let Some(name) = self.names.get_mut(usize::from(c.slot)) {
+                *name = Some(controller_name(&c.name));
+            }
+        }
+    }
+
+    /// What the host is told (P12): the connected controllers with their
+    /// names, and the controller driving each held pad seat.
+    pub fn report(&self) -> ControllerReport {
+        ControllerReport {
+            controllers: (0..MAX_LOCAL_CONTROLLERS as u8)
+                .filter(|c| self.connected(*c))
+                .map(|slot| GuestController {
+                    slot,
+                    name: self.names[usize::from(slot)]
+                        .clone()
+                        .unwrap_or_else(|| "Controller".into()),
+                })
+                .collect(),
+            seats: self
+                .holds
+                .iter()
+                .filter(|(_, h)| h.permissions.contains(Permissions::GAMEPAD))
+                .map(|(seat, _)| SeatDriver {
+                    seat: *seat,
+                    controller: self.driver(*seat),
+                })
+                .collect(),
+        }
     }
 
     /// Seats whose controller went since the last call (with several pad
@@ -217,15 +264,49 @@ impl Forwarder {
             .map(|(seat, h)| (*seat, *h))
     }
 
-    /// The host granted a seat. Sends its pad state at once if the viewer is
-    /// up, so the host hears from the new holder without waiting for a
-    /// refresh, and the others' if the new seat changed which controller
-    /// drives them. Otherwise the first refresh after the viewer speaks does.
+    /// Pins `controller` to `seat` (P12), if it is connected and the seat
+    /// takes a pad: a seat it drove takes `seat`'s controller in exchange.
+    fn choose(&mut self, seat: SeatId, controller: u8) {
+        if !self.connected(controller) || !self.pad_seats().contains(&seat) {
+            return;
+        }
+        let had = self.driver(seat);
+        for other in self.pad_seats() {
+            if other != seat && self.driver(other) == Some(controller) {
+                // Pinned now, whatever drove it: one seat alone was driven
+                // by the controller touched last.
+                if let Some(h) = self.holds.get_mut(&other) {
+                    h.driver = had;
+                }
+            }
+        }
+        if let Some(h) = self.holds.get_mut(&seat) {
+            h.driver = Some(controller);
+        }
+        self.pin();
+    }
+
+    /// The host moved a seat we hold to our controller `controller` (P12,
+    /// `SeatController`). Sends the pad states that changed.
+    pub fn drive(&mut self, seat: SeatId, controller: u8, now: Instant) -> Vec<Outgoing> {
+        self.choose(seat, controller);
+        if !self.viewer_alive(now) {
+            return Vec::new();
+        }
+        self.changed_pads(now)
+    }
+
+    /// The host granted a seat, maybe naming the controller to drive it
+    /// (P12). Sends its pad state at once if the viewer is up, so the host
+    /// hears from the new holder without waiting for a refresh, and the
+    /// others' if the new seat changed which controller drives them.
+    /// Otherwise the first refresh after the viewer speaks does.
     pub fn seat_assigned(
         &mut self,
         seat: SeatId,
         epoch: SeatEpoch,
         permissions: Permissions,
+        controller: Option<u8>,
         now: Instant,
     ) -> Vec<Outgoing> {
         // A second pad seat: the first keeps the controller driving it.
@@ -238,6 +319,13 @@ impl Forwarder {
                 h.driver = driving;
             }
         }
+        // Granted again while held (two passes crossing): its controller
+        // stays, unless the host chose another.
+        let kept = self
+            .holds
+            .get(&seat)
+            .filter(|_| permissions.contains(Permissions::GAMEPAD))
+            .and_then(|h| h.driver);
         self.holds.insert(
             seat,
             Hold {
@@ -246,12 +334,15 @@ impl Forwarder {
                 pad_seq: 0,
                 sent: PadSnapshot::default(),
                 next_refresh: None,
-                driver: None,
+                driver: kept,
                 leaving: false,
             },
         );
         self.left.retain(|s| *s != seat);
         self.pin();
+        if let Some(controller) = controller {
+            self.choose(seat, controller);
+        }
         if permissions.contains(Permissions::MOUSE) {
             self.totals = MouseTotals::default();
         }
@@ -290,6 +381,7 @@ impl Forwarder {
     /// what it isn't in).
     pub fn viewer_replaced(&mut self, now: Instant) -> Vec<Outgoing> {
         self.pads = Default::default();
+        self.names = Default::default();
         self.last_touched = None;
         self.keys = KeyBitmap::default();
         self.buttons = 0;
@@ -397,6 +489,11 @@ impl Forwarder {
                         *pad = None;
                     } else if pad.is_none() {
                         *pad = Some(PadSnapshot::default());
+                    }
+                }
+                for (c, name) in self.names.iter_mut().enumerate() {
+                    if slots & (1 << c) == 0 {
+                        *name = None;
                     }
                 }
                 if self.last_touched.is_some_and(|c| !self.connected(c)) {
@@ -567,7 +664,8 @@ mod tests {
         let mut f = Forwarder::new();
         f.local(LocalInput::Alive, now);
         assert_eq!(
-            f.seat_assigned(SEAT, SeatEpoch(1), permissions, now).len(),
+            f.seat_assigned(SEAT, SeatEpoch(1), permissions, None, now)
+                .len(),
             1
         );
         f
@@ -641,7 +739,7 @@ mod tests {
         let t0 = Instant::now();
         let mut f = Forwarder::new();
         assert!(
-            f.seat_assigned(SEAT, SeatEpoch(1), Permissions::GAMEPAD, t0)
+            f.seat_assigned(SEAT, SeatEpoch(1), Permissions::GAMEPAD, None, t0)
                 .is_empty()
         );
         assert!(f.tick(t0).is_empty());
@@ -702,9 +800,9 @@ mod tests {
     fn a_new_seat_restarts_the_totals_and_old_releases_are_ignored() {
         let mut f = Forwarder::new();
         let now = Instant::now();
-        f.seat_assigned(SEAT, SeatEpoch(1), Permissions::all(), now);
+        f.seat_assigned(SEAT, SeatEpoch(1), Permissions::all(), None, now);
         f.local(LocalInput::MouseMotion { dx: 50, dy: 0 }, now);
-        f.seat_assigned(SEAT, SeatEpoch(2), Permissions::all(), now);
+        f.seat_assigned(SEAT, SeatEpoch(2), Permissions::all(), None, now);
         f.seat_released(SEAT, SeatEpoch(1));
         assert_eq!(f.holding().len(), 1);
         let out = f.local(LocalInput::MouseMotion { dx: 1, dy: 0 }, now);
@@ -730,14 +828,14 @@ mod tests {
         let t0 = Instant::now();
         let mut f = Forwarder::new();
         f.local(LocalInput::ControllerSlots(0b11), t0);
-        f.seat_assigned(SeatId(2), SeatEpoch(7), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SeatId(2), SeatEpoch(7), Permissions::GAMEPAD, None, t0);
         // One seat: any controller drives it.
         assert_eq!(
             pads(&f.local(pad(1, 0x1000), t0)),
             vec![(SeatId(2), 0x1000)]
         );
         // A second seat: seat 2 keeps controller 1; seat 0 takes controller 0.
-        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
         assert_eq!(drivers(&f), vec![(0, Some(0)), (2, Some(1))]);
         assert_eq!(
             pads(&f.local(pad(0, 0x2000), t0)),
@@ -768,8 +866,8 @@ mod tests {
         let t0 = Instant::now();
         let mut f = Forwarder::new();
         f.local(LocalInput::ControllerSlots(0b11), t0);
-        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, t0);
-        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
+        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
         f.local(pad(0, 0x1000), t0);
         f.local(pad(1, 0x2000), t0);
         // Controller 0 goes, pressed: its seat goes neutral, the other stays.
@@ -796,7 +894,7 @@ mod tests {
         let t0 = Instant::now();
         let mut f = Forwarder::new();
         f.local(LocalInput::ControllerSlots(0b11), t0);
-        f.seat_assigned(SEAT, SeatEpoch(1), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SEAT, SeatEpoch(1), Permissions::GAMEPAD, None, t0);
         f.local(pad(1, 0x1000), t0);
         assert_eq!(
             pads(&f.local(LocalInput::ControllerSlots(0b01), t0)),
@@ -814,13 +912,161 @@ mod tests {
         let t0 = Instant::now();
         let mut f = Forwarder::new();
         f.local(LocalInput::ControllerSlots(0b110), t0);
-        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, t0);
-        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
+        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
         assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(2))]);
         f.local(LocalInput::ControllerSlots(0b111), t0);
         assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(2))]);
-        f.seat_assigned(SeatId(3), SeatEpoch(1), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SeatId(3), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
         assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(2)), (3, Some(0))]);
+    }
+
+    /// P12: a grant naming a controller pins it, a seat on its own too, and
+    /// it drives at once.
+    #[test]
+    fn the_hosts_choice_of_controller_drives_the_seat() {
+        let t0 = Instant::now();
+        let mut f = Forwarder::new();
+        f.local(LocalInput::ControllerSlots(0b11), t0);
+        f.local(pad(0, 0x1000), t0);
+        let out = f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, Some(1), t0);
+        assert_eq!(pads(&out), vec![(SeatId(1), 0)]);
+        assert_eq!(drivers(&f), vec![(1, Some(1))]);
+        // Touching the other one doesn't take the seat from the chosen one.
+        assert!(pads(&f.local(pad(0, 0x2000), t0)).is_empty());
+        assert_eq!(
+            pads(&f.local(pad(1, 0x4000), t0)),
+            vec![(SeatId(1), 0x4000)]
+        );
+        // A second seat chosen for the controller already playing: they swap.
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, Some(1), t0);
+        assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(0))]);
+    }
+
+    /// P12: the host moves a seat to another of our controllers; the two
+    /// seats swap, and a controller that isn't there changes nothing.
+    #[test]
+    fn the_host_moves_a_seat_to_another_controller() {
+        let t0 = Instant::now();
+        let mut f = Forwarder::new();
+        f.local(LocalInput::Alive, t0);
+        f.local(LocalInput::ControllerSlots(0b111), t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
+        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
+        assert_eq!(drivers(&f), vec![(0, Some(0)), (1, Some(1))]);
+        f.local(pad(1, 0x1000), t0);
+        let out = f.drive(SeatId(0), 1, t0);
+        assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(0))]);
+        let mut changed = pads(&out);
+        changed.sort();
+        assert_eq!(changed, vec![(SeatId(0), 0x1000), (SeatId(1), 0)]);
+        // To the free controller: nothing else moves.
+        f.drive(SeatId(1), 2, t0);
+        assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(2))]);
+        // Not connected, or a seat we don't hold: nothing.
+        f.drive(SeatId(1), 5, t0);
+        f.drive(SeatId(3), 0, t0);
+        assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(2))]);
+    }
+
+    /// P12: a chosen controller that isn't connected is no choice, and one
+    /// that goes leaves its seat to the others, as without a choice.
+    #[test]
+    fn a_choice_that_cant_be_followed_falls_back() {
+        let t0 = Instant::now();
+        let mut f = Forwarder::new();
+        f.local(LocalInput::ControllerSlots(0b01), t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, Some(3), t0);
+        assert_eq!(drivers(&f), vec![(0, Some(0))]);
+        f.local(LocalInput::ControllerSlots(0b11), t0);
+        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
+        f.drive(SeatId(0), 1, t0);
+        assert_eq!(drivers(&f), vec![(0, Some(1)), (1, Some(0))]);
+        // Its controller goes, with two seats: given back, as before P12.
+        f.local(LocalInput::ControllerSlots(0b01), t0);
+        assert_eq!(f.take_left(), vec![SeatId(0)]);
+    }
+
+    /// P12: what the host hears: the controllers with their names, and
+    /// which drives each pad seat.
+    #[test]
+    fn the_report_names_controllers_and_their_seats() {
+        let t0 = Instant::now();
+        let mut f = Forwarder::new();
+        f.local(LocalInput::ControllerSlots(0b101), t0);
+        f.name_controllers(&[
+            GuestController {
+                slot: 0,
+                name: "DualSense\n".into(),
+            },
+            GuestController {
+                slot: 9,
+                name: "beyond the slots".into(),
+            },
+        ]);
+        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, Some(2), t0);
+        f.seat_assigned(
+            SeatId(3),
+            SeatEpoch(1),
+            Permissions::KEYBOARD | Permissions::MOUSE,
+            None,
+            t0,
+        );
+        let report = f.report();
+        assert_eq!(
+            report.controllers,
+            vec![
+                GuestController {
+                    slot: 0,
+                    name: "DualSense".into(),
+                },
+                GuestController {
+                    slot: 2,
+                    name: "Controller".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            report.seats,
+            vec![SeatDriver {
+                seat: SeatId(1),
+                controller: Some(2),
+            }]
+        );
+        assert_eq!(report.clone().checked(), Some(report));
+    }
+
+    /// P12: names come before the slots that bring their controllers, and
+    /// go with them; a seat granted again keeps its controller.
+    #[test]
+    fn names_wait_for_their_controllers_and_a_regrant_keeps_its_pick() {
+        let t0 = Instant::now();
+        let mut f = Forwarder::new();
+        f.local(LocalInput::ControllerSlots(0b01), t0);
+        f.name_controllers(&[
+            GuestController {
+                slot: 0,
+                name: "DualSense".into(),
+            },
+            GuestController {
+                slot: 1,
+                name: "Xbox".into(),
+            },
+        ]);
+        assert_eq!(f.report().controllers.len(), 1);
+        f.local(LocalInput::ControllerSlots(0b11), t0);
+        let names: Vec<String> = f.report().controllers.into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["DualSense", "Xbox"]);
+
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, Some(1), t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(2), Permissions::GAMEPAD, None, t0);
+        assert_eq!(drivers(&f), vec![(0, Some(1))]);
+
+        // The Xbox pad goes, and its name with it: one coming back on that
+        // slot isn't taken for it.
+        f.local(LocalInput::ControllerSlots(0b01), t0);
+        f.local(LocalInput::ControllerSlots(0b11), t0);
+        assert_eq!(f.report().controllers[1].name, "Controller");
     }
 
     /// M18: a restarted stream window opens its controllers again; that
@@ -830,8 +1076,8 @@ mod tests {
         let t0 = Instant::now();
         let mut f = Forwarder::new();
         f.local(LocalInput::ControllerSlots(0b11), t0);
-        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, t0);
-        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
+        f.seat_assigned(SeatId(1), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
         f.viewer_replaced(t0);
         f.local(LocalInput::ControllerSlots(0b01), t0);
         f.local(LocalInput::ControllerSlots(0b11), t0);
@@ -844,11 +1090,12 @@ mod tests {
         let t0 = Instant::now();
         let mut f = Forwarder::new();
         f.local(LocalInput::Alive, t0);
-        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, t0);
+        f.seat_assigned(SeatId(0), SeatEpoch(1), Permissions::GAMEPAD, None, t0);
         f.seat_assigned(
             SeatId(2),
             SeatEpoch(4),
             Permissions::KEYBOARD | Permissions::MOUSE,
+            None,
             t0,
         );
         let out = f.local(key(0x04, true), t0);
@@ -887,7 +1134,10 @@ mod tests {
                 effects.extend(router.handle(ME, as_input(o), t0));
             }
         };
-        deliver(f.seat_assigned(SEAT, epoch, permissions, t0), &mut router);
+        deliver(
+            f.seat_assigned(SEAT, epoch, permissions, None, t0),
+            &mut router,
+        );
         for input in [
             LocalInput::MouseMotion { dx: 3, dy: 4 },
             LocalInput::MouseButton {
@@ -930,7 +1180,7 @@ mod tests {
             let Some(Effect::Granted { epoch, .. }) = grant.last().copied() else {
                 panic!("no grant");
             };
-            f.seat_assigned(seat, epoch, Permissions::GAMEPAD, t0);
+            f.seat_assigned(seat, epoch, Permissions::GAMEPAD, None, t0);
         }
         let mut effects = Vec::new();
         for input in [pad(0, 0x1000), pad(1, 0x2000)] {

@@ -159,10 +159,21 @@
 .bay-plug-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  gap: 0.3em;
   white-space: nowrap;
   text-align: left;
+}
+
+/* A long model name gives way; the number telling two alike apart stays. */
+.bay-plug-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bay-plug-n {
+  flex: none;
 }
 
 .bay-grip {

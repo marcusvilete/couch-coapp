@@ -7,9 +7,9 @@ use std::{
 };
 
 use couch_proto::ipc::{
-    self, AudioPacket, AudioStats, FrameTiming, HudState, LocalInput, NetStats, RumbleState,
-    SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader, WindowRequest,
-    WindowState,
+    self, AudioPacket, AudioStats, ControllerNames, FrameTiming, HudState, LocalInput, NetStats,
+    RumbleState, SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
+    WindowRequest, WindowState,
 };
 
 use crate::audio::AudioFeed;
@@ -43,6 +43,8 @@ pub enum Outgoing {
     Volume(StreamVolume),
     /// The window's full screen, bar or stats changed (P11).
     Window(WindowState),
+    /// The controllers' names, after each change of them (P12).
+    ControllerNames(ControllerNames),
     /// Write what is queued before this, then stop. Other threads (the
     /// decoder) still hold senders, so the channel alone never closes.
     Close,
@@ -200,6 +202,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>) -> JoinHandle<()> {
                     Outgoing::Window(state) => {
                         payload = ipc::to_payload(&state);
                         ipc::kinds::WINDOW_STATE
+                    }
+                    Outgoing::ControllerNames(names) => {
+                        payload = ipc::to_payload(&names);
+                        ipc::kinds::CONTROLLER_NAMES
                     }
                     Outgoing::Close => break,
                 };

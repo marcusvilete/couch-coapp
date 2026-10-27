@@ -21,18 +21,18 @@ use couch_proto::{
     ids::SeatEpoch,
     ipc::{HudRole, HudSeat, HudState, ShortcutKeys, StreamVolume, UserAction, WindowState},
     session::{
-        Cancel, ControlCancel, ControlRequest, EndReason, GameFocus, JoinResult, SeatKind,
-        SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, StreamState, ViewerControllers,
-        seat_labels, seat_phrase,
+        Cancel, ControlCancel, ControlRequest, ControllerReport, EndReason, GameFocus, JoinResult,
+        SeatKind, SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, StreamState,
+        ViewerControllers, seat_labels, seat_phrase,
     },
 };
 use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 
 use super::*;
 use crate::{
-    AnswerKeys, HostController, InputSetup, RequestView, ScreenArea, SeatView, SessionEnd,
-    SessionRole, SessionView, SourceChoice, StreamStateView, StreamView, StreamWindowView,
-    WatchEnd,
+    AnswerKeys, GuestControllerView, HostController, InputSetup, RequestView, ScreenArea, SeatView,
+    SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView, StreamView,
+    StreamWindowView, WatchEnd,
     pipeline::{
         AudioChoice, Source, ViewerOptions,
         host::{HostOptions, LocalSeat, Rates, StreamControl, StreamOptions},
@@ -71,6 +71,14 @@ struct Hosting {
     /// What each viewer said it decodes when it joined (`couch_proto::codec`
     /// bits, M12c).
     viewer_codecs: BTreeMap<MemberId, u8>,
+    /// Each viewer's controllers and which drives each of its seats, as it
+    /// last said (P12), for the patch bay.
+    guest_controllers: BTreeMap<MemberId, ControllerReport>,
+    /// The controller of theirs we chose for a seat we passed a viewer
+    /// (P12), until its grant goes out with it. Dropped when the seat is
+    /// taken back or revoked from them, or they go, so a later grant never
+    /// carries an old choice.
+    chosen: BTreeMap<(MemberId, SeatId), u8>,
     /// The host keys' hook, in place while the stream runs, with the panic
     /// key it listens for ("Ctrl+Alt+Shift+Backspace"); `None` if it
     /// couldn't be installed.
@@ -125,9 +133,10 @@ struct Watching {
     /// The seats we hold, each from its `SeatAssigned` to its `SeatReleased`
     /// (M18: as many as the host lets us). Never kept across connections.
     holding: BTreeSet<SeatId>,
-    /// How many controllers the stream window has, as it last said; the
-    /// host hears it on every change and after each join (M18).
-    controllers: u8,
+    /// The stream window's controllers and which drives each seat we hold,
+    /// as it last said; the host hears it on every change and after each
+    /// join (M18, P12).
+    controllers: ControllerReport,
     /// The stream volume, as the window or the app last set it (P11).
     volume: StreamVolume,
     /// The window's full screen, bar and stats, as it last said; `None`
@@ -508,15 +517,29 @@ impl Actor {
                 });
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
-            // How many controllers a viewer has (M18): only from the viewer
-            // itself, on the connection it joined on. It decides only whether
-            // a seat we grant it is added or replaces its others.
+            // A viewer's controllers (M18, P12): only from the viewer itself,
+            // on the connection it joined on. Their count decides only
+            // whether a seat we grant it is added or replaces its others;
+            // the rest is shown in the patch bay. A report that can't be
+            // read is dropped whole.
             ControlMessage::ViewerControllers(m) if ours(&self.sessions, m.session) => {
+                let Some(report) = m.report.checked() else {
+                    tracing::debug!(member = ?peer, "a controller report that can't be read");
+                    return;
+                };
                 let fx = self.hosting_mut().and_then(|h| {
-                    (h.session.is_viewer(peer) && h.viewer_conns.get(&peer) == Some(&conn))
-                        .then(|| h.session.set_controllers(peer, m.count))
+                    (h.session.is_viewer(peer) && h.viewer_conns.get(&peer) == Some(&conn)).then(
+                        || {
+                            let count = report.controllers.len() as u8;
+                            h.guest_controllers.insert(peer, report);
+                            h.session.set_controllers(peer, count)
+                        },
+                    )
                 });
-                self.apply_session(room, fx.unwrap_or_default(), now);
+                if let Some(fx) = fx {
+                    self.apply_session(room, fx, now);
+                    self.announce(room, now);
+                }
             }
             ControlMessage::KeyframeRequest(_) => {
                 if let Some(h) = self.sessions.hosting.as_ref()
@@ -637,12 +660,12 @@ impl Actor {
                         tracing::info!(room = ?room, host = ?peer, "watching a stream");
                         // A new viewer to the host each time: it hears how
                         // many controllers we have (M18).
-                        let count = (w.controllers > 0).then_some(
+                        let count = (!w.controllers.controllers.is_empty()).then(|| {
                             ControlMessage::ViewerControllers(ViewerControllers {
                                 session: w.session,
-                                count: w.controllers,
-                            }),
-                        );
+                                report: w.controllers.clone(),
+                            })
+                        });
                         if let Some(count) = count {
                             self.send(conn, Outgoing::Message(count));
                         }
@@ -713,6 +736,20 @@ impl Actor {
                 }
                 self.send_hud();
                 self.announce(room, now);
+            }
+            // The host moved a seat we hold to another of our controllers
+            // (P12): only from our host, for a seat we hold.
+            ControlMessage::SeatController(s) => {
+                let Some(w) = self.sessions.watching.as_ref() else {
+                    return;
+                };
+                if w.room == room
+                    && w.host == peer
+                    && w.holding.contains(&s.seat)
+                    && let Some(watch) = &w.watch
+                {
+                    watch.seat_controller(s);
+                }
             }
             ControlMessage::SeatReleased(s) => {
                 let labels = self.seat_labels();
@@ -819,6 +856,8 @@ impl Actor {
                     if let Some(h) = self.sessions.hosting.as_mut() {
                         h.viewer_conns.remove(&member);
                         h.viewer_codecs.remove(&member);
+                        h.guest_controllers.remove(&member);
+                        h.chosen.retain(|(who, _), _| *who != member);
                         if let Some(pipeline) = &h.pipeline {
                             pipeline.remove_viewer(member);
                         }
@@ -983,6 +1022,8 @@ impl Actor {
             early_ends: Vec::new(),
             viewer_conns: BTreeMap::new(),
             viewer_codecs: BTreeMap::new(),
+            guest_controllers: BTreeMap::new(),
+            chosen: BTreeMap::new(),
             panic_key: None,
             answer_keys: None,
             first: None,
@@ -1426,10 +1467,18 @@ impl Actor {
                 permissions,
             } => {
                 if h.session.is_viewer(member) {
+                    // The controller we chose goes with the grant it was for
+                    // (P12), once.
+                    let controller = self
+                        .sessions
+                        .hosting
+                        .as_mut()
+                        .and_then(|h| h.chosen.remove(&(member, seat)));
                     let assigned = couch_proto::control::SeatAssigned {
                         seat,
                         seat_epoch: epoch,
                         permissions,
+                        controller,
                     };
                     self.send_to(room, member, ControlMessage::SeatAssigned(assigned));
                 }
@@ -1443,6 +1492,9 @@ impl Actor {
                 seat,
                 epoch,
             } => {
+                if let Some(h) = self.sessions.hosting.as_mut() {
+                    h.chosen.remove(&(member, seat));
+                }
                 // Our own controller's seat needs no telling.
                 if member != self.me {
                     let released = couch_proto::control::SeatReleased {
@@ -1579,10 +1631,48 @@ impl Actor {
         &mut self,
         member: &str,
         seat: SeatId,
+        controller: Option<u8>,
         now: Instant,
     ) -> Result<Response, EngineError> {
         let member = MemberId::from_hex(member).ok_or(EngineError::UnknownMember)?;
-        self.our_session(|s| Ok(s.pass(member, seat)?), now)
+        // One of their controllers, as they last said (P12); any other is
+        // no choice. The viewer follows it only while it is connected.
+        let controller = self.sessions.hosting.as_ref().and_then(|h| {
+            let report = h.guest_controllers.get(&member)?;
+            controller.filter(|c| report.controllers.iter().any(|g| g.slot == *c))
+        });
+        let holds = self.sessions.hosting.as_ref().map(|h| {
+            (
+                h.room,
+                h.session
+                    .holders()
+                    .get(usize::from(seat.0))
+                    .copied()
+                    .flatten()
+                    == Some(member),
+            )
+        });
+        // A seat they hold already: only which controller drives it changes,
+        // on their side. Nothing changes hands, so it is allowed while
+        // control is paused too.
+        if let (Some((room, true)), Some(controller)) = (holds, controller) {
+            if self.pipeline().is_none() {
+                return Err(EngineError::NotLive);
+            }
+            let message = couch_proto::control::SeatController { seat, controller };
+            self.send_to(room, member, ControlMessage::SeatController(message));
+            return Ok(Response::Done);
+        }
+        let response = self.our_session(|s| Ok(s.pass(member, seat)?), now)?;
+        // The grant answers later, from the input task: the choice waits
+        // for it.
+        if let Some(h) = self.sessions.hosting.as_mut() {
+            match controller {
+                Some(c) => h.chosen.insert((member, seat), c),
+                None => h.chosen.remove(&(member, seat)),
+            };
+        }
+        Ok(response)
     }
 
     pub(super) fn take_back_control(
@@ -1590,6 +1680,10 @@ impl Actor {
         seat: Option<SeatId>,
         now: Instant,
     ) -> Result<Response, EngineError> {
+        // A choice for a grant still on its way goes with it (P12).
+        if let Some(h) = self.sessions.hosting.as_mut() {
+            h.chosen.retain(|(_, to), _| seat.is_some_and(|s| s != *to));
+        }
         self.our_session(|s| Ok(s.take_back(seat)), now)
     }
 
@@ -1781,7 +1875,7 @@ impl Actor {
             away_since: None,
             in_front: true,
             holding: BTreeSet::new(),
-            controllers: 0,
+            controllers: ControllerReport::default(),
             volume,
             window: None,
         });
@@ -2064,15 +2158,15 @@ impl Actor {
                 self.announce(room, now);
             }
             // The host hears it now if we have joined, or after joining.
-            WatchEvent::Controllers(count) => {
+            WatchEvent::Controllers(report) => {
                 let (joined, conn, session) = (w.joined(), w.conn, w.session);
                 if let Some(w) = self.sessions.watching.as_mut() {
-                    w.controllers = count;
+                    w.controllers = report.clone();
                 }
                 if joined {
-                    let count =
-                        ControlMessage::ViewerControllers(ViewerControllers { session, count });
-                    self.send(conn, Outgoing::Message(count));
+                    let message =
+                        ControlMessage::ViewerControllers(ViewerControllers { session, report });
+                    self.send(conn, Outgoing::Message(message));
                 }
             }
             // The user closed the viewer.
@@ -2282,14 +2376,37 @@ impl Actor {
                 max_viewers: s.config().max_viewers,
                 viewers: s.viewers().iter().map(MemberId::to_hex).collect(),
                 viewer_controllers: s.viewers().iter().map(|v| s.controllers_of(*v)).collect(),
+                viewer_pads: s
+                    .viewers()
+                    .iter()
+                    .map(|v| {
+                        h.guest_controllers.get(v).map_or_else(Vec::new, |r| {
+                            r.controllers
+                                .iter()
+                                .map(|c| GuestControllerView {
+                                    slot: c.slot,
+                                    name: c.name.clone(),
+                                })
+                                .collect()
+                        })
+                    })
+                    .collect(),
                 seats: seat_views(&s.config().seats, s.holders(), self.me)
                     .into_iter()
                     .enumerate()
                     .map(|(i, mut seat)| {
-                        seat.host_controller = seat
-                            .host
-                            .then(|| s.host_controller_on(SeatId(i as u8)))
-                            .flatten();
+                        let id = SeatId(i as u8);
+                        seat.host_controller =
+                            seat.host.then(|| s.host_controller_on(id)).flatten();
+                        // As its holder last said (P12).
+                        seat.guest_controller = s
+                            .holders()
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .and_then(|v| h.guest_controllers.get(&v))
+                            .and_then(|r| r.seats.iter().find(|d| d.seat == id))
+                            .and_then(|d| d.controller);
                         seat
                     })
                     .collect(),
@@ -2370,6 +2487,7 @@ impl Actor {
                     s.viewers.iter().map(MemberId::to_hex).collect()
                 }),
                 viewer_controllers: Vec::new(),
+                viewer_pads: Vec::new(),
                 seats: seat_views(&listing.announce.seats, &holders, *host),
                 host_on_seats: status.is_some_and(|s| s.host_on_seats),
                 control_paused: status.is_some_and(|s| s.control_paused),
@@ -2431,6 +2549,7 @@ fn seat_views(seats: &[SeatKind], holders: &[Option<MemberId>], host: MemberId) 
                 holder: holder.map(|h| h.to_hex()),
                 host: holder == Some(host),
                 host_controller: None,
+                guest_controller: None,
             }
         })
         .collect()

@@ -12,9 +12,10 @@ function view(over: Partial<SessionView>): SessionView {
     maxViewers: 4,
     viewers: [],
     viewerControllers: [],
+    viewerPads: [],
     seats: [
-      { label: "Controller 1", pad: true, keyboardMouse: false, holder: null, host: false, hostController: null },
-      { label: "Controller 2", pad: true, keyboardMouse: false, holder: null, host: false, hostController: null },
+      { label: "Controller 1", pad: true, keyboardMouse: false, holder: null, host: false, hostController: null, guestController: null },
+      { label: "Controller 2", pad: true, keyboardMouse: false, holder: null, host: false, hostController: null, guestController: null },
     ],
     hostOnSeats: false,
     controlPaused: false,
@@ -48,6 +49,7 @@ const held = (holders: (string | null)[]) =>
     holder,
     host: false,
     hostController: null,
+    guestController: null,
   }));
 
 describe("notes over the game", () => {

@@ -275,10 +275,17 @@ pub enum Command {
     },
     /// While streaming: hands a seat to a viewer who didn't ask. It is added
     /// to the viewer's seats if they have a controller to spare for it (or it
-    /// has no pad); otherwise the viewer moves (M18).
+    /// has no pad); otherwise the viewer moves (M18). With `controller`, one
+    /// of the viewer's controllers by its slot
+    /// ([`GuestControllerView::slot`]), that controller drives it (P12),
+    /// while it is connected; to a seat they hold already, only that
+    /// changes.
     PassControl {
         member: String,
         seat: u8,
+        #[serde(default)]
+        #[ts(optional)]
+        controller: Option<u8>,
     },
     /// While streaming: take a seat back from a viewer, or leave the one our
     /// controller plays, or every seat but ours with `None`. The seat stays
@@ -671,6 +678,22 @@ pub struct SeatView {
     /// For the host: which of their controllers drives it (M23), by its
     /// place in [`SessionView::host_controllers`]; set while they play it.
     pub host_controller: Option<u8>,
+    /// For the host, a pad seat a viewer holds: which of the viewer's
+    /// controllers drives it (P12), by its slot
+    /// ([`GuestControllerView::slot`]), as the viewer last said; `None`
+    /// while none does, or before it has said.
+    pub guest_controller: Option<u8>,
+}
+
+/// One of a viewer's controllers, for the host's patch bay (P12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GuestControllerView {
+    /// Its slot in the viewer's stream window, kept while connected.
+    pub slot: u8,
+    /// As the viewer's system names it ("DualSense Wireless Controller").
+    pub name: String,
 }
 
 /// A viewer asking for a seat, for the host.
@@ -727,6 +750,10 @@ pub struct SessionView {
     /// passed to a viewer is added to theirs while they hold fewer pad seats
     /// than this, otherwise they move; a seat without one is always added.
     pub viewer_controllers: Vec<u8>,
+    /// For the host: each viewer's controllers, by slot, in `viewers`'
+    /// order (P12); empty for others' sessions. The patch bay shows each as
+    /// a plug of its own.
+    pub viewer_pads: Vec<Vec<GuestControllerView>>,
     /// The seats players can hold, by seat id; one is single player.
     pub seats: Vec<SeatView>,
     /// The host's own controller plays only through the seats (hidden from
@@ -1095,10 +1122,15 @@ impl fmt::Debug for Command {
                 .field("member", member)
                 .field("accept", accept)
                 .finish(),
-            Self::PassControl { member, seat } => f
+            Self::PassControl {
+                member,
+                seat,
+                controller,
+            } => f
                 .debug_struct("PassControl")
                 .field("member", member)
                 .field("seat", seat)
+                .field("controller", controller)
                 .finish(),
             Self::TakeBackControl { seat } => f
                 .debug_struct("TakeBackControl")

@@ -25,4 +25,11 @@ host: boolean,
  * For the host: which of their controllers drives it (M23), by its
  * place in [`SessionView::host_controllers`]; set while they play it.
  */
-hostController: number | null, };
+hostController: number | null, 
+/**
+ * For the host, a pad seat a viewer holds: which of the viewer's
+ * controllers drives it (P12), by its slot
+ * ([`GuestControllerView::slot`]), as the viewer last said; `None`
+ * while none does, or before it has said.
+ */
+guestController: number | null, };

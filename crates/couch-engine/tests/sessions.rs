@@ -896,6 +896,24 @@ impl FakeViewer {
         );
     }
 
+    /// The window's controllers' names, by slot (P12), as the real one
+    /// sends them just before its slots.
+    fn name_controllers(&self, names: &[(u8, &str)]) {
+        let names = couch_proto::ipc::ControllerNames {
+            controllers: names
+                .iter()
+                .map(|(slot, name)| couch_proto::session::GuestController {
+                    slot: *slot,
+                    name: (*name).into(),
+                })
+                .collect(),
+        };
+        self.say(
+            couch_proto::ipc::kinds::CONTROLLER_NAMES,
+            couch_proto::ipc::to_payload(&names),
+        );
+    }
+
     /// A key on the local keyboard (a HID usage).
     fn key(&self, usage: u16, down: bool) {
         self.say(
@@ -1464,6 +1482,7 @@ async fn control_is_asked_for_given_passed_and_given_back() {
     a.ok(Command::PassControl {
         member: c.id(),
         seat: 0,
+        controller: None,
     })
     .await;
     wait("C's seat", || c_window.holding()).await;
@@ -1506,6 +1525,7 @@ async fn control_is_asked_for_given_passed_and_given_back() {
     a.ok(Command::PassControl {
         member: b.id(),
         seat: 0,
+        controller: None,
     })
     .await;
     wait("B's seat again", || b_window.holding()).await;
@@ -1701,7 +1721,8 @@ async fn the_panic_key_takes_control_back_until_allowed() {
     assert!(matches!(
         a.handle(Command::PassControl {
             member: b.id(),
-            seat: 0
+            seat: 0,
+            controller: None,
         })
         .await,
         Err(EngineError::Session(_))
@@ -2948,6 +2969,7 @@ async fn moving_to_another_seat_lets_go_of_the_old_one_first() {
     a.ok(Command::PassControl {
         member: b.id(),
         seat: 0,
+        controller: None,
     })
     .await;
     a.wait_session(&room, &a, "B back on the first seat", |s| {
@@ -3051,6 +3073,112 @@ async fn a_guest_with_two_controllers_plays_two_seats_and_the_keyboard() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// Which of the viewer's controllers drives `seat`, as the host sees it
+/// (P12).
+fn guest_controller(s: &SessionView, seat: usize) -> Option<u8> {
+    s.seats.get(seat).and_then(|s| s.guest_controller)
+}
+
+/// P12: the host sees a guest's controllers by name, picks which one plays a
+/// seat, and moves a seat the guest holds to its other controller; the
+/// guest's side follows, and the game sees it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_picks_which_of_a_guests_controllers_plays() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a.live(go_live_with(&room, 4, TWO_PADS)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    let b_window = watching(&room, &a, &b).await;
+    b_window.name_controllers(&[(0, "DualSense\u{7}"), (1, "Xbox Controller")]);
+    b_window.controllers(2);
+    a.wait_session(&room, &a, "B's controllers by name", |s| {
+        s.is_some_and(|s| {
+            let names: Vec<&str> = s
+                .viewer_pads
+                .first()
+                .map_or_else(Vec::new, |p| p.iter().map(|c| c.name.as_str()).collect());
+            s.viewers == [b.id()] && names == ["DualSense", "Xbox Controller"]
+        })
+    })
+    .await;
+
+    // Seat 1 to B's second controller: it drives, the first doesn't.
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 0,
+        controller: Some(1),
+    })
+    .await;
+    a.wait_session(&room, &a, "B on seat 1 with its Xbox pad", |s| {
+        s.is_some_and(|s| holder(s, 0) == Some(b.id()) && guest_controller(s, 0) == Some(1))
+    })
+    .await;
+    wait("the window on seat 1", || b_window.held_seats() == [0]).await;
+    b_window.pad_of(1, PadButtons::A);
+    wait("the Xbox pad on seat 1", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::A))
+    })
+    .await;
+    b_window.pad_of(0, PadButtons::B);
+    b_window.pad_of(1, PadButtons::X);
+    wait("still the Xbox pad alone", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::X))
+    })
+    .await;
+
+    // Seat 2 to the same controller: added, and the two swap.
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 1,
+        controller: Some(1),
+    })
+    .await;
+    a.wait_session(&room, &a, "B on both, swapped", |s| {
+        s.is_some_and(|s| {
+            holder(s, 1) == Some(b.id())
+                && guest_controller(s, 0) == Some(0)
+                && guest_controller(s, 1) == Some(1)
+        })
+    })
+    .await;
+    b_window.pad_of(0, PadButtons::Y);
+    b_window.pad_of(1, PadButtons::B);
+    wait("each controller where it was put", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::Y))
+            && a.fake.pad_at(1) == Some(pressed(PadButtons::B))
+    })
+    .await;
+
+    // A seat B holds moved to its other controller: no new grant, a swap.
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 0,
+        controller: Some(1),
+    })
+    .await;
+    a.wait_session(&room, &a, "swapped back", |s| {
+        s.is_some_and(|s| guest_controller(s, 0) == Some(1) && guest_controller(s, 1) == Some(0))
+    })
+    .await;
+    b_window.pad_of(0, PadButtons::X);
+    b_window.pad_of(1, PadButtons::A);
+    wait("the pads follow", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::A))
+            && a.fake.pad_at(1) == Some(pressed(PadButtons::X))
+    })
+    .await;
+    assert_eq!(b_window.held_seats(), [0, 1]);
+
+    // A controller B doesn't have is no choice: the pass to a seat B holds
+    // is accepted and does nothing.
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 1,
+        controller: Some(5),
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_seat_passed_is_added_or_moves_by_the_guests_controllers() {
     let (mut a, mut b, mut c, room) = three().await;
@@ -3065,6 +3193,7 @@ async fn a_seat_passed_is_added_or_moves_by_the_guests_controllers() {
     a.ok(Command::PassControl {
         member: b.id(),
         seat: 1,
+        controller: None,
     })
     .await;
     a.wait_session(&room, &a, "B moved", |s| {
@@ -3082,6 +3211,7 @@ async fn a_seat_passed_is_added_or_moves_by_the_guests_controllers() {
     a.ok(Command::PassControl {
         member: b.id(),
         seat: 0,
+        controller: None,
     })
     .await;
     a.wait_session(&room, &a, "B on both", |s| {

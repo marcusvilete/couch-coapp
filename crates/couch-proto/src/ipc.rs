@@ -11,11 +11,12 @@ use crate::{
     bytes::{Reader, Writer},
     ids::Permissions,
     input::PadSnapshot,
+    session::GuestController,
 };
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 12;
+pub const IPC_VERSION: u16 = 13;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -65,6 +66,10 @@ pub mod kinds {
     /// viewer -> main: the window's state ([`super::WindowState`], P11), at
     /// once and whenever it changes.
     pub const WINDOW_STATE: u8 = 0x87;
+    /// viewer -> main: its controllers' names ([`super::ControllerNames`],
+    /// P12), on each change of its controllers, just before the
+    /// `ControllerSlots` input that says it.
+    pub const CONTROLLER_NAMES: u8 = 0x88;
 }
 
 /// Header of a [`kinds::VIDEO_FRAME`] payload; the access unit follows it.
@@ -430,6 +435,13 @@ pub struct WindowState {
     pub stats: bool,
 }
 
+/// Payload of [`kinds::CONTROLLER_NAMES`] (postcard, P12): each connected
+/// controller by slot, with its name, for the host's patch bay.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerNames {
+    pub controllers: Vec<GuestController>,
+}
+
 /// Payload of [`kinds::AUDIO_PACKET`] (postcard): an audio datagram as it
 /// arrived.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -774,6 +786,26 @@ mod tests {
         assert_eq!(from_payload(&bytes), Some(state));
         bytes.push(0);
         assert_eq!(from_payload::<WindowState>(&bytes), None);
+    }
+
+    #[test]
+    fn controller_names_roundtrip() {
+        let names = ControllerNames {
+            controllers: vec![
+                GuestController {
+                    slot: 0,
+                    name: "DualSense Wireless Controller".into(),
+                },
+                GuestController {
+                    slot: 3,
+                    name: "Xbox Series X Controller".into(),
+                },
+            ],
+        };
+        let mut bytes = to_payload(&names);
+        assert_eq!(from_payload(&bytes), Some(names));
+        bytes.push(0);
+        assert_eq!(from_payload::<ControllerNames>(&bytes), None);
     }
 
     /// P6: the stream volume stays within 0 to 100%, and muting keeps it.

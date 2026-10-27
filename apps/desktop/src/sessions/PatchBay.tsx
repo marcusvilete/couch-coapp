@@ -1,13 +1,15 @@
 // The host's patch bay (M21): who plays which seat, as cables. People on the
-// left (you, with a plug per controller of yours; each viewer), seats on the
-// right, a cable from each seat to whoever holds it, and a dashed one for
-// each request. Drag a person or one of your controllers onto a seat to hand
-// it over; pick a cable up by its plug at the seat and drop it in the open to
-// take the seat back, or on another seat to move it. Every move is a session
-// command, the same the seats' and viewers' menus send (they stay, for the
-// keyboard): the engine decides, and the cables follow its answer.
+// left (you, with a plug per controller of yours; each viewer, with a plug
+// per controller of theirs, P12), seats on the right, a cable from each seat
+// to the controller driving it (or whoever holds it), and a dashed one for
+// each request. Drag a person or a controller onto a seat to hand it over
+// (a guest's controller: that one plays it); pick a cable up by its plug at
+// the seat and drop it in the open to take the seat back, or on another seat
+// to move it. Every move is a session command, the same the seats' and
+// viewers' menus send (they stay, for the keyboard): the engine decides, and
+// the cables follow its answer.
 import { Gamepad2, GripVertical, Keyboard, MoreHorizontal, MousePointer2, ShieldAlert } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
@@ -16,18 +18,33 @@ import { Avatar, hueOf } from "../ui/Avatar";
 import { IconButton } from "../ui/Button";
 import { ContextMenu, DropdownMenu } from "../ui/Menu";
 import { Tooltip } from "../ui/Tooltip";
-import { controllersOf, ourPads, PAUSED_REASON, seatEntries, viewerEntries } from "./hostMenus";
+import { cableFrom, controllersOf, guestPadHint, guestPads, ourPads, PAUSED_REASON, seatEntries, viewerEntries } from "./hostMenus";
 import type { Run } from "./useRun";
 import "./PatchBay.css";
 
 type Point = { x: number; y: number };
 
-/** What is being dragged: a viewer, one of our controllers, or a seat's
- * cable picked up by its plug. */
+/** What is being dragged: a viewer, one of our controllers, one of a
+ * viewer's controllers (by slot, P12), or a seat's cable picked up by its
+ * plug. */
 type Drag =
   | { kind: "viewer"; member: string; from: string }
   | { kind: "pad"; controller: number; from: string }
+  | { kind: "guestPad"; member: string; controller: number; from: string }
   | { kind: "cable"; seat: number; from: string };
+
+/** Who a cable picked up at `seat` drops as: the controller at its other end
+ * (ours or a guest's), else its holder. */
+function heldBy(s: SessionView, seat: number, from: string): Drag | null {
+  const held = s.seats[seat];
+  if (held?.host && held.hostController != null) return { kind: "pad", controller: held.hostController, from };
+  if (!held?.holder) return null;
+  const plug = cableFrom(s, seat);
+  if (plug?.startsWith("gpad:") && held.guestController != null) {
+    return { kind: "guestPad", member: held.holder, controller: held.guestController, from };
+  }
+  return { kind: "viewer", member: held.holder, from };
+}
 
 /** A drag starts once the pointer has moved this far: a plain click stays a
  * click. */
@@ -43,16 +60,13 @@ export function dropOn(
   const target = s.seats[seat];
   if (!target) return { ok: false, hint: "" };
   const pads = ourPads(s);
-  // A cable picked up drops as its holder would.
+  // A cable picked up drops as what's at its other end would.
   if (drag.kind === "cable") {
-    const from = s.seats[drag.seat];
     if (drag.seat === seat) return { ok: false, hint: "" };
-    if (from?.host && from.hostController != null) {
-      return dropOn(room, s, { kind: "pad", controller: from.hostController, from: drag.from }, seat);
-    }
-    if (from?.holder) return dropOn(room, s, { kind: "viewer", member: from.holder, from: drag.from }, seat);
-    return { ok: false, hint: "" };
+    const who = heldBy(s, drag.seat, drag.from);
+    return who ? dropOn(room, s, who, seat) : { ok: false, hint: "" };
   }
+  if (drag.kind === "guestPad") return guestPadHint(room, s, drag.member, drag.controller, seat);
   const loses = !target.host && target.holder ? ` · ${nameOf(room, target.holder)} loses it` : "";
   const kbm = target.keyboardMouse ? " · control of your PC" : "";
   if (drag.kind === "pad") {
@@ -70,6 +84,18 @@ export function dropOn(
   const what =
     held.length === 0 ? "Hands it over" : keeps(s, held, controllersOf(s, drag.member), seat) ? "Added" : "Moves them";
   return { ok: true, hint: what + (target.host ? " · yours" : loses) + kbm };
+}
+
+/** A plug's name: the model gives way to the width, the number `numbered`
+ * added to tell two alike apart stays. */
+function PlugName(props: { model: string; name: string }) {
+  const n = props.name !== props.model ? props.name.slice(props.model.length).trim() : null;
+  return (
+    <span className="bay-plug-name" title={props.name}>
+      <span className="bay-plug-model">{props.model}</span>
+      {n && <span className="bay-plug-n">{n}</span>}
+    </span>
+  );
 }
 
 /** A cable's colour: its player's. */
@@ -169,16 +195,13 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
       if (!dropOn(room, s, start, seat).ok) return;
       setSnapped(seat);
       window.setTimeout(() => setSnapped((n) => (n === seat ? null : n)), 600);
-      const who: Drag =
-        start.kind === "cable"
-          ? s.seats[start.seat].host
-            ? { kind: "pad", controller: s.seats[start.seat].hostController ?? 0, from: start.from }
-            : { kind: "viewer", member: s.seats[start.seat].holder ?? "", from: start.from }
-          : start;
-      if (who.kind === "pad") {
+      const who = start.kind === "cable" ? heldBy(s, start.seat, start.from) : start;
+      if (who?.kind === "pad") {
         void run(`play-${seat}`, { type: "playSeat", seat, controller: who.controller });
-      } else if (who.kind === "viewer") {
+      } else if (who?.kind === "viewer") {
         void run(`pass-${who.member}`, { type: "passControl", member: who.member, seat });
+      } else if (who?.kind === "guestPad") {
+        void run(`pass-${who.member}`, { type: "passControl", member: who.member, seat, controller: who.controller });
       }
     };
     const up = (ev: PointerEvent) => end(ev);
@@ -198,8 +221,8 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
   // The cables: each held seat from its holder, each request dashed.
   const cables: { key: string; from: string; to: string; hue: string; request?: boolean; lifted?: boolean }[] = [];
   s.seats.forEach((seat, i) => {
-    if (!seat.holder) return;
-    const from = seat.host ? `pad:${seat.hostController ?? 0}` : `viewer:${seat.holder}`;
+    const from = cableFrom(s, i);
+    if (!seat.holder || !from) return;
     const lifted = drag?.kind === "cable" && drag.seat === i;
     cables.push({ key: `seat-${i}`, from, to: `seat:${i}`, hue: hueFor(seat.holder), lifted });
   });
@@ -221,15 +244,11 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
   }
   // A cable picked up at its seat stays plugged into its player: its loose
   // end is the one in your hand.
-  const liftedSeat = drag?.kind === "cable" ? s.seats[drag.seat] : undefined;
-  const dragFrom = !drag
-    ? undefined
-    : liftedSeat
-      ? geo[liftedSeat.host ? `pad:${liftedSeat.hostController ?? 0}` : `viewer:${liftedSeat.holder}`]
-      : geo[drag.from];
+  const liftedFrom = drag?.kind === "cable" ? cableFrom(s, drag.seat) : undefined;
+  const dragFrom = !drag ? undefined : liftedFrom ? geo[liftedFrom] : geo[drag.from];
   const target = drag && over != null ? dropOn(room, s, drag, over) : null;
   const dragHue =
-    drag?.kind === "viewer"
+    drag?.kind === "viewer" || drag?.kind === "guestPad"
       ? hueFor(drag.member)
       : drag?.kind === "cable"
         ? hueFor(s.seats[drag.seat]?.holder ?? s.host)
@@ -308,7 +327,7 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
                   aria-label={`Your ${name}: drag onto a seat`}
                 >
                   <Gamepad2 aria-hidden="true" />
-                  <span className="bay-plug-name">{name}</span>
+                  <PlugName model={s.hostControllers[k] ?? name} name={name} />
                   <span className="bay-jack" ref={anchor(`pad:${k}`)} style={{ "--hue": hueFor(s.host) } as React.CSSProperties} />
                 </button>
               </Tooltip>
@@ -320,7 +339,7 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
               >
                 <span className="bay-plug pad fixed" tabIndex={0}>
                   <Keyboard aria-hidden="true" />
-                  <span className="bay-plug-name">Keyboard and mouse</span>
+                  <PlugName model="Keyboard and mouse" name="Keyboard and mouse" />
                   <span className="bay-jack" ref={anchor("kbm")} style={{ "--hue": hueFor(s.host) } as React.CSSProperties} />
                 </span>
               </Tooltip>
@@ -342,33 +361,55 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
             const held = seatsOf(s, id);
             const controllers = controllersOf(s, id);
             const asking = s.requests.some((r) => r.member === id);
+            // Their controllers, a plug each (P12), when there's a seat with
+            // a pad to play.
+            const theirs = s.seats.some((seat) => seat.pad) ? guestPads(s, id) : [];
             return (
-              <ContextMenu key={id} items={viewerEntries(room, s, id, run)}>
-                <div className={`bay-person viewer${asking ? " asking" : ""}`}>
-                  <button
-                    className="bay-plug viewer"
-                    onPointerDown={press({ kind: "viewer", member: id, from: `viewer:${id}` })}
-                    aria-label={`${nameOf(room, id)}: drag onto a seat to hand it over`}
-                    title={s.controlPaused ? PAUSED_REASON : "Drag onto a seat"}
-                  >
-                    <GripVertical className="bay-grip" aria-hidden="true" />
-                    <Avatar id={id} name={nameOf(room, id)} size={32} />
-                    <span className="bay-person-text">
-                      <strong>{nameOf(room, id)}</strong>
-                      <span>
-                        {held.length > 0 ? `plays ${listed(held.map((i) => s.seats[i].label))}` : asking ? "asking to play" : "watching"}
-                        {s.seats.length > 1 && ` · ${controllers === 1 ? "1 controller" : `${controllers} controllers`}`}
+              <Fragment key={id}>
+                <ContextMenu items={viewerEntries(room, s, id, run)}>
+                  <div className={`bay-person viewer${asking ? " asking" : ""}`}>
+                    <button
+                      className="bay-plug viewer"
+                      onPointerDown={press({ kind: "viewer", member: id, from: `viewer:${id}` })}
+                      aria-label={`${nameOf(room, id)}: drag onto a seat to hand it over`}
+                      title={s.controlPaused ? PAUSED_REASON : "Drag onto a seat"}
+                    >
+                      <GripVertical className="bay-grip" aria-hidden="true" />
+                      <Avatar id={id} name={nameOf(room, id)} size={32} />
+                      <span className="bay-person-text">
+                        <strong>{nameOf(room, id)}</strong>
+                        <span>
+                          {held.length > 0 ? `plays ${listed(held.map((i) => s.seats[i].label))}` : asking ? "asking to play" : "watching"}
+                          {s.seats.length > 1 && theirs.length === 0 && ` · ${controllers === 1 ? "1 controller" : `${controllers} controllers`}`}
+                        </span>
                       </span>
-                    </span>
-                    <span className="bay-jack" ref={anchor(`viewer:${id}`)} style={{ "--hue": hueFor(id) } as React.CSSProperties} />
-                  </button>
-                  <DropdownMenu items={viewerEntries(room, s, id, run)}>
-                    <IconButton label={`${nameOf(room, id)}: seats`} size="sm" disabled={props.busy != null}>
-                      <MoreHorizontal />
-                    </IconButton>
-                  </DropdownMenu>
-                </div>
-              </ContextMenu>
+                      <span className="bay-jack" ref={anchor(`viewer:${id}`)} style={{ "--hue": hueFor(id) } as React.CSSProperties} />
+                    </button>
+                    <DropdownMenu items={viewerEntries(room, s, id, run)}>
+                      <IconButton label={`${nameOf(room, id)}: seats`} size="sm" disabled={props.busy != null}>
+                        <MoreHorizontal />
+                      </IconButton>
+                    </DropdownMenu>
+                  </div>
+                </ContextMenu>
+                {theirs.length > 0 && (
+                  <div className="bay-pads guest">
+                    {theirs.map((p) => (
+                      <Tooltip key={p.slot} label={`Drag onto a seat: ${nameOf(room, id)} plays it with their ${p.name}`} side="left">
+                        <button
+                          className="bay-plug pad"
+                          onPointerDown={press({ kind: "guestPad", member: id, controller: p.slot, from: `gpad:${id}:${p.slot}` })}
+                          aria-label={`${nameOf(room, id)}'s ${p.name}: drag onto a seat`}
+                        >
+                          <Gamepad2 aria-hidden="true" />
+                          <PlugName model={p.model} name={p.name} />
+                          <span className="bay-jack" ref={anchor(`gpad:${id}:${p.slot}`)} style={{ "--hue": hueFor(id) } as React.CSSProperties} />
+                        </button>
+                      </Tooltip>
+                    ))}
+                  </div>
+                )}
+              </Fragment>
             );
           })
         )}
@@ -431,12 +472,14 @@ function SeatSocket(props: {
   const yourKeys = seat.keyboardMouse && !seat.holder;
   const who = seat.host || yourKeys ? "You" : seat.holder ? nameOf(room, seat.holder) : "Free";
   const pad = (seat.hostController != null ? pads[seat.hostController] : undefined) ?? "your controller";
+  // A guest's: the controller of theirs driving it, once they've said (P12).
+  const theirs = seat.holder && !seat.host ? guestPads(s, seat.holder).find((p) => p.slot === seat.guestController)?.name : undefined;
   const detail = seat.host
     ? seat.keyboardMouse
       ? `${pad} + keyboard and mouse`
       : pad
     : seat.holder
-      ? "guest"
+      ? (theirs ?? "guest")
       : yourKeys
         ? "your keyboard and mouse"
         : "drop someone here";
