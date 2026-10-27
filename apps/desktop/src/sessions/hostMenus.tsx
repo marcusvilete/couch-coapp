@@ -123,18 +123,20 @@ export function cableFrom(s: SessionView, i: number): string | undefined {
 }
 
 /** Which of `member`'s pad seats giving them seat `i` frees (P13), as the
- * host's session decides (`HostSession::frees`): none while they have a
- * controller to spare; otherwise as many as keep them within their
- * controllers, the one `slot` drives first. `ambiguous` when that's a guess
+ * host's session decides (`HostSession::frees`): the one `slot` drives, if
+ * any (it moves); beyond that, as many as keep them within their
+ * controllers, none while they have one to spare. `ambiguous` when that's a guess
  * the session refuses: more seats to choose from and no controller naming
  * one. (Grants still on their way are the engine's to count.) */
 export function frees(s: SessionView, member: string, i: number, slot?: number): { seats: number[]; ambiguous: boolean } {
   if (!s.seats[i]?.pad) return { seats: [], ambiguous: false };
   const pads = seatsOf(s, member).filter((j) => j !== i && s.seats[j].pad);
   const room = Math.max(0, controllersOf(s, member) - 1);
-  if (pads.length <= room) return { seats: [], ambiguous: false };
-  const excess = pads.length - room;
+  // A controller named that plays one of their seats moves, spare
+  // controllers or not.
   const moving = slot == null ? undefined : pads.find((j) => s.seats[j].guestController === slot);
+  const excess = Math.max(pads.length - room, moving != null ? 1 : 0);
+  if (excess <= 0) return { seats: [], ambiguous: false };
   const order = [...(moving != null ? [moving] : []), ...pads.filter((j) => j !== moving).reverse()];
   return { seats: order.slice(0, excess), ambiguous: moving == null && pads.length > excess };
 }
@@ -171,16 +173,15 @@ export function guestPadHint(room: RoomView, s: SessionView, member: string, slo
     return { ok: true, hint: other != null ? `Swaps with ${s.seats[other].label}` : "Plays here" };
   }
   if (s.controlPaused) return { ok: false, hint: PAUSED_REASON };
-  // Beyond their controllers, this one's seat goes (P13); one playing no
-  // seat can't say which does.
+  // One playing a seat of theirs moves, leaving it; beyond their
+  // controllers, one playing none can't say which seat goes (P13).
   const freed = frees(s, member, i, slot);
   if (freed.ambiguous) return { ok: false, hint: `Drag one of ${nameOf(room, member)}'s controllers playing a seat` };
   const adds = held.length > 0 && freed.seats.length === 0;
   const what = held.length === 0 ? "Hands it over" : adds ? "Added" : `Leaves ${seatsPhrase(s, freed.seats)}`;
-  const swaps = adds && other != null ? ` · ${s.seats[other].label} takes another of theirs` : "";
   const loses = seat.host ? " · yours" : seat.holder ? ` · ${nameOf(room, seat.holder)} loses it` : "";
   const kbm = seat.keyboardMouse ? " · control of your PC" : "";
-  return { ok: true, hint: what + swaps + loses + kbm };
+  return { ok: true, hint: what + loses + kbm };
 }
 
 /** Passing seat `i` to `member` with one of their controllers (P12), as menu

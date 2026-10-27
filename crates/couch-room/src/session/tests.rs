@@ -1053,6 +1053,34 @@ fn a_freed_grant_on_its_way_frees_nothing_when_reported() {
     assert_eq!(s.seats_of(ANA), vec![s1, s2]);
 }
 
+/// P13, the author's run of 0.19.0: two controllers, one on a seat; that
+/// one moved to another seat moves, though the other is spare. The spare
+/// one given a seat adds it.
+#[test]
+fn a_seated_controller_moves_even_with_one_to_spare() {
+    let mut s = with_seats(&[SeatKind::Controller; 3]);
+    s.join(ANA);
+    s.set_controllers(ANA, 2);
+    s.pass(ANA, S0).unwrap();
+    s.seat_changed(S0, Some(ANA));
+    s.set_drivers(ANA, &[(S0, 0)]);
+    let fx = s.pass_with(ANA, S1, Some(0)).unwrap();
+    assert!(fx.contains(&Effect::Revoke {
+        seat: S0,
+        holder: Some(ANA)
+    }));
+    s.seat_changed(S0, None);
+    s.seat_changed(S1, Some(ANA));
+    assert_eq!(s.seats_of(ANA), vec![S1]);
+
+    s.set_drivers(ANA, &[(S1, 0)]);
+    let fx = s.pass_with(ANA, SeatId(2), Some(1)).unwrap();
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Revoke { .. })),
+        "{fx:?}"
+    );
+}
+
 /// P13: with one seat to free, nothing needs choosing.
 #[test]
 fn one_seat_moves_without_a_choice() {

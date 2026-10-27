@@ -391,12 +391,14 @@ impl HostSession {
         pads.into_iter().collect()
     }
 
-    /// Which of `member`'s pad seats giving it `seat` frees (P13): none
-    /// while it has a controller to spare; otherwise only as many as keep it
-    /// within its controllers, normally one. First the seat `controller`
-    /// drives (it moves), then from the last seat down. And whether that
-    /// was a guess: more seats than that to choose from and no controller
-    /// naming one of them.
+    /// Which of `member`'s pad seats giving it `seat` frees (P13). A
+    /// controller named that plays one of them moves: its seat goes, spare
+    /// controllers or not (the author's run of 0.19.0: it had added the
+    /// seat, and a spare controller took the old one). Beyond that, only as
+    /// many as keep it within its controllers, from the last seat down: none
+    /// while it has a controller to spare, normally one otherwise. And
+    /// whether that was a guess: more seats than that to choose from and no
+    /// controller naming one of them.
     pub fn frees(
         &self,
         member: MemberId,
@@ -408,13 +410,16 @@ impl HostSession {
         }
         let pads = self.pad_seats_but(member, seat);
         let room = usize::from(self.controllers_of(member)).saturating_sub(1);
-        if pads.len() <= room {
-            return (Vec::new(), false);
-        }
-        let excess = pads.len() - room;
         let moving = controller
             .and_then(|c| self.driven_by(member, c))
             .filter(|s| pads.contains(s));
+        let excess = pads
+            .len()
+            .saturating_sub(room)
+            .max(usize::from(moving.is_some()));
+        if excess == 0 {
+            return (Vec::new(), false);
+        }
         let mut order: Vec<SeatId> = moving.into_iter().collect();
         order.extend(pads.iter().rev().filter(|s| Some(**s) != moving));
         order.truncate(excess);
