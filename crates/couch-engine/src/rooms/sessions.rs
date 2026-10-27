@@ -19,7 +19,7 @@ use couch_input::{HidUsage, shortcuts::Shortcut};
 use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
-    ipc::{HudRole, HudSeat, HudState, ShortcutKeys, UserAction},
+    ipc::{HudRole, HudSeat, HudState, ShortcutKeys, StreamVolume, UserAction, WindowState},
     session::{
         Cancel, ControlCancel, ControlRequest, EndReason, GameFocus, JoinResult, SeatKind,
         SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, StreamState, ViewerControllers,
@@ -31,7 +31,8 @@ use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 use super::*;
 use crate::{
     AnswerKeys, HostController, InputSetup, RequestView, ScreenArea, SeatView, SessionEnd,
-    SessionRole, SessionView, SourceChoice, StreamStateView, StreamView, WatchEnd,
+    SessionRole, SessionView, SourceChoice, StreamStateView, StreamView, StreamWindowView,
+    WatchEnd,
     pipeline::{
         AudioChoice, Source, ViewerOptions,
         host::{HostOptions, LocalSeat, Rates, StreamControl, StreamOptions},
@@ -127,6 +128,11 @@ struct Watching {
     /// How many controllers the stream window has, as it last said; the
     /// host hears it on every change and after each join (M18).
     controllers: u8,
+    /// The stream volume, as the window or the app last set it (P11).
+    volume: StreamVolume,
+    /// The window's full screen, bar and stats, as it last said; `None`
+    /// until it has (P11).
+    window: Option<WindowState>,
 }
 
 enum WatchState {
@@ -591,6 +597,8 @@ impl Actor {
                 {
                     w.in_front = f.in_front;
                     self.send_hud();
+                    // The app shows it too (P11).
+                    self.announce(room, now);
                 }
             }
             ControlMessage::SessionEnded(e) => {
@@ -1719,11 +1727,15 @@ impl Actor {
             .current_conn(room, host)
             .ok_or(EngineError::Refused("not connected to the host"))?;
         let c = self.conns.get(&conn).ok_or(EngineError::Stopped)?;
+        let volume = crate::store::volume(&self.data_dir);
         let options = WatchOptions {
             session: Some(session.0),
             viewer: ViewerOptions {
                 log: Some(self.data_dir.join("viewer.log")),
                 hide_stats: true,
+                // Settings → Stream window (P11): some watch from another
+                // monitor, with the app's controls instead.
+                hide_bar: !crate::store::stream_window(&self.data_dir).bar,
                 ..ViewerOptions::default()
             },
             measure: false,
@@ -1731,7 +1743,7 @@ impl Actor {
             shortcuts: ShortcutKeys {
                 keys: crate::store::shortcuts(&self.data_dir).changed(),
             },
-            volume: crate::store::volume(&self.data_dir),
+            volume,
         };
         // The subscriptions are in place before the host is asked.
         let (watch, mut events) = Watch::start(
@@ -1770,6 +1782,8 @@ impl Actor {
             in_front: true,
             holding: BTreeSet::new(),
             controllers: 0,
+            volume,
+            window: None,
         });
         self.announce(room, now);
         Ok(None)
@@ -1916,6 +1930,63 @@ impl Actor {
         Ok(Response::Done)
     }
 
+    /// The app changed our stream window's volume (P11): saved for the
+    /// profile, as the window's own slider is, and played from now on.
+    pub(super) fn set_stream_volume(
+        &mut self,
+        volume: StreamVolume,
+        now: Instant,
+    ) -> Result<Response, EngineError> {
+        let volume = volume.clamped();
+        let w = self
+            .sessions
+            .watching
+            .as_mut()
+            .ok_or(EngineError::NotWatching)?;
+        w.volume = volume;
+        let room = w.room;
+        if let Some(watch) = &w.watch {
+            watch.set_volume(volume);
+        }
+        crate::store::save_volume(&self.data_dir, volume)?;
+        self.announce(room, now);
+        Ok(Response::Done)
+    }
+
+    /// Full screen, the bar, the stats, or the front, for our stream window
+    /// (P11). Its new state comes back from the window itself.
+    pub(super) fn stream_window(
+        &mut self,
+        request: crate::StreamWindowRequest,
+    ) -> Result<Response, EngineError> {
+        let watch = self
+            .sessions
+            .watching
+            .as_ref()
+            .and_then(|w| w.watch.as_ref())
+            .ok_or(EngineError::NotWatching)?;
+        watch.window(request.into());
+        Ok(Response::Done)
+    }
+
+    /// Settings → Stream window (P11): saved for the next windows, and the
+    /// one open now follows at once.
+    pub(super) fn set_stream_window(&mut self, bar: bool) -> Result<Response, EngineError> {
+        crate::store::save_stream_window(
+            &self.data_dir,
+            crate::store::StreamWindowSettings { bar },
+        )?;
+        if let Some(watch) = self
+            .sessions
+            .watching
+            .as_ref()
+            .and_then(|w| w.watch.as_ref())
+        {
+            watch.window(couch_proto::ipc::WindowRequest::ShowBar(bar));
+        }
+        Ok(Response::Done)
+    }
+
     /// Gives back one of the seats we hold (M18), keeping the others and any
     /// request; it goes once the host's release arrives.
     pub(super) fn give_back_seat(&mut self, seat: SeatId) -> Result<Response, EngineError> {
@@ -1942,6 +2013,19 @@ impl Actor {
         if let WatchEvent::Volume(volume) = event {
             if let Err(e) = crate::store::save_volume(&self.data_dir, volume) {
                 tracing::warn!("saving the stream volume: {e}");
+            }
+            // The app's slider follows the window's (P11).
+            let room = self
+                .sessions
+                .watching
+                .as_mut()
+                .filter(|w| w.session == session)
+                .map(|w| {
+                    w.volume = volume;
+                    w.room
+                });
+            if let Some(room) = room {
+                self.announce(room, now);
             }
             return;
         }
@@ -1972,6 +2056,13 @@ impl Actor {
             }
             // Saved above, whatever the watch's state.
             WatchEvent::Volume(_) => {}
+            WatchEvent::Window(state) => {
+                let room = w.room;
+                if let Some(w) = self.sessions.watching.as_mut() {
+                    w.window = Some(state);
+                }
+                self.announce(room, now);
+            }
             // The host hears it now if we have joined, or after joining.
             WatchEvent::Controllers(count) => {
                 let (joined, conn, session) = (w.joined(), w.conn, w.session);
@@ -2235,11 +2326,20 @@ impl Actor {
                     .pads_since
                     .map_or(0, |since| since.elapsed().as_secs() as u32),
                 pads_missing: h.pads_missing.iter().map(|seat| seat.0).collect(),
+                stream_window: None,
+                game_in_front: None,
+                note: None,
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
             let status = listing.status.as_ref();
             let mut asked_seat = None;
+            // Ours, if we watch this one (P11): the app's controls.
+            let ours = self
+                .sessions
+                .watching
+                .as_ref()
+                .filter(|w| w.room == room && w.host == *host);
             let role = match &self.sessions.watching {
                 Some(w) if w.room == room && w.host == *host => match w.state {
                     WatchState::Joining(_) => SessionRole::Joining,
@@ -2288,6 +2388,19 @@ impl Actor {
                 pads_setting_up: Vec::new(),
                 pads_setting_up_secs: 0,
                 pads_missing: Vec::new(),
+                stream_window: ours.map(|w| {
+                    let state = w.window;
+                    StreamWindowView {
+                        volume: w.volume.percent,
+                        muted: w.volume.muted,
+                        open: state.is_some(),
+                        fullscreen: state.is_some_and(|s| s.fullscreen),
+                        bar: state.is_none_or(|s| s.bar),
+                        stats: state.is_some_and(|s| s.stats),
+                    }
+                }),
+                game_in_front: ours.map(|w| w.in_front),
+                note: ours.map(|w| w.note.clone()).filter(|n| !n.is_empty()),
             });
         }
         views

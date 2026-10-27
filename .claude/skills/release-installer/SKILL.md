@@ -51,7 +51,8 @@ From its output, leaving out any line containing "token":
 - Serve the folder: `npx --yes http-server target\installer -p 8000`, and give people `http://<this PC>:8000/`, or send all the files another way.
 - **What to tell the people installing it:**
   - Windows SmartScreen warns, since it's unsigned: "More info", then "Run anyway".
-  - It asks to install for just them or for everyone. Afterwards it offers **ViGEmBus** (yes if they'll host games, so guests' controllers reach them) and **HidHide** (optional: lets the host's own controller play through a seat; needs a restart).
+  - It asks to install for just them or for everyone. Afterwards it offers **ViGEmBus** (yes if they'll host games, so guests' controllers reach them) and **HidHide** (optional: lets the host's own controller play through a seat; needs a restart). A driver already installed isn't offered again.
+  - The first session they host on a PC can take a while: Windows sets up each virtual controller the first time (P10). The host console says so, with a timer and Stop waiting; the controllers come up by themselves, and later sessions start at once.
   - Everyone in a session must update: an older build is refused.
   - If something goes wrong, the log is `%LOCALAPPDATA%\CouchCoApp\profiles\default\desktop.log`.
 - The host's own log names each viewer's encoder (`encoding WxH with hevc_nvenc …`), which answers questions like "which codec did they get?" afterwards.

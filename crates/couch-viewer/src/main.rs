@@ -63,6 +63,7 @@ fn main() -> anyhow::Result<()> {
             "--pos"
             | "--size"
             | "--no-hud"
+            | "--no-bar"
             | "--hide-stats"
             | "--hud-preview"
             | "--hud-preview-pointer"
@@ -106,8 +107,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// `--pos X Y` and `--size W H` for the stream window, `--no-hud`,
-/// `--hide-stats`, `--hud-preview STATE`, `--hud-preview-pointer X Y` and
-/// `--hud-scale S`.
+/// `--no-bar` (the session bar alone, P11), `--hide-stats`, `--hud-preview
+/// STATE`, `--hud-preview-pointer X Y` and `--hud-scale S`.
 fn window_options(args: &[String]) -> anyhow::Result<viewer::WindowOptions> {
     let mut options = viewer::WindowOptions::default();
     let mut rest = args.iter();
@@ -121,6 +122,7 @@ fn window_options(args: &[String]) -> anyhow::Result<viewer::WindowOptions> {
             "--pos" => options.position = Some((number()? as i32, number()? as i32)),
             "--size" => options.size = (number()? as u32, number()? as u32),
             "--no-hud" => options.hide_hud = true,
+            "--no-bar" => options.hide_bar = true,
             "--hide-stats" => options.hide_stats = true,
             "--hud-preview" => {
                 let name = rest.next().map(String::as_str).unwrap_or_default();

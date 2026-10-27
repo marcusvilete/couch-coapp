@@ -22,6 +22,7 @@ use couch_media::{
 use couch_proto::{
     ipc::{
         FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, StreamVolume, UserAction,
+        WindowRequest, WindowState,
     },
     session::StreamState,
 };
@@ -74,6 +75,9 @@ pub struct WindowOptions {
     pub size: (u32, u32),
     /// Start with the HUD hidden (it would cover the latency barcode on screen).
     pub hide_hud: bool,
+    /// Start without the session bar, the rest of the HUD showing (P11:
+    /// Settings → Stream window).
+    pub hide_bar: bool,
     /// Start with the stats panel closed (the app's viewers).
     pub hide_stats: bool,
     /// Show a made-up session, without the pipe, to check the HUD by eye
@@ -93,6 +97,7 @@ impl Default for WindowOptions {
             position: None,
             size: (1280, 720),
             hide_hud: false,
+            hide_bar: false,
             hide_stats: false,
             preview: None,
             hud_scale: None,
@@ -262,6 +267,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let mut strip_slot: Option<usize> = None;
     let mut hud = Hud::new(&gpu.device, gpu.config.format);
     hud.visible = !options.hide_hud;
+    hud.show_bar = !options.hide_bar;
     hud.show_stats = !options.hide_stats;
     hud.preview = options.preview.is_some();
     if options.preview == Some(Preview::Muted) {
@@ -291,6 +297,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
     // of a drag.
     let mut volume = StreamVolume::default();
     let mut volume_unsaved: Option<Instant> = None;
+    // The window's state as last told to the main process (P11).
+    let mut reported: Option<WindowState> = None;
 
     'running: loop {
         for event in events.poll_iter() {
@@ -432,6 +440,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     change_volume(&mut volume, saved, audio.as_ref(), &mut hud);
                     redraw = true;
                 }
+                ForWindow::Window(request) => {
+                    window_request(&mut window, &mut hud, request);
+                    redraw = true;
+                }
                 ForWindow::Hud(state) => {
                     let wanted = format!("{} · {} · Couch Co-App", state.title, state.host);
                     if wanted != title {
@@ -453,10 +465,21 @@ pub fn run(options: WindowOptions) -> Result<()> {
         if input.mouse_captured() != was_captured {
             redraw = true;
             if input.mouse_captured() {
-                hud.pointer_gone();
+                hud.mouse_captured();
             }
         }
         was_captured = input.mouse_captured();
+        // The app shows the window's state (P11), however it changed: a
+        // shortcut, the bar, or the app's own request.
+        let state = WindowState {
+            fullscreen: hud.fullscreen,
+            bar: hud.show_bar,
+            stats: hud.show_stats,
+        };
+        if reported != Some(state) {
+            reported = Some(state);
+            let _ = out_tx.send(Outgoing::Window(state));
+        }
         if last_alive.elapsed() >= ALIVE_EVERY {
             last_alive = Instant::now();
             local.push(LocalInput::Alive);
@@ -884,6 +907,31 @@ fn toggle_fullscreen(window: &mut Window, hud: &mut Hud) {
     match window.set_fullscreen(!hud.fullscreen) {
         Ok(()) => hud.fullscreen = !hud.fullscreen,
         Err(e) => tracing::warn!("full screen: {e}"),
+    }
+}
+
+/// Does what the app asks of the window (P11), for someone watching from
+/// another monitor.
+fn window_request(window: &mut Window, hud: &mut Hud, request: WindowRequest) {
+    match request {
+        WindowRequest::Fullscreen(on) => {
+            if on != hud.fullscreen {
+                toggle_fullscreen(window, hud);
+            }
+        }
+        // The bar alone: the centre card and the stats stay (P11).
+        WindowRequest::ShowBar(on) => hud.show_bar = on,
+        WindowRequest::ShowStats(on) => hud.show_stats = on,
+        // The app allowed this process to take the foreground just before
+        // asking; without that, Windows only flashes the taskbar button.
+        WindowRequest::Raise => {
+            if window.is_minimized() {
+                window.restore();
+            }
+            if !window.raise() {
+                tracing::debug!("the window couldn't come to the front");
+            }
+        }
     }
 }
 

@@ -51,6 +51,8 @@ export type World = {
   startFailure: string | null;
   /** Sound guests hear, for the host's meter. */
   sound: "game" | "silent";
+  /** Settings → Stream window (P11): new stream windows show their bar. */
+  streamWindowBar: boolean;
 };
 
 let world: World | null = null;
@@ -251,6 +253,9 @@ export function hostSession(
     padsSettingUp: [],
     padsSettingUpSecs: 0,
     padsMissing: [],
+    streamWindow: null,
+    gameInFront: null,
+    note: null,
   };
 }
 
@@ -503,6 +508,40 @@ function handle(cmd: Command): Response | Promise<Response> {
       return { type: "shortcuts", shortcuts: world.shortcuts };
     case "getNetwork":
       return { type: "network", ...world.network };
+    case "getStreamWindow":
+      return { type: "streamWindow", bar: world.streamWindowBar };
+    case "setStreamWindow": {
+      world.streamWindowBar = cmd.bar;
+      const found = ours();
+      if (found?.session.streamWindow) {
+        found.session.streamWindow.bar = cmd.bar;
+        changed(found.room);
+      }
+      return { type: "done" };
+    }
+    case "setStreamVolume": {
+      const { room, session: s } = watching();
+      if (s.streamWindow) {
+        s.streamWindow.volume = Math.max(0, Math.min(100, cmd.percent));
+        s.streamWindow.muted = cmd.muted;
+      }
+      changed(room);
+      return { type: "done" };
+    }
+    case "streamWindow": {
+      const { room, session: s } = watching();
+      const win = s.streamWindow;
+      if (!win) throw "you aren't watching a stream";
+      // The window answers with its new state a moment later, as the real one.
+      later(120, () => {
+        const r = cmd.request;
+        if (r.type === "fullscreen") win.fullscreen = r.on;
+        if (r.type === "showBar") win.bar = r.on;
+        if (r.type === "showStats") win.stats = r.on;
+        changed(room);
+      });
+      return { type: "done" };
+    }
     case "setNetwork": {
       if (typeof cmd.relay === "object" && !/^https?:\/\/[^/\s]+/.test(cmd.relay.custom)) {
         throw "that relay address won't work: relative URL without a base";
@@ -594,10 +633,14 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (found?.session.role === "host") throw "stop streaming first";
       if (found) throw "stop watching first";
       s.role = "joining";
+      // The stream window opens at once, and says how it is a moment after.
+      s.streamWindow = { volume: 80, muted: false, open: false, fullscreen: false, bar: world.streamWindowBar, stats: false };
+      s.gameInFront = true;
       later(700, () => {
         if (s.role !== "joining") return;
         s.role = "watching";
         s.viewers.push(me());
+        if (s.streamWindow) s.streamWindow.open = true;
         changed(room);
       });
       return roomReply(room);
@@ -605,6 +648,9 @@ function handle(cmd: Command): Response | Promise<Response> {
     case "stopWatching": {
       const { room, session: s } = watching();
       s.role = "none";
+      s.streamWindow = null;
+      s.gameInFront = null;
+      s.note = null;
       s.askedSeat = null;
       s.viewers = s.viewers.filter((v) => v !== me());
       for (const seat of s.seats) if (seat.holder === me()) free(seat);

@@ -83,6 +83,55 @@ export function OverlaySection() {
   );
 }
 
+// ---- Stream window ----
+
+export function StreamWindowSection() {
+  const [bar, setBar] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    request({ type: "getStreamWindow" }, "streamWindow")
+      .then((v) => setBar(v.bar))
+      .catch((e) => setError(errorText(e)));
+  }, []);
+  const change = (next: boolean) => {
+    const was = bar;
+    setBar(next);
+    setError(null);
+    request({ type: "setStreamWindow", bar: next }, "done").catch((e) => {
+      setBar(was);
+      setError(errorText(e));
+    });
+  };
+  return (
+    <div className="settings-section">
+      <p className="settings-lead">
+        When you watch, the stream window shows the game with a bar over the picture: who plays, asking for a seat,
+        the volume. Watching with the stream window on another monitor, you can turn the bar off and use the controls
+        under the session here instead: the volume, full screen, Show window, the bar and the stats.
+      </p>
+      <div className="settings-card">
+        <Switch
+          checked={bar ?? true}
+          disabled={bar == null}
+          onChange={change}
+          label="Show the session bar over the picture"
+          detail="A stream window open now follows at once."
+        />
+      </div>
+      {error && (
+        <p className="field-error selectable" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="settings-note">
+        Without the bar, the stream window still says why it's black (nothing streamed yet, the game closed), and the
+        stats show if you turn them on. Its "Show or hide the overlay" shortcut (Shortcuts) hides all of it, the bar
+        included.
+      </p>
+    </div>
+  );
+}
+
 // ---- Drivers ----
 
 const DRIVERS: Record<DriverName, { title: string; why: string }> = {

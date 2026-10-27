@@ -93,7 +93,9 @@ You need a small Linux server (Ubuntu 24.04) with a name pointing at it. A free 
 - **ViGEmBus:** say yes if they'll host games, so guests' controllers reach the game;
 - **HidHide:** optional. It lets the host's own controllers play through seats, one seat each.
 
-Each one opens its own setup, and Windows asks for administrator rights.
+Each one opens its own setup, and Windows asks for administrator rights. A driver already installed isn't offered again.
+
+The first session someone hosts on a PC can take a while to get its controllers ready: Windows sets up each virtual controller the first time it's plugged in. The app says so, with a timer and a Stop waiting button; the controllers come up by themselves, and later sessions start at once.
 
 | ViGEmBus | HidHide |
 |---|---|

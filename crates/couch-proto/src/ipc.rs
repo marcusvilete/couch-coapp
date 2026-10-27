@@ -15,7 +15,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 11;
+pub const IPC_VERSION: u16 = 12;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -42,8 +42,12 @@ pub mod kinds {
     /// ([`super::ShortcutKeys`]). Until it arrives, the defaults apply.
     pub const SHORTCUTS: u8 = 0x09;
     /// main -> viewer, right after `SHORTCUTS`: the profile's stream volume
-    /// ([`super::StreamVolume`], P6). Until it arrives, full volume.
+    /// ([`super::StreamVolume`], P6). Until it arrives, full volume. Sent
+    /// again whenever the app changes it (P11); the viewer doesn't echo it.
     pub const VOLUME: u8 = 0x0A;
+    /// main -> viewer: something the app asks of the window itself
+    /// ([`super::WindowRequest`], P11).
+    pub const WINDOW: u8 = 0x0B;
 
     /// viewer -> main: a local input event for the host ([`super::LocalInput`]).
     pub const INPUT: u8 = 0x81;
@@ -58,6 +62,9 @@ pub mod kinds {
     /// viewer -> main: the user changed the stream volume
     /// ([`super::StreamVolume`], P6), to remember for the profile.
     pub const VOLUME_CHANGED: u8 = 0x86;
+    /// viewer -> main: the window's state ([`super::WindowState`], P11), at
+    /// once and whenever it changes.
+    pub const WINDOW_STATE: u8 = 0x87;
 }
 
 /// Header of a [`kinds::VIDEO_FRAME`] payload; the access unit follows it.
@@ -397,6 +404,32 @@ impl Default for StreamVolume {
     }
 }
 
+/// Payload of [`kinds::WINDOW`] (postcard, P11): what the app asks of the
+/// stream window, for watching from another monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowRequest {
+    Fullscreen(bool),
+    /// The session bar alone: the centre card and the stats stay. (The
+    /// window's own shortcut hides everything over the picture, the bar
+    /// included, and isn't reported.)
+    ShowBar(bool),
+    ShowStats(bool),
+    /// Come to the front, restored if minimized. The app allows it to take
+    /// the foreground first (Windows refuses a background process otherwise).
+    Raise,
+}
+
+/// Payload of [`kinds::WINDOW_STATE`] (postcard, P11): the stream window as
+/// it is, however it got so (its shortcuts, its bar, or the app).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowState {
+    pub fullscreen: bool,
+    /// The session bar shows when anything happens (not turned off by the
+    /// app or its setting).
+    pub bar: bool,
+    pub stats: bool,
+}
+
 /// Payload of [`kinds::AUDIO_PACKET`] (postcard): an audio datagram as it
 /// arrived.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,6 +751,29 @@ mod tests {
     #[test]
     fn zero_length_is_rejected() {
         assert_eq!(decode(&[0, 0, 0, 0]), Err(IpcError::Empty));
+    }
+
+    /// P11: the window's requests and state travel intact, and trailing
+    /// bytes are refused.
+    #[test]
+    fn window_payloads_roundtrip() {
+        for request in [
+            WindowRequest::Fullscreen(true),
+            WindowRequest::ShowBar(false),
+            WindowRequest::ShowStats(true),
+            WindowRequest::Raise,
+        ] {
+            assert_eq!(from_payload(&to_payload(&request)), Some(request));
+        }
+        let state = WindowState {
+            fullscreen: true,
+            bar: false,
+            stats: true,
+        };
+        let mut bytes = to_payload(&state);
+        assert_eq!(from_payload(&bytes), Some(state));
+        bytes.push(0);
+        assert_eq!(from_payload::<WindowState>(&bytes), None);
     }
 
     /// P6: the stream volume stays within 0 to 100%, and muting keeps it.

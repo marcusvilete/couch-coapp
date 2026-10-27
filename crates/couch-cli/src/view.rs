@@ -170,6 +170,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 position: args.viewer_pos,
                 size: args.viewer_size,
                 hide_hud: args.hide_hud,
+                hide_bar: false,
                 hide_stats: false,
                 log: None,
             },
@@ -250,6 +251,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 Some(WatchEvent::Controllers(n)) => println!("the viewer has {n} controller(s)"),
                 Some(WatchEvent::Volume(v)) => {
                     println!("stream volume {}%{}", v.percent, if v.muted { ", muted" } else { "" });
+                }
+                Some(WatchEvent::Window(w)) => {
+                    println!("window: full screen {}, bar {}, stats {}", w.fullscreen, w.bar, w.stats);
                 }
                 Some(WatchEvent::Action(action)) => println!("the viewer asked to {action:?}; no session here"),
                 Some(WatchEvent::ViewerRestarted) => {

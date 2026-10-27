@@ -71,6 +71,10 @@ pub struct Hud {
     icons: bool,
     /// The whole HUD (Ctrl+Alt+Shift+H by default).
     pub visible: bool,
+    /// The session bar alone (P11: the app's Bar switch and Settings →
+    /// Stream window). Off, the centre card and the stats still show: for
+    /// watching with the app's controls on another monitor.
+    pub show_bar: bool,
     pub show_stats: bool,
     /// Full screen now, for the button's icon.
     pub fullscreen: bool,
@@ -92,6 +96,8 @@ pub struct Hud {
     pointer_at: Option<Instant>,
     /// Since when the pointer has rested on the bar.
     on_bar_since: Option<Instant>,
+    /// When the mouse was last captured for the game.
+    captured_at: Option<Instant>,
     events: Vec<egui::Event>,
     /// Where the bar was last drawn, in points.
     bar_rect: Option<Rect>,
@@ -122,6 +128,7 @@ impl Hud {
             started: Instant::now(),
             icons,
             visible: true,
+            show_bar: true,
             show_stats: true,
             fullscreen: false,
             waiting: false,
@@ -134,6 +141,7 @@ impl Hud {
             changed_at: None,
             pointer_at: None,
             on_bar_since: None,
+            captured_at: None,
             events: Vec::new(),
             bar_rect: None,
             pressed: BTreeSet::new(),
@@ -199,6 +207,13 @@ impl Hud {
     pub fn pointer_gone(&mut self) {
         self.on_bar_since = None;
         self.events.push(egui::Event::PointerGone);
+    }
+
+    /// The mouse was just captured for the game: with the bar off (P11), it
+    /// still comes up for a while, to say which key frees the mouse.
+    pub fn mouse_captured(&mut self) {
+        self.captured_at = Some(Instant::now());
+        self.pointer_gone();
     }
 
     /// The window lost the focus: a release that began on the bar may never
@@ -269,15 +284,21 @@ impl Hud {
         let playing = session.seats.iter().any(|seat| seat.mine);
         let asking = session.role == HudRole::Asking && !playing;
         let away = playing && !session.game_in_front;
+        // With the bar off (P11), it still comes up when a player would
+        // otherwise be stuck: the game out of front, or the mouse just
+        // captured (the hint says which key frees it).
+        let needed =
+            away || (self.mouse_hint.is_some() && recent(self.captured_at, SHOW_AFTER_CHANGE));
         self.visible
-            && (self.preview
-                || asking
-                || away
-                || recent(self.changed_at, SHOW_AFTER_CHANGE)
-                || recent(self.pointer_at, SHOW_AFTER_POINTER)
-                || recent(self.on_bar_since, HOLD_UNDER_POINTER)
-                || self.note.as_ref().is_some_and(|(_, until)| now < *until)
-                || !self.pressed.is_empty())
+            && (needed
+                || self.show_bar
+                    && (self.preview
+                        || asking
+                        || recent(self.changed_at, SHOW_AFTER_CHANGE)
+                        || recent(self.pointer_at, SHOW_AFTER_POINTER)
+                        || recent(self.on_bar_since, HOLD_UNDER_POINTER)
+                        || self.note.as_ref().is_some_and(|(_, until)| now < *until)
+                        || !self.pressed.is_empty()))
     }
 
     /// Records the HUD into `encoder`, drawing over `view`, whose size and

@@ -4,6 +4,7 @@ import type { HostController } from "./HostController";
 import type { InputSetup } from "./InputSetup";
 import type { RelaySetting } from "./RelaySetting";
 import type { SourceChoice } from "./SourceChoice";
+import type { StreamWindowRequest } from "./StreamWindowRequest";
 
 /**
  * Everything the UI can ask of the engine. Its `Debug` leaves out passwords
@@ -44,4 +45,4 @@ max_mbps: number,
 /**
  * This PC's upload cap, split between viewers, Mbit/s.
  */
-upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "setStreamLevel", percent: number, } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "giveBackSeat", seat: number, } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, controller: number, } | { "type": "allowControl" } | { "type": "stopWaitingForPads" };
+upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "setStreamLevel", percent: number, } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, } | { "type": "cancelControl" } | { "type": "giveBackSeat", seat: number, } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, controller: number, } | { "type": "allowControl" } | { "type": "stopWaitingForPads" } | { "type": "setStreamVolume", percent: number, muted: boolean, } | { "type": "streamWindow", request: StreamWindowRequest, } | { "type": "getStreamWindow" } | { "type": "setStreamWindow", bar: boolean, };

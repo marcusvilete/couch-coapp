@@ -40,7 +40,8 @@ use couch_proto::{
     input::RumbleDatagram,
     ipc::{
         self, AudioPacket, AudioStats, FrameTiming, HudState, IpcFrame, LocalInput, NetStats,
-        RumbleState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
+        RumbleState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader, WindowRequest,
+        WindowState,
     },
     media::{AudioDatagram, datagram, decode_payload},
 };
@@ -96,6 +97,8 @@ pub enum WatchEvent {
     Controllers(u8),
     /// The user changed the stream volume in the window (P6): remember it.
     Volume(StreamVolume),
+    /// The window's full screen, bar or stats, as they are now (P11).
+    Window(WindowState),
     /// The user closed the viewer window: watching is over.
     ViewerClosed,
     /// The viewer window crashed, and it can't (or may not yet) be started
@@ -114,6 +117,10 @@ enum WatchCmd {
     SeatAssigned(SeatAssigned),
     SeatReleased(SeatReleased),
     Hud(HudState),
+    /// The app changed the stream volume (P11).
+    Volume(StreamVolume),
+    /// Something the app asks of the window (P11).
+    Window(WindowRequest),
     Reconnect(Box<Link>, u32),
     Stop,
 }
@@ -200,6 +207,18 @@ impl Watch {
         let _ = self.cmds.send(WatchCmd::Hud(hud));
     }
 
+    /// The app changed the stream volume (P11): the window plays at it, and
+    /// a restarted one starts at it.
+    pub fn set_volume(&self, volume: StreamVolume) {
+        let _ = self.cmds.send(WatchCmd::Volume(volume));
+    }
+
+    /// Asks the window for full screen, its bar, its stats, or to come to the
+    /// front (P11). Its new state comes back as [`WatchEvent::Window`].
+    pub fn window(&self, request: WindowRequest) {
+        let _ = self.cmds.send(WatchCmd::Window(request));
+    }
+
     /// Closes the viewer window and waits until it has gone.
     pub async fn stop(mut self) {
         let _ = self.cmds.send(WatchCmd::Stop);
@@ -268,6 +287,8 @@ struct Window {
     said: mpsc::UnboundedReceiver<IpcFrame>,
     reader: JoinHandle<()>,
     guard: Box<dyn std::any::Any + Send>,
+    /// Its process, to let it come to the front (P11).
+    pid: Option<u32>,
     /// The user left (the window's close button, or Leave): its exit is no
     /// crash.
     left: bool,
@@ -279,6 +300,7 @@ impl Window {
             stdin,
             mut stdout,
             guard,
+            pid,
         } = backend.launch_viewer(options)?;
         // What the viewer says, until its stdout closes.
         let (said_tx, said) = mpsc::unbounded_channel::<IpcFrame>();
@@ -297,6 +319,7 @@ impl Window {
             said,
             reader,
             guard,
+            pid,
             left: false,
         })
     }
@@ -537,6 +560,20 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
                     ctx.last_hud = Some(hud);
                     sent
                 }
+                Some(WatchCmd::Volume(volume)) => {
+                    ctx.options.volume = volume;
+                    ctx.window.to.send(ipc::kinds::VOLUME, &ipc::to_payload(&volume)).await
+                }
+                Some(WatchCmd::Window(request)) => {
+                    // Windows lets a background process take the foreground
+                    // only if the one in front, the app, allows it first.
+                    if request == WindowRequest::Raise
+                        && let Some(pid) = ctx.window.pid
+                    {
+                        ctx.backend.allow_foreground(pid);
+                    }
+                    ctx.window.to.send(ipc::kinds::WINDOW, &ipc::to_payload(&request)).await
+                }
                 Some(WatchCmd::Reconnect(link, id)) => {
                     // Whatever the old connection's loss hasn't said yet: no
                     // seat survives a connection.
@@ -632,6 +669,15 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
             if let Some(volume) = ipc::from_payload::<StreamVolume>(&frame.payload) {
                 ctx.options.volume = volume;
                 ctx.event(WatchEvent::Volume(volume));
+            }
+        }
+        ipc::kinds::WINDOW_STATE => {
+            if let Some(state) = ipc::from_payload::<WindowState>(&frame.payload) {
+                // A restarted window starts with the bar and stats as they
+                // were (full screen is the user's to choose again).
+                ctx.options.viewer.hide_bar = !state.bar;
+                ctx.options.viewer.hide_stats = !state.stats;
+                ctx.event(WatchEvent::Window(state));
             }
         }
         ipc::kinds::USER_ACTION => {

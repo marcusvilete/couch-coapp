@@ -33,6 +33,9 @@ function view(over: Partial<SessionView>): SessionView {
     padsSettingUp: [],
     padsSettingUpSecs: 0,
     padsMissing: [],
+    streamWindow: null,
+    gameInFront: null,
+    note: null,
     ...over,
   };
 }

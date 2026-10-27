@@ -1,7 +1,19 @@
 // Someone else's session, as a card of a fixed height: the host, what's
 // streamed, a tile per seat with who plays it, and what we can do: watch,
 // ask for a seat (the tiles), give seats back, stop watching.
-import { Eye, Gamepad2, Keyboard, LogOut, MousePointer2, Undo2 } from "lucide-react";
+import {
+  Activity,
+  AppWindow,
+  Eye,
+  Gamepad2,
+  Keyboard,
+  LogOut,
+  Maximize,
+  Minimize,
+  MousePointer2,
+  PanelTop,
+  Undo2,
+} from "lucide-react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
@@ -12,6 +24,7 @@ import { Badge, Spinner } from "../ui/Feedback";
 import { ContextMenu, type MenuEntry } from "../ui/Menu";
 import { Tooltip } from "../ui/Tooltip";
 import type { Busy } from "../model/sessions";
+import { windowCommand } from "./StreamWindowPanel";
 import { useRun, type Notify } from "./useRun";
 import "./SessionCard.css";
 
@@ -54,6 +67,7 @@ export function SessionCard(props: {
         : null;
   const asked = s.askedSeat;
   const idle = idleText(host, s.stream);
+  const win = s.streamWindow;
 
   let state: string;
   switch (s.role) {
@@ -93,6 +107,33 @@ export function SessionCard(props: {
         })),
         ...(s.role === "asking"
           ? [{ label: "Withdraw the request", icon: <Undo2 />, onSelect: () => void run("cancel", { type: "cancelControl" }) }]
+          : []),
+        // The stream window's own (P11), as under the cards.
+        ...(win?.open
+          ? ([
+              "separator",
+              {
+                label: win.fullscreen ? "Stream window: back to a window" : "Stream window: full screen",
+                icon: win.fullscreen ? <Minimize /> : <Maximize />,
+                onSelect: () => void run("window", windowCommand({ type: "fullscreen", on: !win.fullscreen })),
+              },
+              {
+                label: "Show the stream window",
+                icon: <AppWindow />,
+                onSelect: () => void run("window", windowCommand({ type: "raise" })),
+              },
+              {
+                label: win.bar ? "Hide its bar" : "Show its bar",
+                icon: <PanelTop />,
+                onSelect: () => void run("window", windowCommand({ type: "showBar", on: !win.bar })),
+              },
+              {
+                label: win.stats ? "Hide its stats" : "Show its stats",
+                icon: <Activity />,
+                onSelect: () => void run("window", windowCommand({ type: "showStats", on: !win.stats })),
+              },
+              "separator",
+            ] satisfies MenuEntry[])
           : []),
         { label: "Stop watching", icon: <LogOut />, onSelect: () => void run("stop", { type: "stopWatching" }) },
       ]

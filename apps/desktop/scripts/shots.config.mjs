@@ -154,6 +154,7 @@ export const SHOTS = [
     },
   ],
   ["settings-overlay", "lobby", settings("Overlay and sounds")],
+  ["settings-stream-window", "lobby", settings("Stream window")],
   ["settings-network", "lobby", settings("Network")],
   ["settings-network-release", "release-build", settings("Network")],
   ["settings-drivers", "lobby", settings("Drivers")],
@@ -162,7 +163,17 @@ export const SHOTS = [
   ["settings-about", "lobby", settings("About")],
 ];
 
-const SETTINGS = ["Appearance", "Shortcuts", "Overlay and sounds", "Network", "Drivers", "Backup", "About", "Profile"];
+const SETTINGS = [
+  "Appearance",
+  "Shortcuts",
+  "Overlay and sounds",
+  "Stream window",
+  "Network",
+  "Drivers",
+  "Backup",
+  "About",
+  "Profile",
+];
 
 /** [name, scenario, regions that must not move, [label, move][]]. */
 export const STABLE = [
@@ -206,6 +217,19 @@ export const STABLE = [
       ["more", click("One controller more")],
       ["keyboard", async (page) => page.getByRole("radio", { name: "A seat of their own" }).click()],
       ["none", click("One controller less")],
+    ],
+  ],
+  [
+    // P11: the stream window's controls change in place; the card above
+    // them never moves.
+    "watch card",
+    "watching",
+    [".session-card", ".window-panel"],
+    [
+      ["full screen", click("Full screen")],
+      ["bar off", async (page) => page.getByRole("switch", { name: "Bar" }).click()],
+      ["back", click("Back to a window")],
+      ["bar on", async (page) => page.getByRole("switch", { name: "Bar" }).click()],
     ],
   ],
   [

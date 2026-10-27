@@ -6,6 +6,7 @@ import type { SeatView } from "./SeatView";
 import type { SessionRole } from "./SessionRole";
 import type { StreamStateView } from "./StreamStateView";
 import type { StreamView } from "./StreamView";
+import type { StreamWindowView } from "./StreamWindowView";
 
 /**
  * A live session in a room, as this profile sees it.
@@ -105,4 +106,18 @@ padsSettingUpSecs: number,
  * For the host: the seats with a pad that have none, for the rest of the
  * session (it couldn't be plugged, or setting it up was given up).
  */
-padsMissing: Array<number>, };
+padsMissing: Array<number>, 
+/**
+ * For a viewer: our stream window, for the app's controls (P11).
+ */
+streamWindow: StreamWindowView | null, 
+/**
+ * For a viewer: whether the host's game is in front on their PC, as the
+ * host last said (keyboard and mouse don't reach it while it isn't).
+ */
+gameInFront: boolean | null, 
+/**
+ * For a viewer: the latest news, as the stream window's bar shows it
+ * ("The host said no, for now"); `None` for none.
+ */
+note: string | null, };
