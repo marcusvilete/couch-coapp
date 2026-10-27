@@ -162,9 +162,9 @@ impl InputCapture {
         }
     }
 
-    /// One line for the HUD. With several pad seats (M18), which controller
-    /// drives which: "pad A → seat 1, pad B → seat 3" (seats by number from 1,
-    /// pads by slot).
+    /// The stats card's Input row: what this viewer drives and with what.
+    /// With several pad seats (M18), which controller drives which: "pad A →
+    /// seat 1, pad B → seat 3" (seats by number from 1, pads by slot).
     pub fn hud_line(&self) -> String {
         let pad_seats: Vec<&HeldSeat> = self
             .seats
@@ -202,22 +202,26 @@ impl InputCapture {
                         what.push(name);
                     }
                 }
-                let mouse = if self.may(Permissions::MOUSE) {
-                    if self.captured {
-                        format!(
-                            "  ({} frees the mouse)",
-                            self.shortcuts.binding(Shortcut::FreeMouse).keys()
-                        )
-                    } else {
-                        "  (click to capture the mouse)".to_string()
-                    }
-                } else {
-                    String::new()
-                };
-                format!("Controlling: {}  [{pad}]{mouse}", what.join(", "))
+                format!("{} · {pad}", what.join(", "))
             }
-            _ => format!("Watching  [{pad}]"),
+            _ => format!("watching · {pad}"),
         }
+    }
+
+    /// What the bar tells a player holding the mouse (M21): how to capture
+    /// it, or how to free it again. `None` without the mouse.
+    pub fn mouse_hint(&self) -> Option<String> {
+        if !self.seats.holding() || !self.may(Permissions::MOUSE) {
+            return None;
+        }
+        Some(if self.captured {
+            format!(
+                "{} frees the mouse",
+                self.shortcuts.binding(Shortcut::FreeMouse).keys()
+            )
+        } else {
+            "Click the picture to capture the mouse".to_string()
+        })
     }
 
     /// Handles one event, appending what to send to `out`.
