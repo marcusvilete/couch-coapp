@@ -16,7 +16,8 @@ use std::{
 use couch_engine::{
     Command, Engine, EngineError, EngineOptions, Event, HidingView, HostController,
     HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile, Response, RoomView,
-    SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView, WatchEnd,
+    SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView, StreamWindowRequest,
+    StreamWindowSettingsView, WatchEnd,
     pipeline::{
         AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, Source, Sources,
         ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
@@ -41,7 +42,10 @@ use couch_media::{
 use couch_net::endpoint::{RelayChoice, RelayToken};
 use couch_proto::{
     input::PadSnapshot,
-    ipc::{HudState, LocalInput, SeatState, ShortcutKeys, UserAction, VideoFrameHeader},
+    ipc::{
+        HudState, LocalInput, SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
+        WindowRequest, WindowState,
+    },
     session::{EndReason, SeatKind, StreamState},
 };
 use couch_room::{limits::LimitConfig, room::Timings};
@@ -114,6 +118,8 @@ struct Fake {
     answer_keys_fail: AtomicBool,
     /// The game window isn't in front (another window took the focus).
     away: AtomicBool,
+    /// The stream windows allowed to take the foreground, by process (P11).
+    foreground_allowed: Mutex<Vec<u32>>,
     /// The host's own controller.
     local: FakeLocal,
     /// How many of the host's controllers are hidden from games now.
@@ -624,10 +630,14 @@ impl Backend for Fake {
         Some(Box::new(WatchedFakeGame(self.game.clone())))
     }
 
-    fn launch_viewer(&self, _options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
-        let (viewer, process) = FakeViewer::launch();
+    fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
+        let (viewer, process) = FakeViewer::launch(options);
         self.viewers.lock().unwrap().push(viewer);
         Ok(process)
+    }
+
+    fn allow_foreground(&self, pid: u32) {
+        self.foreground_allowed.lock().unwrap().push(pid);
     }
 
     fn host_keys(
@@ -703,19 +713,55 @@ struct FakeViewer {
     shortcuts: Arc<Mutex<Option<ShortcutKeys>>>,
     /// The codec of the last frame received (`couch_proto::codec`).
     codec: Arc<AtomicU32>,
+    /// The stream volume, as the main process last set it (P6, P11).
+    volume: Arc<Mutex<Option<StreamVolume>>>,
+    /// What the app asked of the window (P11), in order.
+    requests: Arc<Mutex<Vec<WindowRequest>>>,
+    /// It was started with its bar hidden (`--no-bar`).
+    started_without_bar: Arc<AtomicBool>,
+    /// It was started with its stats shown (no `--hide-stats`).
+    started_with_stats: Arc<AtomicBool>,
 }
 
+/// The process id every fake stream window has, to see the foreground
+/// allowed to it (P11).
+const FAKE_VIEWER_PID: u32 = 4242;
+
 impl FakeViewer {
-    fn launch() -> (Self, ViewerProcess) {
+    /// Like the real one, it says how it is at once and after each request
+    /// (P11).
+    fn launch(options: &ViewerOptions) -> (Self, ViewerProcess) {
+        let (hide_bar, hide_stats) = (options.hide_bar, options.hide_stats);
         let (main_in, mut viewer_in) = tokio::io::duplex(1 << 20);
         let (mut viewer_out, main_out) = tokio::io::duplex(1 << 20);
         let (say, mut to_say) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
         let viewer = Self::default();
+        viewer.started_without_bar.store(hide_bar, Ordering::SeqCst);
+        viewer
+            .started_with_stats
+            .store(!hide_stats, Ordering::SeqCst);
         *viewer.say.lock().unwrap() = Some(say);
         let v = viewer.clone();
         tokio::spawn(async move {
             let mut alive = tokio::time::interval(Duration::from_millis(100));
             let mut scratch = Vec::new();
+            let mut state = WindowState {
+                fullscreen: false,
+                bar: !hide_bar,
+                stats: !hide_stats,
+            };
+            let payload = couch_proto::ipc::to_payload(&state);
+            if ipc::write_frame(
+                &mut viewer_out,
+                couch_proto::ipc::kinds::WINDOW_STATE,
+                &payload,
+                &mut scratch,
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
             loop {
                 tokio::select! {
                     frame = ipc::read_frame(&mut viewer_in) => {
@@ -744,6 +790,23 @@ impl FakeViewer {
                             couch_proto::ipc::kinds::HUD_STATE => {
                                 *v.hud.lock().unwrap() = couch_proto::ipc::from_payload(&frame.payload);
                             }
+                            couch_proto::ipc::kinds::VOLUME => {
+                                *v.volume.lock().unwrap() = couch_proto::ipc::from_payload(&frame.payload);
+                            }
+                            couch_proto::ipc::kinds::WINDOW => {
+                                let Some(request) = couch_proto::ipc::from_payload::<WindowRequest>(&frame.payload) else { continue };
+                                v.requests.lock().unwrap().push(request);
+                                match request {
+                                    WindowRequest::Fullscreen(on) => state.fullscreen = on,
+                                    WindowRequest::ShowBar(on) => state.bar = on,
+                                    WindowRequest::ShowStats(on) => state.stats = on,
+                                    WindowRequest::Raise => continue,
+                                }
+                                let payload = couch_proto::ipc::to_payload(&state);
+                                if ipc::write_frame(&mut viewer_out, couch_proto::ipc::kinds::WINDOW_STATE, &payload, &mut scratch).await.is_err() {
+                                    break;
+                                }
+                            }
                             couch_proto::ipc::kinds::SHUTDOWN => {
                                 v.shut_down.store(true, Ordering::SeqCst);
                                 break;
@@ -771,8 +834,26 @@ impl FakeViewer {
             stdin: Box::pin(main_in),
             stdout: Box::pin(main_out),
             guard: Box::new(()),
+            pid: Some(FAKE_VIEWER_PID),
         };
         (viewer, process)
+    }
+
+    /// The user moves the window's own volume slider (P6).
+    fn set_volume(&self, volume: StreamVolume) {
+        self.say(
+            couch_proto::ipc::kinds::VOLUME_CHANGED,
+            couch_proto::ipc::to_payload(&volume),
+        );
+    }
+
+    /// The user toggles something on the window itself (its shortcut, its
+    /// bar): it says how it is now (P11).
+    fn state(&self, state: WindowState) {
+        self.say(
+            couch_proto::ipc::kinds::WINDOW_STATE,
+            couch_proto::ipc::to_payload(&state),
+        );
     }
 
     fn say(&self, kind: u8, payload: Vec<u8>) {
@@ -4077,4 +4158,149 @@ async fn a_pad_not_set_up_in_time_is_given_up() {
     assert_eq!(fake.pads_given_up.load(Ordering::SeqCst), 1);
     assert_eq!(fake.pads_plugged(), 0);
     pipeline.stop().await;
+}
+
+/// P11: the app's controls reach the stream window, and the window's own
+/// changes reach the app; a restarted window keeps its bar and stats.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_apps_controls_reach_the_stream_window_and_back() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    let open = |s: Option<&SessionView>| s.and_then(|s| s.stream_window).filter(|w| w.open);
+    b.wait_session(&room, &a, "the window's state", |s| {
+        open(s).is_some_and(|w| w.bar && !w.fullscreen && !w.stats)
+            && s.is_some_and(|s| s.game_in_front == Some(true))
+    })
+    .await;
+
+    // The app's volume reaches the window; the window's reaches the app.
+    b.ok(Command::SetStreamVolume {
+        percent: 40,
+        muted: true,
+    })
+    .await;
+    let quiet = StreamVolume {
+        percent: 40,
+        muted: true,
+    };
+    wait("the volume in the window", || {
+        *window.volume.lock().unwrap() == Some(quiet)
+    })
+    .await;
+    window.set_volume(StreamVolume {
+        percent: 70,
+        muted: false,
+    });
+    b.wait_session(&room, &a, "the window's volume", |s| {
+        open(s).is_some_and(|w| w.volume == 70 && !w.muted)
+    })
+    .await;
+
+    // Full screen and the front, asked from the app.
+    b.ok(Command::StreamWindow {
+        request: StreamWindowRequest::Fullscreen { on: true },
+    })
+    .await;
+    b.wait_session(&room, &a, "full screen", |s| {
+        open(s).is_some_and(|w| w.fullscreen)
+    })
+    .await;
+    b.ok(Command::StreamWindow {
+        request: StreamWindowRequest::Raise,
+    })
+    .await;
+    wait("asked to the front", || {
+        window
+            .requests
+            .lock()
+            .unwrap()
+            .contains(&WindowRequest::Raise)
+    })
+    .await;
+    // Allowed the foreground first, by its process.
+    assert_eq!(
+        *b.fake.foreground_allowed.lock().unwrap(),
+        [FAKE_VIEWER_PID]
+    );
+
+    // The window's own shortcut hides its bar, its button shows the stats.
+    window.state(WindowState {
+        fullscreen: true,
+        bar: false,
+        stats: true,
+    });
+    b.wait_session(&room, &a, "bar off, stats on", |s| {
+        open(s).is_some_and(|w| !w.bar && w.stats)
+    })
+    .await;
+
+    // The game leaving the front on the host shows in the app too.
+    a.fake.away.store(true, Ordering::SeqCst);
+    b.wait_session(&room, &a, "the game out of front", |s| {
+        s.is_some_and(|s| s.game_in_front == Some(false))
+    })
+    .await;
+
+    // A crashed window starts again as it was: bar off, stats on.
+    window.crash();
+    wait("a new window", || b.fake.viewers.lock().unwrap().len() == 2).await;
+    let second = b.fake.viewer().expect("the new window");
+    assert!(
+        second.started_without_bar.load(Ordering::SeqCst),
+        "the bar stays off"
+    );
+    assert!(
+        second.started_with_stats.load(Ordering::SeqCst),
+        "the stats stay on"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// P11: Settings → Stream window: a new window opens without its bar, and
+/// one open follows the setting at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stream_window_setting_turns_the_bar_off() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let reply = b.handle(Command::GetStreamWindow).await;
+    assert!(
+        matches!(
+            reply,
+            Ok(Response::StreamWindow(StreamWindowSettingsView {
+                bar: true
+            }))
+        ),
+        "on by default: {reply:?}"
+    );
+    b.ok(Command::SetStreamWindow { bar: false }).await;
+    let window = watching(&room, &a, &b).await;
+    assert!(window.started_without_bar.load(Ordering::SeqCst));
+    b.wait_session(&room, &a, "the bar off", |s| {
+        s.and_then(|s| s.stream_window)
+            .is_some_and(|w| w.open && !w.bar)
+    })
+    .await;
+
+    b.ok(Command::SetStreamWindow { bar: true }).await;
+    wait("the bar back on", || {
+        window
+            .requests
+            .lock()
+            .unwrap()
+            .contains(&WindowRequest::ShowBar(true))
+    })
+    .await;
+    b.wait_session(&room, &a, "the bar on", |s| {
+        s.and_then(|s| s.stream_window).is_some_and(|w| w.bar)
+    })
+    .await;
+    let reply = b.handle(Command::GetStreamWindow).await;
+    assert!(matches!(
+        reply,
+        Ok(Response::StreamWindow(StreamWindowSettingsView {
+            bar: true
+        }))
+    ));
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

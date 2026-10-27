@@ -123,6 +123,7 @@ export function Slider(props: {
   onChange: (value: number) => void;
   label: string;
   valueText?: string;
+  disabled?: boolean;
 }) {
   return (
     <RSlider.Root
@@ -132,6 +133,7 @@ export function Slider(props: {
       min={props.min}
       max={props.max}
       step={props.step}
+      disabled={props.disabled}
       onValueChange={([v]) => props.onChange(v)}
       aria-label={props.label}
     >

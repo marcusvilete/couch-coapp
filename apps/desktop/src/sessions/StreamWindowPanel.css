@@ -1,0 +1,75 @@
+/* The stream window's controls (P11): one panel of a fixed height, whatever
+   it says. */
+.window-panel {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s4);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+
+.window-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 24px;
+
+  & h3 {
+    flex: none;
+    font-family: var(--font);
+    font-size: var(--text-xs);
+    font-weight: 650;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+}
+
+.window-status {
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &.away {
+    color: var(--warn);
+  }
+}
+
+.window-panel-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3) var(--s5);
+}
+
+.window-volume {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 200px) 44px;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.window-volume-value {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+
+  &.muted {
+    color: var(--text-faint);
+    text-decoration: line-through;
+  }
+}
+
+.window-actions,
+.window-switches {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.window-switches .switch-row {
+  padding: 0;
+}

@@ -38,6 +38,7 @@ use couch_proto::{
     control::{ALIVE_EVERY, Alive, ControlMessage, close_code},
     ids::{InviteTag, InviteToken, MemberId, RoomId, RoomNonce, SeatId, SessionId},
     invite::Invite,
+    ipc::StreamVolume,
     room::{OwnedPolicy, PeerAddr, RoomSnapshot, valid_name},
 };
 use couch_room::{
@@ -737,6 +738,7 @@ impl Actor {
             | Command::ResetShortcuts { .. }
             | Command::GetNetwork
             | Command::SetNetwork { .. }
+            | Command::GetStreamWindow
             | Command::GetDrivers
             | Command::GetNotices
             | Command::ExportProfile { .. }
@@ -801,6 +803,11 @@ impl Actor {
             Command::PlaySeat { seat, controller } => self.play_seat(SeatId(seat), controller, now),
             Command::AllowControl => self.allow_control(now),
             Command::StopWaitingForPads => self.stop_waiting_for_pads(),
+            Command::SetStreamVolume { percent, muted } => {
+                self.set_stream_volume(StreamVolume { percent, muted }, now)
+            }
+            Command::StreamWindow { request } => self.stream_window(request),
+            Command::SetStreamWindow { bar } => self.set_stream_window(bar),
         };
         let _ = reply.send(result);
     }

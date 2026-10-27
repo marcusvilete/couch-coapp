@@ -300,6 +300,79 @@ pub enum Command {
     /// setting up (P10). They are unplugged, and their seats go on without
     /// one.
     StopWaitingForPads,
+    /// While watching: the stream window's volume (P11), 0 to 100%, saved
+    /// for the profile as the window's own slider is.
+    SetStreamVolume {
+        percent: u8,
+        muted: bool,
+    },
+    /// While watching: something for the stream window itself (P11).
+    StreamWindow {
+        request: StreamWindowRequest,
+    },
+    /// Settings → Stream window (P11): how stream windows open.
+    GetStreamWindow,
+    /// Saves it; a stream window open now follows at once.
+    SetStreamWindow {
+        bar: bool,
+    },
+}
+
+/// What the app asks of the stream window (P11), for watching from another
+/// monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export)]
+pub enum StreamWindowRequest {
+    Fullscreen {
+        on: bool,
+    },
+    /// The session bar alone: the centre card and the stats stay.
+    ShowBar {
+        on: bool,
+    },
+    ShowStats {
+        on: bool,
+    },
+    /// Come to the front, restored if minimized.
+    Raise,
+}
+
+impl From<StreamWindowRequest> for couch_proto::ipc::WindowRequest {
+    fn from(request: StreamWindowRequest) -> Self {
+        use couch_proto::ipc::WindowRequest as W;
+        match request {
+            StreamWindowRequest::Fullscreen { on } => W::Fullscreen(on),
+            StreamWindowRequest::ShowBar { on } => W::ShowBar(on),
+            StreamWindowRequest::ShowStats { on } => W::ShowStats(on),
+            StreamWindowRequest::Raise => W::Raise,
+        }
+    }
+}
+
+/// Answer to [`Command::GetStreamWindow`]: Settings → Stream window (P11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StreamWindowSettingsView {
+    /// New stream windows show the session bar over the picture.
+    pub bar: bool,
+}
+
+/// The stream window of a session we watch, for the app's controls (P11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StreamWindowView {
+    /// 0 to 100%.
+    pub volume: u8,
+    pub muted: bool,
+    /// The window has said how it is: until then, the controls wait.
+    pub open: bool,
+    pub fullscreen: bool,
+    /// Its session bar shows when anything happens.
+    pub bar: bool,
+    pub stats: bool,
 }
 
 /// One row of [`Command::GetShortcuts`].
@@ -701,6 +774,14 @@ pub struct SessionView {
     /// For the host: the seats with a pad that have none, for the rest of the
     /// session (it couldn't be plugged, or setting it up was given up).
     pub pads_missing: Vec<u8>,
+    /// For a viewer: our stream window, for the app's controls (P11).
+    pub stream_window: Option<StreamWindowView>,
+    /// For a viewer: whether the host's game is in front on their PC, as the
+    /// host last said (keyboard and mouse don't reach it while it isn't).
+    pub game_in_front: Option<bool>,
+    /// For a viewer: the latest news, as the stream window's bar shows it
+    /// ("The host said no, for now"); `None` for none.
+    pub note: Option<String>,
 }
 
 /// Whether a session streams anything (M19).
@@ -874,6 +955,7 @@ pub enum Response {
         shortcuts: Vec<ShortcutView>,
     },
     Network(NetworkView),
+    StreamWindow(StreamWindowSettingsView),
     Drivers {
         drivers: Vec<DriverView>,
     },
@@ -1029,6 +1111,19 @@ impl fmt::Debug for Command {
                 .finish(),
             Self::AllowControl => f.write_str("AllowControl"),
             Self::StopWaitingForPads => f.write_str("StopWaitingForPads"),
+            Self::SetStreamVolume { percent, muted } => f
+                .debug_struct("SetStreamVolume")
+                .field("percent", percent)
+                .field("muted", muted)
+                .finish(),
+            Self::StreamWindow { request } => f
+                .debug_struct("StreamWindow")
+                .field("request", request)
+                .finish(),
+            Self::GetStreamWindow => f.write_str("GetStreamWindow"),
+            Self::SetStreamWindow { bar } => {
+                f.debug_struct("SetStreamWindow").field("bar", bar).finish()
+            }
         }
     }
 }
@@ -1057,6 +1152,7 @@ impl fmt::Debug for Response {
                 .field("shortcuts", &shortcuts.len())
                 .finish(),
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
+            Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
@@ -1881,6 +1977,9 @@ impl Engine {
                 store::save_network(dir, &store::NetworkSettings { relay })?;
                 Ok(Response::Done)
             }
+            Command::GetStreamWindow => Ok(Response::StreamWindow(StreamWindowSettingsView {
+                bar: store::stream_window(self.profile.data_dir()).bar,
+            })),
             Command::ListSources => {
                 let backend = self.backend.clone();
                 let (sources, controllers, host_controllers, hiding, virtual_pads) =

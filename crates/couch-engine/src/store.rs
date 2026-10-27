@@ -5,6 +5,7 @@
 //! - `network.json`: the relay to use (applies when the engine starts).
 //! - `audio.json`: the stream window's volume (P6).
 //! - `host-audio.json`: how loud guests hear our stream's sound (P7).
+//! - `stream-window.json`: how stream windows open: with the bar or not (P11).
 //!
 //! The room actor rewrites `settings.json` whole, so what the engine itself
 //! writes has files of its own.
@@ -42,6 +43,7 @@ const SHORTCUTS_FILE: &str = "shortcuts.json";
 const NETWORK_FILE: &str = "network.json";
 const AUDIO_FILE: &str = "audio.json";
 const HOST_AUDIO_FILE: &str = "host-audio.json";
+const STREAM_WINDOW_FILE: &str = "stream-window.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread. `CCR3` (M13) adds the chain of
@@ -66,12 +68,13 @@ pub enum StoreError {
 
 /// The settings files a backup carries, as they are (`crate::backup`).
 /// Not the webview's own storage (the room order, the last session setup).
-const BACKED_UP_FILES: [&str; 5] = [
+const BACKED_UP_FILES: [&str; 6] = [
     SETTINGS_FILE,
     SHORTCUTS_FILE,
     NETWORK_FILE,
     AUDIO_FILE,
     HOST_AUDIO_FILE,
+    STREAM_WINDOW_FILE,
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,6 +481,39 @@ pub(crate) fn volume(dir: &Path) -> StreamVolume {
 pub(crate) fn save_volume(dir: &Path, volume: StreamVolume) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(&volume).expect("volume serialize");
     write_atomic(&dir.join(AUDIO_FILE), &bytes)
+}
+
+/// `stream-window.json` (P11): how stream windows open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StreamWindowSettings {
+    /// The session bar over the picture; off for those watching from
+    /// another monitor, with the app's controls instead.
+    pub bar: bool,
+}
+
+impl Default for StreamWindowSettings {
+    fn default() -> Self {
+        Self { bar: true }
+    }
+}
+
+pub(crate) fn stream_window(dir: &Path) -> StreamWindowSettings {
+    let path = dir.join(STREAM_WINDOW_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            StreamWindowSettings::default()
+        }),
+        Err(_) => StreamWindowSettings::default(),
+    }
+}
+
+pub(crate) fn save_stream_window(
+    dir: &Path,
+    settings: StreamWindowSettings,
+) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
+    write_atomic(&dir.join(STREAM_WINDOW_FILE), &bytes)
 }
 
 /// `host-audio.json` (P7): how loud guests hear our stream's sound.

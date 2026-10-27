@@ -10,8 +10,8 @@
 use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::WindowsAndMessaging::{
-        GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
-        IsWindow, WindowFromPoint,
+        AllowSetForegroundWindow, GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow,
+        GetWindowThreadProcessId, IsWindow, WindowFromPoint,
     },
 };
 
@@ -51,6 +51,16 @@ pub fn pointer_over(window: WindowId) -> bool {
 pub fn window_exists(window: WindowId) -> bool {
     // SAFETY: IsWindow accepts any handle value.
     unsafe { IsWindow(Some(HWND(window.0 as *mut _))) }.as_bool()
+}
+
+/// Lets process `pid` bring a window of its own to the front next (P11: the
+/// stream window, when the app's Show window is clicked). Windows refuses a
+/// background process the foreground unless the one in front allows it; the
+/// app is in front when its button is clicked. `false` if Windows said no
+/// (the app isn't in front after all).
+pub fn allow_foreground(pid: u32) -> bool {
+    // SAFETY: takes a process id by value.
+    unsafe { AllowSetForegroundWindow(pid) }.is_ok()
 }
 
 /// The process that owns `window`, if it still exists.

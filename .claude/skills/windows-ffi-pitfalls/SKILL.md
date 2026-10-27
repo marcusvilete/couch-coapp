@@ -99,6 +99,16 @@ Each item below cost time or nearly caused undefined behaviour in M1–M3. Check
 - **A request that fails or answers oddly means "unknown", never a guess**: the callers then fall back to the safe rule (a pad with our ids counts as ours). ViGEm's own `user_index` failed every time on the dev PC; its notification's `led_number` was right.
 - **The configuration manager's buffers** (`CM_Get_Device_Interface_List*`, `CM_Get_DevNode_Registry_PropertyW`) can change size between the size call and the read when a device comes or goes: loop on `CR_BUFFER_SMALL` a bounded number of times.
 
+## ViGEmBus and its devices (P10)
+
+- **Each ViGEm serial (1 to 64) is a device instance of its own to Windows** (`USB\VID_045E&PID_028E\<serial>`), installed the first time it's plugged, which can take minutes on a fresh PC. Plug from serial 1 (`first_serial(1)`, our vendored vigem-rust, `third_party/vigem-rust/PATCHED.md`), never a random one. `Get-PnpDevice -InstanceId 'USB\VID_045E&PID_028E\*'` lists which instances a PC already has; a dev PC usually has them all, so a first-time setup has to be made on purpose (`pnputil /remove-device`, elevated).
+- **A pad Windows is still setting up answers `VIGEM_WAIT_DEVICE_READY` with `ERROR_DEVICE_HARDWARE_ERROR`, or not within 5 s.** Unplugging it then didn't take: it came up later, owned by nobody, and read as another program's pad. Keep it, its marker and its serial, and wait (`PendingPad`).
+- **Dropping a vigem-rust handle unplugs best-effort and says nothing on failure.** A marker must outlive any pad that might still be there while the host's controllers are followed (`PendingPad::give_up` hands it over).
+
+## Taking the foreground (P11)
+
+- **A background process can't bring its own window to the front**: `SetForegroundWindow`, and SDL's `raise()`, only flash the taskbar button, unless the process in front allowed it with `AllowSetForegroundWindow(pid)` just before. The app does that for its stream window when its own button is clicked (it is in front then); a call from a process that isn't in front fails, which is harmless. Restore a minimized window before raising it.
+
 ## Before calling it done
 
 - Every `unsafe` block has a `// SAFETY:` comment saying why it holds.

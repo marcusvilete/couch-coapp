@@ -50,6 +50,9 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     padsSettingUp: [],
     padsSettingUpSecs: 0,
     padsMissing: [],
+    streamWindow: null,
+    gameInFront: null,
+    note: null,
   };
 }
 

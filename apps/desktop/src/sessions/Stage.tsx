@@ -9,6 +9,7 @@ import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/Feedback";
 import { HostConsole } from "./HostConsole";
 import { SessionCard } from "./SessionCard";
+import { StreamWindowPanel } from "./StreamWindowPanel";
 import type { Notify } from "./useRun";
 import "./Stage.css";
 
@@ -25,6 +26,8 @@ export function Stage(props: {
   const { room, busy } = props;
   const mine = room.sessions.find((s) => s.role === "host");
   const others = room.sessions.filter((s) => s.role !== "host");
+  // The session we watch here, with its stream window's controls (P11).
+  const watched = others.find((s) => s.streamWindow != null);
   const startBlocked = busy.hosting
     ? "You have a session already, in another room."
     : busy.watching
@@ -105,6 +108,7 @@ export function Stage(props: {
               />
             ))}
           </div>
+          {watched && <StreamWindowPanel room={room} session={watched} notify={props.notify} />}
         </section>
       )}
     </div>

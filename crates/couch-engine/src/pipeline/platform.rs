@@ -305,6 +305,9 @@ impl Backend for WindowsBackend {
         if options.hide_hud {
             command.arg("--no-hud");
         }
+        if options.hide_bar {
+            command.arg("--no-bar");
+        }
         if options.hide_stats {
             command.arg("--hide-stats");
         }
@@ -327,11 +330,19 @@ impl Backend for WindowsBackend {
             .map_err(|e| MediaError::Backend(format!("starting {}: {e}", exe.display())))?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
+        let pid = child.id();
         Ok(ViewerProcess {
             stdin: Box::pin(stdin),
             stdout: Box::pin(stdout),
             guard: Box::new(child),
+            pid,
         })
+    }
+
+    fn allow_foreground(&self, pid: u32) {
+        if !couch_platform_win::foreground::allow_foreground(pid) {
+            tracing::debug!("Windows didn't let the stream window come to the front");
+        }
     }
 
     fn drivers(&self) -> Vec<(DriverName, DriverState, bool)> {

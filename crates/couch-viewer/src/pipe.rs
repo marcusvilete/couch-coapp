@@ -8,7 +8,8 @@ use std::{
 
 use couch_proto::ipc::{
     self, AudioPacket, AudioStats, FrameTiming, HudState, LocalInput, NetStats, RumbleState,
-    SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
+    SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader, WindowRequest,
+    WindowState,
 };
 
 use crate::audio::AudioFeed;
@@ -25,8 +26,10 @@ pub enum ForWindow {
     Rumble(RumbleState),
     Hud(HudState),
     Shortcuts(ShortcutKeys),
-    /// The profile's stream volume (P6).
+    /// The profile's stream volume (P6), or the app's change to it (P11).
     Volume(StreamVolume),
+    /// Something the app asks of the window (P11).
+    Window(WindowRequest),
 }
 
 /// What the viewer sends back.
@@ -38,6 +41,8 @@ pub enum Outgoing {
     Action(UserAction),
     /// The user changed the stream volume (P6).
     Volume(StreamVolume),
+    /// The window's full screen, bar or stats changed (P11).
+    Window(WindowState),
     /// Write what is queued before this, then stop. Other threads (the
     /// decoder) still hold senders, so the channel alone never closes.
     Close,
@@ -93,7 +98,8 @@ pub fn spawn_reader(
                     | ipc::kinds::RUMBLE
                     | ipc::kinds::HUD_STATE
                     | ipc::kinds::SHORTCUTS
-                    | ipc::kinds::VOLUME => {
+                    | ipc::kinds::VOLUME
+                    | ipc::kinds::WINDOW => {
                         let message = match frame.kind {
                             ipc::kinds::SEAT => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Seat)
@@ -114,6 +120,9 @@ pub fn spawn_reader(
                                     }
                                     ForWindow::Volume(volume)
                                 }),
+                            ipc::kinds::WINDOW => {
+                                ipc::from_payload(&frame.payload).map(ForWindow::Window)
+                            }
                             _ => ipc::from_payload(&frame.payload).map(ForWindow::Hud),
                         };
                         match message {
@@ -187,6 +196,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>) -> JoinHandle<()> {
                     Outgoing::Volume(volume) => {
                         payload = ipc::to_payload(&volume);
                         ipc::kinds::VOLUME_CHANGED
+                    }
+                    Outgoing::Window(state) => {
+                        payload = ipc::to_payload(&state);
+                        ipc::kinds::WINDOW_STATE
                     }
                     Outgoing::Close => break,
                 };

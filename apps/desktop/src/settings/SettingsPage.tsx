@@ -1,9 +1,11 @@
 // Settings, as a page over the room (Esc goes back): your name, the look,
 // the keyboard shortcuts (each can move to another key), the overlay, the
-// network (which relay, applied when the app restarts), the drivers, a
-// backup of the profile (M13), and About. Each section is mounted only while
-// shown: a passphrase leaves with its page, and nothing polls behind it.
+// stream window (P11), the network (which relay, applied when the app
+// restarts), the drivers, a backup of the profile (M13), and About. Each
+// section is mounted only while shown: a passphrase leaves with its page, and
+// nothing polls behind it.
 import {
+  AppWindow,
   Archive,
   ArrowLeft,
   Cpu,
@@ -21,17 +23,35 @@ import type { Busy } from "../model/sessions";
 import { NameForm } from "../rooms/dialogs";
 import type { ThemeChoice } from "../state/theme";
 import { IconButton } from "../ui/Button";
-import { AboutSection, AppearanceSection, BackupSection, DriversSection, NetworkSection, OverlaySection } from "./sections";
+import {
+  AboutSection,
+  AppearanceSection,
+  BackupSection,
+  DriversSection,
+  NetworkSection,
+  OverlaySection,
+  StreamWindowSection,
+} from "./sections";
 import { ShortcutsSection } from "./ShortcutsSection";
 import "./SettingsPage.css";
 
-export type SettingsSection = "profile" | "appearance" | "shortcuts" | "overlay" | "network" | "drivers" | "backup" | "about";
+export type SettingsSection =
+  | "profile"
+  | "appearance"
+  | "shortcuts"
+  | "overlay"
+  | "streamWindow"
+  | "network"
+  | "drivers"
+  | "backup"
+  | "about";
 
 const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode }[] = [
   { id: "profile", label: "Profile", icon: <UserRound /> },
   { id: "appearance", label: "Appearance", icon: <Palette /> },
   { id: "shortcuts", label: "Shortcuts", icon: <Keyboard /> },
   { id: "overlay", label: "Overlay and sounds", icon: <Layers /> },
+  { id: "streamWindow", label: "Stream window", icon: <AppWindow /> },
   { id: "network", label: "Network", icon: <Network /> },
   { id: "drivers", label: "Drivers", icon: <Cpu /> },
   { id: "backup", label: "Backup", icon: <Archive /> },
@@ -104,6 +124,7 @@ export function SettingsPage(props: {
             {section.id === "appearance" && <AppearanceSection theme={props.theme} onTheme={props.onTheme} />}
             {section.id === "shortcuts" && <ShortcutsSection onCapturing={props.onCapturing} />}
             {section.id === "overlay" && <OverlaySection />}
+            {section.id === "streamWindow" && <StreamWindowSection />}
             {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
             {section.id === "drivers" && <DriversSection />}
             {section.id === "backup" && (

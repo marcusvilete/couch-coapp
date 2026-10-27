@@ -3,6 +3,7 @@
 import type { MemberLink } from "../bindings/MemberLink";
 import type { MemberView } from "../bindings/MemberView";
 import type { SessionView } from "../bindings/SessionView";
+import type { StreamWindowView } from "../bindings/StreamWindowView";
 import { defaultShortcuts, hostSession, seatsFor, type FakeRoom, type World } from "./fakeEngine";
 
 const ME = "a11ce000000000000000000000000001";
@@ -37,8 +38,15 @@ function room(id: string, name: string, over: Partial<FakeRoom> = {}): FakeRoom 
 }
 
 /** Someone else's session, as a member who isn't in it sees it. */
+/** Our stream window, open (P11), for a session we watch. */
+function ourWindow(over: Partial<StreamWindowView> = {}): StreamWindowView {
+  return { volume: 80, muted: false, open: true, fullscreen: false, bar: true, stats: false, ...over };
+}
+
 function othersSession(host: string, title: string, over: Partial<SessionView> = {}): SessionView {
   const seats = seatsFor({ controllers: 2, keyboardMouse: "none" });
+  // A session we watch has our stream window, unless the scenario says.
+  const ours = over.role != null && over.role !== "none";
   return {
     host,
     title,
@@ -63,6 +71,9 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     padsSettingUp: [],
     padsSettingUpSecs: 0,
     padsMissing: [],
+    streamWindow: ours ? ourWindow() : null,
+    gameInFront: ours ? true : null,
+    note: null,
     ...over,
   };
 }
@@ -123,6 +134,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     backupPath: "C:\\Users\\ana\\Documents\\Ana.couchbackup",
     startFailure: null,
     sound: "game",
+    streamWindowBar: true,
     ...over,
   };
 }
@@ -237,6 +249,50 @@ export const SCENARIOS: Record<string, Scenario> = {
       s.seats[2].holder = caio.id;
       return base([sofa({ sessions: [s] })], { myControllers: 2 });
     },
+  },
+  "watching-window": {
+    title: "Watching from another monitor: full screen, bar off, muted (P11)",
+    world: () =>
+      base([
+        sofa({
+          sessions: [
+            othersSession(bia.id, "Overcooked with the gang", {
+              role: "watching",
+              viewers: [ME],
+              streamWindow: ourWindow({ fullscreen: true, bar: false, muted: true, volume: 40 }),
+            }),
+          ],
+        }),
+      ]),
+  },
+  "playing-away": {
+    title: "Playing while the game isn't in front on the host's PC (P11)",
+    world: () => {
+      const s = othersSession(bia.id, "Overcooked with the gang", {
+        role: "controlling",
+        viewers: [ME],
+        gameInFront: false,
+        note: "You have Controller 1",
+        streamWindow: ourWindow({ stats: true }),
+      });
+      s.seats[0].holder = ME;
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
+  "watching-opening": {
+    title: "The stream window still opening (P11)",
+    world: () =>
+      base([
+        sofa({
+          sessions: [
+            othersSession(bia.id, "Overcooked with the gang", {
+              role: "joining",
+              viewers: [ME],
+              streamWindow: ourWindow({ open: false }),
+            }),
+          ],
+        }),
+      ]),
   },
   "watching-paused": {
     title: "Watching while the host paused control",

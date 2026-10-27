@@ -178,6 +178,9 @@ pub struct ViewerOptions {
     pub size: Option<(u32, u32)>,
     /// Start with the HUD hidden (it would cover a latency barcode).
     pub hide_hud: bool,
+    /// Start without the session bar, the centre card and stats still
+    /// showing (P11: Settings → Stream window).
+    pub hide_bar: bool,
     /// Start with the stats panel closed (the app; the HUD has a button).
     pub hide_stats: bool,
     /// Write the viewer's log here, without a console window. `None` lets it
@@ -191,6 +194,8 @@ pub struct ViewerProcess {
     pub stdout: Pin<Box<dyn AsyncRead + Send>>,
     /// Keeps the process alive; dropping it ends a real viewer.
     pub guard: Box<dyn Any + Send>,
+    /// Its process id, to let it come to the front (P11); `None` for fakes.
+    pub pid: Option<u32>,
 }
 
 /// The game behind a streamed window ([`Backend::game_process`]), watched so
@@ -296,6 +301,11 @@ pub trait Backend: Send + Sync + 'static {
     }
 
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError>;
+
+    /// Lets the viewer process `pid` bring its window to the front next
+    /// (P11: the app's Show window). Windows refuses a background process
+    /// otherwise; the app is in front when its button is clicked.
+    fn allow_foreground(&self, _pid: u32) {}
 
     /// At start, before any input: lets go of keys and buttons a host on
     /// this machine left held when it crashed or was killed, shows games any
