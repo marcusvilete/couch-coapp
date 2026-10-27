@@ -95,10 +95,11 @@ describe("a guest's controllers in the patch bay", () => {
 
   it("hands a seat over with one controller, as added or a move", () => {
     expect(dropOn(room, withPads(), guestPad("b", 0), 1)).toEqual({ ok: true, hint: "Added · yours" });
-    // The one already playing their other seat: that seat takes another.
+    // The one already playing their other seat moves, though another is
+    // spare (P13, the author's run of 0.19.0).
     expect(dropOn(room, withPads(), guestPad("b", 2), 1)).toEqual({
       ok: true,
-      hint: "Added · Controller 3 takes another of theirs · yours",
+      hint: "Leaves Controller 3 · yours",
     });
     expect(dropOn(room, withPads(), guestPad("c", 0), 2)).toEqual({ ok: true, hint: "Hands it over · Bia loses it" });
     expect(dropOn(room, withPads({ viewerControllers: [1, 1] }), guestPad("b", 0), 1).hint).toBe("Leaves Controller 3 · yours");
@@ -127,7 +128,7 @@ describe("a guest's controllers in the patch bay", () => {
 
   it("drops a picked-up cable as the controller at its end", () => {
     const cable = { kind: "cable" as const, seat: 2, from: "seat:2" };
-    expect(dropOn(room, withPads(), cable, 1)).toEqual({ ok: true, hint: "Added · Controller 3 takes another of theirs · yours" });
+    expect(dropOn(room, withPads(), cable, 1)).toEqual({ ok: true, hint: "Leaves Controller 3 · yours" });
   });
 });
 
@@ -159,8 +160,10 @@ describe("one of a guest's controllers moving (P13)", () => {
     expect(requestDetail(s, "b", 0, 2)).toBe("with their DualSense 2 · leaves Controller 3");
     // Without one, accepting guesses: from the last seat down.
     expect(requestDetail(s, "b", 0, null)).toBe("they leave Controller 3");
-    // A spare controller: nothing is left.
+    // A spare controller: the one named still moves; unnamed, nothing is
+    // left.
     s.viewerControllers = [3, 1];
-    expect(requestDetail(s, "b", 0, 2)).toBe("with their DualSense 2");
+    expect(requestDetail(s, "b", 0, 2)).toBe("with their DualSense 2 · leaves Controller 3");
+    expect(requestDetail(s, "b", 0, null)).toBeNull();
   });
 });

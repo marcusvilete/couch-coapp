@@ -3154,16 +3154,33 @@ async fn the_host_picks_which_of_a_guests_controllers_plays() {
     })
     .await;
 
-    // Seat 2 to the same controller: added, and the two swap.
+    // Seat 2 to the same controller: it moves, though the DualSense is
+    // spare (P13, the author's run of 0.19.0: it had been added, the
+    // DualSense taking seat 1).
     a.ok(Command::PassControl {
         member: b.id(),
         seat: 1,
         controller: Some(1),
     })
     .await;
-    a.wait_session(&room, &a, "B on both, swapped", |s| {
+    a.wait_session(&room, &a, "the Xbox pad moved to seat 2", |s| {
         s.is_some_and(|s| {
-            holder(s, 1) == Some(b.id())
+            holder(s, 0).is_none()
+                && holder(s, 1) == Some(b.id())
+                && guest_controller(s, 1) == Some(1)
+        })
+    })
+    .await;
+    // Seat 1 to the spare DualSense: added.
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 0,
+        controller: Some(0),
+    })
+    .await;
+    a.wait_session(&room, &a, "B on both", |s| {
+        s.is_some_and(|s| {
+            holder(s, 0) == Some(b.id())
                 && guest_controller(s, 0) == Some(0)
                 && guest_controller(s, 1) == Some(1)
         })

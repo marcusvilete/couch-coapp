@@ -30,6 +30,16 @@ A wire change: **revision 8, version 0.19.0**, which doesn't talk to 0.18.0 or e
   - The guest's note after a grant names the controller: "Your Xbox Wireless Controller now plays Controller 1".
 - The preview has new scenarios: `hosting-guest-asks`, `playing-two` with our controllers, and the shot `ask-with`. The stream window has the new preview state `choosing`.
 
+## Your run of 0.19.0 (2026-10-27) and 0.19.1
+
+It worked, but with one gap. A guest had two controllers, only one of them on a seat. When you moved that controller to another seat, the guest ended up on both seats: the session added the new one because a controller was spare, and the spare took the old seat. You expected only the move.
+
+0.19.1 fixes it: **a named controller that plays one of the guest's seats always moves**, freeing its seat whether or not another is spare (`HostSession::frees`, and the app's copy of it). A free controller named, or none named, still adds the seat while one is spare. Only the host's session changed, not the wire: 0.19.1 still talks to 0.19.0.
+- New unit test `a_seated_controller_moves_even_with_one_to_spare`.
+- P12's scenario now moves the Xbox pad to seat 2, freeing seat 1, where it had added and swapped. Then the spare DualSense is added to seat 1.
+- The drag hints say "Leaves Controller 3" where they said "Added · Controller 3 takes another of theirs".
+- The input-safety checks pass again: `release-check`, `input-sink`, `lifecycle-check`.
+
 ## Your P10 run
 
 On the PC that froze before, Windows took a few seconds and showed its "installing device" notification, with no freeze and no warning in the app. That is as designed (see `p10-results.md`).
