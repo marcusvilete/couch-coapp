@@ -66,6 +66,11 @@
   min-width: 0;
 }
 
+/* Watching together (M24): the one tile, across the strip. */
+.seat-strip li.seat-strip-whole {
+  grid-column: 1 / -1;
+}
+
 .seat-button-wrap {
   display: flex;
   width: 100%;
@@ -122,7 +127,8 @@
     background: var(--info-soft);
   }
 
-  &.host-outside {
+  &.host-outside,
+  &.together {
     border-style: dotted;
   }
 }
@@ -140,16 +146,6 @@
   & svg {
     width: 16px;
     height: 16px;
-  }
-
-  &.both {
-    grid-auto-flow: column;
-    gap: 0;
-
-    & svg {
-      width: 12px;
-      height: 12px;
-    }
   }
 }
 

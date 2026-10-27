@@ -1135,8 +1135,12 @@ impl Actor {
                 .host_keys(keys, Box::new(move |key| on_press(key)))
         };
         let panic = shortcuts.binding(Shortcut::Panic);
-        h.panic_key = match hook(&keys) {
-            Ok(guard) => {
+        // A session nobody plays (M24) has nothing to take back or answer:
+        // no hook at all, so the keys stay the host's own.
+        let hooked = (!h.session.config().seats.is_empty()).then(|| hook(&keys));
+        h.panic_key = match hooked {
+            None => None,
+            Some(Ok(guard)) => {
                 h.answer_keys = Some((
                     shortcuts.binding(Shortcut::AcceptRequest).keys(),
                     shortcuts.binding(Shortcut::DeclineRequest).keys(),
@@ -1144,7 +1148,7 @@ impl Actor {
                 Some((guard, panic.keys()))
             }
             // Never the panic key lost for an answer key's sake: it alone.
-            Err(e) => match hook(&[(panic.key, Shortcut::Panic)]) {
+            Some(Err(e)) => match hook(&[(panic.key, Shortcut::Panic)]) {
                 Ok(guard) => {
                     tracing::error!("no keys to answer requests while streaming: {e}");
                     Some((guard, panic.keys()))

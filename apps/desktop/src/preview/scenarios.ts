@@ -266,6 +266,28 @@ export const SCENARIOS: Record<string, Scenario> = {
       return base([sofa({ sessions: [s] })], { myControllers: 2 });
     },
   },
+  "watching-together": {
+    title: "Watching Bia's session that nobody plays (M24)",
+    world: () => {
+      const s = othersSession(bia.id, "Movie night", {
+        role: "watching",
+        viewers: [ME, caio.id],
+        streamWindow: ourWindow({}),
+      });
+      s.seats = [];
+      s.hostOnSeats = false;
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
+  "together-not-watching": {
+    title: "A session to watch together, not joined yet (M24)",
+    world: () => {
+      const s = othersSession(bia.id, "Movie night", { role: "none", viewers: [caio.id] });
+      s.seats = [];
+      s.hostOnSeats = false;
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
   "watching-window": {
     title: "Watching from another monitor: full screen, bar off, muted (P11)",
     world: () =>
@@ -372,19 +394,21 @@ export const SCENARIOS: Record<string, Scenario> = {
       return base([sofa({ sessions: [s] })]);
     },
   },
-  "hosting-controller-keys": {
-    title: "Hosting: keyboard and mouse with Controller 1, played by you",
+  "hosting-watch-only": {
+    title: "Hosting a session to watch together: no seats (M24)",
     world: () => {
-      const s = hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "withController1" }, [
-        "DualSense Wireless Controller",
-      ]);
-      s.viewers = [bia.id, caio.id];
-      s.viewerControllers = [1, 1];
-      s.seats[1].holder = bia.id;
+      const s = hostSession(ME, "Movie night", 4, { controllers: 0, keyboardMouse: "none" }, []);
+      s.viewers = [bia.id, caio.id, dani.id];
+      s.viewerControllers = [0, 0, 0];
       s.stream = { state: "live" };
-      s.streaming = { name: "Stardew Valley", fps: 60, maxMbps: 20, uploadMbps: null };
+      s.streaming = { name: "VLC media player", fps: 60, maxMbps: 20, uploadMbps: null };
       return base([sofa({ sessions: [s] })]);
     },
+  },
+  "hosting-watch-only-empty": {
+    title: "Hosting a session to watch together, nobody watching yet (M24)",
+    world: () =>
+      base([sofa({ sessions: [hostSession(ME, "Movie night", 4, { controllers: 0, keyboardMouse: "none" }, [])] })]),
   },
   "hosting-paused": {
     title: "Hosting: control paused",

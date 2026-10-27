@@ -1,7 +1,7 @@
 // While we host, in every view (another room, Settings): our session at a
 // glance, with what waits for us. Requests stay answerable from anywhere:
 // the bar takes us to the console. The panic key is shown, or that it is
-// missing.
+// missing (none is needed to watch together).
 import { Hand, MonitorPlay, ShieldAlert } from "lucide-react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
@@ -50,6 +50,9 @@ export function SessionBar(props: {
           <>
             Panic key <Kbd keys={s.panicKey} />
           </>
+        ) : s.seats.length === 0 ? (
+          // Watching together (M24): nobody plays, nothing to take back.
+          "Watching together"
         ) : (
           <span className="session-bar-nopanic">
             <ShieldAlert aria-hidden="true" /> No panic key: use Take back

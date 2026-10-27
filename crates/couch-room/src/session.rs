@@ -61,7 +61,9 @@ pub const DECLINE_COOLDOWN: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionConfig {
     pub title: String,
-    /// The seats players can hold, by [`SeatId`]; one is single player.
+    /// The seats players can hold, by [`SeatId`]; one is single player, and
+    /// none a session to watch together (M24): every request and pass is
+    /// refused as for a seat that doesn't exist.
     pub seats: Vec<SeatKind>,
     pub max_viewers: u8,
     /// The host's own id, when their controllers play through seats;
@@ -80,7 +82,7 @@ pub enum SessionError {
     InvalidTitle,
     #[error("a session takes 1 to {MAX_VIEWERS} viewers")]
     InvalidMaxViewers,
-    #[error("a session has 1 to 4 controllers and at most one keyboard-and-mouse seat")]
+    #[error("a session has at most 4 controllers and one keyboard-and-mouse seat")]
     InvalidSeats,
     #[error("there is no such seat")]
     NoSuchSeat,

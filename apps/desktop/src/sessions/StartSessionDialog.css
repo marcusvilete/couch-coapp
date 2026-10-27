@@ -106,14 +106,23 @@
   }
 }
 
+/* No seats: a session to watch together (M24), a choice, not a mistake. */
 .seat-preview-none {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
   width: 100%;
-  border: 1px dashed var(--danger);
+  border: 1px dashed var(--border-strong);
   border-radius: var(--r-md);
-  color: var(--danger);
+  color: var(--text-muted);
   font-size: var(--text-md);
+}
+
+.seat-preview-none svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
 }
 
 .seat-preview-icon {

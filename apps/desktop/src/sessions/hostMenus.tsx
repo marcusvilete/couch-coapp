@@ -53,7 +53,8 @@ export function passHint(s: SessionView, member: string, i: number): string | nu
 
 /** A viewer's entries: pass a seat, take theirs back. */
 export function viewerEntries(room: RoomView, s: SessionView, member: string, run: Run): MenuEntry[] {
-  if (!s.viewers.includes(member)) return [];
+  // Watching together (M24): no seats, nothing to pass.
+  if (!s.viewers.includes(member) || s.seats.length === 0) return [];
   const held = seatsOf(s, member);
   const entries: MenuEntry[] = [];
   if (s.seats.length === 1) {

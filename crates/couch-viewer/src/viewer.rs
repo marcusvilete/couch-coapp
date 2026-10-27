@@ -132,10 +132,12 @@ pub enum Preview {
     /// Playing two seats with two controllers, choosing which moves to a
     /// third (P13).
     Choosing,
+    /// A session to watch together: no seats (M24).
+    Together,
 }
 
 impl Preview {
-    pub const NAMES: [(&'static str, Preview); 13] = [
+    pub const NAMES: [(&'static str, Preview); 14] = [
         ("watching", Preview::Watching),
         ("asking", Preview::Asking),
         ("controlling", Preview::Controlling),
@@ -149,6 +151,7 @@ impl Preview {
         ("crowded", Preview::Crowded),
         ("worst", Preview::Worst),
         ("choosing", Preview::Choosing),
+        ("together", Preview::Together),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -841,6 +844,12 @@ fn preview_session(preview: Preview) -> HudState {
             s.seats = vec![seat("Controller", true, None, false, false)];
             s.viewers = 1;
         }
+        P::Together => {
+            s.title = "Movie night".into();
+            s.host_on_seats = false;
+            s.seats = Vec::new();
+            s.viewers = 3;
+        }
         P::Crowded => {
             s.title =
                 "The Extraordinarily Long Title of a Game Nobody Remembers: Definitive Edition"
@@ -936,6 +945,8 @@ fn toggle_control(hud: &mut Hud, out: &mpsc::Sender<Outgoing>) {
         HudRole::Watching => {
             if let Some(seat) = crate::hud::seat_to_ask(session) {
                 hud.ask(seat);
+            } else if session.seats.is_empty() {
+                hud.note("Nobody plays in this session: it's for watching together");
             }
             return;
         }

@@ -613,7 +613,7 @@ pub enum HidingView {
 /// How the game takes input, chosen when a session starts (M19: one setup,
 /// where single player and multiplayer were two): 0 to 4 controller seats,
 /// each its own virtual pad, and keyboard and mouse as a seat of their own
-/// or with Controller 1.
+/// or not for guests. No seats at all is a session to watch together (M24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -629,11 +629,10 @@ pub struct InputSetup {
 pub enum KeyboardMouseSeat {
     /// Guests get none.
     None,
-    /// A seat of their own, after the controllers.
+    /// A seat of their own, after the controllers. One player can hold it
+    /// beside a controller seat (M18), which is why "with Controller 1" went
+    /// (M24).
     OwnSeat,
-    /// With Controller 1: one player on pad and keyboard. Without
-    /// controllers, a seat of their own.
-    WithController1,
 }
 
 impl Default for InputSetup {
@@ -647,17 +646,13 @@ impl Default for InputSetup {
 }
 
 impl InputSetup {
-    /// The seats, by seat id: the controllers first, then a keyboard seat.
-    /// Not checked: `couch_room::session` refuses a bad setup (no seats, or
-    /// over 4 controllers).
+    /// The seats, by seat id: the controllers first, then a keyboard seat;
+    /// none for a session to watch together. Not checked:
+    /// `couch_room::session` refuses a bad setup (over 4 controllers).
     pub fn seats(&self) -> Vec<SeatKind> {
         let mut seats = vec![SeatKind::Controller; usize::from(self.controllers)];
-        match self.keyboard_mouse {
-            KeyboardMouseSeat::None => {}
-            KeyboardMouseSeat::WithController1 if !seats.is_empty() => seats[0] = SeatKind::Both,
-            KeyboardMouseSeat::OwnSeat | KeyboardMouseSeat::WithController1 => {
-                seats.push(SeatKind::KeyboardMouse);
-            }
+        if self.keyboard_mouse == KeyboardMouseSeat::OwnSeat {
+            seats.push(SeatKind::KeyboardMouse);
         }
         seats
     }

@@ -60,14 +60,16 @@ export function storedPads(): string[] | null {
   return one == null ? null : one === "" ? [] : [one];
 }
 
-/** The setup last used, or one controller. */
+/** The setup last used, or one controller. Keyboard and mouse "with
+ * Controller 1", from before M24, comes back as a seat of their own. */
 export function storedSetup(): InputSetup {
   const fallback: InputSetup = { controllers: 1, keyboardMouse: "none" };
   try {
     const s = JSON.parse(readStored(KEYS.sessionSetup) ?? "null");
-    const kbm: KeyboardMouseSeat[] = ["none", "ownSeat", "withController1"];
-    if (Number.isInteger(s?.controllers) && s.controllers >= 0 && s.controllers <= 4 && kbm.includes(s.keyboardMouse)) {
-      return { controllers: s.controllers, keyboardMouse: s.keyboardMouse };
+    const kbm: KeyboardMouseSeat[] = ["none", "ownSeat"];
+    const keyboardMouse = s?.keyboardMouse === "withController1" ? "ownSeat" : s?.keyboardMouse;
+    if (Number.isInteger(s?.controllers) && s.controllers >= 0 && s.controllers <= 4 && kbm.includes(keyboardMouse)) {
+      return { controllers: s.controllers, keyboardMouse };
     }
   } catch {
     // Not one: the default.

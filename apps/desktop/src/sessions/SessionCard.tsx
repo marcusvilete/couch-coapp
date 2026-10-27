@@ -10,7 +10,6 @@ import {
   LogOut,
   Maximize,
   Minimize,
-  MousePointer2,
   PanelTop,
   Undo2,
 } from "lucide-react";
@@ -29,16 +28,7 @@ import { useRun, type Notify } from "./useRun";
 import "./SessionCard.css";
 
 export function SeatIcon(props: { seat: SeatView }) {
-  const { seat } = props;
-  if (seat.pad && seat.keyboardMouse) {
-    return (
-      <span className="seat-icon both" aria-hidden="true">
-        <Gamepad2 />
-        <MousePointer2 />
-      </span>
-    );
-  }
-  return <span className="seat-icon" aria-hidden="true">{seat.pad ? <Gamepad2 /> : <Keyboard />}</span>;
+  return <span className="seat-icon" aria-hidden="true">{props.seat.pad ? <Gamepad2 /> : <Keyboard />}</span>;
 }
 
 export function SessionCard(props: {
@@ -68,11 +58,13 @@ export function SessionCard(props: {
   const asked = s.askedSeat;
   const idle = idleText(host, s.stream);
   const win = s.streamWindow;
+  // No seats: a session to watch together (M24), nothing to ask for.
+  const together = s.seats.length === 0;
 
   let state: string;
   switch (s.role) {
     case "none":
-      state = idle ?? "Watch, then ask for a seat to play.";
+      state = idle ?? (together ? "Watch along with the others." : "Watch, then ask for a seat to play.");
       break;
     case "joining":
       state = `Waiting for ${host}…`;
@@ -253,16 +245,32 @@ export function SessionCard(props: {
         </header>
         <ul className="seat-strip" aria-label="Seats">
           {s.seats.map(seatTile)}
-          {!s.hostOnSeats && (
-            <li>
-              <span className="seat-tile host-outside">
-                <Avatar id={s.host} name={host} size={20} />
+          {together ? (
+            <li className="seat-strip-whole">
+              <span className="seat-tile together">
+                <span className="seat-icon" aria-hidden="true">
+                  <Eye />
+                </span>
                 <span className="seat-tile-text">
-                  <span className="seat-tile-label">{host}</span>
-                  <span className="seat-tile-holder">own controller</span>
+                  <span className="seat-tile-label">No seats</span>
+                  <span className="seat-tile-holder">
+                    <span>Watching together: nobody plays</span>
+                  </span>
                 </span>
               </span>
             </li>
+          ) : (
+            !s.hostOnSeats && (
+              <li>
+                <span className="seat-tile host-outside">
+                  <Avatar id={s.host} name={host} size={20} />
+                  <span className="seat-tile-text">
+                    <span className="seat-tile-label">{host}</span>
+                    <span className="seat-tile-holder">own controller</span>
+                  </span>
+                </span>
+              </li>
+            )
           )}
         </ul>
         <p className="session-card-state" role="status">

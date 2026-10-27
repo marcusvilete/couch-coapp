@@ -8,7 +8,7 @@
 // to move it. Every move is a session command, the same the seats' and
 // viewers' menus send (they stay, for the keyboard): the engine decides, and
 // the cables follow its answer.
-import { Gamepad2, GripVertical, Keyboard, MoreHorizontal, MousePointer2, ShieldAlert } from "lucide-react";
+import { Gamepad2, GripVertical, Keyboard, MoreHorizontal, ShieldAlert } from "lucide-react";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
@@ -242,18 +242,11 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
     cables.push({ key: `seat-${i}`, from, to: `seat:${i}`, hue: hueFor(seat.holder), lifted });
   });
   // A keyboard seat no guest holds is the host's own keyboard and mouse:
-  // they always reach the game, and then they're the only ones. On
-  // "Controller, keyboard and mouse" played with the host's controller, both
-  // feed it: two cables, merging into one before the seat.
+  // they always reach the game, and then they're the only ones.
   const kbmSeats = s.seats.flatMap((seat, i) => (seat.keyboardMouse ? [i] : []));
   for (const i of kbmSeats) {
-    const seat = s.seats[i];
-    if (!seat.holder || seat.host) cables.push({ key: `kbm-${i}`, from: "kbm", to: `seat:${i}`, hue: hueFor(s.host) });
+    if (!s.seats[i].holder) cables.push({ key: `kbm-${i}`, from: "kbm", to: `seat:${i}`, hue: hueFor(s.host) });
   }
-  // Where two cables meet one seat: a junction just before its socket.
-  const into = new Map<string, number>();
-  for (const c of cables) if (!c.request) into.set(c.to, (into.get(c.to) ?? 0) + 1);
-  const JUNCTION_PX = 44;
   for (const r of s.requests) {
     cables.push({ key: `ask-${r.member}`, from: `viewer:${r.member}`, to: `seat:${r.seat}`, hue: hueFor(r.member), request: true });
   }
@@ -277,29 +270,12 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
           const a = geo[c.from];
           const b = geo[c.to];
           if (!a || !b || c.lifted) return null;
-          // Merging cables end at the junction; the trunk below joins it to
-          // the socket.
-          const merged = !c.request && (into.get(c.to) ?? 0) > 1;
-          const d = merged ? curve(a, { x: b.x - JUNCTION_PX, y: b.y }) : curve(a, b);
+          const d = curve(a, b);
           return (
             <g key={c.key} className={c.request ? "cable request" : "cable"} style={{ "--hue": c.hue } as React.CSSProperties}>
               <path className="cable-glow" d={d} />
               <path className="cable-line" d={d} />
               {!c.request && <path className="cable-flow" d={d} />}
-            </g>
-          );
-        })}
-        {[...into].map(([to, n]) => {
-          const b = geo[to];
-          if (n < 2 || !b) return null;
-          const j = { x: b.x - JUNCTION_PX, y: b.y };
-          const d = `M ${j.x} ${j.y} L ${b.x} ${b.y}`;
-          return (
-            <g key={`trunk-${to}`} className="cable trunk" style={{ "--hue": hueFor(s.host) } as React.CSSProperties}>
-              <path className="cable-glow" d={d} />
-              <path className="cable-line" d={d} />
-              <path className="cable-flow" d={d} />
-              <circle className="cable-junction" cx={j.x} cy={j.y} r={4} />
             </g>
           );
         })}
@@ -490,9 +466,7 @@ function SeatSocket(props: {
   // A guest's: the controller of theirs driving it, once they've said (P12).
   const theirs = seat.holder && !seat.host ? guestPads(s, seat.holder).find((p) => p.slot === seat.guestController)?.name : undefined;
   const detail = seat.host
-    ? seat.keyboardMouse
-      ? `${pad} + keyboard and mouse`
-      : pad
+    ? pad
     : seat.holder
       ? (theirs ?? "guest")
       : yourKeys
@@ -531,16 +505,7 @@ function SeatSocket(props: {
           <span className="bay-socket" ref={props.anchor} />
         )}
         <span className="bay-seat-icon" aria-hidden="true">
-          {seat.pad && seat.keyboardMouse ? (
-            <>
-              <Gamepad2 />
-              <MousePointer2 />
-            </>
-          ) : seat.pad ? (
-            <Gamepad2 />
-          ) : (
-            <Keyboard />
-          )}
+          {seat.pad ? <Gamepad2 /> : <Keyboard />}
         </span>
         <span className="bay-seat-text">
           <span className="bay-seat-label">{seat.label}</span>

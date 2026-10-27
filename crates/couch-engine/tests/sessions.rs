@@ -48,7 +48,7 @@ use couch_proto::{
     },
     session::{EndReason, SeatKind, StreamState},
 };
-use couch_room::{limits::LimitConfig, room::Timings};
+use couch_room::{limits::LimitConfig, room::Timings, session::SessionError};
 use couch_testkit::{
     FakeCapturer, FakeEncoder, FakeGpu, RecordingInjector, RecordingPadFactory, relay::TestRelay,
 };
@@ -1448,7 +1448,7 @@ async fn a_full_session_turns_one_away_and_one_stream_at_a_time() {
         &b.handle(go_live(&room, 1)).await,
         "stop watching first"
     ));
-    let both = setup(1, KeyboardMouseSeat::WithController1);
+    let both = setup(1, KeyboardMouseSeat::OwnSeat);
     assert!(matches!(
         c.handle(go_live_with(&room, 1, both)).await,
         Ok(Response::Room(_))
@@ -2343,11 +2343,13 @@ async fn between_streams_a_guests_input_is_released_and_held_off() {
     use couch_testkit::KbmCall;
 
     let (mut a, mut b, mut c, room) = three().await;
-    let both = setup(1, KeyboardMouseSeat::WithController1);
-    let reply = a.live(go_live_with(&room, 4, both)).await;
+    let own_seat = setup(1, KeyboardMouseSeat::OwnSeat);
+    let reply = a.live(go_live_with(&room, 4, own_seat)).await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     let window = watching(&room, &a, &b).await;
+    // B on the controller and the keyboard seat beside it (M18).
     give_control(&room, &mut a, &b, &window).await;
+    give_seat(&room, &mut a, &b, &window, 1).await;
     let typed = |key: u16, down: bool| {
         a.fake
             .kbm
@@ -3532,47 +3534,44 @@ async fn viewers_hear_when_the_game_leaves_the_front() {
 }
 
 /// M19: one input setup. Setups that can't be are refused; keyboard and
-/// mouse go to a seat of their own or with Controller 1 (one player on both,
-/// single player's old "both").
+/// mouse go to a seat of their own, after the controllers (M24: "with
+/// Controller 1" went; one player holds both seats instead).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_input_setup_is_checked_and_makes_the_seats() {
     let (mut a, mut b, mut c, room) = three().await;
-    for bad in [
-        setup(5, KeyboardMouseSeat::None),
-        setup(0, KeyboardMouseSeat::None),
-    ] {
-        assert!(
-            matches!(
-                a.handle(go_live_with(&room, 4, bad)).await,
-                Err(EngineError::Session(_))
-            ),
-            "{bad:?}"
-        );
-    }
+    let bad = setup(5, KeyboardMouseSeat::None);
+    assert!(
+        matches!(
+            a.handle(go_live_with(&room, 4, bad)).await,
+            Err(EngineError::Session(_))
+        ),
+        "{bad:?}"
+    );
     let kinds = |s: &SessionView| {
         s.seats
             .iter()
             .map(|s| (s.label.clone(), s.pad, s.keyboard_mouse))
             .collect::<Vec<_>>()
     };
-    let with_first = setup(2, KeyboardMouseSeat::WithController1);
-    let reply = a.handle(go_live_with(&room, 4, with_first)).await;
+    let own_seat = setup(2, KeyboardMouseSeat::OwnSeat);
+    let reply = a.handle(go_live_with(&room, 4, own_seat)).await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     a.wait_session(&room, &a, "the seats", |s| s.is_some())
         .await;
     let view = a.session(&room, &a).await.unwrap();
-    assert_eq!(view.seats.len(), 2);
-    assert!(
-        view.seats[0].pad && view.seats[0].keyboard_mouse,
-        "{:?}",
-        kinds(&view)
+    assert_eq!(
+        kinds(&view),
+        [
+            ("Controller 1".to_string(), true, false),
+            ("Controller 2".to_string(), true, false),
+            ("Keyboard and mouse".to_string(), false, true),
+        ]
     );
-    assert!(view.seats[1].pad && !view.seats[1].keyboard_mouse);
     assert_eq!(a.fake.pads_plugged(), 2);
     a.ok(Command::EndSession).await;
 
     // Keyboard and mouse alone.
-    let alone = setup(0, KeyboardMouseSeat::WithController1);
+    let alone = setup(0, KeyboardMouseSeat::OwnSeat);
     let reply = a.handle(go_live_with(&room, 4, alone)).await;
     assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
     a.wait_session(&room, &a, "one keyboard seat", |s| {
@@ -3581,6 +3580,65 @@ async fn the_input_setup_is_checked_and_makes_the_seats() {
     .await;
     let view = a.session(&room, &a).await.unwrap();
     assert!(!view.seats[0].pad && view.seats[0].keyboard_mouse);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M24: a session to watch together. No seats: no pad is plugged, the
+/// host's controller stays theirs (never hidden), no hook takes the host's
+/// keys, and a guest asking for a seat reaches nobody; the guests watch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_to_watch_together_seats_nobody() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let nobody = setup(0, KeyboardMouseSeat::None);
+    let reply = a
+        .live(go_live_playing(&room, 4, nobody, vec![dualsense()]))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert_eq!(a.fake.pads_plugged(), 0);
+    assert!(
+        !a.fake.hidden(),
+        "the host's controller plays the game itself"
+    );
+    assert_eq!(*a.fake.panic_key_on.lock().unwrap(), None, "no hook");
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    let view = a.session(&room, &a).await.unwrap();
+    assert!(view.seats.is_empty() && view.panic_key.is_none());
+    assert!(view.host_controller_problem.is_none());
+    assert_eq!(view.viewers.len(), 2);
+    let guest = b.session(&room, &a).await.unwrap();
+    assert!(guest.seats.is_empty());
+
+    // Asking for a seat there isn't reaches nobody, and a guest's pad goes
+    // nowhere.
+    let _ = b
+        .handle(Command::RequestControl {
+            seat: 0,
+            controller: None,
+        })
+        .await;
+    b_window.pad(PadButtons::A);
+    let pass = a
+        .handle(Command::PassControl {
+            member: c.id(),
+            seat: 0,
+            controller: None,
+        })
+        .await;
+    assert!(
+        matches!(pass, Err(EngineError::Session(SessionError::NoSuchSeat))),
+        "{pass:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let view = a.session(&room, &a).await.unwrap();
+    assert!(view.requests.is_empty());
+    assert!(b_window.held_seats().is_empty() && c_window.held_seats().is_empty());
+
+    // Ending is as for any session: both stop watching.
+    a.ok(Command::EndSession).await;
+    for m in [&b, &c] {
+        m.wait_session(&room, &a, "the end", |s| s.is_none()).await;
+    }
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

@@ -244,8 +244,9 @@ export function hostSession(
     role: "host",
     requests: [],
     askedSeat: null,
-    panicKey: "Ctrl+Alt+Shift+Backspace",
-    answerKeys: { accept: "Ctrl+Alt+Shift+Y", decline: "Ctrl+Alt+Shift+N" },
+    // Watching together (M24): no seats, so no hook for the host's keys.
+    panicKey: seats.length > 0 ? "Ctrl+Alt+Shift+Backspace" : null,
+    answerKeys: seats.length > 0 ? { accept: "Ctrl+Alt+Shift+Y", decline: "Ctrl+Alt+Shift+N" } : null,
     overlayArea: null,
     hostControllers: numbered(controllers).slice(0, homes.length),
     hostHomes: homes,
@@ -603,9 +604,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (found?.session.role === "host") throw "you have a session already";
       if (found) throw "stop watching first";
       if (nameProblem(cmd.title)) throw "titles must be 1 to 96 bytes, with nothing invisible in them";
-      if (cmd.input.controllers === 0 && cmd.input.keyboardMouse === "none") {
-        throw "a session has 1 to 4 controllers and at most one keyboard-and-mouse seat";
-      }
+      if (cmd.input.controllers > 4) throw "a session has at most 4 controllers and one keyboard-and-mouse seat";
       const hiding = world.sources.hiding;
       const chosen = hiding === "ready" ? cmd.controllers.map((c: HostController) => c.name) : [];
       const s = hostSession(me(), cmd.title.trim(), cmd.max_viewers, cmd.input, chosen);
