@@ -129,10 +129,13 @@ pub enum Preview {
     Crowded,
     /// Paused, the game out of front and a note, all at once.
     Worst,
+    /// Playing two seats with two controllers, choosing which moves to a
+    /// third (P13).
+    Choosing,
 }
 
 impl Preview {
-    pub const NAMES: [(&'static str, Preview); 12] = [
+    pub const NAMES: [(&'static str, Preview); 13] = [
         ("watching", Preview::Watching),
         ("asking", Preview::Asking),
         ("controlling", Preview::Controlling),
@@ -145,6 +148,7 @@ impl Preview {
         ("muted", Preview::Muted),
         ("crowded", Preview::Crowded),
         ("worst", Preview::Worst),
+        ("choosing", Preview::Choosing),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -275,6 +279,21 @@ pub fn run(options: WindowOptions) -> Result<()> {
             percent: 40,
             muted: true,
         };
+    }
+    if options.preview == Some(Preview::Choosing) {
+        hud.controllers = vec![
+            crate::hud::HudController {
+                slot: 0,
+                name: "DualSense Wireless Controller".into(),
+                seat: Some(1),
+            },
+            crate::hud::HudController {
+                slot: 1,
+                name: "Xbox Wireless Controller".into(),
+                seat: Some(2),
+            },
+        ];
+        hud.ask(0);
     }
     // A preview's pointer, sent once the bar has been laid out.
     let mut preview_pointer = options.preview_pointer;
@@ -424,6 +443,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
             match message {
                 ForWindow::Seat(seat) => {
                     input.set_seat(seat);
+                    // A preview keeps its made-up controllers.
+                    if options.preview.is_none() {
+                        hud.controllers = input.hud_controllers();
+                    }
                     redraw = true;
                 }
                 ForWindow::Rumble(rumble) => input.rumble(rumble),
@@ -489,6 +512,9 @@ pub fn run(options: WindowOptions) -> Result<()> {
             // host's patch bay hears a new one by name at once.
             if matches!(event, LocalInput::ControllerSlots(_)) {
                 let _ = out_tx.send(Outgoing::ControllerNames(input.controller_names()));
+                if options.preview.is_none() {
+                    hud.controllers = input.hud_controllers();
+                }
             }
             let _ = out_tx.send(Outgoing::Input(event));
         }
@@ -774,6 +800,13 @@ fn preview_session(preview: Preview) -> HudState {
             s.seats[1].asked = true;
             s.note = "Asked Alice for Controller 2".into();
         }
+        P::Choosing => {
+            s.role = HudRole::Controlling;
+            s.seats
+                .insert(2, seat("Controller 3", true, None, false, false));
+            bob(&mut s.seats[1]);
+            bob(&mut s.seats[2]);
+        }
         P::Controlling => {
             s.role = HudRole::Controlling;
             s.seats
@@ -888,7 +921,8 @@ fn volume_note(volume: StreamVolume) -> String {
 /// Ctrl+Alt+Shift+C: ask for a seat (the first free one), withdraw the
 /// request, or give the seats back, depending on where this viewer stands.
 /// Nothing without a session. Asking for one more seat while holding some
-/// is the bar's (M18).
+/// is the bar's (M18). With two controllers or more, the bar first asks
+/// which one plays it (P13).
 fn toggle_control(hud: &mut Hud, out: &mpsc::Sender<Outgoing>) {
     let Some(session) = hud.session() else {
         return;
@@ -899,10 +933,12 @@ fn toggle_control(hud: &mut Hud, out: &mpsc::Sender<Outgoing>) {
             hud.note(note);
             return;
         }
-        HudRole::Watching => match crate::hud::seat_to_ask(session) {
-            Some(seat) => UserAction::RequestControl(seat),
-            None => return,
-        },
+        HudRole::Watching => {
+            if let Some(seat) = crate::hud::seat_to_ask(session) {
+                hud.ask(seat);
+            }
+            return;
+        }
         HudRole::Asking | HudRole::Controlling => UserAction::CancelControl,
     };
     let _ = out.send(Outgoing::Action(action));

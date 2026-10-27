@@ -17,7 +17,7 @@ import { Callout } from "../ui/Callout";
 import { Badge, Kbd, Spinner } from "../ui/Feedback";
 import { DropdownMenu } from "../ui/Menu";
 import { Why } from "../ui/Why";
-import { ourPads, PAUSED_REASON } from "./hostMenus";
+import { ourPads, PAUSED_REASON, requestDetail } from "./hostMenus";
 import { PatchBay } from "./PatchBay";
 import { SoundLevel } from "./SoundLevel";
 import { streamsElevated } from "./streamMemory";
@@ -317,8 +317,10 @@ function RequestStrip(props: {
             <Hand aria-hidden="true" /> No requests. Guests ask from the room or their stream window; you decide.
           </p>
         ) : (
-          s.requests.map(({ member, seat }, i) => {
+          s.requests.map(({ member, seat, controller }, i) => {
             const label = s.seats[seat]?.label ?? "a seat";
+            // Which of their controllers asks, and the seat it leaves (P13).
+            const detail = requestDetail(s, member, seat, controller);
             const kbm = s.seats[seat]?.keyboardMouse ?? false;
             const fresh = now - (seen.current.get(`${member}:${seat}`)?.at ?? 0) < ANSWER_AFTER_MS;
             const why = s.controlPaused ? PAUSED_REASON : fresh ? "Just arrived" : null;
@@ -333,6 +335,10 @@ function RequestStrip(props: {
                     <span className="request-kbm">
                       <Keyboard aria-hidden="true" /> Control of your PC: only for people you trust
                     </span>
+                  ) : detail ? (
+                    // Which of their controllers moves, and from where (P13);
+                    // the keys above still answer it.
+                    <span className="request-oldest">{detail.charAt(0).toUpperCase() + detail.slice(1)}</span>
                   ) : (
                     i === 0 && s.answerKeys && <span className="request-oldest">Answered by the keys above</span>
                   )}

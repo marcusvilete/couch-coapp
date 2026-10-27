@@ -1266,7 +1266,11 @@ async fn give_control(room: &str, a: &mut Member, b: &Member, window: &FakeViewe
 
 /// B asks for `seat`, A accepts: B plays on it.
 async fn give_seat(room: &str, a: &mut Member, b: &Member, window: &FakeViewer, seat: u8) {
-    b.ok(Command::RequestControl { seat }).await;
+    b.ok(Command::RequestControl {
+        seat,
+        controller: None,
+    })
+    .await;
     let asker = a
         .event("a request", |e| match e {
             Event::ControlRequested { member, .. } => Some(member.clone()),
@@ -1539,7 +1543,10 @@ async fn a_declined_viewer_cannot_ask_again_at_once() {
     let (mut a, mut b, mut c, room) = three().await;
     a.go_live(&room, 4).await;
     let b_window = watching(&room, &a, &b).await;
-    b_window.action(UserAction::RequestControl(0));
+    b_window.action(UserAction::RequestControl {
+        seat: 0,
+        controller: None,
+    });
     a.event("a request", |e| {
         matches!(e, Event::ControlRequested { .. }).then_some(())
     })
@@ -1564,7 +1571,11 @@ async fn a_declined_viewer_cannot_ask_again_at_once() {
     .await;
 
     // Straight away: declined again, and A never hears of it.
-    b.ok(Command::RequestControl { seat: 0 }).await;
+    b.ok(Command::RequestControl {
+        seat: 0,
+        controller: None,
+    })
+    .await;
     b.wait_session(&room, &a, "the second request declined", |s| {
         s.is_some_and(|s| s.role == SessionRole::Watching)
     })
@@ -1630,7 +1641,10 @@ async fn the_hosts_keys_answer_the_oldest_request() {
     assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
 
     // B asks, and the key comes at once: too new to have been seen.
-    b_window.action(UserAction::RequestControl(0));
+    b_window.action(UserAction::RequestControl {
+        seat: 0,
+        controller: None,
+    });
     a.event("B's request", |e| {
         matches!(e, Event::ControlRequested { .. }).then_some(())
     })
@@ -1638,7 +1652,10 @@ async fn the_hosts_keys_answer_the_oldest_request() {
     assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!b_window.holding(), "a request just in isn't answered");
-    c_window.action(UserAction::RequestControl(0));
+    c_window.action(UserAction::RequestControl {
+        seat: 0,
+        controller: None,
+    });
     a.wait_session(&room, &a, "both asking", |s| {
         s.is_some_and(|s| s.requests.len() == 2)
     })
@@ -1712,7 +1729,11 @@ async fn the_panic_key_takes_control_back_until_allowed() {
     .await;
     // B's held button stays released, and asking is declined.
     b_window.pad(PadButtons::A | PadButtons::B);
-    b.ok(Command::RequestControl { seat: 0 }).await;
+    b.ok(Command::RequestControl {
+        seat: 0,
+        controller: None,
+    })
+    .await;
     b.wait_session(&room, &a, "B's request declined", |s| {
         s.is_some_and(|s| s.role == SessionRole::Watching)
     })
@@ -2921,7 +2942,11 @@ async fn moving_to_another_seat_lets_go_of_the_old_one_first() {
     .await;
 
     // B asks for the other seat and withdraws: B keeps the first.
-    b.ok(Command::RequestControl { seat: 1 }).await;
+    b.ok(Command::RequestControl {
+        seat: 1,
+        controller: None,
+    })
+    .await;
     a.wait_session(&room, &a, "B's first request", |s| {
         s.is_some_and(|s| !s.requests.is_empty())
     })
@@ -2935,7 +2960,11 @@ async fn moving_to_another_seat_lets_go_of_the_old_one_first() {
     assert!(b_window.holding(), "a withdraw never gives the seat back");
 
     // B asks for the other seat while holding the first, and gets it.
-    b.ok(Command::RequestControl { seat: 1 }).await;
+    b.ok(Command::RequestControl {
+        seat: 1,
+        controller: None,
+    })
+    .await;
     a.wait_session(&room, &a, "B's request for Controller 2", |s| {
         s.is_some_and(|s| s.requests.iter().any(|r| r.member == b.id() && r.seat == 1))
     })
@@ -3174,6 +3203,105 @@ async fn the_host_picks_which_of_a_guests_controllers_plays() {
         member: b.id(),
         seat: 1,
         controller: Some(5),
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// P13: a guest with two controllers on two seats, given a third: only the
+/// controller that moves leaves its seat, whether the host passes it or
+/// the guest asks for it; passing it without saying which is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_controller_that_moves_leaves_its_seat() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a
+        .live(go_live_with(&room, 4, setup(3, KeyboardMouseSeat::None)))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    let b_window = watching(&room, &a, &b).await;
+    b_window.name_controllers(&[(0, "DualSense"), (1, "Xbox")]);
+    b_window.controllers(2);
+    host_sees_controllers(&room, &a, &b, 2).await;
+    for (seat, controller) in [(0, 0), (1, 1)] {
+        a.ok(Command::PassControl {
+            member: b.id(),
+            seat,
+            controller: Some(controller),
+        })
+        .await;
+    }
+    a.wait_session(&room, &a, "B on seats 1 and 2, by controller", |s| {
+        s.is_some_and(|s| guest_controller(s, 0) == Some(0) && guest_controller(s, 1) == Some(1))
+    })
+    .await;
+
+    // Without saying which: refused, nothing moves.
+    let refused = a
+        .handle(Command::PassControl {
+            member: b.id(),
+            seat: 2,
+            controller: None,
+        })
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+
+    // The Xbox pad to seat 3: seat 2 alone goes; the DualSense plays on.
+    a.ok(Command::PassControl {
+        member: b.id(),
+        seat: 2,
+        controller: Some(1),
+    })
+    .await;
+    a.wait_session(&room, &a, "the Xbox pad on seat 3, seat 2 free", |s| {
+        s.is_some_and(|s| {
+            holder(s, 0) == Some(b.id())
+                && holder(s, 1).is_none()
+                && holder(s, 2) == Some(b.id())
+                && guest_controller(s, 2) == Some(1)
+        })
+    })
+    .await;
+    wait("the window on seats 1 and 3", || {
+        b_window.held_seats() == [0, 2]
+    })
+    .await;
+    b_window.pad_of(0, PadButtons::A);
+    b_window.pad_of(1, PadButtons::B);
+    wait("each controller on its own pad", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::A))
+            && a.fake.pad_at(2) == Some(pressed(PadButtons::B))
+    })
+    .await;
+
+    // B asks for seat 2 back with its DualSense: accepted, seat 1 alone
+    // goes; the Xbox pad stays on seat 3.
+    b.ok(Command::RequestControl {
+        seat: 1,
+        controller: Some(0),
+    })
+    .await;
+    a.wait_session(&room, &a, "B's request names its DualSense", |s| {
+        s.is_some_and(|s| s.requests.first().is_some_and(|r| r.controller == Some(0)))
+    })
+    .await;
+    a.ok(Command::AnswerControl {
+        member: b.id(),
+        accept: true,
+    })
+    .await;
+    a.wait_session(&room, &a, "the DualSense on seat 2, seat 1 free", |s| {
+        s.is_some_and(|s| {
+            holder(s, 0).is_none()
+                && holder(s, 1) == Some(b.id())
+                && holder(s, 2) == Some(b.id())
+                && guest_controller(s, 1) == Some(0)
+                && guest_controller(s, 2) == Some(1)
+        })
+    })
+    .await;
+    b_window.pad_of(0, PadButtons::X);
+    wait("the DualSense on seat 2", || {
+        a.fake.pad_at(1) == Some(pressed(PadButtons::X))
     })
     .await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;

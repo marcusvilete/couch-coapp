@@ -13,12 +13,23 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, ty
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
-import { isLive, keeps, listed, nameOf, seatsOf } from "../model/sessions";
+import { isLive, listed, nameOf, seatsOf } from "../model/sessions";
 import { Avatar, hueOf } from "../ui/Avatar";
 import { IconButton } from "../ui/Button";
 import { ContextMenu, DropdownMenu } from "../ui/Menu";
 import { Tooltip } from "../ui/Tooltip";
-import { cableFrom, controllersOf, guestPadHint, guestPads, ourPads, PAUSED_REASON, seatEntries, viewerEntries } from "./hostMenus";
+import {
+  cableFrom,
+  controllersOf,
+  frees,
+  guestPadHint,
+  guestPads,
+  ourPads,
+  passHint,
+  PAUSED_REASON,
+  seatEntries,
+  viewerEntries,
+} from "./hostMenus";
 import type { Run } from "./useRun";
 import "./PatchBay.css";
 
@@ -81,8 +92,12 @@ export function dropOn(
   if (s.controlPaused) return { ok: false, hint: PAUSED_REASON };
   const held = seatsOf(s, drag.member);
   if (held.includes(seat)) return { ok: false, hint: "Theirs already" };
-  const what =
-    held.length === 0 ? "Hands it over" : keeps(s, held, controllersOf(s, drag.member), seat) ? "Added" : "Moves them";
+  // One of theirs must leave its seat and nothing says which (P13).
+  if (frees(s, drag.member, seat).ambiguous) {
+    return { ok: false, hint: `Drag one of ${nameOf(room, drag.member)}'s controllers` };
+  }
+  const how = passHint(s, drag.member, seat);
+  const what = how == null ? "Hands it over" : how.charAt(0).toUpperCase() + how.slice(1);
   return { ok: true, hint: what + (target.host ? " · yours" : loses) + kbm };
 }
 

@@ -53,7 +53,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// 7: a guest's controllers in the patch bay (P12): `ViewerControllers`
 /// names them and says which drives each seat, `SeatAssigned` carries the
 /// host's choice of controller, and `SeatController`.
-pub const PROTOCOL_MINOR: u16 = 7;
+/// 8: one controller moves at a time (P13): `ControlRequest` names the
+/// controller asking.
+pub const PROTOCOL_MINOR: u16 = 8;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -68,6 +70,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (5, "0.12"),
     (6, "0.16"),
     (7, "0.18"),
+    (8, "0.19"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

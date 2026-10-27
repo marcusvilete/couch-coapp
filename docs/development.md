@@ -54,7 +54,7 @@ npm run shots              # every scenario in dark, light and High Contrast at 
 ```
 `npm run shots` uses the Microsoft Edge already on Windows (nothing to download) and also fails on text spilling out of its box, a menu that doesn't open, or a region that moves as you go between rooms, Settings pages or a dialog's tabs. A development build can be looked at from a script too: start it with `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'` in its own shell (never a shared one: the port lets any program on the PC drive the app; release builds ignore the variable), then attach with Playwright's `connectOverCDP`.
 
-**The stream window and the developer CLI:** `couch-viewer` is the window that shows a stream. Its bar and cards can be seen without a session: `cargo run -p couch-viewer -- --hud-preview watching` (twelve states), or all of them as screenshots with `cargo build -p couch-viewer` then `.\scripts\viewer-shots.ps1` (into `target\ui-shots\viewer`). `couch-cli` runs hosts, viewers and the measurements without the app.
+**The stream window and the developer CLI:** `couch-viewer` is the window that shows a stream. Its bar and cards can be seen without a session: `cargo run -p couch-viewer -- --hud-preview watching` (thirteen states), or all of them as screenshots with `cargo build -p couch-viewer` then `.\scripts\viewer-shots.ps1` (into `target\ui-shots\viewer`). `couch-cli` runs hosts, viewers and the measurements without the app.
 ```powershell
 cargo build --release -p couch-cli -p couch-viewer
 .\target\release\couch-cli.exe latency-probe --secs 30 --relay none   # end-to-end latency on this PC

@@ -168,6 +168,7 @@ fn a_request_accepted_hands_over_the_seat() {
         seat: S0,
         member: ANA,
         permissions: Permissions::GUEST_DEFAULT,
+        controller: None,
     }));
     assert!(s.requests().is_empty());
     // The router's report makes it so.
@@ -200,6 +201,7 @@ fn grant_of(fx: &[Effect]) -> Option<(SeatId, MemberId, Permissions)> {
             seat,
             member,
             permissions,
+            ..
         } => Some((*seat, *member, *permissions)),
         _ => None,
     })
@@ -773,7 +775,8 @@ fn moving_to_another_seat_leaves_the_old_one_first() {
             Effect::Grant {
                 seat: S1,
                 member: ANA,
-                permissions: Permissions::GAMEPAD
+                permissions: Permissions::GAMEPAD,
+                controller: None,
             },
         ]
     );
@@ -951,6 +954,120 @@ fn a_report_for_one_viewer_leaves_anothers_grant_pending() {
 
 /// M18 review: a move takes only the other pad seats; the keyboard seat
 /// needs no controller and stays.
+/// P13: a viewer on two pad seats with two controllers, given a third, gives
+/// up only the seat of the controller that moves.
+#[test]
+fn only_the_moving_controllers_seat_is_freed() {
+    let s2 = SeatId(2);
+    let pads = [SeatKind::Controller; 3];
+    let two_seats = || {
+        let mut s = with_seats(&pads);
+        s.join(ANA);
+        s.set_controllers(ANA, 2);
+        s.pass(ANA, S0).unwrap();
+        s.seat_changed(S0, Some(ANA));
+        s.pass(ANA, S1).unwrap();
+        s.seat_changed(S1, Some(ANA));
+        s.set_drivers(ANA, &[(S0, 0), (S1, 3)]);
+        s
+    };
+    let revoked = |fx: &[Effect]| -> Vec<SeatId> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::Revoke { seat, .. } => Some(*seat),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // The host passes it with controller 3: only seat 2 goes, first.
+    let mut s = two_seats();
+    let fx = s.pass_with(ANA, s2, Some(3)).unwrap();
+    assert_eq!(revoked(&fx), vec![S1]);
+    let grant = fx
+        .iter()
+        .position(|e| matches!(e, Effect::Grant { .. }))
+        .unwrap();
+    assert!(
+        fx.iter()
+            .position(|e| matches!(e, Effect::Revoke { .. }))
+            .unwrap()
+            < grant
+    );
+    assert!(fx.contains(&Effect::Grant {
+        seat: s2,
+        member: ANA,
+        permissions: Permissions::GAMEPAD,
+        controller: Some(3),
+    }));
+    s.seat_changed(S1, None);
+    assert!(revoked(&s.seat_changed(s2, Some(ANA))).is_empty());
+    assert_eq!(s.seats_of(ANA), vec![S0, s2]);
+
+    // Without saying which, or naming one that plays no seat: refused.
+    let mut s = two_seats();
+    assert_eq!(s.pass(ANA, s2).unwrap_err(), SessionError::ChooseController);
+    assert_eq!(
+        s.pass_with(ANA, s2, Some(1)).unwrap_err(),
+        SessionError::ChooseController
+    );
+
+    // A request names its controller, and the answer frees its seat alone.
+    let mut s = two_seats();
+    let now = Instant::now();
+    s.request_with(ANA, s2, Some(0), now);
+    assert_eq!(s.asked_with(ANA), Some(0));
+    let fx = s.answer(ANA, true, now).unwrap();
+    assert_eq!(revoked(&fx), vec![S0]);
+    assert_eq!(s.asked_with(ANA), None);
+}
+
+/// P13 review: a grant still on its way, freed by a later one, is reported
+/// anyway before its revoke: that report frees nothing more.
+#[test]
+fn a_freed_grant_on_its_way_frees_nothing_when_reported() {
+    let (s1, s2, s3) = (SeatId(1), SeatId(2), SeatId(3));
+    let mut s = with_seats(&[SeatKind::Controller; 4]);
+    s.join(ANA);
+    s.set_controllers(ANA, 2);
+    s.pass(ANA, s2).unwrap();
+    s.seat_changed(s2, Some(ANA));
+    s.pass(ANA, s3).unwrap();
+    let now = Instant::now();
+    s.request(ANA, s1, now);
+    let fx = s.answer(ANA, true, now).unwrap();
+    assert!(fx.contains(&Effect::Revoke {
+        seat: s3,
+        holder: Some(ANA)
+    }));
+    // The router took the grant of seat 3, then its revoke, then seat 2's.
+    let late = s.seat_changed(s3, Some(ANA));
+    assert!(
+        !late
+            .iter()
+            .any(|e| matches!(e, Effect::Revoke { seat, .. } if *seat == s2)),
+        "{late:?}"
+    );
+    s.seat_changed(s3, None);
+    s.seat_changed(s1, Some(ANA));
+    assert_eq!(s.seats_of(ANA), vec![s1, s2]);
+}
+
+/// P13: with one seat to free, nothing needs choosing.
+#[test]
+fn one_seat_moves_without_a_choice() {
+    let mut s = with_seats(&[SeatKind::Controller; 3]);
+    s.join(ANA);
+    s.set_controllers(ANA, 1);
+    s.pass(ANA, S0).unwrap();
+    s.seat_changed(S0, Some(ANA));
+    let fx = s.pass(ANA, S1).unwrap();
+    assert!(fx.contains(&Effect::Revoke {
+        seat: S0,
+        holder: Some(ANA)
+    }));
+}
+
 #[test]
 fn a_move_keeps_the_keyboard_seat() {
     let kbm = SeatId(2);
@@ -1193,6 +1310,13 @@ enum Op {
     Controllers(u8, u8),
     Answer(u8, bool),
     Pass(u8, u8),
+    /// A pass naming one of the viewer's controllers (P13).
+    PassWith(u8, u8, u8),
+    /// A request naming one of the viewer's controllers (P13).
+    RequestWith(u8, u8, u8),
+    /// A viewer says which controller drives each seat it holds: the
+    /// seats in order from this controller on (P13).
+    Drive(u8, u8),
     TakeBack(Option<u8>),
     /// One of the host's controllers moves to a seat (M23).
     Play(u8, u8),
@@ -1222,7 +1346,10 @@ fn op() -> impl Strategy<Value = Op> {
         2 => (who.clone(), proptest::option::of(seat.clone())).prop_map(|(w, s)| Op::GiveBack(w, s)),
         3 => (who.clone(), 0u8..4).prop_map(|(w, n)| Op::Controllers(w, n)),
         3 => (who.clone(), any::<bool>()).prop_map(|(w, a)| Op::Answer(w, a)),
-        5 => (who, seat.clone()).prop_map(|(w, s)| Op::Pass(w, s)),
+        5 => (who.clone(), seat.clone()).prop_map(|(w, s)| Op::Pass(w, s)),
+        3 => (who.clone(), seat.clone(), 0u8..4).prop_map(|(w, s, c)| Op::PassWith(w, s, c)),
+        2 => (who.clone(), seat.clone(), 0u8..4).prop_map(|(w, s, c)| Op::RequestWith(w, s, c)),
+        2 => (who, 0u8..4).prop_map(|(w, c)| Op::Drive(w, c)),
         1 => proptest::option::of(seat.clone()).prop_map(Op::TakeBack),
         2 => (seat.clone(), 0u8..3).prop_map(|(s, c)| Op::Play(s, c)),
         1 => Just(Op::Panic),
@@ -1413,6 +1540,20 @@ proptest! {
                     fx
                 }
                 Op::Pass(i, seat) => s.pass(member(i), SeatId(seat)).unwrap_or_default(),
+                Op::PassWith(i, seat, c) => {
+                    s.pass_with(member(i), SeatId(seat), Some(c)).unwrap_or_default()
+                }
+                Op::RequestWith(i, seat, c) => s.request_with(member(i), SeatId(seat), Some(c), now),
+                Op::Drive(i, c) => {
+                    let drivers: Vec<(SeatId, u8)> = s
+                        .seats_of(member(i))
+                        .into_iter()
+                        .zip(c..)
+                        .map(|(seat, c)| (seat, c % 4))
+                        .collect();
+                    s.set_drivers(member(i), &drivers);
+                    Vec::new()
+                }
                 Op::TakeBack(seat) => s.take_back(seat.map(SeatId)),
                 Op::Play(seat, k) => match s.play(SeatId(seat), k) {
                     Ok(fx) => {
@@ -1476,7 +1617,7 @@ proptest! {
             }
 
             for effect in &fx {
-                if let Effect::Grant { seat, member, permissions } = effect {
+                if let Effect::Grant { seat, member, permissions, .. } = effect {
                     prop_assert!(!ended_before, "a grant after the end");
                     if *member == HOST {
                         prop_assert!(host_plays);

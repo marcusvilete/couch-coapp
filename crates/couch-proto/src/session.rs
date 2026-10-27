@@ -256,6 +256,10 @@ pub struct SessionLeave {
 pub struct ControlRequest {
     pub session: SessionId,
     pub seat: SeatId,
+    /// Which of the viewer's controllers asks, by slot (P13): granted, it
+    /// plays the seat, leaving its own if the viewer has no controller to
+    /// spare. `None` with one controller or none.
+    pub controller: Option<u8>,
 }
 
 /// Viewer to host: withdraws my request, or gives my seat back. Which one is

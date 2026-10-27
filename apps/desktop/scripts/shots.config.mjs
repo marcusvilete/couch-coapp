@@ -127,6 +127,12 @@ export const SHOTS = [
     await dragTo(page, ".bay-plug.viewer >> text=Dani", ".bay-seat:has-text('Controller 4')", true);
     await page.waitForTimeout(400);
   }],
+  // P13: on two seats with two controllers, asking for a third asks which
+  // controller plays it.
+  ["ask-with", "playing-two", async (page) => {
+    await page.getByRole("button", { name: "Ask for Controller 3" }).click();
+    await menuOpens(page);
+  }],
   // P12: Bia's Xbox controller held over Controller 4, which her first
   // DualSense drives: the seat says they swap; then let go.
   ["patch-guest-pad-drag", "hosting-guest-controllers", async (page) =>
