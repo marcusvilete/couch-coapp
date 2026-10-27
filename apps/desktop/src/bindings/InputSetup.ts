@@ -5,6 +5,6 @@ import type { KeyboardMouseSeat } from "./KeyboardMouseSeat";
  * How the game takes input, chosen when a session starts (M19: one setup,
  * where single player and multiplayer were two): 0 to 4 controller seats,
  * each its own virtual pad, and keyboard and mouse as a seat of their own
- * or with Controller 1.
+ * or not for guests. No seats at all is a session to watch together (M24).
  */
 export type InputSetup = { controllers: number, keyboardMouse: KeyboardMouseSeat, };

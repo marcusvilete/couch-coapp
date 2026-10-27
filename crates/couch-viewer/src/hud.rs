@@ -740,7 +740,7 @@ fn session_bar(ui: &mut Ui, s: &HudState, view: BarView<'_>, clicks: &mut Vec<Ba
                 pick_controller(ui, s, &view, seat, clicks);
             }
             status(ui, s, &view, clicks);
-            hints(ui, &view);
+            hints(ui, s, &view);
         });
 }
 
@@ -940,8 +940,12 @@ struct Chip {
 
 /// A chip per seat. One seat nobody holds, while the host plays beside the
 /// seats, reads the host: they play it on whatever the game sees directly.
-/// With several, such a host gets a chip of their own after the seats.
+/// With several, such a host gets a chip of their own after the seats. None
+/// at all in a session nobody plays (M24).
 fn seat_chips(s: &HudState) -> Vec<Chip> {
+    if s.seats.is_empty() {
+        return Vec::new();
+    }
     let mut chips: Vec<Chip> = s
         .seats
         .iter()
@@ -1218,6 +1222,7 @@ fn status(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarCli
             (line, GREEN)
         }
         _ if s.control_paused => (format!("{} paused control for now", s.host), FAINT),
+        _ if s.seats.is_empty() => ("Watching together: nobody plays".to_string(), FAINT),
         _ => ("You're watching".to_string(), FAINT),
     };
     let cancel = match s.role {
@@ -1284,12 +1289,20 @@ fn dot_label(ui: &mut Ui, dot: Color32, text: RichText) {
     ui.add(egui::Label::new(text).truncate());
 }
 
-/// The mouse's hint while this viewer has it, then the shortcuts.
-fn hints(ui: &mut Ui, view: &BarView<'_>) {
+/// The mouse's hint while this viewer has it, then the shortcuts; asking
+/// only where there are seats to ask for.
+fn hints(ui: &mut Ui, s: &HudState, view: &BarView<'_>) {
     let shortcuts = view.shortcuts;
+    let ask = if s.seats.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{}: ask or give back · ",
+            shortcuts.binding(Shortcut::ToggleControl).keys()
+        )
+    };
     let keys = format!(
-        "{}: ask or give back · {}: full screen · {}: hide · {} {} {}: volume down, up, mute",
-        shortcuts.binding(Shortcut::ToggleControl).keys(),
+        "{ask}{}: full screen · {}: hide · {} {} {}: volume down, up, mute",
         shortcuts.binding(Shortcut::Fullscreen).key_name(),
         shortcuts.binding(Shortcut::ToggleHud).key_name(),
         shortcuts.binding(Shortcut::VolumeDown).key_name(),
@@ -1314,7 +1327,11 @@ fn hints(ui: &mut Ui, view: &BarView<'_>) {
 /// (M19: nothing streamed, or the last stream ended), or that the picture
 /// hasn't come yet. A second, smaller line with it.
 fn centre_message(s: &HudState, waiting: bool) -> Option<(String, Option<&'static str>)> {
-    let wait = "Your seat stays yours; the next stream shows here.";
+    let wait = if s.seats.is_empty() {
+        "The next stream shows here."
+    } else {
+        "Your seat stays yours; the next stream shows here."
+    };
     let first = match s.stream {
         StreamState::Live if waiting => format!("Waiting for {}'s picture…", s.host),
         StreamState::Live => return None,
@@ -1473,10 +1490,10 @@ fn test_picture(painter: &egui::Painter, rect: Rect) {
 fn playing_with(s: &HudState, mine: &[&HudSeat]) -> String {
     match mine {
         [seat] => {
-            let with = match (seat.pad, seat.keyboard_mouse) {
-                (true, true) => "your gamepad, keyboard and mouse",
-                (false, true) => "your keyboard and mouse",
-                _ => "your gamepad",
+            let with = if seat.keyboard_mouse {
+                "your keyboard and mouse"
+            } else {
+                "your gamepad"
             };
             if s.seats.len() > 1 {
                 format!("You're playing as {}, with {with}", seat.label)
@@ -1616,6 +1633,10 @@ mod tests {
         assert_eq!(who(&empty), [(Some(0), None, false)]);
         // The free seat is the one to ask for, not the host's.
         assert_eq!(seat_to_ask(&on_a_seat), Some(1));
+        // M24: watching together, nothing to show or ask for.
+        let together = session(Vec::new(), false);
+        assert!(seat_chips(&together).is_empty());
+        assert_eq!(seat_to_ask(&together), None);
     }
 
     /// M18: a viewer on several seats hears all of them.

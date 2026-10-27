@@ -5,7 +5,19 @@
 // right-click). Answering a request is never bound to a key here: only the
 // low-level hook answers with keys (CLAUDE.md), and only a request pending
 // for 1 s.
-import { Gamepad2, Hand, Keyboard, MonitorPlay, MoreHorizontal, Play, Power, ShieldAlert, Square, TriangleAlert } from "lucide-react";
+import {
+  Eye,
+  Gamepad2,
+  Hand,
+  Keyboard,
+  MonitorPlay,
+  MoreHorizontal,
+  Play,
+  Power,
+  ShieldAlert,
+  Square,
+  TriangleAlert,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
@@ -81,7 +93,11 @@ export function HostConsole(props: {
             ) : (
               <>
                 {hostIdleText(s.stream)}{" "}
-                <Why>Viewers stay, and keep their seats; their input waits for the stream, since they can't see.</Why>
+                <Why>
+                  {s.seats.length === 0
+                    ? "Viewers stay, and see the next stream when you start it."
+                    : "Viewers stay, and keep their seats; their input waits for the stream, since they can't see."}
+                </Why>
               </>
             )}
           </span>
@@ -119,24 +135,62 @@ export function HostConsole(props: {
 
       <ConsoleBanners room={room} session={s} busy={busy} run={run} pads={pads} />
 
-      <RequestStrip room={room} session={s} busy={busy} run={run} />
-      <section className="panel" aria-label="Players and seats">
-        <header className="panel-head">
-          <h3>Who plays what</h3>
-          <span className="panel-lead">Drag a player onto a seat to hand it over; pull a plug off a seat to take it back.</span>
-          <span className="panel-why">
-            <Why>
-              {pads.length > 0
-                ? `Every player in the game is one of these seats, yours included, so any of them can be handed over. A seat you take back or leave stays empty; dragging ${pads.length === 1 ? "your controller" : "one of your controllers"} onto a seat plays it. The game numbers its players itself, usually in the order controllers join. Each seat's ⋯ and right-click do the same as dragging.`
-                : "The game numbers its players itself, usually in the order controllers join, and your own controller counts: it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat doesn't respond, move them to another one. Each seat's ⋯ and right-click do the same as dragging."}
-            </Why>
-          </span>
-        </header>
-        <PatchBay room={room} session={s} busy={busy} run={run} />
-        <p className="panel-foot">
-          {whatYouPlay(room, s, pads)} {s.viewers.length} of {s.maxViewers} watching.
-        </p>
-      </section>
+      {s.seats.length === 0 ? (
+        // A session to watch together (M24): no seats, so no requests and
+        // no patch bay; who watches, in their place.
+        <section className="panel" aria-label="Watching together">
+          <header className="panel-head">
+            <h3>Watching together</h3>
+            <span className="panel-lead">Guests see and hear what you stream; nobody plays but you.</span>
+            <span className="panel-why">
+              <Why>
+                This session has no seats: no virtual controller is plugged in, nothing of yours is hidden from games,
+                and guests can't ask to play. To let them play, end it and start one with seats.
+              </Why>
+            </span>
+          </header>
+          <ul className="together-viewers" aria-label="Watching">
+            {s.viewers.length === 0 ? (
+              <li className="request-none">
+                <Eye aria-hidden="true" /> Nobody is watching yet.
+              </li>
+            ) : (
+              s.viewers.map((v) => (
+                <li key={v} className="together-viewer">
+                  <Avatar id={v} name={nameOf(room, v)} size={24} />
+                  <span>{nameOf(room, v)}</span>
+                </li>
+              ))
+            )}
+          </ul>
+          <p className="panel-foot">
+            {s.viewers.length} of {s.maxViewers} watching.
+          </p>
+        </section>
+      ) : (
+        <>
+          <RequestStrip room={room} session={s} busy={busy} run={run} />
+          <section className="panel" aria-label="Players and seats">
+            <header className="panel-head">
+              <h3>Who plays what</h3>
+              <span className="panel-lead">
+                Drag a player onto a seat to hand it over; pull a plug off a seat to take it back.
+              </span>
+              <span className="panel-why">
+                <Why>
+                  {pads.length > 0
+                    ? `Every player in the game is one of these seats, yours included, so any of them can be handed over. A seat you take back or leave stays empty; dragging ${pads.length === 1 ? "your controller" : "one of your controllers"} onto a seat plays it. The game numbers its players itself, usually in the order controllers join. Each seat's ⋯ and right-click do the same as dragging.`
+                    : "The game numbers its players itself, usually in the order controllers join, and your own controller counts: it often takes player 1. A seat whose controller the game gave no player does nothing; if a guest's seat doesn't respond, move them to another one. Each seat's ⋯ and right-click do the same as dragging."}
+                </Why>
+              </span>
+            </header>
+            <PatchBay room={room} session={s} busy={busy} run={run} />
+            <p className="panel-foot">
+              {whatYouPlay(room, s, pads)} {s.viewers.length} of {s.maxViewers} watching.
+            </p>
+          </section>
+        </>
+      )}
       {s.soundLevel != null && (
         <section className="panel" aria-label="Sound">
           <header className="panel-head">
@@ -216,7 +270,7 @@ function ConsoleBanners(props: {
           session, so a gamepad there does nothing. End the session and start it again to try again.
         </Callout>
       )}
-      {s.panicKey == null && (
+      {s.panicKey == null && s.seats.length > 0 && (
         <Callout tone="danger" icon={<ShieldAlert />}>
           The panic key couldn't be set up this time: use Take back on a seat to stop someone playing.
         </Callout>
@@ -227,7 +281,7 @@ function ConsoleBanners(props: {
           seats.
         </Callout>
       )}
-      {streamsElevated(s.streaming?.name) && isLive(s) && (
+      {streamsElevated(s.streaming?.name) && isLive(s) && s.seats.length > 0 && (
         <Callout tone="warn" icon={<TriangleAlert />}>
           You're streaming a program that runs as administrator: guests' keyboard and mouse can't reach it, and the
           panic key doesn't work while it is in front. Switch to Couch Co-App and use Take back instead. Their gamepad

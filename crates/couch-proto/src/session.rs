@@ -30,9 +30,9 @@ pub enum SeatKind {
     /// A virtual Xbox 360 pad of its own.
     Controller,
     /// The host's keyboard and pointer, while the game window is in front.
+    /// A player on a controller too holds both seats (M18); one seat with
+    /// both (M19's "with Controller 1") went in M24.
     KeyboardMouse,
-    /// Both: a pad, and keyboard and mouse.
-    Both,
 }
 
 impl SeatKind {
@@ -40,21 +40,20 @@ impl SeatKind {
         match self {
             Self::Controller => Permissions::GAMEPAD,
             Self::KeyboardMouse => Permissions::KEYBOARD | Permissions::MOUSE,
-            Self::Both => Permissions::GAMEPAD | Permissions::KEYBOARD | Permissions::MOUSE,
         }
     }
 
     pub fn has_pad(self) -> bool {
-        matches!(self, Self::Controller | Self::Both)
+        matches!(self, Self::Controller)
     }
 
     pub fn has_keyboard_mouse(self) -> bool {
-        matches!(self, Self::KeyboardMouse | Self::Both)
+        matches!(self, Self::KeyboardMouse)
     }
 }
 
 /// What the seats are called, by seat: "Controller" (numbered when there
-/// are several), "Keyboard and mouse", "Controller, keyboard and mouse".
+/// are several), "Keyboard and mouse".
 pub fn seat_labels(seats: &[SeatKind]) -> Vec<String> {
     let pads = seats.iter().filter(|s| s.has_pad()).count();
     let mut pad = 0;
@@ -62,7 +61,6 @@ pub fn seat_labels(seats: &[SeatKind]) -> Vec<String> {
         .iter()
         .map(|kind| match kind {
             SeatKind::KeyboardMouse => "Keyboard and mouse".to_string(),
-            SeatKind::Both => "Controller, keyboard and mouse".to_string(),
             SeatKind::Controller => {
                 pad += 1;
                 if pads > 1 {
@@ -85,13 +83,13 @@ pub fn seat_phrase(label: &str) -> String {
     }
 }
 
-/// A session's seats: 1 to [`MAX_SEATS`], at most [`MAX_PAD_SEATS`] with a
-/// pad, and at most one with keyboard and mouse (Windows has one keyboard
-/// and one pointer).
+/// A session's seats: none (M24: watching together, nobody plays) to
+/// [`MAX_SEATS`], at most [`MAX_PAD_SEATS`] with a pad, and at most one with
+/// keyboard and mouse (Windows has one keyboard and one pointer).
 pub fn valid_seats(seats: &[SeatKind]) -> bool {
     let pads = seats.iter().filter(|s| s.has_pad()).count();
     let kbm = seats.iter().filter(|s| s.has_keyboard_mouse()).count();
-    (1..=MAX_SEATS).contains(&seats.len()) && pads <= MAX_PAD_SEATS && kbm <= 1
+    seats.len() <= MAX_SEATS && pads <= MAX_PAD_SEATS && kbm <= 1
 }
 
 /// Host to each connected member, optional: a session is live. Sent on going
@@ -102,7 +100,8 @@ pub struct SessionAnnounce {
     /// What the host called it (a name: 1 to 96 bytes, nothing invisible).
     pub title: String,
     /// The seats players can hold, by [`SeatId`] (their index). One seat is
-    /// a single-player session.
+    /// a single-player session; none, a session to watch together, which
+    /// nobody plays (M24).
     pub seats: Vec<SeatKind>,
     /// The most viewers the host takes at once.
     pub max_viewers: u8,
@@ -388,7 +387,7 @@ mod tests {
     fn seats_are_checked() {
         assert!(valid_seats(&[Controller]));
         assert!(valid_seats(&[KeyboardMouse]));
-        assert!(valid_seats(&[Both]));
+        assert!(valid_seats(&[]), "watching together");
         assert!(valid_seats(&[
             Controller,
             Controller,
@@ -396,13 +395,11 @@ mod tests {
             Controller,
             KeyboardMouse
         ]));
-        assert!(!valid_seats(&[]));
         assert!(!valid_seats(&[Controller; MAX_PAD_SEATS + 1]), "five pads");
         assert!(
             !valid_seats(&[KeyboardMouse, Controller, KeyboardMouse]),
             "two keyboard seats"
         );
-        assert!(!valid_seats(&[Both, KeyboardMouse]), "two keyboard seats");
         assert_eq!(Controller.permissions(), Permissions::GUEST_DEFAULT);
         assert_eq!(seat_labels(&[Controller]), ["Controller"]);
         assert_eq!(
@@ -436,8 +433,16 @@ mod tests {
             .is_valid()
         );
         assert!(
-            !SessionAnnounce {
+            SessionAnnounce {
                 seats: vec![],
+                ..announce.clone()
+            }
+            .is_valid(),
+            "watching together (M24)"
+        );
+        assert!(
+            !SessionAnnounce {
+                seats: vec![SeatKind::KeyboardMouse; 2],
                 ..announce
             }
             .is_valid()

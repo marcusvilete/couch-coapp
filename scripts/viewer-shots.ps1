@@ -42,7 +42,7 @@ public static class ViewerShots {
 [ViewerShots]::SetProcessDPIAware() | Out-Null
 
 $states = 'watching', 'asking', 'controlling', 'asking-more', 'paused', 'stopped', 'waiting',
-    'beside', 'single', 'muted', 'crowded', 'worst', 'choosing'
+    'beside', 'single', 'muted', 'crowded', 'worst', 'choosing', 'together'
 $shots = [ordered]@{}
 foreach ($state in $states) { $shots[$state] = @('--hud-preview', $state, '--hud-scale', '1') }
 $shots['crowded-480x300'] = @('--hud-preview', 'crowded', '--size', '480', '300', '--hud-scale', '1')

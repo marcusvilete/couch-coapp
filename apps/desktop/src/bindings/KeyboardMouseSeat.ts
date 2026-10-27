@@ -3,4 +3,4 @@
 /**
  * Where a session's keyboard and mouse go.
  */
-export type KeyboardMouseSeat = "none" | "ownSeat" | "withController1";
+export type KeyboardMouseSeat = "none" | "ownSeat";

@@ -213,7 +213,6 @@ fn the_seat_decides_what_its_holder_may_send() {
     for (kind, permissions) in [
         (SeatKind::Controller, Permissions::GAMEPAD),
         (SeatKind::KeyboardMouse, kbm),
-        (SeatKind::Both, Permissions::GAMEPAD | kbm),
     ] {
         let mut s = with_seats(&[kind]);
         s.join(ANA);
@@ -242,15 +241,15 @@ fn seats_are_checked_when_going_live() {
             },
         )
     };
-    assert_eq!(new(&[]).unwrap_err(), SessionError::InvalidSeats);
     assert_eq!(
         new(&[SeatKind::Controller; 5]).unwrap_err(),
         SessionError::InvalidSeats
     );
     assert_eq!(
-        new(&[SeatKind::Both, SeatKind::KeyboardMouse]).unwrap_err(),
+        new(&[SeatKind::KeyboardMouse, SeatKind::KeyboardMouse]).unwrap_err(),
         SessionError::InvalidSeats
     );
+    assert!(new(&[]).unwrap().holders().is_empty(), "watching together");
     let s = new(&[SeatKind::Controller, SeatKind::Controller]).unwrap();
     assert_eq!(s.holders(), &[None, None]);
 }
@@ -276,6 +275,40 @@ fn two_guests_play_two_seats() {
     );
     s.seat_changed(S0, None);
     assert_eq!(s.holders(), &[None, Some(BIA)]);
+}
+
+/// M24: a session nobody plays. Viewers watch; nothing they ask for, and
+/// nothing the host tries, hands out a seat.
+#[test]
+fn a_session_to_watch_together_has_nothing_to_hand_out() {
+    let now = Instant::now();
+    let mut s = hosted_with(&[], 2);
+    assert!(s.start().is_empty(), "the host's controllers stay theirs");
+    assert!(s.host_seats().is_empty());
+    assert!(s.join(ANA).contains(&Effect::StartViewer(ANA)), "watches");
+    assert!(s.request(ANA, S0, now).is_empty());
+    assert!(s.request_with(ANA, S0, Some(0), now).is_empty());
+    assert!(s.requests().is_empty());
+    assert_eq!(s.pass(ANA, S0).unwrap_err(), SessionError::NoSuchSeat);
+    assert_eq!(s.play(S0, 0).unwrap_err(), SessionError::HostNotOnASeat);
+    assert_eq!(s.take_back(Some(S0)), vec![]);
+    assert_eq!(
+        s.take_back(None),
+        vec![Effect::RevokeViewers],
+        "frees nothing"
+    );
+    assert!(s.give_back(ANA, None).is_empty());
+    assert!(
+        s.seat_changed(S0, Some(ANA)).is_empty(),
+        "a report for no seat"
+    );
+    let status = status_of(&s);
+    assert!(status.holders.is_empty() && status.host_seats.is_empty());
+    assert!(status.is_valid());
+    match s.announce() {
+        ControlMessage::SessionAnnounce(a) => assert!(a.seats.is_empty() && a.is_valid()),
+        other => panic!("{other:?}"),
+    }
 }
 
 // ---- The host on a seat ----
@@ -354,13 +387,13 @@ fn the_host_starts_on_the_first_seat_with_a_pad() {
 #[test]
 fn the_hosts_seat_comes_back_when_a_viewer_lets_go() {
     let now = Instant::now();
-    let mut s = hosted(&[SeatKind::Both]);
+    let mut s = hosted(&[SeatKind::Controller]);
     s.start();
     s.seat_changed(S0, Some(HOST));
     s.join(ANA);
     s.request(ANA, S0, now);
     let fx = s.answer(ANA, true, now).unwrap();
-    assert_eq!(grant_of(&fx), Some((S0, ANA, SeatKind::Both.permissions())));
+    assert_eq!(grant_of(&fx), Some((S0, ANA, Permissions::GAMEPAD)));
     // The router ends the host's hold first. The claim this causes reaches
     // it after the grant, so it finds the seat taken and does nothing.
     let fx = s.seat_changed(S0, None);

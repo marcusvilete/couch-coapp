@@ -89,6 +89,12 @@ export const SHOTS = [
   ["dialog-start", "owner-alone", click("Start a session")],
   ["dialog-start-remapper", "start-remapper", click("Start a session")],
   ["dialog-start-no-drivers", "start-no-drivers", click("Start a session")],
+  // M24: no seats at all, a session to watch together.
+  ["dialog-start-together", "owner-alone", async (page) => {
+    await click("Start a session")(page);
+    await click("One controller less")(page);
+    await page.getByRole("radio", { name: "Not for guests" }).click();
+  }],
   ["dialog-stream", "hosting-idle", click("Start streaming…")],
   [
     "dialog-stream-admin",
@@ -142,7 +148,6 @@ export const SHOTS = [
     await page.waitForTimeout(400);
   }],
   ["patch-keyboard-yours", "hosting-keyboard-yours", async (page) => centreBay(page)],
-  ["patch-controller-keys", "hosting-controller-keys", async (page) => centreBay(page)],
   ["patch-pull", "hosting-live", async (page) => {
     await centreBay(page);
     const plug = page.locator(".bay-seat:has-text('Controller 3') .bay-socket.plugged");
@@ -231,6 +236,10 @@ export const STABLE = [
       ["more", click("One controller more")],
       ["keyboard", async (page) => page.getByRole("radio", { name: "A seat of their own" }).click()],
       ["none", click("One controller less")],
+      // M24: down to no seats, a session to watch together.
+      ["less", click("One controller less")],
+      ["no controller", click("One controller less")],
+      ["watch only", async (page) => page.getByRole("radio", { name: "Not for guests" }).click()],
     ],
   ],
   [

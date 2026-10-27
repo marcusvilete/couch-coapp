@@ -1,7 +1,7 @@
 // Starting a session (M19): the seats come first, and our controllers are
 // hidden from games, before any game starts; streams come later, from the
 // console. One step: title and how many can watch, then the seats.
-import { Gamepad2, Keyboard, Minus, MousePointer2, Play, Plus, ShieldAlert } from "lucide-react";
+import { Eye, Gamepad2, Keyboard, Minus, Play, Plus, ShieldAlert } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { InputSetup } from "../bindings/InputSetup";
 import type { KeyboardMouseSeat } from "../bindings/KeyboardMouseSeat";
@@ -50,10 +50,9 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
       .catch((e) => setLoadError(errorText(e)));
   }, []);
 
-  // Keyboard and mouse "with Controller 1" needs a Controller 1.
-  const kbmChoice: KeyboardMouseSeat = controllers === 0 && kbm === "withController1" ? "ownSeat" : kbm;
-  const input: InputSetup = { controllers, keyboardMouse: kbmChoice };
-  const noSeats = controllers === 0 && kbmChoice === "none";
+  const input: InputSetup = { controllers, keyboardMouse: kbm };
+  // No seats at all: a session to watch together, nobody plays (M24).
+  const watchOnly = controllers === 0 && kbm === "none";
   const padSeat = controllers > 0;
   const hostControllers = sources?.hostControllers ?? [];
   const keys = padKeys(hostControllers);
@@ -79,8 +78,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
     prepareChime();
     const problem =
       (title.trim() === "" ? "Give the session a title." : null) ??
-      (new TextEncoder().encode(title.trim()).length > MAX_NAME_BYTES ? "That title is too long." : null) ??
-      (noSeats ? "Give the guests at least one seat: a controller, or keyboard and mouse." : null);
+      (new TextEncoder().encode(title.trim()).length > MAX_NAME_BYTES ? "That title is too long." : null);
     if (problem) {
       setError(problem);
       return;
@@ -118,7 +116,11 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
   return (
     <Dialog
       title={`Start a session in ${props.room.name}`}
-      description="The seats are set up first, and your controllers hidden from games. Then you stream a window or a screen, and stop or switch whenever you like."
+      description={
+        watchOnly
+          ? "Guests watch what you stream; nobody else plays. You stream a window or a screen next, and stop or switch whenever you like."
+          : "The seats are set up first, and your controllers hidden from games. Then you stream a window or a screen, and stop or switch whenever you like."
+      }
       onClose={props.onClose}
       busy={busy}
       size="l"
@@ -140,7 +142,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
             form="start-session"
             variant="primary"
             icon={<Play />}
-            disabled={busy || noSeats}
+            disabled={busy}
             labels={["Start the session", "Starting…"]}
           >
             {busy ? "Starting…" : "Start the session"}
@@ -195,11 +197,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
                 label="One controller less"
                 variant="secondary"
                 disabled={controllers === 0}
-                onClick={() => {
-                  const n = controllers - 1;
-                  setControllers(n);
-                  if (n === 0 && kbm === "withController1") setKbm("ownSeat");
-                }}
+                onClick={() => setControllers(controllers - 1)}
               >
                 <Minus />
               </IconButton>
@@ -219,25 +217,21 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
               {() => (
                 <Segmented
                   label="Keyboard and mouse"
-                  value={kbmChoice}
+                  value={kbm}
                   onChange={setKbm}
                   options={[
                     { value: "none", label: "Not for guests" },
-                    { value: "ownSeat", label: "A seat of their own" },
-                    {
-                      value: "withController1",
-                      label: "With Controller 1",
-                      disabled: controllers === 0,
-                      title: "One player on both",
-                    },
+                    { value: "ownSeat", label: "A seat of their own", title: "One player can hold it beside a controller" },
                   ]}
                 />
               )}
             </Field>
           </div>
           <ul className="seat-preview" aria-label="The seats">
-            {seats.length === 0 ? (
-              <li className="seat-preview-none">Give the guests at least one seat: a controller, or keyboard and mouse.</li>
+            {watchOnly ? (
+              <li className="seat-preview-none">
+                <Eye aria-hidden="true" /> Just watching: guests see and hear, nobody plays.
+              </li>
             ) : (
               seats.map((seat, i) => {
                 const mine = seat.pad ? chosenKeys[seats.slice(0, i).filter((x) => x.pad).length] : undefined;
@@ -245,16 +239,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
                 return (
                   <li key={i} className={`seat-preview-tile${mineName ? " yours" : ""}`}>
                     <span className="seat-preview-icon" aria-hidden="true">
-                      {seat.pad && seat.keyboardMouse ? (
-                        <>
-                          <Gamepad2 />
-                          <MousePointer2 />
-                        </>
-                      ) : seat.pad ? (
-                        <Gamepad2 />
-                      ) : (
-                        <Keyboard />
-                      )}
+                      {seat.pad ? <Gamepad2 /> : <Keyboard />}
                     </span>
                     <span className="seat-preview-label">{seat.label}</span>
                     <span className="seat-preview-who">{mineName ? `You · ${mineName}` : "A guest"}</span>
@@ -263,12 +248,16 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
               })
             )}
           </ul>
-          {kbmChoice !== "none" ? (
+          {kbm !== "none" ? (
             <Callout tone="danger" icon={<ShieldAlert />} title="Keyboard and mouse are control of your PC">
               Whoever holds that seat types only into the game, and only while its window is in front, so you'll stream
               a window, not a whole screen; the Windows key, Alt+Tab, Alt+F4, Ctrl+Esc and Ctrl+Shift+Esc never go
               through. Give that seat only to people you trust.
             </Callout>
+          ) : watchOnly ? (
+            <p className="start-note">
+              No virtual controller is plugged in and nothing of yours is hidden: you play as you would alone.
+            </p>
           ) : (
             <p className="start-note">Guests play with their gamepad only.</p>
           )}

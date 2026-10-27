@@ -458,19 +458,6 @@
   }
 }
 
-/* Two of the host's cables feeding one seat (a controller and the keyboard
-   on "Controller, keyboard and mouse") meet at a junction, then run on as
-   one, thicker. */
-.cable.trunk .cable-line {
-  stroke-width: 4.5;
-}
-
-.cable-junction {
-  fill: var(--stroke);
-  stroke: var(--bg-raised);
-  stroke-width: 2;
-}
-
 /* A request: dashed, breathing. */
 .cable.request .cable-line {
   stroke-width: 2;
