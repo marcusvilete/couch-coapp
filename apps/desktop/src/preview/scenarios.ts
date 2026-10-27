@@ -2,6 +2,7 @@
 // seeing. Picked by `?scenario=<name>` or the preview's picker.
 import type { MemberLink } from "../bindings/MemberLink";
 import type { MemberView } from "../bindings/MemberView";
+import type { RemoteAccessView } from "../bindings/RemoteAccessView";
 import type { SessionView } from "../bindings/SessionView";
 import type { StreamWindowView } from "../bindings/StreamWindowView";
 import { defaultShortcuts, hostSession, seatsFor, type FakeRoom, type World } from "./fakeEngine";
@@ -9,7 +10,7 @@ import { defaultShortcuts, hostSession, seatsFor, type FakeRoom, type World } fr
 const ME = "a11ce000000000000000000000000001";
 
 function member(id: string, name: string, link: MemberLink, extra: Partial<MemberView> = {}): MemberView {
-  return { id, name, isOwner: false, link, otherVersion: null, ...extra };
+  return { id, name, isOwner: false, link, otherVersion: null, remote: null, ...extra };
 }
 
 const you = (owner: boolean): MemberView => member(ME, "Ana", "me", { isOwner: owner });
@@ -18,6 +19,15 @@ const caio = member("ca10", "Caio", "relay");
 const dani = member("dan1", "Dani", "online");
 const edu = member("ed0", "Edu", "offline");
 const fer = member("fe2", "Fer", "direct", { otherVersion: { appVersion: "0.12.0", newer: false } });
+
+// Remote play (M25): our home PC, as our laptop sees it, and our laptop, as
+// the home PC sees it.
+const HOME_PC = "90ce0000000000000000000000000002";
+const LAPTOP = "1a970000000000000000000000000003";
+const homePc = (state: Partial<RemoteAccessView>): MemberView =>
+  member(HOME_PC, "Ana's PC", "relay", {
+    remote: { accepted: true, unlocked: false, code: "4F2A 9C1B", waitSecs: null, ...state },
+  });
 
 function room(id: string, name: string, over: Partial<FakeRoom> = {}): FakeRoom {
   return {
@@ -76,6 +86,8 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     streamWindow: ours ? ourWindow() : null,
     gameInFront: ours ? true : null,
     note: null,
+    operator: false,
+    operatedBy: [],
     ...over,
   };
 }
@@ -137,6 +149,19 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     startFailure: null,
     sound: "game",
     streamWindowBar: true,
+    remotePlay: {
+      on: false,
+      pinSet: false,
+      myCode: "4F2A 9C1B",
+      devices: [],
+      candidates: [
+        { id: bia.id, name: bia.name, code: "1D7E 03BA", online: true },
+        { id: caio.id, name: caio.name, code: "88C4 F120", online: true },
+        { id: dani.id, name: dani.name, code: "5A0B 6E2D", online: false },
+      ],
+      waitSecs: null,
+      hosts: [],
+    },
     ...over,
   };
 }
@@ -264,6 +289,56 @@ export const SCENARIOS: Record<string, Scenario> = {
         { slot: 1, name: "Xbox Wireless Controller", seat: 1 },
       ];
       return base([sofa({ sessions: [s] })], { myControllers: 2 });
+    },
+  },
+  // ---- Remote play (M25): we are the laptop, "Ana's PC" our home PC ----
+  "remote-offered": {
+    title: "Remote play: a PC offers itself, not accepted yet",
+    world: () => base([sofa({ members: [you(false), homePc({ accepted: false }), bia, caio] })]),
+  },
+  "remote-locked": {
+    title: "Remote play: our PC, locked",
+    world: () => base([sofa({ members: [you(false), homePc({}), bia, caio] })]),
+  },
+  "remote-unlocked": {
+    title: "Remote play: our PC unlocked, no session there",
+    world: () => base([sofa({ members: [you(false), homePc({ unlocked: true }), bia, caio] })]),
+  },
+  "remote-console": {
+    title: "Remote play: running our PC's session from here",
+    world: () => {
+      const s = hostSession(HOME_PC, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []);
+      Object.assign(s, { role: "watching", operator: true, panicKey: null, answerKeys: null });
+      s.viewers = [ME, bia.id];
+      s.viewerControllers = [1, 1];
+      s.viewerPads = [[{ slot: 0, name: "Xbox Wireless Controller" }], [{ slot: 0, name: "DualSense Wireless Controller" }]];
+      s.seats[0].holder = ME;
+      s.seats[0].guestController = 0;
+      s.requests = [{ member: bia.id, seat: 1, controller: null }];
+      s.stream = { state: "live" };
+      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null };
+      s.streamWindow = ourWindow({});
+      s.gameInFront = true;
+      return base([sofa({ members: [you(false), homePc({ unlocked: true }), bia, caio], sessions: [s] })]);
+    },
+  },
+  "remote-home": {
+    title: "Remote play at the home PC: our laptop trusted, running our session",
+    world: () => {
+      const s = hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []);
+      s.viewers = [LAPTOP];
+      s.viewerControllers = [1];
+      s.operatedBy = ["Ana's laptop"];
+      s.stream = { state: "live" };
+      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null };
+      const laptop = member(LAPTOP, "Ana's laptop", "relay");
+      const world = base([sofa({ members: [you(true), laptop, bia, caio], sessions: [s] })]);
+      Object.assign(world.remotePlay, {
+        on: true,
+        pinSet: true,
+        devices: [{ id: LAPTOP, name: "Ana's laptop", code: "7B31 E05C", online: true }],
+      });
+      return world;
     },
   },
   "watching-together": {

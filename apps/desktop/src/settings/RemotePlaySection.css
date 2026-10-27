@@ -1,0 +1,65 @@
+/* Settings → Remote play (M25). */
+.remote-devices {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.remote-device {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 48px;
+  padding: 0 var(--s3);
+  background: var(--bg-raised-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+}
+
+.remote-device-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--active);
+  color: var(--text-muted);
+
+  & svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.remote-device-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.remote-device-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-device-code {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+.remote-pin,
+.remote-add {
+  display: grid;
+  gap: var(--s3);
+  max-width: 420px;
+}
+
+.remote-code {
+  font-size: var(--text-md);
+  color: var(--text-muted);
+}

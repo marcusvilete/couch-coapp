@@ -133,4 +133,13 @@ gameInFront: boolean | null,
  * For a viewer: the latest news, as the stream window's bar shows it
  * ("The host said no, for now"); `None` for none.
  */
-note: string | null, };
+note: string | null, 
+/**
+ * For a session of one of our own PCs, unlocked (M25): we run it from
+ * here, and the host's fields above are filled as the host sees them.
+ */
+operator: boolean, 
+/**
+ * For the host: our devices running this session from afar, by name.
+ */
+operatedBy: Array<string>, };

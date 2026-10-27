@@ -12,8 +12,10 @@
 //! members accept each other by the owner's signed roster.
 //!
 //! Sessions ride on the same connections ([`sessions`]): the one we stream,
-//! the one we watch, and the others' we hear of.
+//! the one we watch, and the others' we hear of. So does remote play
+//! ([`remote`], M25): one of our own devices running our sessions from afar.
 
+mod remote;
 mod sessions;
 
 use std::{
@@ -178,6 +180,31 @@ pub(crate) enum Input {
         session: SessionId,
         accept: bool,
     },
+    /// Remote play (M25): a device's PIN, checked off this thread.
+    RemotePinChecked {
+        conn: ConnId,
+        peer: MemberId,
+        /// The PIN it was checked against, as numbered this run.
+        generation: u64,
+        right: bool,
+    },
+    /// A new PIN's hash, made off this thread.
+    RemotePinHashed {
+        hash: crate::remote::PinHash,
+        reply: Reply,
+    },
+    /// An operator's command, answered here.
+    RemoteAnswered {
+        conn: ConnId,
+        id: u32,
+        result: couch_proto::remote::RemoteResult,
+    },
+    /// A command to one of our PCs it hasn't answered in time.
+    RemoteTimeout {
+        room: RoomId,
+        member: MemberId,
+        id: u32,
+    },
 }
 
 pub(crate) enum JoinAnswer {
@@ -301,6 +328,8 @@ struct Actor {
     /// again with its identity, nothing is created, joined or renamed under
     /// the old one.
     restored: bool,
+    /// Remote play (M25): as a home PC, its devices; as a device, its PCs.
+    remote: remote::Remote,
 }
 
 fn lock(limits: &Mutex<AdmissionLimits>) -> MutexGuard<'_, AdmissionLimits> {
@@ -404,6 +433,7 @@ pub(crate) async fn start(
         other_versions: BTreeMap::new(),
         views: AtomicU64::new(0),
         restored: false,
+        remote: remote::Remote::load(profile.data_dir()),
     };
     actor.restore_rooms(now);
     tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
@@ -607,6 +637,10 @@ impl Actor {
                     self.session_received(room, conn, message, now);
                     return;
                 }
+                if message.is_remote() {
+                    self.remote_received(room, conn, message, now);
+                    return;
+                }
                 if let Some(entry) = self.rooms.get_mut(&room) {
                     let fx = entry.room.received(conn, message, now);
                     self.apply(room, fx, now);
@@ -622,6 +656,7 @@ impl Actor {
                     self.apply(closed.room, fx, now);
                 }
                 self.session_closed(closed.room, conn, closed.peer, now);
+                self.remote_closed(conn, now);
             }
             Input::SessionReady {
                 session,
@@ -643,6 +678,15 @@ impl Actor {
             }
             Input::Panic(session) => self.panic_key(session, now),
             Input::AnswerFirst { session, accept } => self.answer_first(session, accept, now),
+            Input::RemotePinChecked {
+                conn,
+                peer,
+                generation,
+                right,
+            } => self.remote_pin_checked(conn, peer, generation, right, now),
+            Input::RemotePinHashed { hash, reply } => self.remote_pin_hashed(hash, reply, now),
+            Input::RemoteAnswered { conn, id, result } => self.remote_answered(conn, id, result),
+            Input::RemoteTimeout { room, member, id } => self.remote_timeout(room, member, id, now),
         }
     }
 
@@ -814,6 +858,19 @@ impl Actor {
             }
             Command::StreamWindow { request } => self.stream_window(request),
             Command::SetStreamWindow { bar } => self.set_stream_window(bar),
+            command @ (Command::GetRemotePlay
+            | Command::SetRemotePlay { .. }
+            | Command::SetRemotePin { .. }
+            | Command::AddRemoteDevice { .. }
+            | Command::RemoveRemoteDevice { .. }
+            | Command::AcceptRemoteHost { .. }
+            | Command::ForgetRemoteHost { .. }
+            | Command::UnlockRemote { .. }
+            | Command::LockRemote { .. }
+            | Command::Remote { .. }) => {
+                self.remote_settings_command(command, reply, now);
+                return;
+            }
         };
         let _ = reply.send(result);
     }
@@ -1345,6 +1402,7 @@ impl Actor {
         self.apply(room, fx, now);
         // After the room's snapshot, on the same writer.
         self.session_connected(room, peer, id, now);
+        self.remote_connected(room, peer, id);
     }
 
     /// Carries out a room's effects.
@@ -1584,6 +1642,8 @@ impl Actor {
         if let Some(view) = self.view(room, now) {
             let _ = self.events.send(Event::RoomChanged { room: view });
         }
+        // Our devices running our session hear what changed too (M25).
+        self.remote_push();
     }
 
     /// What the UI shows of a room; nothing for one we are leaving.
@@ -1628,6 +1688,7 @@ impl Actor {
                         app_version: app_version.clone(),
                         newer: *minor > couch_proto::PROTOCOL_MINOR,
                     }),
+                remote: self.remote_access(room, m.id),
             })
             .collect();
         let paused = lock(&self.limits)

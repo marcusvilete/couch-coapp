@@ -14,6 +14,7 @@ import {
   MoreHorizontal,
   Play,
   Power,
+  Router,
   ShieldAlert,
   Square,
   TriangleAlert,
@@ -21,6 +22,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
+import type { RemoteTarget } from "../model/remote";
 import { hostIdleText, isLive, listed, nameOf, seatPhrase } from "../model/sessions";
 import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
@@ -48,9 +50,13 @@ export function HostConsole(props: {
   notify: Notify;
   onStream: () => void;
   confirm: (c: Confirm) => void;
+  /** One of our own PCs' session, run from here (M25): its commands go
+   * there. */
+  remote?: RemoteTarget;
 }) {
-  const { room, session: s } = props;
-  const { busy, run } = useRun(props.notify, props.onRoom);
+  const { room, session: s, remote } = props;
+  const { busy, run } = useRun(props.notify, props.onRoom, remote);
+  const pcName = remote ? nameOf(room, remote.member) : null;
   const live = isLive(s);
   const pads = ourPads(s);
   const starting = s.stream.state === "starting";
@@ -70,7 +76,7 @@ export function HostConsole(props: {
   };
 
   return (
-    <section className="console" aria-label="Your session">
+    <section className="console" aria-label={pcName ? `${pcName}'s session, run from here` : "Your session"}>
       <header className="console-top">
         <span className={`console-screen${live ? " live" : ""}`} aria-hidden="true">
           <MonitorPlay />
@@ -78,6 +84,11 @@ export function HostConsole(props: {
         <div className="console-titles">
           <div className="console-title-row">
             {live ? <Badge tone="live">Live</Badge> : <Badge>{starting ? "Starting…" : "Not streaming"}</Badge>}
+            {pcName && (
+              <Badge tone="info">
+                <Router aria-hidden="true" /> On {pcName}
+              </Badge>
+            )}
             <h2 className="console-title" title={s.title}>
               {s.title}
             </h2>
@@ -133,7 +144,7 @@ export function HostConsole(props: {
         </div>
       </header>
 
-      <ConsoleBanners room={room} session={s} busy={busy} run={run} pads={pads} />
+      <ConsoleBanners room={room} session={s} busy={busy} run={run} pads={pads} remote={pcName} />
 
       {s.seats.length === 0 ? (
         // A session to watch together (M24): no seats, so no requests and
@@ -184,9 +195,10 @@ export function HostConsole(props: {
                 </Why>
               </span>
             </header>
-            <PatchBay room={room} session={s} busy={busy} run={run} />
+            <PatchBay room={room} session={s} busy={busy} run={run} remote={pcName ?? undefined} />
             <p className="panel-foot">
-              {whatYouPlay(room, s, pads)} {s.viewers.length} of {s.maxViewers} watching.
+              {pcName ? `Run from here, on ${pcName}.` : whatYouPlay(room, s, pads)} {s.viewers.length} of{" "}
+              {s.maxViewers} watching.
             </p>
           </section>
         </>
@@ -196,7 +208,13 @@ export function HostConsole(props: {
           <header className="panel-head">
             <h3>Stream volume</h3>
           </header>
-          <SoundLevel roomId={room.id} level={s.soundLevel} onRoom={props.onRoom} notify={props.notify} />
+          <SoundLevel
+            roomId={room.id}
+            level={s.soundLevel}
+            onRoom={props.onRoom}
+            notify={props.notify}
+            remote={remote}
+          />
         </section>
       )}
     </section>
@@ -230,10 +248,19 @@ function ConsoleBanners(props: {
   busy: string | null;
   run: ReturnType<typeof useRun>["run"];
   pads: string[];
+  /** The name of the home PC we run this from (M25). */
+  remote: string | null;
 }) {
-  const { session: s, pads } = props;
+  const { session: s, pads, remote } = props;
   return (
     <div className="console-banners">
+      {s.operatedBy.length > 0 && (
+        <Callout tone="info" icon={<Router />}>
+          {listed(s.operatedBy)} {s.operatedBy.length === 1 ? "is" : "are"} running this session from afar. The panic
+          key locks {s.operatedBy.length === 1 ? "it" : "them"} out until the PIN is given again; to keep{" "}
+          {s.operatedBy.length === 1 ? "it" : "them"} out, turn remote play off in Settings.
+        </Callout>
+      )}
       {s.controlPaused && (
         <Callout
           tone="warn"
@@ -244,8 +271,9 @@ function ConsoleBanners(props: {
             </Button>
           }
         >
-          You took the controller back with the panic key. Nobody else can play until you allow it
-          {pads.length > 0 ? "; you still can" : ""}.
+          {remote
+            ? `Someone at ${remote} took the controller back with the panic key. Nobody can play until it's allowed again.`
+            : `You took the controller back with the panic key. Nobody else can play until you allow it${pads.length > 0 ? "; you still can" : ""}.`}
         </Callout>
       )}
       {s.padsSettingUp.length > 0 && (
@@ -270,7 +298,7 @@ function ConsoleBanners(props: {
           session, so a gamepad there does nothing. End the session and start it again to try again.
         </Callout>
       )}
-      {s.panicKey == null && s.seats.length > 0 && (
+      {s.panicKey == null && s.seats.length > 0 && !remote && (
         <Callout tone="danger" icon={<ShieldAlert />}>
           The panic key couldn't be set up this time: use Take back on a seat to stop someone playing.
         </Callout>

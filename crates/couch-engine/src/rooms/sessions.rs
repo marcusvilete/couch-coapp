@@ -16,6 +16,7 @@ use std::{
 };
 
 use couch_input::{HidUsage, shortcuts::Shortcut};
+use couch_proto::remote::{RemoteGuest, RemoteRequest, RemoteSession, RemoteStream};
 use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
@@ -268,7 +269,7 @@ impl Actor {
         }
     }
 
-    fn member_name(&self, room: RoomId, member: MemberId) -> String {
+    pub(super) fn member_name(&self, room: RoomId, member: MemberId) -> String {
         self.rooms
             .get(&room)
             .and_then(|e| e.room.status().members.into_iter().find(|m| m.id == member))
@@ -1768,6 +1769,8 @@ impl Actor {
         }
         let fx = h.session.panic();
         self.apply_session(room, fx, now);
+        // Whoever is at the PC stops our devices too: the PIN again (M25).
+        self.remote_lock_all(couch_proto::remote::LockReason::Panic, now);
     }
 
     /// The host's Accept or Decline key: answers the oldest request, once
@@ -2400,6 +2403,87 @@ impl Actor {
         }
     }
 
+    /// The room our session is in, once it has started.
+    pub(super) fn hosting_room(&self) -> Option<RoomId> {
+        self.sessions
+            .hosting
+            .as_ref()
+            .filter(|h| h.pipeline.is_some())
+            .map(|h| h.room)
+    }
+
+    /// The room our session is in, started or still starting.
+    pub(super) fn session_room(&self) -> Option<RoomId> {
+        self.sessions.hosting.as_ref().map(|h| h.room)
+    }
+
+    /// Our host console, for our devices running it from afar (M25): what
+    /// the room's members don't hear otherwise.
+    pub(super) fn remote_session(&self) -> Option<RemoteSession> {
+        let h = self
+            .sessions
+            .hosting
+            .as_ref()
+            .filter(|h| h.pipeline.is_some())?;
+        let s = &h.session;
+        let (starting, streaming) = match &h.stream {
+            Some(OurStream::Starting { view, .. }) => (true, Some(view)),
+            Some(OurStream::Live { view, .. }) => (false, Some(view)),
+            None => (false, None),
+        };
+        let cut = |text: &str| {
+            let mut text = text.to_string();
+            couch_proto::remote::cut(&mut text);
+            text
+        };
+        Some(RemoteSession {
+            session: s.id(),
+            starting,
+            stream: s.stream(),
+            streaming: streaming.map(|v| RemoteStream {
+                name: cut(&v.name),
+                fps: v.fps,
+                max_mbps: v.max_mbps,
+                upload_mbps: v.upload_mbps,
+            }),
+            requests: s
+                .requests()
+                .iter()
+                .map(|(member, seat)| RemoteRequest {
+                    member: *member,
+                    seat: *seat,
+                    controller: s.asked_with(*member),
+                })
+                .collect(),
+            guests: s
+                .viewers()
+                .iter()
+                .filter_map(|v| {
+                    h.guest_controllers.get(v).map(|report| RemoteGuest {
+                        member: *v,
+                        report: report.clone(),
+                    })
+                })
+                .collect(),
+            sound_level: h.sound_level,
+            pads_setting_up: h.pads_setting_up.clone(),
+            pads_setting_up_secs: h
+                .pads_since
+                .map_or(0, |since| since.elapsed().as_secs() as u32),
+            pads_missing: h.pads_missing.clone(),
+            host_controllers: h
+                .controllers
+                .clone()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+                .iter()
+                .map(|name| cut(name))
+                .collect(),
+            host_homes: s.host_homes().to_vec(),
+            panic_key: h.panic_key.is_some(),
+        })
+    }
+
     // ---- What the UI shows ----
 
     pub(super) fn session_views(&self, room: RoomId) -> Vec<SessionView> {
@@ -2494,6 +2578,8 @@ impl Actor {
                 stream_window: None,
                 game_in_front: None,
                 note: None,
+                operator: false,
+                operated_by: self.operated_by(),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -2527,15 +2613,70 @@ impl Actor {
                     *slot = Some(*host);
                 }
             }
+            // One of our own PCs, unlocked (M25): its host console, as it
+            // sent it.
+            let operator = self.operating(room, *host);
+            let console = self.operated_session(room, *host, listing.announce.session);
+            let viewers: Vec<MemberId> = status.map_or_else(Vec::new, |s| s.viewers.clone());
+            let report = |v: &MemberId| {
+                console.and_then(|c| c.guests.iter().find(|g| g.member == *v).map(|g| &g.report))
+            };
+            let mut seats = seat_views(&listing.announce.seats, &holders, *host);
+            if let Some(c) = console {
+                for (i, seat) in seats.iter_mut().enumerate() {
+                    let id = SeatId(i as u8);
+                    seat.host_controller = seat
+                        .host
+                        .then(|| c.host_homes.iter().position(|s| *s == id))
+                        .flatten()
+                        .map(|k| k as u8);
+                    seat.guest_controller = holders
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .and_then(|v| report(&v))
+                        .and_then(|r| r.seats.iter().find(|d| d.seat == id))
+                        .and_then(|d| d.controller);
+                }
+            }
             views.push(SessionView {
                 host: host.to_hex(),
                 title: listing.announce.title.clone(),
                 max_viewers: listing.announce.max_viewers,
-                viewers: status.map_or_else(Vec::new, |s| {
-                    s.viewers.iter().map(MemberId::to_hex).collect()
-                }),
-                viewer_controllers: Vec::new(),
-                viewer_pads: Vec::new(),
+                viewers: viewers.iter().map(MemberId::to_hex).collect(),
+                viewer_controllers: if console.is_some() {
+                    viewers
+                        .iter()
+                        .map(|v| {
+                            report(v).map_or(0, |r| {
+                                r.controllers
+                                    .len()
+                                    .min(usize::from(couch_room::session::MAX_CONTROLLERS))
+                                    as u8
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                viewer_pads: if console.is_some() {
+                    viewers
+                        .iter()
+                        .map(|v| {
+                            report(v).map_or_else(Vec::new, |r| {
+                                r.controllers
+                                    .iter()
+                                    .map(|c| GuestControllerView {
+                                        slot: c.slot,
+                                        name: c.name.clone(),
+                                    })
+                                    .collect()
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 our_controllers: ours.map_or_else(Vec::new, |w| {
                     w.controllers
                         .controllers
@@ -2552,24 +2693,47 @@ impl Actor {
                         })
                         .collect()
                 }),
-                seats: seat_views(&listing.announce.seats, &holders, *host),
+                seats,
                 host_on_seats: status.is_some_and(|s| s.host_on_seats),
                 control_paused: status.is_some_and(|s| s.control_paused),
                 role,
-                requests: Vec::new(),
+                requests: console.map_or_else(Vec::new, |c| {
+                    c.requests
+                        .iter()
+                        .map(|r| RequestView {
+                            member: r.member.to_hex(),
+                            seat: r.seat.0,
+                            controller: r.controller,
+                        })
+                        .collect()
+                }),
                 asked_seat,
                 panic_key: None,
                 answer_keys: None,
                 overlay_area: None,
-                host_controllers: Vec::new(),
-                host_homes: Vec::new(),
+                host_controllers: console.map_or_else(Vec::new, |c| c.host_controllers.clone()),
+                host_homes: console
+                    .map_or_else(Vec::new, |c| c.host_homes.iter().map(|s| s.0).collect()),
                 host_controller_problem: None,
-                stream: stream_view(status.map_or(StreamState::Waiting, |s| s.stream)),
-                streaming: None,
-                sound_level: None,
-                pads_setting_up: Vec::new(),
-                pads_setting_up_secs: 0,
-                pads_missing: Vec::new(),
+                stream: match console {
+                    Some(c) if c.starting => StreamStateView::Starting,
+                    _ => stream_view(status.map_or(StreamState::Waiting, |s| s.stream)),
+                },
+                streaming: console
+                    .and_then(|c| c.streaming.as_ref())
+                    .map(|s| StreamView {
+                        name: s.name.clone(),
+                        fps: s.fps,
+                        max_mbps: s.max_mbps,
+                        upload_mbps: s.upload_mbps,
+                    }),
+                sound_level: console.map(|c| c.sound_level),
+                pads_setting_up: console.map_or_else(Vec::new, |c| {
+                    c.pads_setting_up.iter().map(|s| s.0).collect()
+                }),
+                pads_setting_up_secs: console.map_or(0, |c| c.pads_setting_up_secs),
+                pads_missing: console
+                    .map_or_else(Vec::new, |c| c.pads_missing.iter().map(|s| s.0).collect()),
                 stream_window: ours.map(|w| {
                     let state = w.window;
                     StreamWindowView {
@@ -2583,6 +2747,8 @@ impl Actor {
                 }),
                 game_in_front: ours.map(|w| w.in_front),
                 note: ours.map(|w| w.note.clone()).filter(|n| !n.is_empty()),
+                operator,
+                operated_by: Vec::new(),
             });
         }
         views

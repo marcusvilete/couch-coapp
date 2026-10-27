@@ -617,9 +617,15 @@ pub(crate) mod legacy {
     }
 }
 
+/// Whether a backup carries the settings file `name`.
+#[cfg(test)]
+pub(crate) fn backed_up(name: &str) -> bool {
+    BACKED_UP_FILES.contains(&name)
+}
+
 /// Writes a sibling temporary file and renames it over `path`, so a crash
 /// leaves the old file or the new one, never half of one.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
         source,

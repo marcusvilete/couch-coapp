@@ -9,7 +9,8 @@ import type { RoomView } from "../bindings/RoomView";
 import type { SourceList } from "../bindings/SourceList";
 import { prepareChime } from "../chime";
 import { errorText, request } from "../engine";
-import { numbered, padKeys, padName, padsAdded, togglePad } from "../model/sessions";
+import { viaRemote, type RemoteTarget } from "../model/remote";
+import { nameOf, numbered, padKeys, padName, padsAdded, togglePad } from "../model/sessions";
 import { seatsFor } from "../model/seats";
 import { KEYS, readStored, storedPads, storedSetup, writeStored } from "../state/storage";
 import { Button, IconButton } from "../ui/Button";
@@ -22,7 +23,16 @@ import { MAX_NAME_BYTES, truncateBytes } from "../ui/text";
 import { Why } from "../ui/Why";
 import "./StartSessionDialog.css";
 
-export function StartSessionDialog(props: { room: RoomView; onClose: () => void; onStarted: (room: RoomView) => void }) {
+export function StartSessionDialog(props: {
+  room: RoomView;
+  onClose: () => void;
+  onStarted: (room: RoomView) => void;
+  /** On one of our own PCs, run from here (M25): its windows, its virtual
+   * controllers, and none of its own controllers (nobody is there). */
+  remote?: RemoteTarget;
+}) {
+  const remote = props.remote;
+  const pcName = remote ? nameOf(props.room, remote.member) : null;
   const [sources, setSources] = useState<SourceList | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // The last title, or one ready to go: the placeholder alone looked filled in.
@@ -37,7 +47,7 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    request({ type: "listSources" }, "sources")
+    request(viaRemote(remote, { type: "listSources" }), "sources")
       .then((list) => {
         setSources(list);
         // The last choice comes back, for the controllers here; with none
@@ -86,23 +96,28 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
     setBusy(true);
     setError(null);
     try {
-      const room = await request(
-        {
+      let room = await request(
+        viaRemote(remote, {
           type: "startSession",
           room: props.room.id,
           title: title.trim(),
           max_viewers: viewers,
           input,
           controllers: chosen,
-        },
+        }),
         "room",
       );
       writeStored(KEYS.sessionSetup, JSON.stringify(input));
       writeStored(KEYS.sessionTitle, title.trim());
-      // Only a real choice is remembered: with HidHide missing or busy, or
-      // no controller seat, none could be made. It keeps the controllers
-      // remembered but not plugged in now: they come back when they are.
-      if (padSeat && hostControllers.length > 0 && sources?.hiding === "ready") {
+      if (remote) {
+        // Run from afar, it is watched from here: the stream window opens
+        // once something is streamed.
+        room = await request({ type: "watch", room: remote.room, host: remote.member }, "room").catch(() => room);
+      } else if (padSeat && hostControllers.length > 0 && sources?.hiding === "ready") {
+        // Only a real choice is remembered: with HidHide missing or busy,
+        // or no controller seat, none could be made. It keeps the
+        // controllers remembered but not plugged in now: they come back
+        // when they are.
         const absent = (storedPads() ?? []).filter((k) => !keys.includes(k));
         writeStored(KEYS.myPads, JSON.stringify([...chosenKeys, ...absent]));
       }
@@ -115,11 +130,13 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
 
   return (
     <Dialog
-      title={`Start a session in ${props.room.name}`}
+      title={pcName ? `Start a session on ${pcName}` : `Start a session in ${props.room.name}`}
       description={
-        watchOnly
-          ? "Guests watch what you stream; nobody else plays. You stream a window or a screen next, and stop or switch whenever you like."
-          : "The seats are set up first, and your controllers hidden from games. Then you stream a window or a screen, and stop or switch whenever you like."
+        pcName
+          ? `Run from here: ${pcName} plugs in the seats' virtual controllers, then you pick one of its windows or screens to stream, and watch it here.`
+          : watchOnly
+            ? "Guests watch what you stream; nobody else plays. You stream a window or a screen next, and stop or switch whenever you like."
+            : "The seats are set up first, and your controllers hidden from games. Then you stream a window or a screen, and stop or switch whenever you like."
       }
       onClose={props.onClose}
       busy={busy}
@@ -263,7 +280,13 @@ export function StartSessionDialog(props: { room: RoomView; onClose: () => void;
           )}
         </section>
 
-        {padSeat && (
+        {remote && padSeat && sources && !sources.virtualPads && (
+          <Callout tone="warn" compact>
+            ViGEmBus, which makes the virtual controllers, isn't installed on {pcName}: guests' controllers won't reach
+            the game. It can be installed there only, in Settings → Drivers.
+          </Callout>
+        )}
+        {padSeat && !remote && (
           <section className="start-pads" aria-label="Your controllers">
             <header className="start-section-head">
               <h3>Your controllers: one seat each</h3>

@@ -3,11 +3,13 @@
 // start one.
 import { Gamepad2, Play, UserPlus } from "lucide-react";
 import type { RoomView } from "../bindings/RoomView";
+import { operatedSession, remotePcs } from "../model/remote";
 import type { Busy } from "../model/sessions";
 import type { Confirm } from "../rooms/dialogs";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/Feedback";
 import { HostConsole } from "./HostConsole";
+import { RemotePanel } from "./RemotePanel";
 import { SessionCard } from "./SessionCard";
 import { StreamWindowPanel } from "./StreamWindowPanel";
 import type { Notify } from "./useRun";
@@ -22,10 +24,29 @@ export function Stage(props: {
   onRoom: (room: RoomView) => void;
   notify: Notify;
   confirm: (c: Confirm) => void;
+  /** Remote play (M25): one of our PCs, by member id. */
+  onUnlockRemote: (pc: string) => void;
+  onStartRemote: (pc: string) => void;
+  onStreamRemote: (pc: string) => void;
 }) {
   const { room, busy } = props;
   const mine = room.sessions.find((s) => s.role === "host");
   const others = room.sessions.filter((s) => s.role !== "host");
+  // Our own PCs here, and the session of one we run from here (M25).
+  const pcs = remotePcs(room);
+  const operated = others.find((s) => s.operator);
+  const remotePanels = pcs.map((pc) => (
+    <RemotePanel
+      key={pc.id}
+      room={room}
+      pc={pc}
+      session={operatedSession(room, pc.id)}
+      onUnlock={() => props.onUnlockRemote(pc.id)}
+      onStart={() => props.onStartRemote(pc.id)}
+      onRoom={props.onRoom}
+      notify={props.notify}
+    />
+  ));
   // The session we watch here, with its stream window's controls (P11).
   const watched = others.find((s) => s.streamWindow != null);
   const startBlocked = busy.hosting
@@ -37,38 +58,53 @@ export function Stage(props: {
   if (mine == null && others.length === 0) {
     const alone = room.members.length === 1;
     return (
-      <EmptyState
-        icon={<Gamepad2 />}
-        title="Nobody has a session yet"
-        actions={
-          <>
-            <Button
-              variant="primary"
-              size="lg"
-              icon={<Play />}
-              onClick={props.onStartSession}
-              disabled={startBlocked != null}
-              reason={startBlocked}
-            >
-              Start a session
-            </Button>
-            {room.isOwner && alone && !room.needsPassword && !room.catchingUp && (
-              <Button size="lg" icon={<UserPlus />} onClick={props.onInvite}>
-                Invite people
+      <>
+        {remotePanels}
+        <EmptyState
+          icon={<Gamepad2 />}
+          title="Nobody has a session yet"
+          actions={
+            <>
+              <Button
+                variant="primary"
+                size="lg"
+                icon={<Play />}
+                onClick={props.onStartSession}
+                disabled={startBlocked != null}
+                reason={startBlocked}
+              >
+                Start a session
               </Button>
-            )}
-          </>
-        }
-      >
-        Set up the controller seats first, then stream a game window or a screen, as often as you like. The others
-        watch, and you hand them the controller.
-        {startBlocked && <span className="stage-blocked">{startBlocked}</span>}
-      </EmptyState>
+              {room.isOwner && alone && !room.needsPassword && !room.catchingUp && (
+                <Button size="lg" icon={<UserPlus />} onClick={props.onInvite}>
+                  Invite people
+                </Button>
+              )}
+            </>
+          }
+        >
+          Set up the controller seats first, then stream a game window or a screen, as often as you like. The others
+          watch, and you hand them the controller.
+          {startBlocked && <span className="stage-blocked">{startBlocked}</span>}
+        </EmptyState>
+      </>
     );
   }
 
   return (
     <div className="stage">
+      {remotePanels}
+      {operated && (
+        <HostConsole
+          room={room}
+          session={operated}
+          remote={{ room: room.id, member: operated.host }}
+          onRoom={props.onRoom}
+          notify={props.notify}
+          onStream={() => props.onStreamRemote(operated.host)}
+          confirm={props.confirm}
+        />
+      )}
       {mine && (
         <HostConsole
           room={room}

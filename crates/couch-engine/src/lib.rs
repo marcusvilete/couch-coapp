@@ -13,6 +13,7 @@ pub mod backup;
 pub mod build_config;
 pub mod pipeline;
 mod profile;
+pub mod remote;
 mod rooms;
 pub mod secrets;
 mod store;
@@ -330,6 +331,124 @@ pub enum Command {
     SetStreamWindow {
         bar: bool,
     },
+    // ---- Remote play (M25, ADR 0010) ----
+    /// Remote play's settings: on the home PC, the devices it trusts and the
+    /// members that could be added; on a device, the home PCs it accepted.
+    GetRemotePlay,
+    /// At the home PC: turns remote play on (a PIN set first) or off. Off
+    /// locks every device out at once.
+    SetRemotePlay {
+        on: bool,
+    },
+    /// At the home PC: the PIN its devices unlock with. A new one locks them
+    /// out until they give it.
+    SetRemotePin {
+        pin: String,
+    },
+    /// At the home PC: trusts `member`, a member of one of our rooms, as one
+    /// of our own devices. Never possible from afar.
+    AddRemoteDevice {
+        member: String,
+    },
+    RemoveRemoteDevice {
+        member: String,
+    },
+    /// On a device: `member`, which offered remote play, is our own PC (the
+    /// codes matched). Until then its offer only asks this, and no PIN goes
+    /// to it.
+    AcceptRemoteHost {
+        member: String,
+    },
+    ForgetRemoteHost {
+        member: String,
+    },
+    /// On a device: unlocks the home PC `member`, met in `room`, with the
+    /// PIN. Kept in memory for this run, to unlock again after a reconnect.
+    UnlockRemote {
+        room: String,
+        member: String,
+        pin: String,
+    },
+    /// On a device: locks it again, forgetting the PIN.
+    LockRemote {
+        room: String,
+        member: String,
+    },
+    /// On a device, unlocked: one of the home PC's own host commands, run
+    /// there as if from its window.
+    Remote {
+        room: String,
+        member: String,
+        action: RemoteAction,
+    },
+}
+
+/// What a device may ask its home PC to do (M25): the host's console, and
+/// nothing else. Named as the [`Command`]s they stand for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export)]
+pub enum RemoteAction {
+    ListSources,
+    /// In the room the command came through. The home PC's own controllers
+    /// stay out of the seats: nobody is there.
+    StartSession {
+        title: String,
+        max_viewers: u8,
+        input: InputSetup,
+    },
+    StartStream {
+        source: SourceChoice,
+        name: String,
+        fps: u32,
+        max_mbps: u32,
+        upload_mbps: Option<u32>,
+    },
+    StopStream,
+    SetStreamLevel {
+        percent: u16,
+    },
+    EndSession,
+    AnswerControl {
+        member: String,
+        accept: bool,
+    },
+    PassControl {
+        member: String,
+        seat: u8,
+        #[serde(default)]
+        #[ts(optional)]
+        controller: Option<u8>,
+    },
+    TakeBackControl {
+        seat: Option<u8>,
+    },
+    PlaySeat {
+        seat: u8,
+        controller: u8,
+    },
+    AllowControl,
+    StopWaitingForPads,
+}
+
+impl RemoteAction {
+    /// Its name alone, for logs: a stream's name is a window's title.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ListSources => "ListSources",
+            Self::StartSession { .. } => "StartSession",
+            Self::StartStream { .. } => "StartStream",
+            Self::StopStream => "StopStream",
+            Self::SetStreamLevel { .. } => "SetStreamLevel",
+            Self::EndSession => "EndSession",
+            Self::AnswerControl { .. } => "AnswerControl",
+            Self::PassControl { .. } => "PassControl",
+            Self::TakeBackControl { .. } => "TakeBackControl",
+            Self::PlaySeat { .. } => "PlaySeat",
+            Self::AllowControl => "AllowControl",
+            Self::StopWaitingForPads => "StopWaitingForPads",
+        }
+    }
 }
 
 /// What the app asks of the stream window (P11), for watching from another
@@ -830,6 +949,11 @@ pub struct SessionView {
     /// For a viewer: the latest news, as the stream window's bar shows it
     /// ("The host said no, for now"); `None` for none.
     pub note: Option<String>,
+    /// For a session of one of our own PCs, unlocked (M25): we run it from
+    /// here, and the host's fields above are filled as the host sees them.
+    pub operator: bool,
+    /// For the host: our devices running this session from afar, by name.
+    pub operated_by: Vec<String>,
 }
 
 /// Whether a session streams anything (M19).
@@ -1015,7 +1139,55 @@ pub enum Response {
     Backup {
         path: Option<String>,
     },
+    RemotePlay(RemotePlayView),
     Done,
+}
+
+/// Remote play (M25), as [`Command::GetRemotePlay`] shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemotePlayView {
+    /// This PC lets its devices in.
+    pub on: bool,
+    pub pin_set: bool,
+    /// This profile's own code, to compare when a home PC adds it.
+    pub my_code: String,
+    /// The devices this PC trusts.
+    pub devices: Vec<RemoteDeviceView>,
+    /// Members of our rooms that could be added, ourselves and devices
+    /// already added left out.
+    pub candidates: Vec<RemoteDeviceView>,
+    /// Wrong PINs make the next try wait this long, in seconds.
+    pub wait_secs: Option<u32>,
+    /// On a device: the home PCs it accepted.
+    pub hosts: Vec<RemoteDeviceView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemoteDeviceView {
+    pub id: String,
+    pub name: String,
+    /// Its code, "AB12 CD34": the same on both ends.
+    pub code: String,
+    /// Connected now, in some room.
+    pub online: bool,
+}
+
+/// For a device: a member that offered it remote play (M25).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RemoteAccessView {
+    /// We accepted it as our own PC; until then it only asks.
+    pub accepted: bool,
+    pub unlocked: bool,
+    /// Its code, to compare before accepting.
+    pub code: String,
+    /// Wrong PINs make the next try wait this long, in seconds.
+    pub wait_secs: Option<u32>,
 }
 
 impl fmt::Debug for Command {
@@ -1178,6 +1350,46 @@ impl fmt::Debug for Command {
             Self::SetStreamWindow { bar } => {
                 f.debug_struct("SetStreamWindow").field("bar", bar).finish()
             }
+            Self::GetRemotePlay => f.write_str("GetRemotePlay"),
+            Self::SetRemotePlay { on } => f.debug_struct("SetRemotePlay").field("on", on).finish(),
+            // The PIN guards the whole PC.
+            Self::SetRemotePin { .. } => f.write_str("SetRemotePin { .. }"),
+            Self::AddRemoteDevice { member } => f
+                .debug_struct("AddRemoteDevice")
+                .field("member", member)
+                .finish(),
+            Self::RemoveRemoteDevice { member } => f
+                .debug_struct("RemoveRemoteDevice")
+                .field("member", member)
+                .finish(),
+            Self::AcceptRemoteHost { member } => f
+                .debug_struct("AcceptRemoteHost")
+                .field("member", member)
+                .finish(),
+            Self::ForgetRemoteHost { member } => f
+                .debug_struct("ForgetRemoteHost")
+                .field("member", member)
+                .finish(),
+            Self::UnlockRemote { room, member, .. } => f
+                .debug_struct("UnlockRemote")
+                .field("room", room)
+                .field("member", member)
+                .finish_non_exhaustive(),
+            Self::LockRemote { room, member } => f
+                .debug_struct("LockRemote")
+                .field("room", room)
+                .field("member", member)
+                .finish(),
+            Self::Remote {
+                room,
+                member,
+                action,
+            } => f
+                .debug_struct("Remote")
+                .field("room", room)
+                .field("member", member)
+                .field("action", &action.kind())
+                .finish(),
         }
     }
 }
@@ -1219,6 +1431,7 @@ impl fmt::Debug for Response {
                 .debug_struct("Backup")
                 .field("path", &path.as_ref().map(|_| ".."))
                 .finish(),
+            Self::RemotePlay(view) => f.debug_tuple("RemotePlay").field(view).finish(),
             Self::Done => f.write_str("Done"),
         }
     }
@@ -1304,6 +1517,9 @@ pub struct MemberView {
     /// Their Couch Co-App can't talk to ours (another wire revision): one
     /// of us needs to update. `None` once we talk again.
     pub other_version: Option<OtherVersion>,
+    /// They offered us remote play (M25): one of our own PCs, or asking to
+    /// be.
+    pub remote: Option<RemoteAccessView>,
 }
 
 /// Another member's build, when it can't talk to ours (M10a).
@@ -1500,6 +1716,12 @@ pub enum EngineError {
     /// Capture, encoding or the viewer window failed; the text says how.
     #[error("{0}")]
     Media(String),
+    #[error(transparent)]
+    Pin(#[from] remote::PinError),
+    /// Remote play (M25): the home PC refused, or couldn't be asked; the
+    /// text says why.
+    #[error("{0}")]
+    Remote(String),
 }
 
 fn other_version_text(app_version: &str, newer: bool) -> String {
@@ -2648,6 +2870,31 @@ mod tests {
                 "{:?}",
                 Command::PreviewInvite {
                     invite: secret.into()
+                }
+            ),
+            // A remote-play PIN opens the home PC (M25), and a stream's name
+            // sent to it is a window's title.
+            format!("{:?}", Command::SetRemotePin { pin: secret.into() }),
+            format!(
+                "{:?}",
+                Command::UnlockRemote {
+                    room: "00".into(),
+                    member: "11".into(),
+                    pin: secret.into()
+                }
+            ),
+            format!(
+                "{:?}",
+                Command::Remote {
+                    room: "00".into(),
+                    member: "11".into(),
+                    action: RemoteAction::StartStream {
+                        source: SourceChoice::Window { id: "7".into() },
+                        name: secret.into(),
+                        fps: 60,
+                        max_mbps: 20,
+                        upload_mbps: None,
+                    }
                 }
             ),
             // A backup's passphrase opens the whole identity (M13).

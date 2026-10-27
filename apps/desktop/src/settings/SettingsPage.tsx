@@ -1,7 +1,7 @@
 // Settings, as a page over the room (Esc goes back): your name, the look,
 // the keyboard shortcuts (each can move to another key), the overlay, the
 // stream window (P11), the network (which relay, applied when the app
-// restarts), the drivers, a backup of the profile (M13), and About. Each
+// restarts), remote play (M25), the drivers, a backup of the profile (M13), and About. Each
 // section is mounted only while shown: a passphrase leaves with its page, and
 // nothing polls behind it.
 import {
@@ -14,6 +14,7 @@ import {
   Layers,
   Network,
   Palette,
+  Router,
   UserRound,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -32,6 +33,7 @@ import {
   OverlaySection,
   StreamWindowSection,
 } from "./sections";
+import { RemotePlaySection } from "./RemotePlaySection";
 import { ShortcutsSection } from "./ShortcutsSection";
 import "./SettingsPage.css";
 
@@ -42,6 +44,7 @@ export type SettingsSection =
   | "overlay"
   | "streamWindow"
   | "network"
+  | "remotePlay"
   | "drivers"
   | "backup"
   | "about";
@@ -53,6 +56,7 @@ const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode }[] = [
   { id: "overlay", label: "Overlay and sounds", icon: <Layers /> },
   { id: "streamWindow", label: "Stream window", icon: <AppWindow /> },
   { id: "network", label: "Network", icon: <Network /> },
+  { id: "remotePlay", label: "Remote play", icon: <Router /> },
   { id: "drivers", label: "Drivers", icon: <Cpu /> },
   { id: "backup", label: "Backup", icon: <Archive /> },
   { id: "about", label: "About", icon: <Info /> },
@@ -126,6 +130,7 @@ export function SettingsPage(props: {
             {section.id === "overlay" && <OverlaySection />}
             {section.id === "streamWindow" && <StreamWindowSection />}
             {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
+            {section.id === "remotePlay" && <RemotePlaySection />}
             {section.id === "drivers" && <DriversSection />}
             {section.id === "backup" && (
               <BackupSection

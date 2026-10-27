@@ -14,6 +14,9 @@ import type { InvitePreview } from "../bindings/InvitePreview";
 import type { MemberView } from "../bindings/MemberView";
 import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
+import type { RemoteAccessView } from "../bindings/RemoteAccessView";
+import type { RemoteAction } from "../bindings/RemoteAction";
+import type { RemotePlayView } from "../bindings/RemotePlayView";
 import type { Response } from "../bindings/Response";
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
@@ -54,6 +57,9 @@ export type World = {
   sound: "game" | "silent";
   /** Settings → Stream window (P11): new stream windows show their bar. */
   streamWindowBar: boolean;
+  /** Remote play (M25): Settings → Remote play. Members offering it carry
+   * their `remote` in the rooms. A PC unlocks with "246810". */
+  remotePlay: RemotePlayView;
 };
 
 let world: World | null = null;
@@ -171,7 +177,7 @@ function nameProblem(name: string): string | null {
 }
 
 function self(): MemberView {
-  return { id: me(), name: w().profile.displayName, isOwner: true, link: "me", otherVersion: null };
+  return { id: me(), name: w().profile.displayName, isOwner: true, link: "me", otherVersion: null, remote: null };
 }
 
 function linkFor(room: FakeRoom): string {
@@ -260,6 +266,8 @@ export function hostSession(
     streamWindow: null,
     gameInFront: null,
     note: null,
+    operator: false,
+    operatedBy: [],
   };
 }
 
@@ -346,6 +354,144 @@ function streamLevels() {
   }
 }
 
+// ---- Remote play (M25) ----
+
+/** The PIN every PC in the preview unlocks with. */
+export const REMOTE_PIN = "246810";
+
+type RemoteCommand = Extract<
+  Command,
+  {
+    type:
+      | "getRemotePlay"
+      | "setRemotePlay"
+      | "setRemotePin"
+      | "addRemoteDevice"
+      | "removeRemoteDevice"
+      | "acceptRemoteHost"
+      | "forgetRemoteHost"
+      | "unlockRemote"
+      | "lockRemote"
+      | "remote";
+  }
+>;
+
+/** `pc`, offering us remote play in `roomId`. */
+function offering(roomId: string, pc: string): { room: FakeRoom; member: MemberView; remote: RemoteAccessView } {
+  const room = find(roomId);
+  const member = room.members.find((m) => m.id === pc);
+  if (!member?.remote) throw "that PC isn't offering remote play to this device now";
+  return { room, member, remote: member.remote };
+}
+
+function remoteCommand(cmd: RemoteCommand): Response {
+  const world = w();
+  const rp = world.remotePlay;
+  const reply = (): Response => ({ type: "remotePlay", ...structuredClone(rp) });
+  // Each room where `pc` offers remote play.
+  const everywhere = (pc: string, change: (remote: RemoteAccessView) => void) => {
+    for (const room of world.rooms) {
+      const m = room.members.find((x) => x.id === pc);
+      if (m?.remote) {
+        change(m.remote);
+        changed(room);
+      }
+    }
+  };
+  switch (cmd.type) {
+    case "getRemotePlay":
+      return reply();
+    case "setRemotePlay":
+      if (cmd.on && !rp.pinSet) throw "set a PIN first";
+      rp.on = cmd.on;
+      return reply();
+    case "setRemotePin":
+      if ([...cmd.pin.trim()].length < 6) throw "the PIN must be at least 6 characters";
+      rp.pinSet = true;
+      return reply();
+    case "addRemoteDevice": {
+      if (!rp.pinSet) throw "set a PIN first";
+      const device = rp.candidates.find((c) => c.id === cmd.member);
+      if (!device) throw "no such member";
+      rp.candidates = rp.candidates.filter((c) => c !== device);
+      rp.devices.push(device);
+      return reply();
+    }
+    case "removeRemoteDevice": {
+      const device = rp.devices.find((d) => d.id === cmd.member);
+      rp.devices = rp.devices.filter((d) => d !== device);
+      if (device) rp.candidates.push(device);
+      return reply();
+    }
+    case "acceptRemoteHost": {
+      const room = world.rooms.find((r) => r.members.some((m) => m.id === cmd.member && m.remote));
+      const pc = room?.members.find((m) => m.id === cmd.member);
+      if (!pc?.remote) throw "that member hasn't offered remote play";
+      if (!rp.hosts.some((h) => h.id === pc.id)) {
+        rp.hosts.push({ id: pc.id, name: pc.name, code: pc.remote.code, online: true });
+      }
+      everywhere(pc.id, (r) => (r.accepted = true));
+      return reply();
+    }
+    case "forgetRemoteHost":
+      rp.hosts = rp.hosts.filter((h) => h.id !== cmd.member);
+      everywhere(cmd.member, (r) => Object.assign(r, { accepted: false, unlocked: false }));
+      return reply();
+    case "unlockRemote": {
+      const { room, remote } = offering(cmd.room, cmd.member);
+      if (!remote.accepted) throw "accept it as your PC first";
+      if (cmd.pin !== REMOTE_PIN) throw "wrong PIN";
+      remote.unlocked = true;
+      for (const s of room.sessions) if (s.host === cmd.member) s.operator = true;
+      return roomReply(room);
+    }
+    case "lockRemote": {
+      const { room, remote } = offering(cmd.room, cmd.member);
+      remote.unlocked = false;
+      for (const s of room.sessions) if (s.host === cmd.member) s.operator = false;
+      changed(room);
+      return reply();
+    }
+    case "remote": {
+      const { room, member, remote } = offering(cmd.room, cmd.member);
+      if (!remote.unlocked) throw "unlock your PC first";
+      return remoteAction(room, member, cmd.action);
+    }
+  }
+}
+
+/** One of the host's commands, run on the PC `pc` as from afar: the preview
+ * starts, streams and ends sessions; seats and answers stay as they are. */
+function remoteAction(room: FakeRoom, pc: MemberView, action: RemoteAction): Response {
+  const s = room.sessions.find((x) => x.host === pc.id);
+  switch (action.type) {
+    case "listSources":
+      return { type: "sources", ...structuredClone(w().sources), controllers: 0, hostControllers: [], hiding: "notInstalled" };
+    case "startSession": {
+      if (s) throw "you have a session already";
+      const started = hostSession(pc.id, action.title, action.max_viewers, action.input, []);
+      Object.assign(started, { role: "none", operator: true, panicKey: null, answerKeys: null });
+      room.sessions.push(started);
+      return roomReply(room);
+    }
+    case "startStream":
+      if (!s) throw "there's no session";
+      s.stream = { state: "live" };
+      s.streaming = { name: action.name, fps: action.fps, maxMbps: action.max_mbps, uploadMbps: action.upload_mbps };
+      return roomReply(room);
+    case "stopStream":
+      if (!s) throw "there's no session";
+      s.stream = { state: "stopped", reason: "hostStopped" };
+      s.streaming = null;
+      return roomReply(room);
+    case "endSession":
+      room.sessions = room.sessions.filter((x) => x !== s);
+      return roomReply(room);
+    default:
+      return roomReply(room);
+  }
+}
+
 // ---- Commands ----
 
 function handle(cmd: Command): Response | Promise<Response> {
@@ -412,8 +558,8 @@ function handle(cmd: Command): Response | Promise<Response> {
         isOwner: false,
         members: [
           { ...self(), isOwner: false },
-          { id: "0wner", name: "Rafa", isOwner: true, link: "direct", otherVersion: null },
-          { id: "m1", name: "Lia", isOwner: false, link: "relay", otherVersion: null },
+          { id: "0wner", name: "Rafa", isOwner: true, link: "direct", otherVersion: null, remote: null },
+          { id: "m1", name: "Lia", isOwner: false, link: "relay", otherVersion: null, remote: null },
         ],
         joinsPausedForSecs: null,
         sessions: [],
@@ -535,6 +681,17 @@ function handle(cmd: Command): Response | Promise<Response> {
       return { type: "network", ...world.network };
     case "getStreamWindow":
       return { type: "streamWindow", bar: world.streamWindowBar };
+    case "getRemotePlay":
+    case "setRemotePlay":
+    case "setRemotePin":
+    case "addRemoteDevice":
+    case "removeRemoteDevice":
+    case "acceptRemoteHost":
+    case "forgetRemoteHost":
+    case "unlockRemote":
+    case "lockRemote":
+    case "remote":
+      return remoteCommand(cmd);
     case "setStreamWindow": {
       world.streamWindowBar = cmd.bar;
       const found = ours();

@@ -38,6 +38,8 @@ function view(over: Partial<SessionView>): SessionView {
     streamWindow: null,
     gameInFront: null,
     note: null,
+    operator: false,
+    operatedBy: [],
     ...over,
   };
 }

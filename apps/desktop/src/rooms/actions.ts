@@ -16,8 +16,10 @@ export type AppDialog =
   | { kind: "password"; room: string }
   | { kind: "accept"; room: string }
   | { kind: "name" }
-  | { kind: "startSession"; room: string }
-  | { kind: "streamPicker"; room: string }
+  /** `remote`: on one of our PCs, run from here (M25), by member id. */
+  | { kind: "startSession"; room: string; remote?: string }
+  | { kind: "streamPicker"; room: string; remote?: string }
+  | { kind: "unlockRemote"; room: string; member: string }
   | ({ kind: "confirm" } & Confirm);
 
 export type RoomActions = {
