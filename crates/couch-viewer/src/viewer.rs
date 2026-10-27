@@ -76,9 +76,15 @@ pub struct WindowOptions {
     pub hide_hud: bool,
     /// Start with the stats panel closed (the app's viewers).
     pub hide_stats: bool,
-    /// Show a made-up session in this role, without the pipe, to check the
-    /// HUD by eye (`--hud-preview`).
-    pub preview: Option<HudRole>,
+    /// Show a made-up session, without the pipe, to check the HUD by eye
+    /// (`--hud-preview`).
+    pub preview: Option<Preview>,
+    /// The HUD's scale instead of the display's (`--hud-scale`, for the
+    /// preview's shots at 150%).
+    pub hud_scale: Option<f32>,
+    /// A preview's pointer, in points, to see hovers and tooltips
+    /// (`--hud-preview-pointer`).
+    pub preview_pointer: Option<(f32, f32)>,
 }
 
 impl Default for WindowOptions {
@@ -89,22 +95,75 @@ impl Default for WindowOptions {
             hide_hud: false,
             hide_stats: false,
             preview: None,
+            hud_scale: None,
+            preview_pointer: None,
         }
     }
 }
 
+/// What `--hud-preview` shows: each state of the bar worth seeing (M21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preview {
+    Watching,
+    Asking,
+    /// Playing two seats, the game out of front on the host, a note.
+    Controlling,
+    /// Playing one seat and asking for another.
+    AskingMore,
+    Paused,
+    /// The game closed: nothing streamed, the seats staying.
+    Stopped,
+    /// Nothing streamed yet.
+    Waiting,
+    /// The host plays beside the seats.
+    Beside,
+    /// One seat, nobody on it, the host playing beside it.
+    Single,
+    Muted,
+    /// Four pads and a keyboard seat, a long title and long names.
+    Crowded,
+    /// Paused, the game out of front and a note, all at once.
+    Worst,
+}
+
+impl Preview {
+    pub const NAMES: [(&'static str, Preview); 12] = [
+        ("watching", Preview::Watching),
+        ("asking", Preview::Asking),
+        ("controlling", Preview::Controlling),
+        ("asking-more", Preview::AskingMore),
+        ("paused", Preview::Paused),
+        ("stopped", Preview::Stopped),
+        ("waiting", Preview::Waiting),
+        ("beside", Preview::Beside),
+        ("single", Preview::Single),
+        ("muted", Preview::Muted),
+        ("crowded", Preview::Crowded),
+        ("worst", Preview::Worst),
+    ];
+
+    pub fn named(name: &str) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, p)| *p)
+    }
+}
+
 /// An SDL window position (window coordinates) in the HUD's points.
-fn hud_point(window: &Window, x: f32, y: f32) -> egui::Pos2 {
+fn hud_point(window: &Window, scale: Option<f32>, x: f32, y: f32) -> egui::Pos2 {
     let (w, _) = window.size();
     let (pw, _) = window.size_in_pixels();
     let per_coord = if w == 0 { 1.0 } else { pw as f32 / w as f32 };
-    let scale = hud_scale(window);
+    let scale = hud_scale(window, scale);
     egui::pos2(x * per_coord / scale, y * per_coord / scale)
 }
 
-/// The HUD's pixels per point: the display's scale.
-fn hud_scale(window: &Window) -> f32 {
-    window.display_scale().clamp(0.5, 4.0)
+/// The HUD's pixels per point: the display's scale, unless set.
+fn hud_scale(window: &Window, scale: Option<f32>) -> f32 {
+    scale
+        .unwrap_or_else(|| window.display_scale())
+        .clamp(0.5, 4.0)
 }
 
 pub fn run(options: WindowOptions) -> Result<()> {
@@ -129,9 +188,9 @@ pub fn run(options: WindowOptions) -> Result<()> {
     pipe::spawn_reader(in_tx, window_tx.clone(), net.clone(), audio_feed);
     let writer = match options.preview {
         None => Some(pipe::spawn_writer(out_rx)),
-        Some(role) => {
+        Some(preview) => {
             drop(out_rx);
-            let _ = window_tx.send(ForWindow::Hud(preview_session(role)));
+            let _ = window_tx.send(ForWindow::Hud(preview_session(preview)));
             None
         }
     };
@@ -204,9 +263,22 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let mut hud = Hud::new(&gpu.device, gpu.config.format);
     hud.visible = !options.hide_hud;
     hud.show_stats = !options.hide_stats;
+    hud.preview = options.preview.is_some();
+    if options.preview == Some(Preview::Muted) {
+        hud.volume = StreamVolume {
+            percent: 40,
+            muted: true,
+        };
+    }
+    // A preview's pointer, sent once the bar has been laid out.
+    let mut preview_pointer = options.preview_pointer;
     let mut title = String::new();
     let mut events = sdl.event_pump().map_err(|e| anyhow!("SDL events: {e}"))?;
     let mut stats = Stats::default();
+    // The stats card's rows and when they were last built.
+    let mut stat_rows: Vec<(String, String)> = Vec::new();
+    let mut stats_at: Option<Instant> = None;
+    let mut was_captured = false;
     // The size of the frame in the video textures, once there is one. It can
     // be drawn again whenever the window needs it: a static source sends no
     // new frames.
@@ -250,13 +322,17 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 // nowhere else, so it is never forwarded and never captures
                 // the mouse.
                 Event::MouseMotion { x, y, .. } if !input.mouse_captured() => {
-                    hud.pointer_moved(hud_point(&window, x, y));
+                    hud.pointer_moved(hud_point(&window, options.hud_scale, x, y));
                 }
                 Event::MouseButtonDown {
                     mouse_btn, x, y, ..
                 } if !input.mouse_captured() => {
                     if let Some(button) = button_code(mouse_btn)
-                        && hud.pointer_button(hud_point(&window, x, y), button, true)
+                        && hud.pointer_button(
+                            hud_point(&window, options.hud_scale, x, y),
+                            button,
+                            true,
+                        )
                     {
                         continue;
                     }
@@ -265,7 +341,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     mouse_btn, x, y, ..
                 } => {
                     if let Some(button) = button_code(mouse_btn)
-                        && hud.pointer_button(hud_point(&window, x, y), button, false)
+                        && hud.pointer_button(
+                            hud_point(&window, options.hud_scale, x, y),
+                            button,
+                            false,
+                        )
                     {
                         continue;
                     }
@@ -367,6 +447,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
         }
         redraw |= hud.needs_paint();
         input.sync_capture(&mouse, &window);
+        // Captured, the pointer reaches the game, not the HUD: no hover or
+        // tooltip may stay drawn over the game.
+        if input.mouse_captured() && !was_captured {
+            hud.pointer_gone();
+        }
+        was_captured = input.mouse_captured();
         if last_alive.elapsed() >= ALIVE_EVERY {
             last_alive = Instant::now();
             local.push(LocalInput::Alive);
@@ -522,27 +608,38 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 video_pass.draw(&mut pass, gpu::letterbox(frame_size, size));
             }
         }
-        let mut lines = stats.lines(
-            shown.unwrap_or((0, 0)),
-            &decoder_name.lock().unwrap(),
-            &gpu.adapter_name,
-            &format!(
-                "{:?} (latency {}), {} scaling",
-                gpu.present_mode(),
-                gpu.frame_latency(),
-                video_pass.scaler.name()
-            ),
-            decoded.replaced_count() + behind.load(Ordering::Relaxed),
-            *net.lock().unwrap(),
-        );
-        lines.insert(2, input.hud_line());
-        lines.insert(
-            3,
-            audio
-                .as_ref()
-                .map_or_else(|| "audio: no device".to_string(), AudioOut::hud_line),
-        );
-        hud.waiting = shown.is_none();
+        // The stats card's rows: built only while it shows, a few times a
+        // second (the audio's take its thread's lock; numbers that change
+        // every frame can't be read anyway).
+        if hud.wants_stats() && stats_at.is_none_or(|t| t.elapsed() >= STATS_EVERY) {
+            stats_at = Some(Instant::now());
+            stat_rows = stats.rows(
+                shown.unwrap_or((0, 0)),
+                &decoder_name.lock().unwrap(),
+                &gpu.adapter_name,
+                &format!(
+                    "{:?} (latency {}), {} scaling",
+                    gpu.present_mode(),
+                    gpu.frame_latency(),
+                    video_pass.scaler.name()
+                ),
+                decoded.replaced_count() + behind.load(Ordering::Relaxed),
+                *net.lock().unwrap(),
+            );
+            stat_rows.insert(2, ("Input".into(), input.hud_line()));
+            stat_rows.insert(
+                3,
+                (
+                    "Audio".into(),
+                    audio
+                        .as_ref()
+                        .map_or_else(|| "no device".to_string(), AudioOut::hud_line),
+                ),
+            );
+        }
+        hud.mouse_hint = input.mouse_hint();
+        // A preview draws a test picture behind the HUD instead of waiting.
+        hud.waiting = shown.is_none() && options.preview.is_none();
         let mut buffers = hud.paint(
             &gpu.device,
             &gpu.queue,
@@ -550,14 +647,17 @@ pub fn run(options: WindowOptions) -> Result<()> {
             &view,
             &egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [size.0, size.1],
-                pixels_per_point: hud_scale(&window),
+                pixels_per_point: hud_scale(&window, options.hud_scale),
             },
-            &lines,
+            &stat_rows,
         );
         buffers.push(encoder.finish());
         gpu.queue.submit(buffers);
         gpu.queue.present(surface_texture);
         redraw = false;
+        if let Some((x, y)) = preview_pointer.take() {
+            hud.pointer_moved(egui::pos2(x, y));
+        }
 
         // Only a new frame's first showing is measured. A frame on the GPU
         // whose barcode corner is being read back waits for it (above).
@@ -601,10 +701,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
     Ok(())
 }
 
-/// A made-up multiplayer session for `--hud-preview`: two controllers and a
-/// keyboard seat, the host on the first with their own controller. Playing,
-/// the game is out of front on the host.
-fn preview_session(role: HudRole) -> HudState {
+/// A made-up session for `--hud-preview`: two controllers and a keyboard
+/// seat, the host on the first with their own controller, unless the state
+/// asks for something else.
+fn preview_session(preview: Preview) -> HudState {
+    use Preview as P;
     let seat = |label: &str, pad, holder: Option<&str>, mine, asked| HudSeat {
         label: label.into(),
         pad,
@@ -614,34 +715,115 @@ fn preview_session(role: HudRole) -> HudState {
         mine,
         asked,
     };
-    let playing = role == HudRole::Controlling;
-    HudState {
+    let mut s = HudState {
         title: "Fling to the Finish".into(),
         host: "Alice".into(),
-        role,
+        role: HudRole::Watching,
         seats: vec![
             seat("Controller 1", true, Some("Alice"), false, false),
-            seat(
-                "Controller 2",
-                true,
-                playing.then_some("Bob"),
-                playing,
-                role == HudRole::Asking,
-            ),
+            seat("Controller 2", true, None, false, false),
             seat("Keyboard and mouse", false, Some("Carol"), false, false),
         ],
         host_on_seats: true,
         viewers: 2,
         control_paused: false,
-        game_in_front: !playing,
+        game_in_front: true,
         stream: StreamState::Live,
-        note: match role {
-            HudRole::Watching => String::new(),
-            HudRole::Asking => "Asked the host for Controller 2".into(),
-            HudRole::Controlling => "You have Controller 2".into(),
-        },
+        note: String::new(),
+    };
+    let bob = |seat: &mut HudSeat| {
+        seat.holder = Some("Bob".into());
+        seat.mine = true;
+    };
+    match preview {
+        P::Watching | P::Muted => {}
+        P::Asking => {
+            s.role = HudRole::Asking;
+            s.seats[1].asked = true;
+            s.note = "Asked Alice for Controller 2".into();
+        }
+        P::Controlling => {
+            s.role = HudRole::Controlling;
+            s.seats
+                .insert(2, seat("Controller 3", true, None, false, false));
+            bob(&mut s.seats[1]);
+            bob(&mut s.seats[2]);
+            s.game_in_front = false;
+            s.note = "You have Controller 3".into();
+        }
+        P::AskingMore => {
+            s.role = HudRole::Asking;
+            bob(&mut s.seats[1]);
+            s.seats[2].asked = true;
+        }
+        P::Paused => {
+            s.control_paused = true;
+            s.note = "Alice took control back".into();
+        }
+        P::Stopped => {
+            s.role = HudRole::Controlling;
+            bob(&mut s.seats[1]);
+            s.stream = StreamState::Stopped(couch_proto::session::EndReason::GameExited);
+        }
+        P::Waiting => s.stream = StreamState::Waiting,
+        P::Beside => {
+            s.host_on_seats = false;
+            s.seats[0] = seat("Controller 1", true, Some("Dan"), false, false);
+            s.viewers = 3;
+        }
+        P::Single => {
+            s.host_on_seats = false;
+            s.seats = vec![seat("Controller", true, None, false, false)];
+            s.viewers = 1;
+        }
+        P::Crowded => {
+            s.title =
+                "The Extraordinarily Long Title of a Game Nobody Remembers: Definitive Edition"
+                    .into();
+            s.host = "Alexandria-Maximiliana".into();
+            s.role = HudRole::Controlling;
+            s.seats = vec![
+                seat(
+                    "Controller 1",
+                    true,
+                    Some("Alexandria-Maximiliana"),
+                    false,
+                    false,
+                ),
+                seat(
+                    "Controller 2",
+                    true,
+                    Some("Bartholomew the Third"),
+                    false,
+                    false,
+                ),
+                seat("Controller 3", true, Some("Bob"), true, false),
+                seat("Controller 4", true, None, false, false),
+                seat(
+                    "Keyboard and mouse",
+                    false,
+                    Some("Constantinople"),
+                    false,
+                    false,
+                ),
+            ];
+            s.seats[0].host = true;
+            s.viewers = 7;
+        }
+        P::Worst => {
+            s.role = HudRole::Controlling;
+            bob(&mut s.seats[1]);
+            s.control_paused = true;
+            s.game_in_front = false;
+            s.note =
+                "Alice paused control with the panic key; it comes back when they allow it".into();
+        }
     }
+    s
 }
+
+/// How often the stats card's rows are built again while it shows.
+const STATS_EVERY: Duration = Duration::from_millis(250);
 
 /// How much a volume shortcut moves the stream volume, in percent (P6).
 const VOLUME_STEP: i8 = 10;
@@ -1049,7 +1231,9 @@ impl Stats {
         }
     }
 
-    fn lines(
+    /// The stats card's rows, as (label, value), before Input and Audio,
+    /// which the window loop adds.
+    fn rows(
         &self,
         (width, height): (u32, u32),
         decoder: &str,
@@ -1057,30 +1241,31 @@ impl Stats {
         presentation: &str,
         dropped: u64,
         net: Option<NetStats>,
-    ) -> Vec<String> {
-        let fmt = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.1} ms"));
-        let path = net.map_or("path -".to_string(), |n| {
+    ) -> Vec<(String, String)> {
+        let fmt = |v: Option<f32>| v.map_or("–".to_string(), |v| format!("{v:.1} ms"));
+        let path = net.map_or("–".to_string(), |n| {
             format!(
-                "{}  rtt {:.1} ms  {:.1} Mbit/s",
+                "{} · rtt {:.1} ms · {:.1} Mbit/s",
                 if n.relayed { "Relay" } else { "Direct" },
                 f64::from(n.rtt_us) / 1000.0,
                 f64::from(n.receive_bps) / 1e6
             )
         });
+        let row = |label: &str, value: String| (label.to_string(), value);
         vec![
-            format!("{width}x{height} @ {:.0} fps", self.fps()),
-            path,
-            format!(
-                "capture -> present  {}",
-                fmt(median(&self.capture_to_present_ms))
+            row("Video", format!("{width}×{height} · {:.0} fps", self.fps())),
+            row("Path", path),
+            row(
+                "Capture → present",
+                fmt(median(&self.capture_to_present_ms)),
             ),
-            format!(
-                "clock -> present    {}",
-                fmt(median(&self.clock_to_present_ms))
+            row("Clock → present", fmt(median(&self.clock_to_present_ms))),
+            row("Arrive → decoded", fmt(median(&self.decode_ms))),
+            row(
+                "Decoder",
+                format!("{decoder}, {presentation}, {dropped} skipped"),
             ),
-            format!("arrive -> decoded   {}", fmt(median(&self.decode_ms))),
-            format!("decoder {decoder}, {presentation}, {dropped} skipped"),
-            format!("GPU {adapter}   (Ctrl+Alt+Shift+H hides this)"),
+            row("GPU", adapter.to_string()),
         ]
     }
 }

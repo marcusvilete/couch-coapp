@@ -64,11 +64,12 @@ Ask the user to press each button and move each stick on their controller. alice
 ## The viewer's HUD without a session
 
 ```powershell
-cargo run -p couch-viewer -- --hud-preview watching     # or asking, controlling
+cargo run -p couch-viewer -- --hud-preview watching     # every state: viewer::Preview::NAMES
+.\scripts\viewer-shots.ps1                              # all of them, into target\ui-shots\viewer
 ```
 
 - **Check the debug build, not only release.** The app runs the debug `couch-viewer`, and egui has checks that panic only in debug builds (an undrained `TexturesDelta` crashed every stream window in M5b while release looked fine).
-- **To look at it yourself:** start the preview with stdin redirected and kept open (a .NET `ProcessStartInfo` with `RedirectStandardInput`), wait 3 s, and screenshot the region with `System.Drawing` (`CopyFromScreen`). Then read the PNG.
+- **To look at it yourself:** `viewer-shots.ps1` (after `cargo build -p couch-viewer`) captures each state with PrintWindow, so other windows covering it don't matter: 1280×720 each, the crowded one also at 480×300 and at 150% (`--hud-scale`), and a pointer on a seat chip for its hover and tooltip (`--hud-preview-pointer X Y`, in points). Then read the PNGs. The preview keeps the bar up and draws a test picture behind it.
 - **A still picture repaints only when asked:** egui lays a new area out unseen on its first frame, so the HUD must honour egui's repaint requests (`Hud::needs_paint`).
 
 ## The panic key
@@ -105,7 +106,7 @@ Each feature's notes sit under its area, tagged with the milestone that added it
 - **Watchers between streams:** the room card says "Ana isn't streaming anything yet" (or why the last stream stopped); a stream window stays open, black, with that line in the middle and "Your seat stays yours". Their input does nothing until the next stream (the host's log shows no seat change). The next stream arrives by itself, from a keyframe.
 - **A session with a keyboard-and-mouse seat** streams only windows: the Stream section says so if a screen is picked.
 - **The host's own controller** plays its seat between streams too, so the host can start the game with it.
-- **The "game not in front" line.** With alice live and the game window behind another window, the guests' stream windows say "The game isn't in front on Ana's PC"; for a player the bar stays up until it comes back. On one PC the stream window itself takes the front, so expect the line while clicking in it: that is right.
+- **The "game not in front" line.** With alice live and the game window behind another window, the stream windows of guests playing or asking say "The game isn't in front on Ana's PC" (watchers' don't, since M21's bar); for a player the bar stays up until it comes back. On one PC the stream window itself takes the front, so expect the line while clicking in it: that is right.
 - **Closing the game** ends the stream with "The game closed", not the session (M19): viewers' windows stay, black, saying so, and the host can stream again. A game that swaps its window (some do when changing display mode) keeps streaming after a short freeze; host log: `the game opened a new window; streaming that one`.
 - **A window that closes while the game runs** ends the stream after 5 s ("went away"); the session goes on.
 - **Killing the host app** (Task Manager): its viewers see the connection lost after about 5 s (log: `the peer went silent; closing`).

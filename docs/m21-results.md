@@ -46,9 +46,19 @@ You found text spilling out of the "A seat of their own" button: segmented butto
 
 Your one-PC run (2026-10-21): "way better already". Your further comments come as follow-up work after this PR.
 
+## Part 2: the stream window (0.17.2)
+
+The stream window's HUD (`couch-viewer`, drawn with egui over the video) still had egui's stock grey buttons, three stacked lines of text, buttons wrapping onto two rows and a raw monospace stats dump. You asked for it to match (2026-10-26). No engine, wire or IPC change.
+
+- **Seeing it.** `--hud-preview` has twelve states now (`viewer::Preview::NAMES`: watching, asking, playing two seats, asking for one more, paused, stopped, waiting, the host beside the seats, a single seat, muted, a crowded session with long names, everything at once), keeps the bar up and draws a test picture behind it (a white band where the bar sits: the worst case). `scripts\viewer-shots.ps1` captures each with PrintWindow, plus the crowded one at 480×300 and at 150% and a pointer on a seat chip, and fails on a black capture.
+- **Look.** The main window's dark palette and Windows' fonts, read from `%WINDIR%\Fonts` once (Segoe UI Variable and its semibold, Segoe's icons, Cascadia Mono for the numbers); anything missing falls back to egui's, and without an icon font the icon buttons are words.
+- **The bar** is four rows of fixed height, so it never jumps: LIVE (or "not streaming"), the title, the host and how many watch, then the volume, full screen, the stats and, apart, Leave in red; a chip per seat saying who has it (yours in blue, "You"; one you asked for outlined; a free one "Free"; the host playing beside the seats a chip of their own), a chip you can ask for being the button (its tooltip says whom you ask, or why not); where you stand, a dot in its colour, with the host's note beside it (or below, when long) and the request's or the seats' button; the shortcuts, after the mouse's hint while you hold keyboard and mouse. "The game isn't in front" now shows only to guests playing or asking: it concerns their input. Long titles and names are cut with "…", the full text in a tooltip; in a narrow window the seat icons and the slider go first.
+- **The stats card** is a card of labelled rows, built only while it shows and at most four times a second (they were built every frame, the audio's taking its thread's lock); in a short window it shows the rows that fit, and says how many more.
+- **Input safety, kept and written down** (`hud.rs`'s doc): no popup or editable value box, since the bar takes clicks only inside itself; capturing the mouse clears the HUD's pointer, so no hover or tooltip stays over the game; releases still come to the bar once their press did. The bar also stays up while the pointer rests on it, at most 15 s.
+
 ## Known limits
 
 - In the light theme, the window shows its dark background for a moment before the page paints.
 - The stream picker shows window titles, not pictures: thumbnails or icons need the engine.
 - The title bar is dark or light, not tinted: that needs a Windows call in `couch-platform-win`.
-- The stream window's on-screen display (Rust) wasn't redone.
+- The stream window is dark only: it sits over a game.

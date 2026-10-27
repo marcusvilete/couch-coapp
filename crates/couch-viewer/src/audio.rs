@@ -200,13 +200,14 @@ impl AudioOut {
         }
     }
 
-    /// One line for the HUD.
+    /// The stats card's Audio row (built only while the card shows: it takes
+    /// the audio thread's lock).
     pub fn hud_line(&self) -> String {
         let s = self.stats();
         let total = (s.played + s.concealed).max(1);
         let heard = self.heard();
         format!(
-            "audio {:.0}/{:.0} ms  concealed {:.1}%  underruns {}  capture -> device {:.0} ms  level peak {:.0} / avg {:.0} dBFS",
+            "{:.0}/{:.0} ms · concealed {:.1}% · underruns {} · capture → device {:.0} ms · level peak {:.0} / avg {:.0} dBFS",
             f64::from(s.buffered_us) / 1000.0,
             f64::from(s.target_us) / 1000.0,
             s.concealed as f64 * 100.0 / total as f64,

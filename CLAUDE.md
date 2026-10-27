@@ -28,7 +28,7 @@ Run from the repo root in PowerShell, after `. .\scripts\dev.ps1`. That script r
 | Dependency licenses and advisories | `cargo deny check` (and `cargo xtask notices` for the licence texts) |
 | Capability probe (codecs, iroh, SDL3, ViGEm) | `cargo build -p couch-viewer`, then `cargo run -p couch-cli -- probe` |
 | Desktop app | `cd apps/desktop`, then `npm run tauri dev` (builds `couch-viewer` first, which watching needs) |
-| The viewer's HUD by eye, without a session | `cargo run -p couch-viewer -- --hud-preview watching` (or `asking`, `controlling`) |
+| The viewer's HUD by eye, without a session | `cargo run -p couch-viewer -- --hud-preview watching` (states in `viewer::Preview::NAMES`; `--hud-scale 1.5`, `--hud-preview-pointer X Y` for a hover); every state at once (1280×720, the crowded one at 480×300 and 150%, into `target\ui-shots\viewer`): `cargo build -p couch-viewer`, then `.\scripts\viewer-shots.ps1` (`-Only crowded,hover`) |
 | The viewer's maximum frame latency, for measuring on another GPU (M9a kept 1; NVIDIA showed no difference) | `$env:COUCH_VIEWER_FRAME_LATENCY = 2` (1 to 3) before `latency-probe` or the app; the stats line shows the value |
 | Front-end type check | `cd apps/desktop`, then `npx tsc --noEmit` |
 | Front-end unit tests (the pure logic in `src/model` and `src/state`) | `cd apps/desktop`, then `npx vitest run` |
