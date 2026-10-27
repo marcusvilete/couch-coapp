@@ -46,6 +46,13 @@ You found text spilling out of the "A seat of their own" button: segmented butto
 
 Your one-PC run (2026-10-21): "way better already". Your further comments come as follow-up work after this PR.
 
+**With friends** (the 0.17.1 installer, `2dd1f5a`, reported 2026-10-26):
+- They were mostly pleased with the new look. Everything else they tried worked, the new UI included.
+- **Your own fresh install** offered only HidHide: the installer offers a driver only when its Windows service is missing, and ViGEmBus was already installed. You didn't restart as HidHide asks, nor play on a seat as the host, so that part wasn't tried.
+- **A friend hosting on a fresh install had trouble with the virtual controllers.** Their account: the first session took a few seconds to start while Windows found new hardware and installed Xbox controllers; after the session ended, the controllers were still in Device Manager; they removed them by hand, and it took two or three restarts before it worked; in the end they played two controllers on that PC from afar. Open: what failed before the removal (no input in the game? a session that wouldn't start?), and their `desktop.log` (`%LOCALAPPDATA%\CouchCoApp\profiles\default\`), to tell our plugging and unplugging (`vigem.rs`) from Windows installing its driver for a first virtual pad. Device Manager keeps entries for unplugged devices, greyed under "Show hidden devices", so entries left behind aren't necessarily pads still plugged. A first session could also say that Windows is setting the controllers up, the first time only.
+- **Several controllers on one guest** (M18) worked, a first with friends, but felt confusing: the patch bay shows a guest as one player, whatever their controllers. Wanted: a plug per controller, named (the controller's name, numbered when two are alike), as the host's own controllers are (P11).
+- **Their ideas:** a session that streams without offering control, to show something or watch together (M24); and playing your own PC from afar, say a gaming PC at home from a laptop while travelling, which needs some way to let your own device in without anyone at home to accept (M25).
+
 ## Part 2: the stream window (0.17.2)
 
 The stream window's HUD (`couch-viewer`, drawn with egui over the video) still had egui's stock grey buttons, three stacked lines of text, buttons wrapping onto two rows and a raw monospace stats dump. You asked for it to match (2026-10-26). No engine, wire or IPC change.
