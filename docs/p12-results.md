@@ -62,6 +62,10 @@ Fixed:
 - "Added" now says when their other seat takes another controller ("Controller 3 takes another of theirs").
 - A report that wasn't taken no longer refreshes the app's view. The held-seat branch allowed while paused now says so in a comment.
 
+## Your run (0.19.0 and 0.19.1, 2026-10-27)
+
+Dragging a guest's controllers works and "makes sense now". Moving one of two seated controllers took the other's seat too, and so did a guest asking for a third seat: P13 changed that. Moving a seated controller while another was spare added a seat: 0.19.1 fixed it (`p13-results.md`).
+
 ## Still to try
 
-- With friends, on 0.18.0: a guest with two controllers, the host dragging each onto a seat, and swapping them.
+- With friends, on 0.19.1.

@@ -43,6 +43,10 @@ A fresh review agent found nothing serious, and checked Show window can't be rea
 - Turning the bar off first hid the centre card too ("isn't streaming anything yet"): the switch was the window's whole overlay. Split so it hides the bar alone; now "it works the intended way".
 - Full screen and back to a window, and Show window, both work.
 
+## Your later run (0.19.1, 2026-10-27)
+
+The stream window's controls from the app work.
+
 ## Still to try
 
-- Your two-monitor run, and with friends.
+- With friends.

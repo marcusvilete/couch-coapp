@@ -45,6 +45,8 @@ A fresh review agent found nothing serious, and checked the teardown order, the 
 
 ## Still to try
 
+**Still open (2026-10-27): a run on a truly fresh PC**, where Windows sets the virtual controllers up for the first time and takes longer than 3 s, to see the warning, its timer and Stop waiting. The run on the PC that froze before (below) came up within the wait.
+
 Windows' first-time setup can't happen on this PC by itself: all 64 devices exist here. To see it:
 - here, remove the first two, from an elevated PowerShell: `pnputil /remove-device "USB\VID_045E&PID_028E\01"` and `\02`, then start a session with two controller seats: if Windows takes long, the console says so, and the pads come up by themselves;
 - on the friend's PC, with a `-TestRelay` installer of this branch.
