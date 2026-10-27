@@ -3,6 +3,7 @@ import type { DriverName } from "./DriverName";
 import type { HostController } from "./HostController";
 import type { InputSetup } from "./InputSetup";
 import type { RelaySetting } from "./RelaySetting";
+import type { RemoteAction } from "./RemoteAction";
 import type { SourceChoice } from "./SourceChoice";
 import type { StreamWindowRequest } from "./StreamWindowRequest";
 
@@ -45,4 +46,4 @@ max_mbps: number,
 /**
  * This PC's upload cap, split between viewers, Mbit/s.
  */
-upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "setStreamLevel", percent: number, } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, controller?: number, } | { "type": "cancelControl" } | { "type": "giveBackSeat", seat: number, } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, controller?: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, controller: number, } | { "type": "allowControl" } | { "type": "stopWaitingForPads" } | { "type": "setStreamVolume", percent: number, muted: boolean, } | { "type": "streamWindow", request: StreamWindowRequest, } | { "type": "getStreamWindow" } | { "type": "setStreamWindow", bar: boolean, };
+upload_mbps: number | null, } | { "type": "stopStream" } | { "type": "setStreamLevel", percent: number, } | { "type": "endSession" } | { "type": "watch", room: string, host: string, } | { "type": "stopWatching" } | { "type": "requestControl", seat: number, controller?: number, } | { "type": "cancelControl" } | { "type": "giveBackSeat", seat: number, } | { "type": "answerControl", member: string, accept: boolean, } | { "type": "passControl", member: string, seat: number, controller?: number, } | { "type": "takeBackControl", seat: number | null, } | { "type": "playSeat", seat: number, controller: number, } | { "type": "allowControl" } | { "type": "stopWaitingForPads" } | { "type": "setStreamVolume", percent: number, muted: boolean, } | { "type": "streamWindow", request: StreamWindowRequest, } | { "type": "getStreamWindow" } | { "type": "setStreamWindow", bar: boolean, } | { "type": "getRemotePlay" } | { "type": "setRemotePlay", on: boolean, } | { "type": "setRemotePin", pin: string, } | { "type": "addRemoteDevice", member: string, } | { "type": "removeRemoteDevice", member: string, } | { "type": "acceptRemoteHost", member: string, } | { "type": "forgetRemoteHost", member: string, } | { "type": "unlockRemote", room: string, member: string, pin: string, } | { "type": "lockRemote", room: string, member: string, } | { "type": "remote", room: string, member: string, action: RemoteAction, };

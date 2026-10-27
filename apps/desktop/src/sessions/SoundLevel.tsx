@@ -5,6 +5,7 @@ import { Volume2, VolumeX } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import { engineCommand, errorText, onEngineEvent } from "../engine";
+import { viaRemote, type RemoteTarget } from "../model/remote";
 import { Slider } from "../ui/Controls";
 import { Why } from "../ui/Why";
 import type { Notify } from "./useRun";
@@ -19,7 +20,15 @@ const METER_STALE_MS = 1000;
 /** The host's stream level's top (`couch_media::audio::MAX_BOOST_PERCENT`). */
 const MAX_STREAM_LEVEL = 400;
 
-export function SoundLevel(props: { roomId: string; level: number; onRoom: (room: RoomView) => void; notify: Notify }) {
+export function SoundLevel(props: {
+  roomId: string;
+  level: number;
+  onRoom: (room: RoomView) => void;
+  notify: Notify;
+  /** A home PC run from here (M25): the level is set there. */
+  remote?: RemoteTarget;
+}) {
+  const setLevel = (percent: number) => engineCommand(viaRemote(props.remote, { type: "setStreamLevel", percent }));
   const [percent, setPercent] = useState(props.level);
   const [heard, setHeard] = useState<{ peak: number; average: number; at: number } | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -41,7 +50,7 @@ export function SoundLevel(props: { roomId: string; level: number; onRoom: (room
       if (sendTimer.current != null && waiting.current != null) {
         window.clearTimeout(sendTimer.current);
         sendTimer.current = null;
-        void engineCommand({ type: "setStreamLevel", percent: waiting.current }).catch(() => {});
+        void setLevel(waiting.current).catch(() => {});
       }
     },
     [],
@@ -64,7 +73,7 @@ export function SoundLevel(props: { roomId: string; level: number; onRoom: (room
   // Applied while dragging, but at most every 100 ms: each change is saved.
   const send = (value: number) => {
     inFlight.current++;
-    engineCommand({ type: "setStreamLevel", percent: value })
+    setLevel(value)
       .then((r) => {
         if (r.type === "room") props.onRoom(r);
       })

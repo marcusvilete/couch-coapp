@@ -27,6 +27,8 @@ import { roomMenu } from "../rooms/menus";
 import { viewerEntries } from "../sessions/hostMenus";
 import { SessionBar } from "../sessions/SessionBar";
 import { Stage } from "../sessions/Stage";
+import { operatedSession } from "../model/remote";
+import { UnlockRemoteDialog } from "../sessions/RemotePanel";
 import { StartSessionDialog } from "../sessions/StartSessionDialog";
 import { StreamPicker } from "../sessions/StreamPicker";
 import { useRun } from "../sessions/useRun";
@@ -198,10 +200,21 @@ export default function App() {
   // A dialog with nothing left to show closes: about a room that went, the
   // stream picker once our session ended, our name before the profile. An
   // invisible one would still hold the keys and any opened link.
+  // One of our PCs' session we run from here (M25), for its stream picker.
+  const remoteSession =
+    dialog?.kind === "streamPicker" && dialog.remote && dialogRoom
+      ? operatedSession(dialogRoom, dialog.remote)
+      : undefined;
+  const remotePc =
+    dialog?.kind === "unlockRemote" && dialogRoom ? dialogRoom.members.find((m) => m.id === dialog.member) : undefined;
   const orphan =
     dialog != null &&
     (("room" in dialog && !dialogRoom) ||
-      (dialog.kind === "streamPicker" && host == null) ||
+      (dialog.kind === "streamPicker" && (dialog.remote ? remoteSession == null : host == null)) ||
+      (dialog.kind === "unlockRemote" && remotePc?.remote == null) ||
+      (dialog.kind === "startSession" &&
+        dialog.remote != null &&
+        !dialogRoom?.members.some((m) => m.id === dialog.remote && m.remote?.unlocked)) ||
       (dialog.kind === "name" && lobby.profile == null));
   useEffect(() => {
     if (orphan) setDialog(null);
@@ -291,6 +304,9 @@ export default function App() {
                       onRoom={lobby.putRoom}
                       notify={lobby.notify}
                       confirm={(c) => setDialog({ kind: "confirm", ...c })}
+                      onUnlockRemote={(pc) => setDialog({ kind: "unlockRemote", room: room.id, member: pc })}
+                      onStartRemote={(pc) => setDialog({ kind: "startSession", room: room.id, remote: pc })}
+                      onStreamRemote={(pc) => setDialog({ kind: "streamPicker", room: room.id, remote: pc })}
                     />
                   </div>
                 </div>
@@ -386,6 +402,7 @@ export default function App() {
       {dialog?.kind === "startSession" && dialogRoom && (
         <StartSessionDialog
           room={dialogRoom}
+          remote={dialog.remote ? { room: dialogRoom.id, member: dialog.remote } : undefined}
           onClose={close}
           onStarted={(started) => {
             lobby.putRoom(started);
@@ -393,8 +410,28 @@ export default function App() {
           }}
         />
       )}
-      {dialog?.kind === "streamPicker" && host && (
+      {dialog?.kind === "streamPicker" && dialog.remote && dialogRoom && remoteSession && (
+        <StreamPicker
+          session={remoteSession}
+          remote={{ room: dialogRoom.id, member: dialog.remote }}
+          onClose={close}
+          onRoom={lobby.putRoom}
+          notify={lobby.notify}
+        />
+      )}
+      {dialog?.kind === "streamPicker" && !dialog.remote && host && (
         <StreamPicker session={host.session} onClose={close} onRoom={lobby.putRoom} notify={lobby.notify} />
+      )}
+      {dialog?.kind === "unlockRemote" && dialogRoom && remotePc && (
+        <UnlockRemoteDialog
+          room={dialogRoom}
+          pc={remotePc}
+          onClose={close}
+          onUnlocked={(unlocked) => {
+            lobby.putRoom(unlocked);
+            setDialog(null);
+          }}
+        />
       )}
       {dialog?.kind === "confirm" && <ConfirmDialog {...dialog} onClose={close} />}
       {splash && <Splash ready={lobby.loaded || lobby.failure != null} onDone={endSplash} />}

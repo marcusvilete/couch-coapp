@@ -11,6 +11,10 @@ use crate::{
     admission::{AdmitConfirm, AdmitReply, JoinStart, MemberHello},
     envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND},
     ids::{Permissions, SeatEpoch, SeatId},
+    remote::{
+        RemoteCommand, RemoteLock, RemoteOffer, RemoteReply, RemoteState, RemoteUnlock,
+        RemoteUnlockReply,
+    },
     room::{
         Goodbye, HandoverAnswer, HandoverOffer, HandoverWithdraw, MemberRecord, OwnedPolicy,
         Presence, RoomSnapshot, Signed,
@@ -65,6 +69,16 @@ pub mod type_ids {
     /// Optional (M18): without it, a viewer counts as having no controller
     /// to spare, and every seat it gets moves it.
     pub const VIEWER_CONTROLLERS: u16 = 0x0608;
+    /// Remote play (M25): only between a home PC and a device it trusts.
+    /// The offer is optional: a device that doesn't know it just never
+    /// unlocks.
+    pub const REMOTE_OFFER: u16 = 0x0701;
+    pub const REMOTE_UNLOCK: u16 = MUST_UNDERSTAND | 0x0702;
+    pub const REMOTE_UNLOCK_REPLY: u16 = MUST_UNDERSTAND | 0x0703;
+    pub const REMOTE_COMMAND: u16 = MUST_UNDERSTAND | 0x0704;
+    pub const REMOTE_REPLY: u16 = MUST_UNDERSTAND | 0x0705;
+    pub const REMOTE_STATE: u16 = MUST_UNDERSTAND | 0x0706;
+    pub const REMOTE_LOCK: u16 = MUST_UNDERSTAND | 0x0707;
 }
 
 /// QUIC application close codes for connections between members.
@@ -190,9 +204,31 @@ pub enum ControlMessage {
     ControlDeclined(ControlDeclined),
     GameFocus(GameFocus),
     ViewerControllers(ViewerControllers),
+    RemoteOffer(RemoteOffer),
+    RemoteUnlock(RemoteUnlock),
+    RemoteUnlockReply(RemoteUnlockReply),
+    RemoteCommand(RemoteCommand),
+    RemoteReply(Box<RemoteReply>),
+    RemoteState(Box<RemoteState>),
+    RemoteLock(RemoteLock),
 }
 
 impl ControlMessage {
+    /// Whether this is remote play's (M25), between a home PC and a device
+    /// it trusts.
+    pub fn is_remote(&self) -> bool {
+        matches!(
+            self,
+            Self::RemoteOffer(_)
+                | Self::RemoteUnlock(_)
+                | Self::RemoteUnlockReply(_)
+                | Self::RemoteCommand(_)
+                | Self::RemoteReply(_)
+                | Self::RemoteState(_)
+                | Self::RemoteLock(_)
+        )
+    }
+
     /// Whether this is about a session (its directory, joining, control),
     /// which the session's host and its viewers handle, rather than the room.
     pub fn is_session(&self) -> bool {
@@ -273,6 +309,13 @@ impl ControlMessage {
             Self::ControlDeclined(_) => type_ids::CONTROL_DECLINED,
             Self::GameFocus(_) => type_ids::GAME_FOCUS,
             Self::ViewerControllers(_) => type_ids::VIEWER_CONTROLLERS,
+            Self::RemoteOffer(_) => type_ids::REMOTE_OFFER,
+            Self::RemoteUnlock(_) => type_ids::REMOTE_UNLOCK,
+            Self::RemoteUnlockReply(_) => type_ids::REMOTE_UNLOCK_REPLY,
+            Self::RemoteCommand(_) => type_ids::REMOTE_COMMAND,
+            Self::RemoteReply(_) => type_ids::REMOTE_REPLY,
+            Self::RemoteState(_) => type_ids::REMOTE_STATE,
+            Self::RemoteLock(_) => type_ids::REMOTE_LOCK,
         }
     }
 
@@ -308,6 +351,13 @@ impl ControlMessage {
             Self::ControlDeclined(m) => postcard::to_stdvec(m)?,
             Self::GameFocus(m) => postcard::to_stdvec(m)?,
             Self::ViewerControllers(m) => postcard::to_stdvec(m)?,
+            Self::RemoteOffer(m) => postcard::to_stdvec(m)?,
+            Self::RemoteUnlock(m) => postcard::to_stdvec(m)?,
+            Self::RemoteUnlockReply(m) => postcard::to_stdvec(m)?,
+            Self::RemoteCommand(m) => postcard::to_stdvec(m)?,
+            Self::RemoteReply(m) => postcard::to_stdvec(m)?,
+            Self::RemoteState(m) => postcard::to_stdvec(m)?,
+            Self::RemoteLock(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -345,6 +395,13 @@ impl ControlMessage {
             type_ids::CONTROL_DECLINED => Self::ControlDeclined(payload(frame)?),
             type_ids::GAME_FOCUS => Self::GameFocus(payload(frame)?),
             type_ids::VIEWER_CONTROLLERS => Self::ViewerControllers(payload(frame)?),
+            type_ids::REMOTE_OFFER => Self::RemoteOffer(payload(frame)?),
+            type_ids::REMOTE_UNLOCK => Self::RemoteUnlock(payload(frame)?),
+            type_ids::REMOTE_UNLOCK_REPLY => Self::RemoteUnlockReply(payload(frame)?),
+            type_ids::REMOTE_COMMAND => Self::RemoteCommand(payload(frame)?),
+            type_ids::REMOTE_REPLY => Self::RemoteReply(payload(frame)?),
+            type_ids::REMOTE_STATE => Self::RemoteState(payload(frame)?),
+            type_ids::REMOTE_LOCK => Self::RemoteLock(payload(frame)?),
             other if frame.must_understand() => return Err(DecodeError::UnknownRequired(other)),
             other => return Ok(Decoded::SkippedOptional(other)),
         };
@@ -626,6 +683,174 @@ mod tests {
         ] {
             assert!(message.is_session());
             roundtrip(message);
+        }
+    }
+
+    #[test]
+    fn remote_messages_roundtrip() {
+        use crate::{
+            ids::{MemberId, SessionId},
+            remote::*,
+            session::{ControllerReport, StreamState},
+        };
+        for message in [
+            ControlMessage::RemoteOffer(RemoteOffer {
+                wait_secs: Some(60),
+            }),
+            ControlMessage::RemoteUnlock(RemoteUnlock {
+                pin: Pin("246810".into()),
+            }),
+            ControlMessage::RemoteUnlockReply(RemoteUnlockReply {
+                result: UnlockResult::WrongPin { wait_secs: 0 },
+            }),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 7,
+                op: RemoteOp::StartStream {
+                    source: RemoteSource::Window(-3),
+                    name: "Celeste".into(),
+                    fps: 60,
+                    max_mbps: 20,
+                    upload_mbps: None,
+                },
+            }),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 8,
+                op: RemoteOp::PassControl {
+                    member: MemberId([4; 32]),
+                    seat: SeatId(1),
+                    controller: Some(0),
+                },
+            }),
+            ControlMessage::RemoteReply(Box::new(RemoteReply {
+                id: 7,
+                result: RemoteResult::Failed("that window is gone".into()),
+            })),
+            ControlMessage::RemoteState(Box::new(RemoteState {
+                session: Some(RemoteSession {
+                    session: SessionId(9),
+                    starting: true,
+                    stream: StreamState::Waiting,
+                    streaming: None,
+                    requests: vec![RemoteRequest {
+                        member: MemberId([5; 32]),
+                        seat: SeatId(0),
+                        controller: None,
+                    }],
+                    guests: vec![RemoteGuest {
+                        member: MemberId([5; 32]),
+                        report: ControllerReport::default(),
+                    }],
+                    sound_level: 140,
+                    pads_setting_up: vec![SeatId(2)],
+                    pads_setting_up_secs: 42,
+                    pads_missing: Vec::new(),
+                    host_controllers: Vec::new(),
+                    host_homes: Vec::new(),
+                    panic_key: true,
+                }),
+            })),
+            ControlMessage::RemoteLock(RemoteLock {
+                reason: LockReason::Panic,
+            }),
+        ] {
+            assert!(message.is_remote() && !message.is_session());
+            roundtrip(message);
+        }
+        assert_eq!(type_ids::REMOTE_OFFER & MUST_UNDERSTAND, 0);
+    }
+
+    /// The fullest state and source list fit a control frame.
+    #[test]
+    fn the_largest_remote_messages_fit_a_frame() {
+        use crate::{
+            ids::{MemberId, SessionId},
+            remote::*,
+            session::{
+                ControllerReport, GuestController, MAX_GUEST_CONTROLLERS, MAX_SEATS, SeatDriver,
+                StreamState,
+            },
+        };
+        let text = "\u{1F3AE}".repeat(MAX_REMOTE_TEXT / 4);
+        let report = ControllerReport {
+            controllers: (0..MAX_GUEST_CONTROLLERS as u8)
+                .map(|slot| GuestController {
+                    slot,
+                    name: crate::session::controller_name(&"W".repeat(200)),
+                })
+                .collect(),
+            seats: (0..MAX_GUEST_CONTROLLERS as u8)
+                .map(|s| SeatDriver {
+                    seat: SeatId(s),
+                    controller: Some(s),
+                })
+                .collect(),
+        };
+        let state = RemoteState {
+            session: Some(RemoteSession {
+                session: SessionId(u64::MAX),
+                starting: true,
+                stream: StreamState::Live,
+                streaming: Some(RemoteStream {
+                    name: text.clone(),
+                    fps: u32::MAX,
+                    max_mbps: u32::MAX,
+                    upload_mbps: Some(u32::MAX),
+                }),
+                requests: (0..MAX_REMOTE_LISTED)
+                    .map(|i| RemoteRequest {
+                        member: MemberId([i as u8; 32]),
+                        seat: SeatId(4),
+                        controller: Some(3),
+                    })
+                    .collect(),
+                guests: (0..MAX_REMOTE_LISTED)
+                    .map(|i| RemoteGuest {
+                        member: MemberId([i as u8; 32]),
+                        report: report.clone(),
+                    })
+                    .collect(),
+                sound_level: u16::MAX,
+                pads_setting_up: (0..MAX_SEATS as u8).map(SeatId).collect(),
+                pads_setting_up_secs: u32::MAX,
+                pads_missing: (0..MAX_SEATS as u8).map(SeatId).collect(),
+                host_controllers: vec![text.clone(); 4],
+                host_homes: (0..4).map(SeatId).collect(),
+                panic_key: true,
+            }),
+        };
+        let sources = RemoteSources {
+            windows: (0..MAX_REMOTE_WINDOWS)
+                .map(|_| RemoteWindow {
+                    id: i64::MIN,
+                    title: text.clone(),
+                    app: text.clone(),
+                    elevated: true,
+                    refresh_hz: Some(u32::MAX),
+                })
+                .collect(),
+            screens: (0..MAX_REMOTE_SCREENS)
+                .map(|_| RemoteScreen {
+                    id: i64::MIN,
+                    name: text.clone(),
+                    width: u32::MAX,
+                    height: u32::MAX,
+                    primary: true,
+                    refresh_hz: Some(u32::MAX),
+                })
+                .collect(),
+            virtual_pads: true,
+        };
+        assert!(state.clone().checked().is_some() && sources.is_valid());
+        for message in [
+            ControlMessage::RemoteState(Box::new(state)),
+            ControlMessage::RemoteReply(Box::new(RemoteReply {
+                id: u32::MAX,
+                result: RemoteResult::Sources(sources),
+            })),
+        ] {
+            let mut buf = Vec::new();
+            message.encode(&mut buf).unwrap();
+            assert!(buf.len() < envelope::MAX_FRAME_LEN, "{} bytes", buf.len());
         }
     }
 

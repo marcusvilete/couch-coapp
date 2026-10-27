@@ -20,13 +20,14 @@ The wire protocol between room members, and the pipe between the main process an
 - P12 put a guest's controllers in the host's patch bay: `ViewerControllers` names them and says which drives each seat, `SeatAssigned.controller`, `SeatController` (wire revision 7), and viewer IPC v13 (`CONTROLLER_NAMES`).
 - P13 moves one controller at a time: `ControlRequest.controller` (wire revision 8), and viewer IPC v14 (`RequestControl { seat, controller }`).
 - M24 lets a session have no seats, to watch together, and drops `SeatKind::Both` (wire revision 9).
+- M25a adds remote play: a device of the user's own runs a home PC's sessions from afar, the `0x07xx` messages (wire revision 10).
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 9, for sessions with no seats and no `Both` seat in M24). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 10, for remote play in M25a). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -71,9 +72,17 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x0607` | `GameFocus { session, in_front }` | Optional. Host to its viewers: whether the streamed window is in front (P1) |
 | `0x0608` | `ViewerControllers { session, report: { controllers: [{ slot u8, name }], seats: [{ seat u8, controller u8? }] } }` | Optional. Viewer to host: its stream window's controllers, by slot and named, and which drives each pad seat it holds; after joining and on every change (M18, P12). At most 8 controllers on distinct slots below 8, at most 8 seats, each once, each driven by one of those or none; names of at most 40 characters, control characters replaced. The host drops a report that breaks this whole |
 
+| `0x0701` | `RemoteOffer { wait_secs u32? }` | Optional. Home PC to a device it trusts, on every room connection while remote play is on ([Remote play](#remote-play)): it may unlock; `wait_secs` while wrong PINs make it wait |
+| `0x8702` | `RemoteUnlock { pin }` | Device to home PC: the PIN, at most 64 bytes, to become its operator on this connection. Never logged |
+| `0x8703` | `RemoteUnlockReply { result: Unlocked \| WrongPin { wait_secs u32 } \| Wait { secs u32 } \| Off }` | Home PC to the device that sent `RemoteUnlock` |
+| `0x8704` | `RemoteCommand { id u32, op }` | Operator to home PC: one of the host's commands (`RemoteOp`: `ListSources`, `StartSession { title, max_viewers, controllers u8, keyboard_mouse }`, `StartStream { source: Window(i64) \| Screen(i64), name, fps, max_mbps, upload_mbps? }`, `StopStream`, `SetStreamLevel`, `EndSession`, `AnswerControl`, `PassControl`, `TakeBackControl`, `PlaySeat`, `AllowControl`, `StopWaitingForPads`); texts at most 200 bytes |
+| `0x8705` | `RemoteReply { id u32, result: Done \| Sources(...) \| Failed(text) }` | Home PC to its operator: how that command went. Sources: at most 64 windows and 16 screens, texts at most 200 bytes |
+| `0x8706` | `RemoteState { session? }` | Home PC to each operator, on unlocking and on every change: what its host console shows that members don't otherwise hear (requests, each guest's controllers report, the stream's name and rate, the sound level, pads setting up or missing, its own controllers and their seats, whether it has a panic key). Lists within the room's size; each guest's report checked as a host checks one |
+| `0x8707` | `RemoteLock { reason: ByOperator \| Panic \| Removed \| PinChanged \| Off }` | Either way: the operator locks itself, or the home PC locks it out |
+
 Message families still to come, all on this stream: **media control** (`VideoConfig`, `BitrateHint`).
 
-Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions.
+Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions, `0x07xx` remote play.
 
 ### Liveness
 
@@ -474,6 +483,47 @@ While nobody watches (no capture runs), the host checks once a second.
 **Upload share.** With an upload cap, once a second each viewer's ceiling is recomputed (`couch_media::ratecontrol::UploadShare`): a viewer held back by its own network (aiming below an equal share) gets its target plus 25% to grow into; the others split what is left equally. Shares move in 0.5 Mbit/s steps, rise at once, but come down only when the cut exceeds 10% (or keeping them would overrun the cap by more than 10%), since every bitrate change costs an NVENC keyframe.
 
 **One stream acceptor per connection.** QUIC has one accept queue for unidirectional streams, so each room connection has one acceptor (`couch_net::streams`) that reads a stream's kind byte and hands it to whoever subscribed to that kind, as `couch_net::datagrams` does for datagram tags. Video and input can then flow both ways on one connection.
+
+## Remote play
+
+M25a ([ADR 0010](adr/0010-playing-your-own-pc-from-afar.md)): a device of the user's own (the *operator*) runs a home PC's sessions from afar, as if at it. Code: `couch_engine::remote` (the settings, the PIN), `rooms::remote` (the messages).
+
+**Trust is set at the home PC only.** Its Settings → Remote play holds:
+- whether remote play is on;
+- the devices it trusts, each a member id picked from a room it shares, with a code (`SHA-256("couch/device-code/v1" || id)`, the first 4 bytes in hex, "AB12 CD34") compared on both screens;
+- the PIN's Argon2id hash (19 MiB, 2 passes; the PIN trimmed and NFKC-normalized, at least 6 characters);
+- the wrong-PIN count, and the time before which no PIN is tried.
+
+It is kept in `remote-play.json`, never in a backup. No message changes any of it.
+
+**A device accepts its home PC too.** An offer only asks the user whether that member is their own PC, showing its code. The device keeps the PCs it accepted in `remote-hosts.json`, and sends a PIN to no other: a room member offering remote play can't collect one.
+
+**Unlocking.**
+- A trusted device gets `RemoteOffer` on every current room connection while remote play is on.
+- It sends `RemoteUnlock` on that connection, which the home PC checks off its actor thread. A device gets one check at a time, whichever of its connections asks, until that check ends; a connection of the device asking meanwhile hears that check's answer (a reconnect may replace the first connection). The try is counted before the check runs.
+- After 5 wrong PINs, the next try waits 1 minute, doubling with each wrong one up to an hour, kept across restarts; a right PIN clears the count.
+- A check started before the PIN changed, the panic key was pressed, the device was removed or remote play was turned off opens nothing.
+- A right PIN makes the device the home PC's operator **on that connection**, until it closes.
+- The device keeps the PIN in memory for the app's run, and unlocks again by itself after a reconnect.
+
+**What an operator may do** is `RemoteOp`: the host's console, nothing else.
+- The home PC turns each op into its own window's command and runs it the same way, with the same checks:
+  - `StartSession` goes in the room of the operator's connection, without the home PC's own controllers;
+  - the other ops act on its session only if that session is in that room.
+- Rooms, invites, bans, handovers, settings, backups and remote play itself can't be asked for.
+- The home PC stays the session's host and the only writer of its facts; members see its session as any other.
+
+**Messages to the home PC count only** from a trusted id, on the current connection with it, while it is on the room's roster and remote play is on; operator messages only on the unlocked connection. **Messages to a device** count only on the connection its home PC's offer came on. None are relayed.
+
+**The console's state goes only to operators in the session's room:** an operator in another room hears no session, not its guests or its window's title. Every op, `ListSources` included, refuses while the session (started or starting) is in another room.
+
+**Locking.** The home PC locks operators out with `RemoteLock`:
+- `Panic`: the panic key, pressed at it;
+- `PinChanged`: a new PIN;
+- `Removed`: the device removed;
+- `Off`: remote play turned off.
+
+After `Panic`, `PinChanged`, `Removed` or `Off`, the device forgets the PIN. After `Removed` or `Off`, it also forgets the offer. An operator locks itself with `RemoteLock { ByOperator }`; any other reason from a peer is a home PC locking us out (two PCs may trust each other). After the panic key, an operator who knows the PIN can unlock again: to keep a device out, the home PC turns remote play off or removes it.
 
 ## Close and reset codes
 

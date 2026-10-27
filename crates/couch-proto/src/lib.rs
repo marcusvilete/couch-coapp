@@ -5,6 +5,7 @@
 //! - [`admission`]: the password check's messages.
 //! - [`room`]: member records, the owner's policy, snapshots, presence.
 //! - [`session`]: sessions (a member streaming to others) and control requests.
+//! - [`remote`]: remote play, between a home PC and a device it trusts.
 //! - [`invite`]: invite links.
 //! - [`ipc`]: framing for the pipe between the main process and `couch-viewer`.
 //! - [`ids`]: identifiers and permission flags that appear on the wire.
@@ -23,6 +24,7 @@ pub mod input;
 pub mod invite;
 pub mod ipc;
 pub mod media;
+pub mod remote;
 pub mod room;
 pub mod session;
 
@@ -57,7 +59,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// controller asking.
 /// 9: watching together (M24): a session may have no seats, and
 /// `SeatKind::Both` (one seat with a controller, keyboard and mouse) is gone.
-pub const PROTOCOL_MINOR: u16 = 9;
+/// 10: remote play (M25a): a trusted device runs the home PC's sessions,
+/// the `0x07xx` messages.
+pub const PROTOCOL_MINOR: u16 = 10;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -74,6 +78,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (7, "0.18"),
     (8, "0.19"),
     (9, "0.20"),
+    (10, "0.21"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

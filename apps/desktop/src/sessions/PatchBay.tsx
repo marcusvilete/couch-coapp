@@ -125,7 +125,14 @@ function curve(a: Point, b: Point): string {
   return `M ${a.x} ${a.y} C ${a.x + pull} ${a.y}, ${b.x - pull} ${b.y}, ${b.x} ${b.y}`;
 }
 
-export function PatchBay(props: { room: RoomView; session: SessionView; busy: string | null; run: Run }) {
+export function PatchBay(props: {
+  room: RoomView;
+  session: SessionView;
+  busy: string | null;
+  run: Run;
+  /** The name of one of our PCs, whose session we run from here (M25). */
+  remote?: string;
+}) {
   const { room, session: s, run } = props;
   const pads = ourPads(s);
   const live = isLive(s);
@@ -296,15 +303,17 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
         <div className="bay-person host">
           <Avatar id={s.host} name={nameOf(room, s.host)} size={32} />
           <span className="bay-person-text">
-            <strong>You</strong>
+            <strong>{props.remote ?? "You"}</strong>
             <span>
-              {pads.length > 0
-                ? pads.length === 1
-                  ? "your controller"
-                  : "your controllers"
-                : kbmSeats.length > 0
-                  ? "your keyboard and mouse"
-                  : "beside the seats"}
+              {props.remote
+                ? "your PC, run from here"
+                : pads.length > 0
+                  ? pads.length === 1
+                    ? "your controller"
+                    : "your controllers"
+                  : kbmSeats.length > 0
+                    ? "your keyboard and mouse"
+                    : "beside the seats"}
             </span>
           </span>
         </div>
@@ -339,9 +348,11 @@ export function PatchBay(props: { room: RoomView; session: SessionView; busy: st
         )}
         {pads.length === 0 && (
           <p className="bay-note">
-            {kbmSeats.length > 0
-              ? "Your own controller plays the game directly."
-              : "Your own controller, keyboard and mouse play the game directly."}
+            {props.remote
+              ? "Its own controllers stay out of the seats: nobody plays at it. Hand a seat to yourself to play from here."
+              : kbmSeats.length > 0
+                ? "Your own controller plays the game directly."
+                : "Your own controller, keyboard and mouse play the game directly."}
           </p>
         )}
 

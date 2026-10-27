@@ -7,6 +7,7 @@ import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import type { SourceList } from "../bindings/SourceList";
 import { errorText, request } from "../engine";
+import { viaRemote, type RemoteTarget } from "../model/remote";
 import { allowsKbm, FRAME_RATES, QUALITIES, uploadLimit, uploadLimitOk } from "../model/sessions";
 import { KEYS, storedNumber, writeStored } from "../state/storage";
 import { Button, IconButton } from "../ui/Button";
@@ -26,9 +27,11 @@ export function StreamPicker(props: {
   onClose: () => void;
   onRoom: (room: RoomView) => void;
   notify: Notify;
+  /** One of our PCs run from here (M25): its windows and screens. */
+  remote?: RemoteTarget;
 }) {
   const s = props.session;
-  const { busy, run } = useRun(props.notify, props.onRoom);
+  const { busy, run } = useRun(props.notify, props.onRoom, props.remote);
   const [sources, setSources] = useState<SourceList | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<"windows" | "screens">("windows");
@@ -48,7 +51,7 @@ export function StreamPicker(props: {
 
   const load = () => {
     setLoadError(null);
-    request({ type: "listSources" }, "sources")
+    request(viaRemote(props.remote, { type: "listSources" }), "sources")
       .then(setSources)
       .catch((e) => setLoadError(errorText(e)));
   };

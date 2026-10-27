@@ -15,9 +15,9 @@ use std::{
 
 use couch_engine::{
     Command, Engine, EngineError, EngineOptions, Event, HidingView, HostController,
-    HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile, Response, RoomView,
-    SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView, StreamWindowRequest,
-    StreamWindowSettingsView, WatchEnd,
+    HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile, RemoteAccessView,
+    RemoteAction, Response, RoomView, SessionEnd, SessionRole, SessionView, SourceChoice,
+    StreamStateView, StreamWindowRequest, StreamWindowSettingsView, WatchEnd,
     pipeline::{
         AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, Source, Sources,
         ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
@@ -4635,5 +4635,333 @@ async fn the_stream_window_setting_turns_the_bar_off() {
             bar: true
         }))
     ));
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+// ---- Remote play (M25, ADR 0010) ----
+
+const PIN: &str = "246810";
+
+fn remote(room: &str, host: &Member, action: RemoteAction) -> Command {
+    Command::Remote {
+        room: room.into(),
+        member: host.id(),
+        action,
+    }
+}
+
+fn unlock(room: &str, host: &Member, pin: &str) -> Command {
+    Command::UnlockRemote {
+        room: room.into(),
+        member: host.id(),
+        pin: pin.into(),
+    }
+}
+
+/// `device`'s view of `host` as an offer of remote play, until `check`.
+async fn wait_remote(
+    device: &Member,
+    room: &str,
+    host: &Member,
+    what: &str,
+    check: impl Fn(Option<&RemoteAccessView>) -> bool,
+) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let view = device.room(room).await.and_then(|r| {
+            r.members
+                .into_iter()
+                .find(|m| m.id == host.id())
+                .and_then(|m| m.remote)
+        });
+        if check(view.as_ref()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{}: timed out waiting for {what}; last: {view:?}",
+            device.name
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn refused_remotely(reply: &Result<Response, EngineError>, words: &str) -> bool {
+    matches!(reply, Err(EngineError::Remote(why)) if why.contains(words))
+}
+
+/// A trusts B as its own device with [`PIN`], and B accepts A as its PC.
+async fn trusted(room: &str, a: &Member, b: &Member) {
+    a.ok(Command::SetRemotePin { pin: PIN.into() }).await;
+    a.ok(Command::AddRemoteDevice { member: b.id() }).await;
+    a.ok(Command::SetRemotePlay { on: true }).await;
+    wait_remote(b, room, a, "A's offer", |r| r.is_some()).await;
+    b.ok(Command::AcceptRemoteHost { member: a.id() }).await;
+}
+
+/// M25a: B, A's own laptop, runs A's sessions from afar as if at A's PC:
+/// starts one and its stream, answers C's request, passes a seat to itself,
+/// and ends it. C, a friend, never hears an offer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_device_runs_the_home_pcs_sessions_from_afar() {
+    let (mut a, mut b, mut c, room) = three().await;
+    // Nothing without a PIN, and a short one is refused.
+    assert!(refused_remotely(
+        &a.handle(Command::SetRemotePlay { on: true }).await,
+        "PIN first"
+    ));
+    assert!(matches!(
+        a.handle(Command::SetRemotePin {
+            pin: "12345".into()
+        })
+        .await,
+        Err(EngineError::Pin(_))
+    ));
+    a.ok(Command::SetRemotePin { pin: PIN.into() }).await;
+    a.ok(Command::AddRemoteDevice { member: b.id() }).await;
+    a.ok(Command::SetRemotePlay { on: true }).await;
+    let Ok(Response::RemotePlay(settings)) = a.handle(Command::GetRemotePlay).await else {
+        panic!("settings");
+    };
+    assert!(settings.on && settings.pin_set && settings.devices.len() == 1);
+    assert_eq!(settings.candidates.len(), 1, "C could be added too");
+
+    // B hears the offer, but no PIN goes until it accepts A as its PC,
+    // having compared the codes.
+    wait_remote(&b, &room, &a, "A's offer", |r| {
+        r.is_some_and(|r| !r.accepted)
+    })
+    .await;
+    let on_b = b
+        .room(&room)
+        .await
+        .unwrap()
+        .members
+        .into_iter()
+        .find(|m| m.id == a.id())
+        .and_then(|m| m.remote)
+        .unwrap();
+    assert_eq!(on_b.code, settings.my_code, "the codes match");
+    assert!(refused_remotely(
+        &b.handle(unlock(&room, &a, PIN)).await,
+        "accept it"
+    ));
+    b.ok(Command::AcceptRemoteHost { member: a.id() }).await;
+    assert!(refused_remotely(
+        &b.handle(unlock(&room, &a, "135790")).await,
+        "wrong PIN"
+    ));
+    assert!(refused_remotely(
+        &b.handle(remote(&room, &a, RemoteAction::EndSession)).await,
+        "unlock"
+    ));
+    b.ok(unlock(&room, &a, PIN)).await;
+    wait_remote(&b, &room, &a, "unlocked", |r| r.is_some_and(|r| r.unlocked)).await;
+
+    // C, a friend: no offer, nothing to send.
+    wait_remote(&c, &room, &a, "no offer", |r| r.is_none()).await;
+    assert!(refused_remotely(
+        &c.handle(remote(&room, &a, RemoteAction::EndSession)).await,
+        "isn't offering"
+    ));
+
+    // The stream picker, from A's windows.
+    let Ok(Response::Sources(sources)) =
+        b.handle(remote(&room, &a, RemoteAction::ListSources)).await
+    else {
+        panic!("sources");
+    };
+    assert_eq!(sources.windows[0].title, "Celeste");
+    assert!(sources.host_controllers.is_empty(), "A's own stay at home");
+
+    // A session and a stream, started from B; A's own controllers stay out
+    // of it (nobody is there to play).
+    let start = b
+        .handle(remote(
+            &room,
+            &a,
+            RemoteAction::StartSession {
+                title: "From afar".into(),
+                max_viewers: 4,
+                input: setup(2, KeyboardMouseSeat::None),
+            },
+        ))
+        .await;
+    assert!(matches!(start, Ok(Response::Room(_))), "{start:?}");
+    assert_eq!(a.fake.pads_plugged(), 2);
+    assert!(!a.fake.hidden());
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::StartStream {
+            source: SourceChoice::Window {
+                id: sources.windows[0].id.clone(),
+            },
+            name: "Celeste".into(),
+            fps: 30,
+            max_mbps: 20,
+            upload_mbps: None,
+        },
+    ))
+    .await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    a.wait_session(&room, &a, "B running it", |s| {
+        s.is_some_and(|s| s.operated_by == ["Bia"])
+    })
+    .await;
+    b.wait_session(&room, &a, "the host console on B", |s| {
+        s.is_some_and(|s| s.operator && s.streaming.is_some() && s.sound_level == Some(100))
+    })
+    .await;
+
+    // C asks; B sees it and accepts, from afar.
+    c.ok(Command::RequestControl {
+        seat: 1,
+        controller: None,
+    })
+    .await;
+    b.wait_session(&room, &a, "C's request on B", |s| {
+        s.is_some_and(|s| s.requests.iter().any(|r| r.member == c.id()))
+    })
+    .await;
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::AnswerControl {
+            member: c.id(),
+            accept: true,
+        },
+    ))
+    .await;
+    wait("C's seat", || c_window.held_seats().contains(&1)).await;
+
+    // B passes the other seat to itself, and plays.
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::PassControl {
+            member: b.id(),
+            seat: 0,
+            controller: None,
+        },
+    ))
+    .await;
+    wait("B's seat", || b_window.held_seats().contains(&0)).await;
+    b_window.pad(PadButtons::A);
+    wait("B's A on A's first pad", || {
+        a.fake.pad_at(0) == Some(pressed(PadButtons::A))
+    })
+    .await;
+
+    // And ends it.
+    b.ok(remote(&room, &a, RemoteAction::EndSession)).await;
+    for m in [&b, &c] {
+        m.wait_session(&room, &a, "the end", |s| s.is_none()).await;
+    }
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M25a: everything that locks a device out, and what lets it in again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_is_locked_out_by_the_home_pc() {
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+    let locked = |r: Option<&RemoteAccessView>| r.is_some_and(|r| !r.unlocked);
+
+    // A dropped connection: B unlocks again by itself, with the PIN it gave.
+    // Followed by B's events, which queue: the moment it is locked can be
+    // too short to poll for.
+    let a_id = a.id();
+    let unlocked_in = move |e: &Event| match e {
+        Event::RoomChanged { room: v } => Some(
+            v.members
+                .iter()
+                .find(|m| m.id == a_id)
+                .and_then(|m| m.remote.as_ref())
+                .is_some_and(|r| r.unlocked),
+        ),
+        _ => None,
+    };
+    b.event("unlocked", |e| unlocked_in(e).filter(|u| *u)).await;
+    a.engine().drop_connection(&room, &b.id()).await;
+    b.event("locked by the drop", |e| unlocked_in(e).filter(|u| !u))
+        .await;
+    b.event("unlocked again", |e| unlocked_in(e).filter(|u| *u))
+        .await;
+
+    // The panic key at A: the PIN again.
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::StartSession {
+            title: "Game night".into(),
+            max_viewers: 4,
+            input: setup(1, KeyboardMouseSeat::None),
+        },
+    ))
+    .await;
+    assert!(a.fake.press_panic_key(), "the hook is in place");
+    wait_remote(&b, &room, &a, "locked by the panic key", locked).await;
+    assert!(refused_remotely(
+        &b.handle(remote(&room, &a, RemoteAction::AllowControl))
+            .await,
+        "unlock"
+    ));
+    b.ok(unlock(&room, &a, PIN)).await;
+    b.ok(remote(&room, &a, RemoteAction::EndSession)).await;
+
+    // A new PIN: the old one no longer opens it.
+    a.ok(Command::SetRemotePin {
+        pin: "135790".into(),
+    })
+    .await;
+    wait_remote(&b, &room, &a, "locked by the new PIN", locked).await;
+    assert!(refused_remotely(
+        &b.handle(unlock(&room, &a, PIN)).await,
+        "wrong PIN"
+    ));
+    b.ok(unlock(&room, &a, "135790")).await;
+
+    // Locked by B itself.
+    b.ok(Command::LockRemote {
+        room: room.clone(),
+        member: a.id(),
+    })
+    .await;
+    wait_remote(&b, &room, &a, "locked by B", locked).await;
+
+    // Removed at A: the offer goes.
+    a.ok(Command::RemoveRemoteDevice { member: b.id() }).await;
+    wait_remote(&b, &room, &a, "no offer", |r| r.is_none()).await;
+    a.ok(Command::AddRemoteDevice { member: b.id() }).await;
+    wait_remote(&b, &room, &a, "offered again", |r| r.is_some()).await;
+
+    // Remote play off at A: the offer goes too.
+    a.ok(Command::SetRemotePlay { on: false }).await;
+    wait_remote(&b, &room, &a, "off", |r| r.is_none()).await;
+    a.ok(Command::SetRemotePlay { on: true }).await;
+    wait_remote(&b, &room, &a, "on again", |r| r.is_some()).await;
+
+    // Wrong PINs: five free, then a wait, which a right PIN can't skip.
+    for _ in 0..4 {
+        assert!(refused_remotely(
+            &b.handle(unlock(&room, &a, "000000")).await,
+            "wrong PIN"
+        ));
+    }
+    assert!(refused_remotely(
+        &b.handle(unlock(&room, &a, "000000")).await,
+        "wait"
+    ));
+    assert!(refused_remotely(
+        &b.handle(unlock(&room, &a, "135790")).await,
+        "too many"
+    ));
+    let Ok(Response::RemotePlay(settings)) = a.handle(Command::GetRemotePlay).await else {
+        panic!("settings");
+    };
+    assert!(settings.wait_secs.is_some());
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

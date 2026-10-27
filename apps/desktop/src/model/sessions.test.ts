@@ -62,6 +62,8 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     streamWindow: null,
     gameInFront: null,
     note: null,
+    operator: false,
+    operatedBy: [],
   };
 }
 
