@@ -485,6 +485,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
             local.push(LocalInput::Alive);
         }
         for event in local.drain(..) {
+            // The controllers' names go just before the slots (P12), so the
+            // host's patch bay hears a new one by name at once.
+            if matches!(event, LocalInput::ControllerSlots(_)) {
+                let _ = out_tx.send(Outgoing::ControllerNames(input.controller_names()));
+            }
             let _ = out_tx.send(Outgoing::Input(event));
         }
         if last_pad_check.elapsed() >= Duration::from_secs(1) {

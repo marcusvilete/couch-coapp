@@ -18,7 +18,8 @@ use couch_input::{
 use couch_proto::{
     ids::Permissions,
     input::{PadSnapshot, mouse_button},
-    ipc::{HeldSeat, LocalInput, RumbleState, SeatState},
+    ipc::{ControllerNames, HeldSeat, LocalInput, RumbleState, SeatState},
+    session::GuestController,
 };
 use sdl3::{
     GamepadSubsystem,
@@ -448,6 +449,27 @@ impl InputCapture {
             .filter(|(_, s)| s.is_some())
             .fold(0u8, |mask, (i, _)| mask | 1 << i);
         LocalInput::ControllerSlots(mask)
+    }
+
+    /// The connected controllers' names, by slot (P12): sent after
+    /// [`Self::controller_slots`], for the host's patch bay.
+    pub fn controller_names(&self) -> ControllerNames {
+        ControllerNames {
+            controllers: self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, id)| {
+                    let pad = self.pads.get(&(*id)?)?;
+                    Some(GuestController {
+                        slot: slot as u8,
+                        name: couch_proto::session::controller_name(
+                            &pad.name().unwrap_or_default(),
+                        ),
+                    })
+                })
+                .collect(),
+        }
     }
 
     /// Looks again at the Xbox 360 pads, our pads' ids (P9): one open that

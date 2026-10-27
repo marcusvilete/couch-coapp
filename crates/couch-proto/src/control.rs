@@ -35,6 +35,9 @@ pub mod type_ids {
     pub const CONTROL_REQUEST: u16 = MUST_UNDERSTAND | 0x0203;
     pub const CONTROL_CANCEL: u16 = MUST_UNDERSTAND | 0x0204;
     pub const CONTROL_DECLINED: u16 = MUST_UNDERSTAND | 0x0205;
+    /// Optional: a member that doesn't know it keeps choosing its
+    /// controllers itself (P12).
+    pub const SEAT_CONTROLLER: u16 = 0x0206;
     pub const JOIN_START: u16 = MUST_UNDERSTAND | 0x0401;
     pub const MEMBER_HELLO: u16 = MUST_UNDERSTAND | 0x0402;
     pub const ADMIT_REPLY: u16 = MUST_UNDERSTAND | 0x0403;
@@ -103,6 +106,20 @@ pub struct SeatAssigned {
     pub seat: SeatId,
     pub seat_epoch: SeatEpoch,
     pub permissions: Permissions,
+    /// Which of the member's controllers the host chose for it, by its slot
+    /// in the member's `ControllerReport` (P12); `None` lets the member
+    /// choose. The member follows it while that controller is connected.
+    pub controller: Option<u8>,
+}
+
+/// Host to a member, optional: drive this seat you hold with your
+/// controller `controller` (P12, by its slot), swapping with the seat it
+/// drove, if any. Ignored for a seat the member doesn't hold (a release
+/// came first) or a controller it doesn't have.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatController {
+    pub seat: SeatId,
+    pub controller: u8,
 }
 
 /// Host to a member: you no longer hold this seat (the epoch that ended).
@@ -150,6 +167,7 @@ pub enum ControlMessage {
     KeyframeRequest(KeyframeRequest),
     SeatAssigned(SeatAssigned),
     SeatReleased(SeatReleased),
+    SeatController(SeatController),
     JoinStart(JoinStart),
     MemberHello(Box<MemberHello>),
     AdmitReply(AdmitReply),
@@ -193,6 +211,7 @@ impl ControlMessage {
                 | Self::ViewerControllers(_)
                 | Self::SeatAssigned(_)
                 | Self::SeatReleased(_)
+                | Self::SeatController(_)
                 | Self::KeyframeRequest(_)
         )
     }
@@ -231,6 +250,7 @@ impl ControlMessage {
             Self::KeyframeRequest(_) => type_ids::KEYFRAME_REQUEST,
             Self::SeatAssigned(_) => type_ids::SEAT_ASSIGNED,
             Self::SeatReleased(_) => type_ids::SEAT_RELEASED,
+            Self::SeatController(_) => type_ids::SEAT_CONTROLLER,
             Self::JoinStart(_) => type_ids::JOIN_START,
             Self::MemberHello(_) => type_ids::MEMBER_HELLO,
             Self::AdmitReply(_) => type_ids::ADMIT_REPLY,
@@ -265,6 +285,7 @@ impl ControlMessage {
             Self::KeyframeRequest(m) => postcard::to_stdvec(m)?,
             Self::SeatAssigned(m) => postcard::to_stdvec(m)?,
             Self::SeatReleased(m) => postcard::to_stdvec(m)?,
+            Self::SeatController(m) => postcard::to_stdvec(m)?,
             Self::JoinStart(m) => postcard::to_stdvec(m)?,
             Self::MemberHello(m) => postcard::to_stdvec(m)?,
             Self::AdmitReply(m) => postcard::to_stdvec(m)?,
@@ -301,6 +322,7 @@ impl ControlMessage {
             type_ids::KEYFRAME_REQUEST => Self::KeyframeRequest(payload(frame)?),
             type_ids::SEAT_ASSIGNED => Self::SeatAssigned(payload(frame)?),
             type_ids::SEAT_RELEASED => Self::SeatReleased(payload(frame)?),
+            type_ids::SEAT_CONTROLLER => Self::SeatController(payload(frame)?),
             type_ids::JOIN_START => Self::JoinStart(payload(frame)?),
             type_ids::MEMBER_HELLO => Self::MemberHello(payload(frame)?),
             type_ids::ADMIT_REPLY => Self::AdmitReply(payload(frame)?),
@@ -374,10 +396,21 @@ mod tests {
                 seat: SeatId(0),
                 seat_epoch: SeatEpoch(3),
                 permissions: Permissions::GAMEPAD | Permissions::KEYBOARD,
+                controller: None,
+            }),
+            ControlMessage::SeatAssigned(SeatAssigned {
+                seat: SeatId(2),
+                seat_epoch: SeatEpoch(4),
+                permissions: Permissions::GAMEPAD,
+                controller: Some(3),
             }),
             ControlMessage::SeatReleased(SeatReleased {
                 seat: SeatId(1),
                 seat_epoch: SeatEpoch(u32::MAX),
+            }),
+            ControlMessage::SeatController(SeatController {
+                seat: SeatId(1),
+                controller: 7,
             }),
         ] {
             let mut buf = Vec::new();
@@ -504,7 +537,9 @@ mod tests {
     fn session_messages_roundtrip() {
         use crate::{
             ids::{MemberId, SessionId},
-            session::{EndReason, JoinResult, SeatKind},
+            session::{
+                ControllerReport, EndReason, GuestController, JoinResult, SeatDriver, SeatKind,
+            },
         };
         let session = SessionId(0x0123_4567_89ab_cdef);
         for message in [
@@ -553,7 +588,35 @@ mod tests {
                 session,
                 in_front: false,
             }),
-            ControlMessage::ViewerControllers(ViewerControllers { session, count: 2 }),
+            ControlMessage::ViewerControllers(ViewerControllers {
+                session,
+                report: ControllerReport::default(),
+            }),
+            ControlMessage::ViewerControllers(ViewerControllers {
+                session,
+                report: ControllerReport {
+                    controllers: vec![
+                        GuestController {
+                            slot: 0,
+                            name: "DualSense Wireless Controller".into(),
+                        },
+                        GuestController {
+                            slot: 2,
+                            name: "Xbox Controller".into(),
+                        },
+                    ],
+                    seats: vec![
+                        SeatDriver {
+                            seat: SeatId(0),
+                            controller: Some(2),
+                        },
+                        SeatDriver {
+                            seat: SeatId(1),
+                            controller: None,
+                        },
+                    ],
+                },
+            }),
         ] {
             assert!(message.is_session());
             roundtrip(message);
@@ -570,6 +633,7 @@ mod tests {
             type_ids::SESSION_ENDED,
             type_ids::GAME_FOCUS,
             type_ids::VIEWER_CONTROLLERS,
+            type_ids::SEAT_CONTROLLER,
         ] {
             assert_eq!(id & MUST_UNDERSTAND, 0, "{id:#06x}");
         }

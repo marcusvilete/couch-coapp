@@ -53,6 +53,7 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     maxViewers: 4,
     viewers: [],
     viewerControllers: [],
+    viewerPads: [],
     seats,
     hostOnSeats: false,
     controlPaused: false,
@@ -159,7 +160,16 @@ function hosting(over: Partial<SessionView> = {}, live = true): SessionView {
   const s = hostSession(ME, "Game night", 4, { controllers: 4, keyboardMouse: "ownSeat" }, ["DualSense Wireless Controller", "Xbox Wireless Controller"]);
   s.viewers = [bia.id, caio.id, dani.id];
   s.viewerControllers = [2, 1, 1];
+  s.viewerPads = [
+    [
+      { slot: 0, name: "DualSense Wireless Controller" },
+      { slot: 1, name: "Xbox Wireless Controller" },
+    ],
+    [{ slot: 0, name: "Xbox 360 Controller" }],
+    [{ slot: 0, name: "Pro Controller" }],
+  ];
   s.seats[2].holder = bia.id;
+  s.seats[2].guestController = 1;
   s.seats[4].holder = caio.id;
   s.requests = [
     { member: dani.id, seat: 3 },
@@ -319,6 +329,22 @@ export const SCENARIOS: Record<string, Scenario> = {
     world: () => base([sofa({ sessions: [hostSession(ME, "Game night", 4, { controllers: 1, keyboardMouse: "none" }, [])] })]),
   },
   "hosting-live": { title: "Hosting: live, five seats, two requests", world: () => base([sofa({ sessions: [hosting()] })]) },
+  "hosting-guest-controllers": {
+    title: "Hosting: a guest's two controllers of one model on two seats (P12)",
+    world: () => {
+      const s = hosting({ requests: [] });
+      s.viewerControllers = [3, 1, 1];
+      s.viewerPads[0] = [
+        { slot: 0, name: "DualSense Wireless Controller" },
+        { slot: 1, name: "DualSense Wireless Controller" },
+        { slot: 3, name: "Xbox Wireless Controller" },
+      ];
+      s.seats[2].guestController = 3;
+      s.seats[3].holder = bia.id;
+      s.seats[3].guestController = 0;
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
   "hosting-keyboard-yours": {
     title: "Hosting: the keyboard seat still yours (no guest on it)",
     world: () => {

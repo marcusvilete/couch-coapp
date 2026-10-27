@@ -27,5 +27,6 @@ export function seatsFor(input: InputSetup): SeatView[] {
     holder: null,
     host: false,
     hostController: null,
+    guestController: null,
   }));
 }
