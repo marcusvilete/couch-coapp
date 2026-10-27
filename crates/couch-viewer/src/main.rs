@@ -60,7 +60,13 @@ fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         None
         | Some(
-            "--pos" | "--size" | "--no-hud" | "--hide-stats" | "--hud-preview" | "--hud-scale",
+            "--pos"
+            | "--size"
+            | "--no-hud"
+            | "--hide-stats"
+            | "--hud-preview"
+            | "--hud-preview-pointer"
+            | "--hud-scale",
         ) => viewer::run(window_options(&args)?),
         Some("--clock") => {
             let coord =

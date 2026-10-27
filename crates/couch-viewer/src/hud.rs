@@ -1,9 +1,10 @@
 //! The in-stream HUD, drawn with egui on top of the video (its look since
 //! M21, the main window's dark palette):
-//! - the session bar, in rows of fixed height so it never jumps: what is
-//!   streaming and the window's controls; a chip per seat, saying who has
-//!   it, to ask for one; where this viewer stands, with a note such as "the
-//!   host said no"; the shortcuts;
+//! - the session bar, in rows of fixed height: what is streaming and the
+//!   window's controls; a chip per seat, saying who has it, to ask for one;
+//!   where this viewer stands, with a note such as "the host said no"; the
+//!   shortcuts. Only a note too long to sit beside the status, and the game
+//!   being out of front, add a row;
 //! - the centre card, when there is no picture to show, and why;
 //! - the stats card (latency, path, decoder), bottom left.
 //!
@@ -253,6 +254,8 @@ impl Hud {
         !self.events.is_empty()
             || self.bar_up(now) != self.bar_painted
             || self.repaint_at.is_some_and(|t| now >= t)
+            // A note that ran out must go even over a still picture.
+            || self.note.as_ref().is_some_and(|(_, until)| now >= *until)
     }
 
     fn bar_up(&self, now: Instant) -> bool {
@@ -346,7 +349,12 @@ impl Hud {
                                 shortcuts: &self.shortcuts,
                                 mouse_hint: self.mouse_hint.as_deref(),
                                 icons: self.icons,
-                                width: (size.x - 32.0).clamp(BAR_MIN, BAR_MAX) - 28.0,
+                                // Narrower than its minimum only in a window narrower still:
+                                // the right end holds Leave.
+                                width: (size.x - 32.0)
+                                    .clamp(BAR_MIN.min(size.x - 16.0), BAR_MAX)
+                                    .max(60.0)
+                                    - 28.0,
                                 wide: size.x >= 520.0,
                             },
                             &mut actions,
@@ -450,7 +458,7 @@ const GREEN: Color32 = Color32::from_rgb(0x57, 0xc7, 0x85);
 /// The bar's width, in points, frame included.
 const BAR_MIN: f32 = 300.0;
 const BAR_MAX: f32 = 680.0;
-/// Its rows' heights, fixed so it never jumps.
+/// Its rows' heights, fixed so nothing moves as their contents change.
 const HEADER_H: f32 = 28.0;
 const CHIP_H: f32 = 40.0;
 const STATUS_H: f32 = 24.0;
@@ -753,12 +761,14 @@ fn header(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarCli
                     w.inactive.bg_fill = Color32::from_rgb(0x4a, 0x49, 0x45);
                     w.hovered.bg_fill = TEXT;
                     w.active.bg_fill = TEXT;
+                    let tip = format!(
+                        "Volume · {} {}",
+                        keys(Shortcut::VolumeDown),
+                        keys(Shortcut::VolumeUp)
+                    );
                     ui.add_enabled(!volume.muted, slider)
-                        .on_hover_text(format!(
-                            "Volume · {} {}",
-                            keys(Shortcut::VolumeDown),
-                            keys(Shortcut::VolumeUp)
-                        ))
+                        .on_hover_text(&tip)
+                        .on_disabled_hover_text("Muted: unmute to change the volume")
                         .changed()
                 })
                 .inner;
@@ -924,7 +934,13 @@ fn seat_chip(
 
     let inner = rect.shrink2(vec2(9.0, 5.0));
     let give_back = c.mine && several_mine;
-    let button_w = if give_back { 64.0 } else { 0.0 };
+    // Never wider than the chip: the bar's rect, which takes the clicks, is
+    // the chips'.
+    let button_w = if give_back {
+        inner.width().min(64.0)
+    } else {
+        0.0
+    };
     let mut x = inner.left();
     // A narrow chip keeps its words.
     if icons && width >= 110.0 {
@@ -974,12 +990,15 @@ fn seat_chip(
             vec2(button_w, 20.0),
         );
         let button = egui::Button::new(RichText::new("Give back").small())
-            .wrap_mode(egui::TextWrapMode::Extend)
+            .wrap_mode(egui::TextWrapMode::Truncate)
             .min_size(vec2(button_w, 20.0));
-        // Inside the chip: egui's taller buttons would push the next chips.
-        let tall = std::mem::replace(&mut ui.spacing_mut().interact_size.y, 20.0);
-        let response = ui.put(at, button);
-        ui.spacing_mut().interact_size.y = tall;
+        // Placed inside the chip, moving nothing: `put` would move the next
+        // chips along, and egui's taller buttons would stick out.
+        let spacing = ui.spacing().clone();
+        ui.spacing_mut().interact_size.y = 20.0;
+        ui.spacing_mut().button_padding.x = 5.0;
+        let response = ui.place(at, button);
+        *ui.spacing_mut() = spacing;
         if response
             .on_hover_text(format!("Give back {}", seat_phrase(&c.label)))
             .clicked()
@@ -1200,7 +1219,7 @@ fn stats_card(ui: &mut Ui, rows: &[(String, String)], hide: &str, width: f32, ro
         .corner_radius(10)
         .inner_margin(Margin::symmetric(12, 10))
         .show(ui, |ui| {
-            ui.set_width(width - 24.0);
+            ui.set_width((width - 24.0).max(0.0));
             let top = ui.cursor().top();
             row(ui, 18.0, |ui| {
                 ui.label(

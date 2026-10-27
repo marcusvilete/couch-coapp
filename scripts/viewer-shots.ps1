@@ -6,8 +6,8 @@ into target\ui-shots\viewer.
 .DESCRIPTION
 Starts couch-viewer once per state, waits for it to draw, captures its window
 with PrintWindow (which sees GPU-drawn windows even when covered) and closes
-it. Each state at 1280x720; the crowded one also at 480x300 and at 150%; a
-pointer resting on a seat chip shows its hover and tooltip. Fails if a capture
+it. Each state at 1280x720; the crowded one also at 480x300, 320x300 and at
+150%; a pointer resting on a seat chip shows its hover and tooltip. Fails if a capture
 comes back black. Build the viewer first: cargo build -p couch-viewer.
 
 .EXAMPLE
@@ -47,6 +47,8 @@ $shots = [ordered]@{}
 foreach ($state in $states) { $shots[$state] = @('--hud-preview', $state, '--hud-scale', '1') }
 $shots['crowded-480x300'] = @('--hud-preview', 'crowded', '--size', '480', '300', '--hud-scale', '1')
 $shots['crowded-150'] = @('--hud-preview', 'crowded', '--hud-scale', '1.5')
+# Narrower than the bar's minimum: Leave must stay on screen.
+$shots['crowded-320x300'] = @('--hud-preview', 'crowded', '--size', '320', '300', '--hud-scale', '1')
 # The pointer on Controller 2's chip, which can be asked for.
 $shots['hover'] = @('--hud-preview', 'watching', '--hud-scale', '1', '--hud-preview-pointer', '620', '78')
 

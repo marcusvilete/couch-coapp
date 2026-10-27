@@ -448,9 +448,13 @@ pub fn run(options: WindowOptions) -> Result<()> {
         redraw |= hud.needs_paint();
         input.sync_capture(&mouse, &window);
         // Captured, the pointer reaches the game, not the HUD: no hover or
-        // tooltip may stay drawn over the game.
-        if input.mouse_captured() && !was_captured {
-            hud.pointer_gone();
+        // tooltip may stay drawn over the game. Either way the bar's mouse
+        // hint changes.
+        if input.mouse_captured() != was_captured {
+            redraw = true;
+            if input.mouse_captured() {
+                hud.pointer_gone();
+            }
         }
         was_captured = input.mouse_captured();
         if last_alive.elapsed() >= ALIVE_EVERY {
