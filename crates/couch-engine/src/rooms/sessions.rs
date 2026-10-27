@@ -30,9 +30,9 @@ use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 
 use super::*;
 use crate::{
-    AnswerKeys, GuestControllerView, HostController, InputSetup, RequestView, ScreenArea, SeatView,
-    SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView, StreamView,
-    StreamWindowView, WatchEnd,
+    AnswerKeys, GuestControllerView, HostController, InputSetup, OurControllerView, RequestView,
+    ScreenArea, SeatView, SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView,
+    StreamView, StreamWindowView, WatchEnd,
     pipeline::{
         AudioChoice, Source, ViewerOptions,
         host::{HostOptions, LocalSeat, Rates, StreamControl, StreamOptions},
@@ -166,6 +166,15 @@ impl Watching {
         } else {
             WatchState::Controlling
         }
+    }
+
+    /// Our controller `slot`'s name, as the stream window said (P13).
+    fn controller_name(&self, slot: u8) -> Option<String> {
+        self.controllers
+            .controllers
+            .iter()
+            .find(|c| c.slot == slot)
+            .map(|c| c.name.clone())
     }
 
     /// Joined: the host may hear from us.
@@ -505,9 +514,16 @@ impl Actor {
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
             ControlMessage::ControlRequest(m) if ours(&self.sessions, m.session) => {
-                let fx = self
-                    .hosting_mut()
-                    .map(|h| h.session.request(peer, m.seat, now));
+                // One of its controllers, as it said (P13); any other is no
+                // choice.
+                let fx = self.hosting_mut().map(|h| {
+                    let controller = m.controller.filter(|c| {
+                        h.guest_controllers
+                            .get(&peer)
+                            .is_some_and(|r| r.controllers.iter().any(|g| g.slot == *c))
+                    });
+                    h.session.request_with(peer, m.seat, controller, now)
+                });
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
             ControlMessage::ControlCancel(m) if ours(&self.sessions, m.session) => {
@@ -531,6 +547,12 @@ impl Actor {
                     (h.session.is_viewer(peer) && h.viewer_conns.get(&peer) == Some(&conn)).then(
                         || {
                             let count = report.controllers.len() as u8;
+                            let drivers: Vec<(SeatId, u8)> = report
+                                .seats
+                                .iter()
+                                .filter_map(|d| Some((d.seat, d.controller?)))
+                                .collect();
+                            h.session.set_drivers(peer, &drivers);
                             h.guest_controllers.insert(peer, report);
                             h.session.set_controllers(peer, count)
                         },
@@ -730,7 +752,11 @@ impl Actor {
                 let label = labels
                     .get(usize::from(s.seat.0))
                     .map_or("a seat", String::as_str);
-                w.note = format!("You have {}", seat_phrase(label));
+                // Which of ours moved there, when the host said (P13).
+                w.note = match s.controller.and_then(|c| w.controller_name(c)) {
+                    Some(name) => format!("Your {name} now plays {}", seat_phrase(label)),
+                    None => format!("You have {}", seat_phrase(label)),
+                };
                 if let Some(watch) = &w.watch {
                     watch.seat_assigned(s);
                 }
@@ -867,7 +893,16 @@ impl Actor {
                     seat,
                     member,
                     permissions,
+                    controller,
                 } => {
+                    // The controller that plays it goes with the grant's
+                    // `SeatAssigned` (P12, P13), when the router reports it.
+                    if let Some(h) = self.sessions.hosting.as_mut() {
+                        match controller {
+                            Some(c) => h.chosen.insert((member, seat), c),
+                            None => h.chosen.remove(&(member, seat)),
+                        };
+                    }
                     if let Some(pipeline) = self.pipeline() {
                         pipeline.grant(seat, member, permissions);
                     }
@@ -1663,16 +1698,9 @@ impl Actor {
             self.send_to(room, member, ControlMessage::SeatController(message));
             return Ok(Response::Done);
         }
-        let response = self.our_session(|s| Ok(s.pass(member, seat)?), now)?;
-        // The grant answers later, from the input task: the choice waits
-        // for it.
-        if let Some(h) = self.sessions.hosting.as_mut() {
-            match controller {
-                Some(c) => h.chosen.insert((member, seat), c),
-                None => h.chosen.remove(&(member, seat)),
-            };
-        }
-        Ok(response)
+        // The controller moves, leaving its seat if they have none to spare
+        // (P13); the choice goes with the grant's effect.
+        self.our_session(|s| Ok(s.pass_with(member, seat, controller)?), now)
     }
 
     pub(super) fn take_back_control(
@@ -1958,10 +1986,13 @@ impl Actor {
 
     /// Asks for `seat`: free, someone else's, or another than those we hold
     /// (added, or a move: the host decides by our controllers, M18). Asking
-    /// again for another seat replaces the request.
+    /// again for another seat replaces the request. With `controller`, one
+    /// of ours by slot, that one plays it, leaving its seat if we have no
+    /// controller to spare (P13); to ask with another, withdraw first.
     pub(super) fn request_control(
         &mut self,
         seat: SeatId,
+        controller: Option<u8>,
         now: Instant,
     ) -> Result<Response, EngineError> {
         let labels = self.seat_labels();
@@ -1979,6 +2010,7 @@ impl Actor {
             WatchState::Reconnecting => {
                 return Err(EngineError::Refused("reconnecting to the host"));
             }
+            // The host keeps a request as first asked, controller included.
             WatchState::Asking(asked) if asked == seat => {}
             WatchState::Controlling if w.holding.contains(&seat) => {}
             // Asking for a seat we hold while asking for another: staying
@@ -1986,9 +2018,19 @@ impl Actor {
             WatchState::Asking(_) if w.holding.contains(&seat) => return self.cancel_control(now),
             WatchState::Watching | WatchState::Asking(_) | WatchState::Controlling => {
                 w.state = WatchState::Asking(seat);
-                w.note = format!("Asked the host for {}", seat_phrase(&label));
+                let name = controller.and_then(|c| w.controller_name(c));
+                w.note = match name {
+                    Some(name) => {
+                        format!("Asked the host for {} for your {name}", seat_phrase(&label))
+                    }
+                    None => format!("Asked the host for {}", seat_phrase(&label)),
+                };
                 let (room, conn, session) = (w.room, w.conn, w.session);
-                let ask = ControlMessage::ControlRequest(ControlRequest { session, seat });
+                let ask = ControlMessage::ControlRequest(ControlRequest {
+                    session,
+                    seat,
+                    controller,
+                });
                 self.send(conn, Outgoing::Message(ask));
                 self.send_hud();
                 self.announce(room, now);
@@ -2139,8 +2181,8 @@ impl Actor {
                 });
                 self.send(w.conn, Outgoing::Message(ask));
             }
-            WatchEvent::Action(UserAction::RequestControl(seat)) => {
-                let _ = self.request_control(SeatId(seat), now);
+            WatchEvent::Action(UserAction::RequestControl { seat, controller }) => {
+                let _ = self.request_control(SeatId(seat), controller, now);
             }
             WatchEvent::Action(UserAction::CancelControl) => {
                 let _ = self.cancel_control(now);
@@ -2376,6 +2418,7 @@ impl Actor {
                 max_viewers: s.config().max_viewers,
                 viewers: s.viewers().iter().map(MemberId::to_hex).collect(),
                 viewer_controllers: s.viewers().iter().map(|v| s.controllers_of(*v)).collect(),
+                our_controllers: Vec::new(),
                 viewer_pads: s
                     .viewers()
                     .iter()
@@ -2419,6 +2462,7 @@ impl Actor {
                     .map(|(member, seat)| RequestView {
                         member: member.to_hex(),
                         seat: seat.0,
+                        controller: s.asked_with(*member),
                     })
                     .collect(),
                 asked_seat: None,
@@ -2488,6 +2532,22 @@ impl Actor {
                 }),
                 viewer_controllers: Vec::new(),
                 viewer_pads: Vec::new(),
+                our_controllers: ours.map_or_else(Vec::new, |w| {
+                    w.controllers
+                        .controllers
+                        .iter()
+                        .map(|c| OurControllerView {
+                            slot: c.slot,
+                            name: c.name.clone(),
+                            seat: w
+                                .controllers
+                                .seats
+                                .iter()
+                                .find(|d| d.controller == Some(c.slot))
+                                .map(|d| d.seat.0),
+                        })
+                        .collect()
+                }),
                 seats: seat_views(&listing.announce.seats, &holders, *host),
                 host_on_seats: status.is_some_and(|s| s.host_on_seats),
                 control_paused: status.is_some_and(|s| s.control_paused),

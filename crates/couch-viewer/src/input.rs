@@ -451,6 +451,25 @@ impl InputCapture {
         LocalInput::ControllerSlots(mask)
     }
 
+    /// The connected controllers for the bar's choice (P13): each with the
+    /// seat it drives, as the main process decided.
+    pub fn hud_controllers(&self) -> Vec<crate::hud::HudController> {
+        self.controller_names()
+            .controllers
+            .into_iter()
+            .map(|c| crate::hud::HudController {
+                seat: self
+                    .seats
+                    .seats
+                    .iter()
+                    .find(|s| s.controller == Some(c.slot))
+                    .map(|s| s.seat),
+                slot: c.slot,
+                name: c.name,
+            })
+            .collect()
+    }
+
     /// The connected controllers' names, by slot (P12): sent after
     /// [`Self::controller_slots`], for the host's patch bay.
     pub fn controller_names(&self) -> ControllerNames {

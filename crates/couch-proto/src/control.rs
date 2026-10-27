@@ -574,6 +574,12 @@ mod tests {
             ControlMessage::ControlRequest(ControlRequest {
                 session,
                 seat: SeatId(1),
+                controller: None,
+            }),
+            ControlMessage::ControlRequest(ControlRequest {
+                session,
+                seat: SeatId(2),
+                controller: Some(3),
             }),
             ControlMessage::ControlCancel(ControlCancel {
                 session,

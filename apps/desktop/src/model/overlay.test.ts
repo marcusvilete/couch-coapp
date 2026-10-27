@@ -13,6 +13,7 @@ function view(over: Partial<SessionView>): SessionView {
     viewers: [],
     viewerControllers: [],
     viewerPads: [],
+    ourControllers: [],
     seats: [
       { label: "Controller 1", pad: true, keyboardMouse: false, holder: null, host: false, hostController: null, guestController: null },
       { label: "Controller 2", pad: true, keyboardMouse: false, holder: null, host: false, hostController: null, guestController: null },
@@ -73,7 +74,7 @@ describe("notes over the game", () => {
   });
 
   it("says a request ended unless it was granted", () => {
-    const before = view({ viewers: ["a"], requests: [{ member: "a", seat: 1 }] });
+    const before = view({ viewers: ["a"], requests: [{ member: "a", seat: 1, controller: null }] });
     expect(sessionEvents(name, before, view({ viewers: ["a"] }))).toEqual(["Ana's request ended"]);
     expect(sessionEvents(name, before, view({ viewers: ["a"], seats: held([null, "a"]) }))).toEqual([
       "Ana now plays Controller 2",

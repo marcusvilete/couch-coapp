@@ -794,7 +794,9 @@ impl Actor {
                 return;
             }
             Command::StopWatching => self.stop_watching(now),
-            Command::RequestControl { seat } => self.request_control(SeatId(seat), now),
+            Command::RequestControl { seat, controller } => {
+                self.request_control(SeatId(seat), controller, now)
+            }
             Command::CancelControl => self.cancel_control(now),
             Command::GiveBackSeat { seat } => self.give_back_seat(SeatId(seat)),
             Command::AnswerControl { member, accept } => self.answer_control(&member, accept, now),

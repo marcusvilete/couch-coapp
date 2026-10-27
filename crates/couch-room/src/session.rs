@@ -96,6 +96,8 @@ pub enum SessionError {
     NoSuchController,
     #[error("that seat has no controller")]
     NoPad,
+    #[error("say which of their controllers moves to it: each of them plays a seat already")]
+    ChooseController,
     #[error("the session has ended")]
     Ended,
 }
@@ -114,11 +116,14 @@ pub enum Effect {
     StartViewer(MemberId),
     /// Stop streaming to this viewer, releasing what it held first.
     StopViewer(MemberId),
-    /// Ask the seat router to hand `seat` to `member`.
+    /// Ask the seat router to hand `seat` to `member`; `controller`, one of
+    /// a viewer's controllers by slot, is the one that should drive it
+    /// (P12, P13), told to the viewer with the grant.
     Grant {
         seat: SeatId,
         member: MemberId,
         permissions: Permissions,
+        controller: Option<u8>,
     },
     /// Ask the seat router to free `seat`: only if `holder` still holds it,
     /// or from whoever does with `None`. A request aimed at one viewer must
@@ -196,6 +201,12 @@ pub struct HostSession {
     /// How many controllers each viewer said it has (M18; 0 until told):
     /// whether a seat with a pad is added to theirs or replaces it.
     controllers: BTreeMap<MemberId, u8>,
+    /// Which controller drives each pad seat a viewer holds, by slot, as it
+    /// last said (P13): a grant beyond its controllers frees the seat of
+    /// the controller that moves.
+    drivers: BTreeMap<MemberId, Vec<(SeatId, u8)>>,
+    /// The controller a viewer's pending request names (P13).
+    asked_with: BTreeMap<MemberId, u8>,
     /// Grants sent to the router and not yet reported back, in the order
     /// sent: they count toward a viewer's seats too, so two quick grants
     /// never give it more than its controllers allow.
@@ -203,13 +214,17 @@ pub struct HostSession {
 }
 
 /// A grant on its way to the router (M18).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PendingGrant {
     seat: SeatId,
     member: MemberId,
-    /// It moves the member (its other pad seats revoked first), rather than
-    /// adding a seat.
-    moves: bool,
+    /// The member's other pad seats it frees (revoked first), so it never
+    /// holds more than its controllers (P13: only as many as that takes).
+    frees: Vec<SeatId>,
+    /// A later grant freed this one's seat (revoked right behind it): it no
+    /// longer counts toward the member's seats, but its report still
+    /// answers it, so that report frees nothing more (P13 review).
+    cancelled: bool,
 }
 
 /// The most controllers a viewer counts as having: XInput's four slots.
@@ -254,6 +269,8 @@ impl HostSession {
             ended: false,
             stream: StreamState::Waiting,
             controllers: BTreeMap::new(),
+            drivers: BTreeMap::new(),
+            asked_with: BTreeMap::new(),
             pending: Vec::new(),
         })
     }
@@ -343,11 +360,74 @@ impl HostSession {
         self.controllers.get(&member).copied().unwrap_or(0)
     }
 
+    /// The controller `member`'s pending request names (P13).
+    pub fn asked_with(&self, member: MemberId) -> Option<u8> {
+        self.asked_with.get(&member).copied()
+    }
+
+    /// The pad seat `member`'s controller `controller` drives, as it said.
+    fn driven_by(&self, member: MemberId, controller: u8) -> Option<SeatId> {
+        self.drivers
+            .get(&member)?
+            .iter()
+            .find(|(_, c)| *c == controller)
+            .map(|(s, _)| *s)
+    }
+
+    /// The pad seats `member` holds or has on their way, but `seat`, in
+    /// seat order.
+    fn pad_seats_but(&self, member: MemberId, seat: SeatId) -> Vec<SeatId> {
+        let on_way = self
+            .pending
+            .iter()
+            .filter(|p| p.member == member && !p.cancelled)
+            .map(|p| p.seat);
+        let pads: BTreeSet<SeatId> = self
+            .seats_of(member)
+            .into_iter()
+            .chain(on_way)
+            .filter(|s| *s != seat && self.has_pad(*s))
+            .collect();
+        pads.into_iter().collect()
+    }
+
+    /// Which of `member`'s pad seats giving it `seat` frees (P13): none
+    /// while it has a controller to spare; otherwise only as many as keep it
+    /// within its controllers, normally one. First the seat `controller`
+    /// drives (it moves), then from the last seat down. And whether that
+    /// was a guess: more seats than that to choose from and no controller
+    /// naming one of them.
+    pub fn frees(
+        &self,
+        member: MemberId,
+        seat: SeatId,
+        controller: Option<u8>,
+    ) -> (Vec<SeatId>, bool) {
+        if self.is_host(member) || !self.has_pad(seat) {
+            return (Vec::new(), false);
+        }
+        let pads = self.pad_seats_but(member, seat);
+        let room = usize::from(self.controllers_of(member)).saturating_sub(1);
+        if pads.len() <= room {
+            return (Vec::new(), false);
+        }
+        let excess = pads.len() - room;
+        let moving = controller
+            .and_then(|c| self.driven_by(member, c))
+            .filter(|s| pads.contains(s));
+        let mut order: Vec<SeatId> = moving.into_iter().collect();
+        order.extend(pads.iter().rev().filter(|s| Some(**s) != moving));
+        order.truncate(excess);
+        (order, moving.is_none() && pads.len() > excess)
+    }
+
     /// Whether `member` would keep its other seats on being given `seat`
     /// (M18), rather than move to it:
     /// - a seat without a pad (keyboard and mouse) needs no controller: added;
     /// - a seat with a pad is added while the viewer holds fewer seats with a
-    ///   pad than it has controllers; otherwise it moves, as before M18.
+    ///   pad than it has controllers; otherwise one of its controllers moves
+    ///   to it, leaving its seat ([`Self::frees`], P13; before it, every
+    ///   other pad seat went).
     ///
     /// The host's controllers each keep their own seat (M23): a grant to the
     /// host never takes another of theirs; [`Self::play`] frees the moving
@@ -361,18 +441,7 @@ impl HostSession {
             return true;
         }
         // The pad seats it holds, and those on their way to it.
-        let on_way = self
-            .pending
-            .iter()
-            .filter(|p| p.member == member)
-            .map(|p| p.seat);
-        let pads: BTreeSet<SeatId> = self
-            .seats_of(member)
-            .into_iter()
-            .chain(on_way)
-            .filter(|s| *s != seat && self.has_pad(*s))
-            .collect();
-        pads.len() < usize::from(self.controllers_of(member))
+        self.pad_seats_but(member, seat).len() < usize::from(self.controllers_of(member))
     }
 
     pub fn control_paused(&self) -> bool {
@@ -544,6 +613,8 @@ impl HostSession {
         self.viewers.retain(|v| *v != member);
         self.requests.retain(|(r, _)| *r != member);
         self.controllers.remove(&member);
+        self.drivers.remove(&member);
+        self.asked_with.remove(&member);
         self.pending.retain(|p| p.member != member);
         // Stopping the viewer releases what it held; the router's own report
         // of that follows.
@@ -566,12 +637,30 @@ impl HostSession {
     /// A viewer asks for `seat`, free or held by another viewer. Asking for
     /// another seat replaces its pending request.
     pub fn request(&mut self, member: MemberId, seat: SeatId, now: Instant) -> Vec<Effect> {
+        self.request_with(member, seat, None, now)
+    }
+
+    /// A viewer asks for `seat` for one of its controllers (P13): granted,
+    /// that controller plays it, leaving its own seat if the viewer has no
+    /// controller to spare. Asking again for the same seat changes nothing,
+    /// another controller included.
+    pub fn request_with(
+        &mut self,
+        member: MemberId,
+        seat: SeatId,
+        controller: Option<u8>,
+        now: Instant,
+    ) -> Vec<Effect> {
         if self.ended
             || !self.is_viewer(member)
             || !self.has_seat(seat)
             || self.seats_of(member).contains(&seat)
-            || self.requests.contains(&(member, seat))
         {
+            return Vec::new();
+        }
+        // A request stays as the host first saw it: its controller can't
+        // change under the host's Accept (P13 review). Withdraw to change it.
+        if self.requests.contains(&(member, seat)) {
             return Vec::new();
         }
         let cooling = self
@@ -586,6 +675,10 @@ impl HostSession {
         self.cooldowns.remove(&member);
         self.requests.retain(|(r, _)| *r != member);
         self.requests.push((member, seat));
+        match controller {
+            Some(c) => self.asked_with.insert(member, c),
+            None => self.asked_with.remove(&member),
+        };
         vec![Effect::Requested(member, seat), Effect::Changed]
     }
 
@@ -595,6 +688,7 @@ impl HostSession {
             return Vec::new();
         }
         self.requests.retain(|(r, _)| *r != member);
+        self.asked_with.remove(&member);
         vec![Effect::Changed]
     }
 
@@ -628,6 +722,16 @@ impl HostSession {
         vec![Effect::Changed]
     }
 
+    /// A viewer says which of its controllers drives each pad seat it holds
+    /// (P13, by slot): which seat a controller moving to another leaves.
+    /// Only seats it holds or has on their way count ([`Self::frees`]).
+    pub fn set_drivers(&mut self, member: MemberId, drivers: &[(SeatId, u8)]) {
+        if self.ended || !self.is_viewer(member) {
+            return;
+        }
+        self.drivers.insert(member, drivers.to_vec());
+    }
+
     /// The seat router handed `seat` to `holder`, or back to the host.
     pub fn seat_changed(&mut self, seat: SeatId, holder: Option<MemberId>) -> Vec<Effect> {
         if !self.has_seat(seat) {
@@ -641,15 +745,15 @@ impl HostSession {
                 .iter()
                 .position(|p| p.seat == seat && p.member == m)
         });
-        let moved = answered.map(|i| {
-            let moves = self.pending[i].moves;
+        let freed = answered.map(|i| {
+            let frees = self.pending[i].frees.clone();
             let mut at = 0;
             self.pending.retain(|p| {
                 let keep = at > i || p.seat != seat;
                 at += 1;
                 keep
             });
-            moves
+            frees
         });
         let host = holder.is_some_and(|h| self.is_host(h));
         match holder {
@@ -673,21 +777,20 @@ impl HostSession {
                 }
                 // A request for this seat is answered; one for another seat
                 // stays, and the viewer keeps asking too.
-                self.requests.retain(|r| *r != (member, seat));
+                if self.requests.contains(&(member, seat)) {
+                    self.requests.retain(|r| *r != (member, seat));
+                    self.asked_with.remove(&member);
+                }
                 // Never more pad seats than the rule allows: a grant that
-                // moves revokes the others first, so this only guards against
+                // frees a seat revokes it first, so this only guards against
                 // a report out of order. A grant that added keeps what is
                 // held, even if the viewer's count dropped meanwhile (a seat
                 // already held stays; its pad goes neutral).
-                let moves = moved.unwrap_or_else(|| !self.keeps(member, seat));
-                let extra = if moves {
-                    self.seats_of(member)
-                } else {
-                    Vec::new()
-                };
+                let extra = freed.unwrap_or_else(|| self.frees(member, seat, None).0);
+                let held = self.seats_of(member);
                 let mut fx: Vec<Effect> = extra
                     .into_iter()
-                    .filter(|s| *s != seat && self.has_pad(*s))
+                    .filter(|s| *s != seat && self.has_pad(*s) && held.contains(s))
                     .map(|s| Effect::Revoke {
                         seat: s,
                         holder: Some(member),
@@ -737,8 +840,11 @@ impl HostSession {
             return Err(SessionError::ControlPaused);
         }
         self.requests.retain(|(r, _)| *r != member);
+        let controller = self.asked_with.remove(&member);
         if accept {
-            let mut fx = self.grant(member, seat);
+            // The controller they asked with moves (P13); without one, a
+            // guess (a request with one controller needs none).
+            let mut fx = self.grant(member, seat, controller);
             fx.push(Effect::Changed);
             return Ok(fx);
         }
@@ -750,6 +856,19 @@ impl HostSession {
     /// for this seat is answered; one for another seat stays (the viewer
     /// still shows it as pending), as when the router reports the grant.
     pub fn pass(&mut self, member: MemberId, seat: SeatId) -> Result<Vec<Effect>, SessionError> {
+        self.pass_with(member, seat, None)
+    }
+
+    /// Hands `seat` to a viewer for its controller `controller` (P12, P13),
+    /// which then plays it, leaving its own seat if the viewer has no
+    /// controller to spare. Refused with [`SessionError::ChooseController`]
+    /// when a seat must be freed and nothing says which.
+    pub fn pass_with(
+        &mut self,
+        member: MemberId,
+        seat: SeatId,
+        controller: Option<u8>,
+    ) -> Result<Vec<Effect>, SessionError> {
         if self.ended {
             return Err(SessionError::Ended);
         }
@@ -765,8 +884,14 @@ impl HostSession {
         if self.holders[usize::from(seat.0)] == Some(member) {
             return Ok(Vec::new());
         }
-        self.requests.retain(|r| *r != (member, seat));
-        let mut fx = self.grant(member, seat);
+        if self.frees(member, seat, controller).1 {
+            return Err(SessionError::ChooseController);
+        }
+        if self.requests.contains(&(member, seat)) {
+            self.requests.retain(|r| *r != (member, seat));
+            self.asked_with.remove(&member);
+        }
+        let mut fx = self.grant(member, seat, controller);
         fx.push(Effect::Changed);
         Ok(fx)
     }
@@ -842,7 +967,7 @@ impl HostSession {
             if held(seat) {
                 return Ok(Vec::new());
             }
-            let mut fx = self.grant(host, seat);
+            let mut fx = self.grant(host, seat, None);
             fx.push(Effect::Changed);
             return Ok(fx);
         }
@@ -854,7 +979,7 @@ impl HostSession {
             self.homes[k].home = Home::Playing;
             fx.push(self.host_seats_effect());
             if !held(seat) {
-                fx.extend(self.grant(host, seat));
+                fx.extend(self.grant(host, seat, None));
             }
             // The other controller's new seat, if free, comes back to it.
             fx.extend(self.reclaim());
@@ -873,7 +998,7 @@ impl HostSession {
                 seat: old,
                 holder: Some(host),
             });
-            fx.extend(self.grant(host, seat));
+            fx.extend(self.grant(host, seat, None));
         }
         fx.push(Effect::Changed);
         Ok(fx)
@@ -892,6 +1017,7 @@ impl HostSession {
         self.pending.retain(|p| Some(p.member) == host);
         self.everything_taken_back();
         let waiting = std::mem::take(&mut self.requests);
+        self.asked_with.clear();
         fx.extend(waiting.into_iter().map(|(member, _)| self.declined(member)));
         if !self.paused {
             self.paused = true;
@@ -933,6 +1059,7 @@ impl HostSession {
         }
         self.ended = true;
         self.requests.clear();
+        self.asked_with.clear();
         self.pending.clear();
         vec![
             Effect::Broadcast(ControlMessage::SessionEnded(SessionEnded {
@@ -943,12 +1070,13 @@ impl HostSession {
         ]
     }
 
-    /// Grants `seat`, after revoking `member` from every other seat with a
-    /// pad when it moves rather than adds ([`Self::keeps`]): the router takes
-    /// them in order, so a viewer that moves never holds more pad seats than
-    /// it may, even with a grant still on its way. A keyboard-and-mouse seat
-    /// stays: it needs no controller.
-    fn grant(&mut self, member: MemberId, seat: SeatId) -> Vec<Effect> {
+    /// Grants `seat`, after revoking `member` from the pad seats it must
+    /// give up to stay within its controllers ([`Self::frees`], P13: the
+    /// one `controller` drives first): the router takes them in order, so a
+    /// viewer never holds more pad seats than it may, even with a grant
+    /// still on its way. A keyboard-and-mouse seat stays: it needs no
+    /// controller.
+    fn grant(&mut self, member: MemberId, seat: SeatId, controller: Option<u8>) -> Vec<Effect> {
         // A host controller's seat passed on: it comes back to it when that
         // viewer lets go.
         if !self.is_host(member) {
@@ -956,18 +1084,24 @@ impl HostSession {
                 h.home = Home::Lent;
             }
         }
-        let moves = !self.keeps(member, seat);
-        if moves {
-            self.pending.retain(|p| p.member != member);
+        // Beyond its controllers: the seat of the one that moves goes first
+        // (P13), on the same ordered channel, so the router never sees it
+        // on more pad seats than its controllers.
+        let (frees, _) = self.frees(member, seat, controller);
+        for p in &mut self.pending {
+            if p.member == member && frees.contains(&p.seat) {
+                p.cancelled = true;
+                p.frees.clear();
+            }
         }
         self.pending.push(PendingGrant {
             seat,
             member,
-            moves,
+            frees: frees.clone(),
+            cancelled: false,
         });
-        let mut fx: Vec<Effect> = (0..self.config.seats.len())
-            .map(|i| SeatId(i as u8))
-            .filter(|s| moves && *s != seat && self.has_pad(*s))
+        let mut fx: Vec<Effect> = frees
+            .into_iter()
             .map(|s| Effect::Revoke {
                 seat: s,
                 holder: Some(member),
@@ -984,6 +1118,7 @@ impl HostSession {
             seat,
             member,
             permissions,
+            controller: controller.filter(|_| !self.is_host(member)),
         });
         fx
     }

@@ -63,6 +63,16 @@ pub enum HudAction {
     Volume(StreamVolume),
 }
 
+/// One of this window's controllers, as the bar's choice shows it (P13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HudController {
+    /// Its slot, which a request names.
+    pub slot: u8,
+    pub name: String,
+    /// The seat it drives now, if any.
+    pub seat: Option<u8>,
+}
+
 pub struct Hud {
     ctx: egui::Context,
     renderer: egui_wgpu::Renderer,
@@ -90,6 +100,12 @@ pub struct Hud {
     /// While this viewer holds keyboard and mouse: how to capture the mouse
     /// or free it.
     pub mouse_hint: Option<String>,
+    /// This window's controllers and the seat each drives (P13): with two
+    /// or more, asking for a seat asks which one plays it.
+    pub controllers: Vec<HudController>,
+    /// The seat whose controller is being chosen (P13): the bar shows the
+    /// choice below the seats until one is picked or it is cancelled.
+    picking: Option<u8>,
     session: Option<HudState>,
     note: Option<(String, Instant)>,
     changed_at: Option<Instant>,
@@ -136,6 +152,8 @@ impl Hud {
             shortcuts: Shortcuts::default(),
             volume: StreamVolume::default(),
             mouse_hint: None,
+            controllers: Vec::new(),
+            picking: None,
             session: None,
             note: None,
             changed_at: None,
@@ -149,6 +167,31 @@ impl Hud {
             bar_painted: false,
             repaint_at: None,
         }
+    }
+
+    /// Asks for `seat` (P13): at once, unless one of two or more
+    /// controllers must leave its seat for it; then the bar first asks which
+    /// moves, and the request goes from there.
+    pub fn ask(&mut self, seat: u8) {
+        // A choice only when one of ours must leave its seat for one with a
+        // pad: each plays one already (P13 review). Otherwise a spare one
+        // takes it, or it needs no controller.
+        let pad = self
+            .session
+            .as_ref()
+            .and_then(|s| s.seats.get(usize::from(seat)))
+            .is_some_and(|x| x.pad);
+        let all_seated = self.controllers.iter().all(|c| c.seat.is_some());
+        if self.controllers.len() < 2 || !pad || !all_seated {
+            self.actions
+                .push(HudAction::Session(UserAction::RequestControl {
+                    seat,
+                    controller: None,
+                }));
+            return;
+        }
+        self.picking = Some(seat);
+        self.changed_at = Some(Instant::now());
     }
 
     /// The session as the main process describes it.
@@ -213,6 +256,8 @@ impl Hud {
     /// still comes up for a while, to say which key frees the mouse.
     pub fn mouse_captured(&mut self) {
         self.captured_at = Some(Instant::now());
+        // No choice can be clicked now (P13): it would hold the bar up.
+        self.picking = None;
         self.pointer_gone();
     }
 
@@ -287,8 +332,9 @@ impl Hud {
         // With the bar off (P11), it still comes up when a player would
         // otherwise be stuck: the game out of front, or the mouse just
         // captured (the hint says which key frees it).
-        let needed =
-            away || (self.mouse_hint.is_some() && recent(self.captured_at, SHOW_AFTER_CHANGE));
+        let needed = away
+            || self.picking.is_some()
+            || (self.mouse_hint.is_some() && recent(self.captured_at, SHOW_AFTER_CHANGE));
         self.visible
             && (needed
                 || self.show_bar
@@ -340,6 +386,12 @@ impl Hud {
             .or_default()
             .native_pixels_per_point = Some(scale);
 
+        // A choice for a seat that can't be asked for any more goes (P13).
+        if let Some(seat) = self.picking
+            && !self.session.as_ref().is_some_and(|s| askable(s, seat))
+        {
+            self.picking = None;
+        }
         let mut bar_rect = None;
         let mut actions = Vec::new();
         let mut output = self.ctx.run_ui(input, |root| {
@@ -369,6 +421,8 @@ impl Hud {
                                 volume: self.volume,
                                 shortcuts: &self.shortcuts,
                                 mouse_hint: self.mouse_hint.as_deref(),
+                                controllers: &self.controllers,
+                                picking: self.picking,
                                 icons: self.icons,
                                 // Narrower than its minimum only in a window narrower still:
                                 // the right end holds Leave.
@@ -404,12 +458,21 @@ impl Hud {
             .map(|delay| now + delay);
         for action in actions {
             match action {
-                BarClick::Action(a) => self.actions.push(a),
+                BarClick::Action(a) => {
+                    // Asking with a controller ends the choice.
+                    if matches!(a, HudAction::Session(UserAction::RequestControl { .. })) {
+                        self.picking = None;
+                    }
+                    self.actions.push(a);
+                }
                 BarClick::Stats => {
                     self.show_stats = !self.show_stats;
                     self.repaint_at = Some(now);
                 }
+                BarClick::Ask(seat) => self.ask(seat),
+                BarClick::NoPick => self.picking = None,
             }
+            self.repaint_at = Some(now);
         }
 
         // Drained, not just read: epaint checks (in debug builds) that every
@@ -452,6 +515,10 @@ impl Hud {
 enum BarClick {
     Action(HudAction),
     Stats,
+    /// A seat's chip: ask for it (P13: maybe choosing a controller first).
+    Ask(u8),
+    /// The choice of controller closed without asking (P13).
+    NoPick,
 }
 
 // The palette: the main window's dark theme (`apps/desktop/src/styles/
@@ -642,6 +709,10 @@ struct BarView<'a> {
     volume: StreamVolume,
     shortcuts: &'a Shortcuts,
     mouse_hint: Option<&'a str>,
+    /// This window's controllers, and the seat whose controller is being
+    /// chosen (P13).
+    controllers: &'a [HudController],
+    picking: Option<u8>,
     icons: bool,
     /// The rows' width, in points.
     width: f32,
@@ -665,6 +736,9 @@ fn session_bar(ui: &mut Ui, s: &HudState, view: BarView<'_>, clicks: &mut Vec<Ba
             ui.set_width(view.width);
             header(ui, s, &view, clicks);
             seats(ui, s, &view, clicks);
+            if let Some(seat) = view.picking {
+                pick_controller(ui, s, &view, seat, clicks);
+            }
             status(ui, s, &view, clicks);
             hints(ui, &view);
         });
@@ -1034,9 +1108,7 @@ fn seat_chip(
         && response.clicked()
         && let Some(seat) = c.seat
     {
-        clicks.push(BarClick::Action(HudAction::Session(
-            UserAction::RequestControl(seat),
-        )));
+        clicks.push(BarClick::Ask(seat));
     }
     let phrase = seat_phrase(&c.label);
     let tip = match c.seat {
@@ -1056,6 +1128,77 @@ fn seat_chip(
     if let Some(tip) = tip {
         response.on_hover_text(tip);
     }
+}
+
+/// Whether this viewer may ask for `seat` now: one there, not its own, not
+/// asked for already, control not paused.
+fn askable(s: &HudState, seat: u8) -> bool {
+    s.seats
+        .get(usize::from(seat))
+        .is_some_and(|x| !x.mine && !x.asked)
+        && !s.control_paused
+}
+
+/// What asking for a seat with controller `c` does (P13): it plays the new
+/// seat, leaving its own (the choice shows only while each plays one).
+fn pick_effect(s: &HudState, c: &HudController) -> String {
+    match c.seat.and_then(|seat| s.seats.get(usize::from(seat))) {
+        Some(seat) => format!("leaves {}", seat.label),
+        None => "free".into(),
+    }
+}
+
+/// Which controller plays the seat asked for (P13), a row below the seats:
+/// each controller with what asking with it does, then Cancel.
+fn pick_controller(
+    ui: &mut Ui,
+    s: &HudState,
+    view: &BarView<'_>,
+    seat: u8,
+    clicks: &mut Vec<BarClick>,
+) {
+    let label = s
+        .seats
+        .get(usize::from(seat))
+        .map_or("a seat", |x| x.label.as_str());
+    ui.add_space(6.0);
+    ui.label(RichText::new(format!("Which controller plays {}?", seat_phrase(label))).color(TEXT));
+    ui.horizontal_wrapped(|ui| {
+        for c in view.controllers {
+            let effect = pick_effect(s, c);
+            // What it does stays whole; a long name gives way.
+            let mut job = one_line(
+                &c.name,
+                FontId::proportional(13.5),
+                TEXT,
+                (view.width * 0.45 - 120.0).max(80.0),
+            );
+            job.append(
+                &format!("  {effect}"),
+                0.0,
+                TextFormat::simple(FontId::proportional(12.5), MUTED),
+            );
+            let response = ui.button(job);
+            if response
+                .on_hover_text(format!(
+                    "Ask for {} for your {}",
+                    seat_phrase(label),
+                    c.name
+                ))
+                .clicked()
+            {
+                clicks.push(BarClick::Action(HudAction::Session(
+                    UserAction::RequestControl {
+                        seat,
+                        controller: Some(c.slot),
+                    },
+                )));
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            clicks.push(BarClick::NoPick);
+        }
+    });
 }
 
 /// Where this viewer stands, with the note beside it and the request's or

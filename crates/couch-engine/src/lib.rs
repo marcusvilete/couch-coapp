@@ -259,8 +259,15 @@ pub enum Command {
     },
     StopWatching,
     /// While watching: asks the host for a seat (free, or someone else's).
+    /// With `controller`, one of ours by slot
+    /// ([`GuestControllerView::slot`]), that one plays it, leaving its seat
+    /// if we have no controller to spare (P13); the app asks which when we
+    /// have two or more.
     RequestControl {
         seat: u8,
+        #[serde(default)]
+        #[ts(optional)]
+        controller: Option<u8>,
     },
     /// While watching: withdraws the request, or gives every seat back.
     CancelControl,
@@ -703,6 +710,22 @@ pub struct GuestControllerView {
 pub struct RequestView {
     pub member: String,
     pub seat: u8,
+    /// Which of their controllers asks, by slot (P13): it plays the seat,
+    /// leaving the one it drives if they have no controller to spare.
+    pub controller: Option<u8>,
+}
+
+/// One of our controllers, in a session we watch (P13): asking for a seat
+/// with two or more names the one that plays it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OurControllerView {
+    /// Its slot in our stream window.
+    pub slot: u8,
+    pub name: String,
+    /// The seat it drives now, if any.
+    pub seat: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -754,6 +777,9 @@ pub struct SessionView {
     /// order (P12); empty for others' sessions. The patch bay shows each as
     /// a plug of its own.
     pub viewer_pads: Vec<Vec<GuestControllerView>>,
+    /// For a session we watch: our stream window's controllers, and the
+    /// seat each drives (P13); empty otherwise.
+    pub our_controllers: Vec<OurControllerView>,
     /// The seats players can hold, by seat id; one is single player.
     pub seats: Vec<SeatView>,
     /// The host's own controller plays only through the seats (hidden from
@@ -1109,9 +1135,10 @@ impl fmt::Debug for Command {
                 .field("host", host)
                 .finish(),
             Self::StopWatching => f.write_str("StopWatching"),
-            Self::RequestControl { seat } => f
+            Self::RequestControl { seat, controller } => f
                 .debug_struct("RequestControl")
                 .field("seat", seat)
+                .field("controller", controller)
                 .finish(),
             Self::CancelControl => f.write_str("CancelControl"),
             Self::GiveBackSeat { seat } => {

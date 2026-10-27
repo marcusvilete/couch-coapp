@@ -54,6 +54,7 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     viewers: [],
     viewerControllers: [],
     viewerPads: [],
+    ourControllers: [],
     seats,
     hostOnSeats: false,
     controlPaused: false,
@@ -172,8 +173,8 @@ function hosting(over: Partial<SessionView> = {}, live = true): SessionView {
   s.seats[2].guestController = 1;
   s.seats[4].holder = caio.id;
   s.requests = [
-    { member: dani.id, seat: 3 },
-    { member: bia.id, seat: 4 },
+    { member: dani.id, seat: 3, controller: null },
+    { member: bia.id, seat: 4, controller: null },
   ];
   if (live) {
     s.stream = { state: "live" };
@@ -257,6 +258,11 @@ export const SCENARIOS: Record<string, Scenario> = {
       s.seats[0].holder = ME;
       s.seats[1].holder = ME;
       s.seats[2].holder = caio.id;
+      // Asking for another seat says which of ours moves (P13).
+      s.ourControllers = [
+        { slot: 0, name: "DualSense Wireless Controller", seat: 0 },
+        { slot: 1, name: "Xbox Wireless Controller", seat: 1 },
+      ];
       return base([sofa({ sessions: [s] })], { myControllers: 2 });
     },
   },
@@ -345,10 +351,23 @@ export const SCENARIOS: Record<string, Scenario> = {
       return base([sofa({ sessions: [s] })]);
     },
   },
+  "hosting-guest-asks": {
+    title: "Hosting: a guest on two seats asks for a third with one controller (P13)",
+    world: () => {
+      const s = hosting({ requests: [{ member: bia.id, seat: 0, controller: 1 }] });
+      s.viewerPads[0] = [
+        { slot: 0, name: "DualSense Wireless Controller" },
+        { slot: 1, name: "Xbox Wireless Controller" },
+      ];
+      s.seats[3].holder = bia.id;
+      s.seats[3].guestController = 0;
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
   "hosting-keyboard-yours": {
     title: "Hosting: the keyboard seat still yours (no guest on it)",
     world: () => {
-      const s = hosting({ requests: [{ member: dani.id, seat: 4 }] });
+      const s = hosting({ requests: [{ member: dani.id, seat: 4, controller: null }] });
       s.seats[4].holder = null;
       return base([sofa({ sessions: [s] })]);
     },

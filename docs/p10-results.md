@@ -49,6 +49,11 @@ Windows' first-time setup can't happen on this PC by itself: all 64 devices exis
 - here, remove the first two, from an elevated PowerShell: `pnputil /remove-device "USB\VID_045E&PID_028E\01"` and `\02`, then start a session with two controller seats: if Windows takes long, the console says so, and the pads come up by themselves;
 - on the friend's PC, with a `-TestRelay` installer of this branch.
 
+## Your run on the PC that froze (0.18.0, 2026-10-27)
+
+- Windows showed its "installing device" notification and took a few seconds to set the controllers up; **no freeze** this time.
+- No warning in the app either, as designed: each pad gets 3 s (plus the library's own readiness check) before it counts as still being set up, and these came up within that. The warning, timer and Stop waiting appear only past it, the long first install that froze things before.
+
 ## Known limits
 
 - A pad given up whose unplug ViGEmBus still refuses would stay behind, as before; it can't be told apart from another program's pad once the app has closed. It hasn't been seen since the plugs stopped failing that way.

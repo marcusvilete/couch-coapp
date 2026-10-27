@@ -22,6 +22,7 @@ import type { ShortcutView } from "../bindings/ShortcutView";
 import type { SourceList } from "../bindings/SourceList";
 import { seatsFor } from "../model/seats";
 import { keeps, numbered, seatsOf } from "../model/sessions";
+import { frees } from "../sessions/hostMenus";
 
 export { seatsFor };
 
@@ -236,6 +237,7 @@ export function hostSession(
     viewers: [],
     viewerControllers: [],
     viewerPads: [],
+    ourControllers: [],
     seats,
     hostOnSeats: homes.length > 0,
     controlPaused: false,
@@ -269,7 +271,7 @@ function free(seat: SeatView) {
  * (their other pad seats go first). With `controller`, that one of theirs
  * drives it, as their side decides (`couch_input::forward`, P12): a seat it
  * drove swaps; to a seat they hold, only that changes. */
-function pass(s: SessionView, member: string, seat: number, controller?: number) {
+function pass(s: SessionView, member: string, seat: number, controller?: number, answering = false) {
   const target = s.seats[seat];
   if (!target) throw "there is no such seat";
   const i = s.viewers.indexOf(member);
@@ -285,9 +287,11 @@ function pass(s: SessionView, member: string, seat: number, controller?: number)
     return;
   }
   if (s.controlPaused) throw "control is paused; allow it again first";
-  if (held.length > 0 && !keeps(s, held, s.viewerControllers[i] ?? 1, seat)) {
-    for (const h of held) if (s.seats[h].pad) free(s.seats[h]);
-  }
+  // Beyond their controllers, only the moving one's seat goes (P13); an
+  // answer guesses rather than refuse, as `HostSession::answer` does.
+  const freed = frees(s, member, seat, chosen);
+  if (freed.ambiguous && !answering) throw "say which of their controllers moves to it: each of them plays a seat already";
+  for (const h of freed.seats) free(s.seats[h]);
   free(target);
   target.holder = member;
   if (target.pad) {
@@ -692,11 +696,16 @@ function handle(cmd: Command): Response | Promise<Response> {
           s.askedSeat = null;
           if (world.hostAnswers === "accept") {
             const held = seatsOf(s, me());
+            // Beyond our controllers, the asking one's seat goes (P13), or
+            // with one controller its one seat.
+            const asking = s.ourControllers.find((c) => c.slot === cmd.controller);
             if (held.length > 0 && !keeps(s, held, world.myControllers, cmd.seat)) {
-              for (const h of held) if (s.seats[h].pad) free(s.seats[h]);
+              const leaves = asking?.seat ?? held.find((h) => s.seats[h].pad);
+              if (leaves != null) free(s.seats[leaves]);
             }
             free(s.seats[cmd.seat]);
             s.seats[cmd.seat].holder = me();
+            if (asking && s.seats[cmd.seat].pad) asking.seat = cmd.seat;
           }
           s.role = seatsOf(s, me()).length > 0 ? "controlling" : "watching";
           changed(room);
@@ -727,7 +736,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       const { room, session: s } = hosting();
       const request = s.requests.find((r) => r.member === cmd.member);
       if (!request) throw "that member hasn't asked for control";
-      if (cmd.accept) pass(s, cmd.member, request.seat);
+      if (cmd.accept) pass(s, cmd.member, request.seat, request.controller ?? undefined, true);
       s.requests = s.requests.filter((r) => r.member !== cmd.member);
       return roomReply(room);
     }
@@ -828,7 +837,7 @@ export function someoneAsks() {
   const asker = s.viewers.find((v) => !s.requests.some((r) => r.member === v));
   if (!asker) return;
   const seat = Math.max(0, s.seats.findIndex((x) => x.holder !== asker));
-  s.requests.push({ member: asker, seat });
+  s.requests.push({ member: asker, seat, controller: null });
   changed(room);
   emit({ type: "controlRequested", room: room.id, member: asker, seat: s.seats[seat].label });
 }

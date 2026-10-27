@@ -40,6 +40,7 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
       ],
       [{ slot: 0, name: "Xbox Controller" }],
     ],
+    ourControllers: [],
     seats,
     hostOnSeats,
     controlPaused: false,

@@ -3,4 +3,9 @@
 /**
  * A viewer asking for a seat, for the host.
  */
-export type RequestView = { member: string, seat: number, };
+export type RequestView = { member: string, seat: number, 
+/**
+ * Which of their controllers asks, by slot (P13): it plays the seat,
+ * leaving the one it drives if they have no controller to spare.
+ */
+controller: number | null, };

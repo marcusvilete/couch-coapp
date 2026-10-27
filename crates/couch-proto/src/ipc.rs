@@ -16,7 +16,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 13;
+pub const IPC_VERSION: u16 = 14;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -328,8 +328,9 @@ pub enum HudRole {
 /// the session from the viewer (a hotkey or the HUD's bar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserAction {
-    /// Ask for this seat (by [`crate::ids::SeatId`]'s number).
-    RequestControl(u8),
+    /// Ask for this seat (by [`crate::ids::SeatId`]'s number), for this
+    /// controller (by slot, P13) when the window has two or more.
+    RequestControl { seat: u8, controller: Option<u8> },
     /// Withdraw the request, or give every seat back.
     CancelControl,
     /// Give this seat back, keeping the others (M18).
@@ -730,7 +731,14 @@ mod tests {
         };
         assert_eq!(from_payload(&to_payload(&hud)), Some(hud));
         for action in [
-            UserAction::RequestControl(1),
+            UserAction::RequestControl {
+                seat: 1,
+                controller: None,
+            },
+            UserAction::RequestControl {
+                seat: 2,
+                controller: Some(1),
+            },
             UserAction::CancelControl,
             UserAction::Leave,
         ] {

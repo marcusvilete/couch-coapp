@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { hostSession } from "../preview/fakeEngine";
-import { cableFrom, guestPads } from "./hostMenus";
+import { cableFrom, frees, guestPads, passHint, requestDetail } from "./hostMenus";
 import { dropOn } from "./PatchBay";
 
 const room = {
@@ -35,7 +35,8 @@ describe("dropping on a seat in the patch bay", () => {
   it("says added or moves them, as the host's session decides", () => {
     expect(dropOn(room, session(), viewer("b"), 1).hint).toMatch(/^Added/);
     const s = session({ viewerControllers: [1, 1] });
-    expect(dropOn(room, s, viewer("b"), 1).hint).toMatch(/^Moves them/);
+    // One controller on one seat: that seat goes (P13).
+    expect(dropOn(room, s, viewer("b"), 1).hint).toBe("Leaves Controller 3 · yours");
   });
 
   it("warns that the keyboard seat is control of the PC", () => {
@@ -100,7 +101,7 @@ describe("a guest's controllers in the patch bay", () => {
       hint: "Added · Controller 3 takes another of theirs · yours",
     });
     expect(dropOn(room, withPads(), guestPad("c", 0), 2)).toEqual({ ok: true, hint: "Hands it over · Bia loses it" });
-    expect(dropOn(room, withPads({ viewerControllers: [1, 1] }), guestPad("b", 0), 1).hint).toMatch(/^Moves them/);
+    expect(dropOn(room, withPads({ viewerControllers: [1, 1] }), guestPad("b", 0), 1).hint).toBe("Leaves Controller 3 · yours");
   });
 
   it("moves a seat they hold to their other controller, and swaps two", () => {
@@ -127,5 +128,39 @@ describe("a guest's controllers in the patch bay", () => {
   it("drops a picked-up cable as the controller at its end", () => {
     const cable = { kind: "cable" as const, seat: 2, from: "seat:2" };
     expect(dropOn(room, withPads(), cable, 1)).toEqual({ ok: true, hint: "Added · Controller 3 takes another of theirs · yours" });
+  });
+});
+
+/** P13: Bia's two controllers each on a seat: her first on Controller 2
+ * (ours before), her second on Controller 3. */
+function bothSeated(): SessionView {
+  const s = withPads();
+  Object.assign(s.seats[1], { holder: "b", host: false, hostController: null, guestController: 0 });
+  return s;
+}
+
+describe("one of a guest's controllers moving (P13)", () => {
+  it("frees only the seat of the controller that moves", () => {
+    const s = bothSeated();
+    expect(frees(s, "b", 0, 2)).toEqual({ seats: [2], ambiguous: false });
+    expect(dropOn(room, s, guestPad("b", 2), 0)).toEqual({ ok: true, hint: "Leaves Controller 3 · yours" });
+    expect(dropOn(room, s, guestPad("b", 0), 0)).toEqual({ ok: true, hint: "Leaves Controller 2 · yours" });
+  });
+
+  it("asks for one of their controllers when nothing says which", () => {
+    const s = bothSeated();
+    expect(frees(s, "b", 0)).toEqual({ seats: [2], ambiguous: true });
+    expect(dropOn(room, s, viewer("b"), 0)).toEqual({ ok: false, hint: "Drag one of Bia's controllers" });
+    expect(passHint(s, "b", 0)).toBe("choose their controller");
+  });
+
+  it("says which seat a request's controller leaves", () => {
+    const s = bothSeated();
+    expect(requestDetail(s, "b", 0, 2)).toBe("with their DualSense 2 · leaves Controller 3");
+    // Without one, accepting guesses: from the last seat down.
+    expect(requestDetail(s, "b", 0, null)).toBe("they leave Controller 3");
+    // A spare controller: nothing is left.
+    s.viewerControllers = [3, 1];
+    expect(requestDetail(s, "b", 0, 2)).toBe("with their DualSense 2");
   });
 });

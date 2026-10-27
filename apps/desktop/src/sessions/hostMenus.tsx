@@ -6,7 +6,7 @@
 import { Gamepad2, Hand, Keyboard, Undo2 } from "lucide-react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { keeps, nameOf, numbered, seatsOf } from "../model/sessions";
+import { listed, nameOf, numbered, seatsOf } from "../model/sessions";
 import type { MenuEntry } from "../ui/Menu";
 import type { Run } from "./useRun";
 
@@ -19,28 +19,36 @@ export function controllersOf(s: SessionView, member: string): number {
 /** The seats `member` could be passed, as menu entries. */
 export function passEntries(room: RoomView, s: SessionView, member: string, run: Run): MenuEntry[] {
   const held = seatsOf(s, member);
-  const controllers = controllersOf(s, member);
   return s.seats.flatMap((seat, i): MenuEntry[] => {
     if (held.includes(i)) return [];
     const pass = () => void run(`pass-${member}`, { type: "passControl", member, seat: i });
-    // With two controllers or more, which one plays it (P12).
+    // With two controllers or more, which one plays it (P12); when one
+    // must leave its seat and nothing says which, only those (P13).
     const pads = guestPadEntries(room, s, member, i, run);
+    const ambiguous = frees(s, member, i).ambiguous;
     return [
       {
         label: seat.label,
         icon: seat.pad ? <Gamepad2 /> : <Keyboard />,
-        hint: [
-          seat.host ? "yours" : seat.holder ? `${nameOf(room, seat.holder)}'s` : "free",
-          held.length > 0 ? (keeps(s, held, controllers, i) ? "added" : "moves them") : null,
-        ]
+        hint: [seat.host ? "yours" : seat.holder ? `${nameOf(room, seat.holder)}'s` : "free", passHint(s, member, i)]
           .filter(Boolean)
           .join(" · "),
         ...(pads.length > 0
-          ? { items: [{ label: "Whichever they pick up", onSelect: pass }, "separator" as const, ...pads] }
+          ? { items: ambiguous ? pads : [{ label: "Whichever they pick up", onSelect: pass }, "separator" as const, ...pads] }
           : { onSelect: pass }),
       },
     ];
   });
+}
+
+/** What passing seat `i` to `member` without naming a controller does, as
+ * a hint: "added", "leaves Controller 2" (P13), "they choose" when that
+ * would be a guess, or nothing for their first seat. */
+export function passHint(s: SessionView, member: string, i: number): string | null {
+  if (seatsOf(s, member).length === 0) return null;
+  const freed = frees(s, member, i);
+  if (freed.ambiguous) return "choose their controller";
+  return freed.seats.length === 0 ? "added" : `leaves ${seatsPhrase(s, freed.seats)}`;
 }
 
 /** A viewer's entries: pass a seat, take theirs back. */
@@ -114,6 +122,38 @@ export function cableFrom(s: SessionView, i: number): string | undefined {
   return `viewer:${seat.holder}`;
 }
 
+/** Which of `member`'s pad seats giving them seat `i` frees (P13), as the
+ * host's session decides (`HostSession::frees`): none while they have a
+ * controller to spare; otherwise as many as keep them within their
+ * controllers, the one `slot` drives first. `ambiguous` when that's a guess
+ * the session refuses: more seats to choose from and no controller naming
+ * one. (Grants still on their way are the engine's to count.) */
+export function frees(s: SessionView, member: string, i: number, slot?: number): { seats: number[]; ambiguous: boolean } {
+  if (!s.seats[i]?.pad) return { seats: [], ambiguous: false };
+  const pads = seatsOf(s, member).filter((j) => j !== i && s.seats[j].pad);
+  const room = Math.max(0, controllersOf(s, member) - 1);
+  if (pads.length <= room) return { seats: [], ambiguous: false };
+  const excess = pads.length - room;
+  const moving = slot == null ? undefined : pads.find((j) => s.seats[j].guestController === slot);
+  const order = [...(moving != null ? [moving] : []), ...pads.filter((j) => j !== moving).reverse()];
+  return { seats: order.slice(0, excess), ambiguous: moving == null && pads.length > excess };
+}
+
+/** "Controller 2", "Controller 2 and Controller 3". */
+function seatsPhrase(s: SessionView, seats: number[]): string {
+  return listed(seats.map((j) => s.seats[j].label));
+}
+
+/** What a request of `member`'s for seat `seat` with controller `slot` does,
+ * for the host (P13): "with their DualSense · leaves Controller 2". */
+export function requestDetail(s: SessionView, member: string, seat: number, slot: number | null): string | null {
+  const pad = slot == null ? undefined : guestPads(s, member).find((p) => p.slot === slot);
+  const freed = frees(s, member, seat, pad?.slot).seats;
+  // Without a controller, what accepting frees is the session's guess.
+  if (!pad) return freed.length > 0 ? `they leave ${seatsPhrase(s, freed)}` : null;
+  return `with their ${pad.name}` + (freed.length > 0 ? ` · leaves ${seatsPhrase(s, freed)}` : "");
+}
+
 /** What putting `member`'s controller `slot` on seat `i` does (P12), or why
  * it can't. */
 export function guestPadHint(room: RoomView, s: SessionView, member: string, slot: number, i: number): { ok: boolean; hint: string } {
@@ -131,8 +171,12 @@ export function guestPadHint(room: RoomView, s: SessionView, member: string, slo
     return { ok: true, hint: other != null ? `Swaps with ${s.seats[other].label}` : "Plays here" };
   }
   if (s.controlPaused) return { ok: false, hint: PAUSED_REASON };
-  const adds = held.length > 0 && keeps(s, held, controllersOf(s, member), i);
-  const what = held.length === 0 ? "Hands it over" : adds ? "Added" : "Moves them";
+  // Beyond their controllers, this one's seat goes (P13); one playing no
+  // seat can't say which does.
+  const freed = frees(s, member, i, slot);
+  if (freed.ambiguous) return { ok: false, hint: `Drag one of ${nameOf(room, member)}'s controllers playing a seat` };
+  const adds = held.length > 0 && freed.seats.length === 0;
+  const what = held.length === 0 ? "Hands it over" : adds ? "Added" : `Leaves ${seatsPhrase(s, freed.seats)}`;
   const swaps = adds && other != null ? ` · ${s.seats[other].label} takes another of theirs` : "";
   const loses = seat.host ? " · yours" : seat.holder ? ` · ${nameOf(room, seat.holder)} loses it` : "";
   const kbm = seat.keyboardMouse ? " · control of your PC" : "";
@@ -221,11 +265,16 @@ export function seatEntries(room: RoomView, s: SessionView, i: number, run: Run)
       label: "Pass to",
       icon: <Hand />,
       disabled: s.controlPaused && PAUSED_REASON,
-      items: viewers.map((v) => {
-        const held = seatsOf(s, v);
+      items: viewers.map((v): MenuEntry => {
+        const hint = passHint(s, v, i) ?? undefined;
+        // One of theirs must leave its seat: which one is the host's to say
+        // (P13).
+        if (frees(s, v, i).ambiguous) {
+          return { label: nameOf(room, v), hint, items: guestPadEntries(room, s, v, i, run) };
+        }
         return {
           label: nameOf(room, v),
-          hint: held.length > 0 ? (keeps(s, held, controllersOf(s, v), i) ? "added" : "moves them") : undefined,
+          hint,
           onSelect: () => void run(`pass-${v}`, { type: "passControl", member: v, seat: i }),
         };
       }),

@@ -17,11 +17,11 @@ import {
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
-import { allowsKbm, idleText, isLive, listed, nameOf, seatPhrase, seatsOf } from "../model/sessions";
+import { allowsKbm, idleText, isLive, listed, nameOf, numbered, seatPhrase, seatsOf } from "../model/sessions";
 import { Avatar } from "../ui/Avatar";
 import { Button } from "../ui/Button";
 import { Badge, Spinner } from "../ui/Feedback";
-import { ContextMenu, type MenuEntry } from "../ui/Menu";
+import { ContextMenu, DropdownMenu, type MenuEntry } from "../ui/Menu";
 import { Tooltip } from "../ui/Tooltip";
 import type { Busy } from "../model/sessions";
 import { windowCommand } from "./StreamWindowPanel";
@@ -98,8 +98,36 @@ export function SessionCard(props: {
     }
   }
 
+  // Our controllers (P13): when one of two or more must leave its seat for
+  // a seat with a pad (each plays one already), asking says which.
+  const ourNames = numbered(s.ourControllers.map((c) => c.name));
+  const choose = (i: number): MenuEntry[] =>
+    s.seats[i]?.pad && s.ourControllers.length >= 2 && s.ourControllers.every((c) => c.seat != null)
+      ? s.ourControllers.map((c, k) => ({
+          label: ourNames[k],
+          icon: <Gamepad2 />,
+          hint: c.seat != null ? `leaves ${s.seats[c.seat]?.label ?? "its seat"}` : undefined,
+          onSelect: () => void run(`ask-${i}`, { type: "requestControl", seat: i, controller: c.slot }),
+        }))
+      : [];
+  const canAskFor = (i: number) => ready && !mine.includes(i) && !s.controlPaused && asked !== i;
+  const askEntries: MenuEntry[] = s.seats.flatMap((seat, i): MenuEntry[] => {
+    if (!canAskFor(i)) return [];
+    const pads = choose(i);
+    return [
+      pads.length > 0
+        ? { label: `Ask for ${seatPhrase(seat.label)} with`, icon: <Gamepad2 />, items: pads }
+        : {
+            label: `Ask for ${seatPhrase(seat.label)}`,
+            icon: seat.pad ? <Gamepad2 /> : <Keyboard />,
+            onSelect: () => void run(`ask-${i}`, { type: "requestControl", seat: i }),
+          },
+    ];
+  });
+
   const menu: MenuEntry[] = watching
     ? [
+        ...askEntries,
         ...mine.map((i) => ({
           label: `Give back ${s.seats[i].label}`,
           icon: <Undo2 />,
@@ -184,11 +212,13 @@ export function SessionCard(props: {
       );
     }
     const why = s.controlPaused ? `${host} paused control` : asked === i ? "Asked" : undefined;
+    // With two controllers or more, the tile asks which plays it (P13).
+    const pads = canAsk ? choose(i) : [];
     const button = (
       <button
         className="seat-button"
         disabled={!canAsk}
-        onClick={() => void run(`ask-${i}`, { type: "requestControl", seat: i })}
+        onClick={pads.length > 0 ? undefined : () => void run(`ask-${i}`, { type: "requestControl", seat: i })}
         aria-label={`Ask for ${seatPhrase(seat.label)}`}
       >
         {tile}
@@ -196,10 +226,14 @@ export function SessionCard(props: {
     );
     return (
       <li key={i}>
-        <Tooltip label={why ?? `Ask for ${seatPhrase(seat.label)}`}>
-          {/* A disabled button gets no pointer: the label sits on a wrapper. */}
-          {canAsk ? button : <span className="seat-button-wrap" tabIndex={0}>{button}</span>}
-        </Tooltip>
+        {pads.length > 0 ? (
+          <DropdownMenu items={[{ heading: `Which controller plays ${seat.label}?` }, ...pads]}>{button}</DropdownMenu>
+        ) : (
+          <Tooltip label={why ?? `Ask for ${seatPhrase(seat.label)}`}>
+            {/* A disabled button gets no pointer: the label sits on a wrapper. */}
+            {canAsk ? button : <span className="seat-button-wrap" tabIndex={0}>{button}</span>}
+          </Tooltip>
+        )}
       </li>
     );
   };
