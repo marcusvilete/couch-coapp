@@ -40,6 +40,12 @@ It worked, but with one gap. A guest had two controllers, only one of them on a 
 - The drag hints say "Leaves Controller 3" where they said "Added · Controller 3 takes another of theirs".
 - The input-safety checks pass again: `release-check`, `input-sink`, `lifecycle-check`.
 
+Your run of the 0.19.1 installer (2026-10-27): moving a guest's seated controller, with their other one spare, now moves it alone ("it works now").
+
+## Still to try
+
+- With friends, on 0.19.1: a guest with two controllers asking for seats from the stream window's bar and the app, and the host's request line naming the controller.
+
 ## Your P10 run
 
 On the PC that froze before, Windows took a few seconds and showed its "installing device" notification, with no freeze and no warning in the app. That is as designed (see `p10-results.md`).
