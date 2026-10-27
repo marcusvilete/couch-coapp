@@ -248,6 +248,9 @@ export function hostSession(
     stream: { state: "waiting" },
     streaming: null,
     soundLevel: 100,
+    padsSettingUp: [],
+    padsSettingUpSecs: 0,
+    padsMissing: [],
   };
 }
 
@@ -686,6 +689,13 @@ function handle(cmd: Command): Response | Promise<Response> {
       const { room, session: s } = hosting();
       s.controlPaused = false;
       return roomReply(room);
+    }
+    case "stopWaitingForPads": {
+      const { room, session: s } = hosting();
+      s.padsMissing = [...s.padsMissing, ...s.padsSettingUp];
+      s.padsSettingUp = [];
+      changed(room);
+      return { type: "done" };
     }
   }
 }

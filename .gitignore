@@ -3,6 +3,7 @@
 # Downloaded native dependencies (cargo xtask fetch-deps)
 /third_party/*
 !/third_party/README.md
+!/third_party/vigem-rust/
 
 # Per-developer editor settings
 .vscode/*

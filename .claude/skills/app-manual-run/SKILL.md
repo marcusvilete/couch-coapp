@@ -47,6 +47,7 @@ cd apps\desktop; npm run tauri dev        # the default profile; builds couch-vi
 - **Keyboard and mouse never reach the game on one PC.** They go in only while the game window is in front, and then the stream window doesn't have the keyboard. That is by design.
 - **Steam notifications.** Steam announces each virtual pad as it is plugged in ("Xbox 360 Controller"). Each session's start or `pad-test --real-pad-ids` shows one.
   - "XInput Controller #N" means made-up ids: the pad is a CLI test pad, or something regressed in `real_pad_ids`.
+- **A virtual controller Windows is still setting up** (P10): our pads take ViGEm serials from 1, each a device Windows installs the first time. The host console then says "Windows is setting up the virtual controller for …", with a timer and Stop waiting, and the log `seat N: … Windows is still setting it up`, then `ready after N s`. This PC has every serial installed; to see it, remove one from an elevated PowerShell (`pnputil /remove-device "USB\VID_045E&PID_028E\01"`) and start a session.
 
 ## Tell a stream problem from a game's choice
 

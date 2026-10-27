@@ -3,9 +3,15 @@
 //! virtual Xbox 360 controller, which every PC game understands through
 //! XInput.
 
-use couch_input::{InputError, PadState, Rumble, VirtualPad, VirtualPadFactory};
+use std::time::{Duration, Instant};
+
+use couch_input::{
+    InputError, PAD_SETUP_LIMIT, PadState, PendingPad, Plugged, Rumble, VirtualPad,
+    VirtualPadFactory,
+};
 use vigem_rust::{
-    Client, NotificationReceiver, TargetHandle, X360Button, X360Notification, X360Report, Xbox360,
+    Client, ClientError, NotificationReceiver, Pending, SerialDiscovery, TargetHandle, X360Button,
+    X360Notification, X360Report, Xbox360,
 };
 
 use crate::virtual_pads::{self, PadMarker};
@@ -34,8 +40,17 @@ impl VigemPadFactory {
     /// [`couch_input::DEV_PAD_IDS`]. Either way a stream window on this PC
     /// skips it while it is plugged in (`virtual_pads`).
     pub fn connect(ids: Option<(u16, u16)>) -> Result<Self, InputError> {
+        // From serial 1, as the original ViGEm client: each serial is a device
+        // of its own to Windows, set up the first time it is plugged, so a PC
+        // sets up the first few once (P10). Looked up first, so no plug is
+        // refused (each refusal costs ViGEmBus a little kernel memory).
+        let client = Client::builder()
+            .first_serial(1)
+            .serial_discovery(SerialDiscovery::Eager)
+            .connect()
+            .map_err(driver)?;
         Ok(Self {
-            client: Client::connect().map_err(driver)?,
+            client,
             ids,
             marked: true,
         })
@@ -55,9 +70,27 @@ impl VigemPadFactory {
 
 impl VirtualPadFactory for VigemPadFactory {
     fn plug(&self) -> Result<Box<dyn VirtualPad>, InputError> {
-        Ok(Box::new(self.plug_pad()?))
+        self.plug_pending()?.wait(PAD_SETUP_LIMIT)
+    }
+
+    fn plug_pending(&self) -> Result<Plugged, InputError> {
+        let mut pending = self.plug_start()?;
+        Ok(match pending.ready(FIRST_WAIT)? {
+            Some(pad) => Plugged::Ready(Box::new(pad)),
+            None => {
+                tracing::info!(
+                    "virtual pad {}: not taking input yet; Windows may still be setting it up",
+                    pending.serial
+                );
+                Plugged::SettingUp(Box::new(pending))
+            }
+        })
     }
 }
+
+/// How long a pad gets to come up before it counts as still being set up: a
+/// pad whose device Windows already knows takes well under a second.
+const FIRST_WAIT: Duration = Duration::from_secs(3);
 
 /// A pad plugged for `couch-cli pad-origins` (P9), with what ViGEm says of
 /// it. Unplugs when dropped.
@@ -68,43 +101,132 @@ pub struct ProbePad {
 
 impl VigemPadFactory {
     pub fn plug_for_probe(&self) -> Result<ProbePad, InputError> {
-        Ok(ProbePad {
-            pad: self.plug_pad()?,
-            light: None,
-        })
+        let mut pending = self.plug_start()?;
+        let until = Instant::now() + PAD_SETUP_LIMIT;
+        let pad = loop {
+            if let Some(pad) = pending.ready(Duration::from_millis(500))? {
+                break pad;
+            }
+            if Instant::now() >= until {
+                return Err(driver("the virtual pad wasn't ready in time"));
+            }
+        };
+        Ok(ProbePad { pad, light: None })
     }
 
-    fn plug_pad(&self) -> Result<VigemPad, InputError> {
+    /// Plugs a pad, marked as ours before it appears and given its serial at
+    /// once (`virtual_pads`), not yet waiting for it to take input.
+    fn plug_start(&self) -> Result<VigemPending, InputError> {
         let mut builder = self.client.new_x360_target();
         if let Some((vid, pid)) = self.ids {
             builder = builder.with_vid(vid).with_pid(pid);
         }
         // Marked before it appears, so a stream window on this PC never
-        // opens it (see `virtual_pads`), and given its serial once it has
-        // one; until then every ViGEm pad counts as ours. In this process
-        // the mark can't fail (M22: the host's reader must never take its
-        // own pad for a remapper's). A failed plug drops the marker.
+        // opens it (see `virtual_pads`), and given its serial as soon as it
+        // has one, before it takes input: Windows may take minutes to set a
+        // new pad up (P10), and until the serial is there every ViGEm pad
+        // counts as ours. In this process the mark can't fail (M22: the
+        // host's reader must never take its own pad for a remapper's). A
+        // failed plug drops the marker.
         let marker = self.marked.then(virtual_pads::mark);
-        let pad = builder
-            .plug()
-            .map_err(driver)?
-            .wait_for_ready()
-            .map_err(driver)?;
+        let handle = builder.plug().map_err(driver)?;
+        let serial = handle.serial_no();
         if let Some(marker) = &marker {
             // Without it the marker stays serial-less: every ViGEm pad then
             // counts as ours, as before P9.
-            if let Err(e) = marker.set_serial(pad.serial_no()) {
+            if let Err(e) = marker.set_serial(serial) {
                 tracing::warn!("recording the virtual pad's serial: {e}");
             }
         }
-        let rumble = pad.register_notification().map_err(driver)?;
-        Ok(VigemPad {
-            _client: self.client.clone(),
-            pad,
-            rumble,
-            last_rumble: Rumble::default(),
-            _marker: marker,
+        Ok(VigemPending {
+            client: self.client.clone(),
+            handle: Some(handle),
+            marker,
+            serial,
+            said: None,
         })
+    }
+}
+
+/// A pad plugged in that doesn't take input yet (P10). Dropping it unplugs
+/// it (vigem-rust's handle), then removes its marker: until then it stays
+/// known as ours.
+struct VigemPending {
+    client: Client,
+    handle: Option<TargetHandle<Xbox360, Pending>>,
+    marker: Option<PadMarker>,
+    serial: u32,
+    /// The last error logged, so each is logged once.
+    said: Option<String>,
+}
+
+impl VigemPending {
+    /// Waits up to `wait` for the pad: `Ok(None)` while it doesn't take
+    /// input, `Err` once it's gone for good.
+    fn ready(&mut self, wait: Duration) -> Result<Option<VigemPad>, InputError> {
+        let started = Instant::now();
+        let Some(handle) = &self.handle else {
+            return Err(driver("the virtual pad was already handed over"));
+        };
+        let error = match handle.wait_for_ready_timeout(wait) {
+            Ok(pad) => {
+                let rumble = pad.register_notification().map_err(driver)?;
+                // The ready handle shares the pending one's pad: dropping the
+                // pending one doesn't unplug it.
+                self.handle = None;
+                return Ok(Some(VigemPad {
+                    _client: self.client.clone(),
+                    pad,
+                    rumble,
+                    last_rumble: Rumble::default(),
+                    _marker: self.marker.take(),
+                }));
+            }
+            Err(ClientError::ReadyTimeout { .. }) => return Ok(None),
+            Err(
+                e @ (ClientError::TargetDoesNotExist { .. }
+                | ClientError::ClientNoLongerExists
+                | ClientError::Bus(
+                    vigem_rust::BusError::DeviceGone { .. }
+                    | vigem_rust::BusError::BusNotFound { .. }
+                    | vigem_rust::BusError::AccessDenied { .. },
+                )),
+            ) => return Err(driver(e)),
+            Err(e) => e.to_string(),
+        };
+        // Anything else may be Windows still setting it up: keep waiting,
+        // saying so once per kind of answer.
+        if self.said.as_deref() != Some(error.as_str()) {
+            tracing::info!("virtual pad {}: not ready yet ({error})", self.serial);
+            self.said = Some(error);
+        }
+        std::thread::sleep(wait.saturating_sub(started.elapsed()));
+        Ok(None)
+    }
+}
+
+impl PendingPad for VigemPending {
+    fn poll(&mut self, wait: Duration) -> Result<Option<Box<dyn VirtualPad>>, InputError> {
+        Ok(self
+            .ready(wait)?
+            .map(|pad| Box::new(pad) as Box<dyn VirtualPad>))
+    }
+
+    fn give_up(mut self: Box<Self>) -> Box<dyn Send> {
+        tracing::info!("virtual pad {}: given up, unplugging it", self.serial);
+        // Unplugged now; the marker stays with the caller.
+        self.handle = None;
+        Box::new(self.marker.take())
+    }
+}
+
+impl Drop for VigemPending {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            tracing::info!("virtual pad {}: given up, unplugging it", self.serial);
+        }
+        // The handle first (it unplugs the pad), then the marker.
+        self.handle = None;
     }
 }
 

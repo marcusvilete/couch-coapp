@@ -6,7 +6,7 @@ use std::{any::Any, process::Stdio, sync::Arc, time::Duration};
 
 use couch_codec_ffmpeg::{FfmpegEncoder, encoder::gpu_input_encoder};
 use couch_input::{
-    DEV_PAD_IDS, HidUsage, InputError, KbmInjector, VirtualPad, VirtualPadFactory,
+    DEV_PAD_IDS, HidUsage, InputError, KbmInjector, Plugged, VirtualPadFactory,
     local::{ControllerIds, LocalPads},
     shortcuts::Shortcut,
 };
@@ -208,8 +208,8 @@ impl Backend for WindowsBackend {
         })
     }
 
-    fn plug_pad(&self, real_ids: bool) -> Result<Box<dyn VirtualPad>, InputError> {
-        VigemPadFactory::connect((!real_ids).then_some(DEV_PAD_IDS))?.plug()
+    fn plug_pad(&self, real_ids: bool) -> Result<Plugged, InputError> {
+        VigemPadFactory::connect((!real_ids).then_some(DEV_PAD_IDS))?.plug_pending()
     }
 
     fn kbm(&self) -> Box<dyn KbmInjector> {

@@ -296,6 +296,10 @@ pub enum Command {
     },
     /// While streaming: let viewers have control again after the panic key.
     AllowControl,
+    /// While hosting: stop waiting for the virtual pads Windows is still
+    /// setting up (P10). They are unplugged, and their seats go on without
+    /// one.
+    StopWaitingForPads,
 }
 
 /// One row of [`Command::GetShortcuts`].
@@ -689,6 +693,14 @@ pub struct SessionView {
     /// For the host: how loud guests hear the sound, 0 to 400% of the game's
     /// (P7); `None` for others' sessions.
     pub sound_level: Option<u16>,
+    /// For the host: the seats whose virtual pads Windows is still setting
+    /// up (P10), each taking its seat's input once ready.
+    pub pads_setting_up: Vec<u8>,
+    /// How long that has taken so far, in seconds, when this view was made.
+    pub pads_setting_up_secs: u32,
+    /// For the host: the seats with a pad that have none, for the rest of the
+    /// session (it couldn't be plugged, or setting it up was given up).
+    pub pads_missing: Vec<u8>,
 }
 
 /// Whether a session streams anything (M19).
@@ -1016,6 +1028,7 @@ impl fmt::Debug for Command {
                 .field("controller", controller)
                 .finish(),
             Self::AllowControl => f.write_str("AllowControl"),
+            Self::StopWaitingForPads => f.write_str("StopWaitingForPads"),
         }
     }
 }

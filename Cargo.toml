@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.17.2"
+version = "0.17.3"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -112,3 +112,9 @@ lto = true
 codegen-units = 1
 strip = true
 debug = false
+
+# vigem-rust with two changes: pads plugged from serial 1, so Windows sets up
+# each virtual controller device once, and a pad Windows is still setting up
+# kept rather than unplugged (third_party/vigem-rust/PATCHED.md).
+[patch.crates-io]
+vigem-rust = { path = "third_party/vigem-rust" }

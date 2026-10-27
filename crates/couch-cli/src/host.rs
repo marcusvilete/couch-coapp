@@ -157,6 +157,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             netem_elapsed,
             replace_grace: REPLACE_GRACE,
             local: local.clone(),
+            pad_setup_limit: couch_input::PAD_SETUP_LIMIT,
         },
     )
     .await;
@@ -383,6 +384,10 @@ fn on_event(
             event_line(event, qpc_now());
         }
         HostEvent::Note(text) => println!("{text}"),
+        // Their notes say it all (P10).
+        HostEvent::PadsSettingUp { .. }
+        | HostEvent::PadReady { .. }
+        | HostEvent::PadsMissing { .. } => {}
     }
     None
 }

@@ -47,6 +47,9 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     stream: { state: "waiting" },
     streaming: null,
     soundLevel: null,
+    padsSettingUp: [],
+    padsSettingUpSecs: 0,
+    padsMissing: [],
   };
 }
 

@@ -60,6 +60,9 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     stream: { state: "live" },
     streaming: null,
     soundLevel: null,
+    padsSettingUp: [],
+    padsSettingUpSecs: 0,
+    padsMissing: [],
     ...over,
   };
 }
@@ -285,6 +288,14 @@ export const SCENARIOS: Record<string, Scenario> = {
   "hosting-paused": {
     title: "Hosting: control paused",
     world: () => base([sofa({ sessions: [hosting({ controlPaused: true, requests: [] })] })]),
+  },
+  "hosting-pads-setting-up": {
+    title: "Hosting: Windows setting up two virtual controllers (P10)",
+    world: () => base([sofa({ sessions: [hosting({ padsSettingUp: [2, 3], padsSettingUpSecs: 42 })] })]),
+  },
+  "hosting-pads-missing": {
+    title: "Hosting: a seat left without its virtual controller (P10)",
+    world: () => base([sofa({ sessions: [hosting({ padsMissing: [3] })] })]),
   },
   "hosting-trouble": {
     title: "Hosting: no panic key, controllers can't hide",
