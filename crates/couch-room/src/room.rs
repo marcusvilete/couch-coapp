@@ -798,6 +798,11 @@ impl Room {
             && self.records.get(&member).is_none_or(|r| !r.body.left)
     }
 
+    /// Where a member said it can be reached, by its own signed record.
+    pub fn member_addr(&self, member: MemberId) -> Option<PeerAddr> {
+        self.records.get(&member).map(|r| r.body.addr.clone())
+    }
+
     fn active_peers(&self) -> impl Iterator<Item = MemberId> + '_ {
         self.records
             .keys()

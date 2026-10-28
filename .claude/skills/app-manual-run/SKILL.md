@@ -62,6 +62,8 @@ Ask the user to press each button and move each stick on their controller. alice
 - **If inputs are missing or wrong there,** the problem is ours: the viewer's `read_pad`, `couch_input::forward`, the router, or `couch_platform_win::vigem`.
 - `joy.cpl` → "Controller (XBOX 360 For Windows)" → Properties is the same check in Windows' own panel.
 
+**A stream window that takes many seconds to open** (or `release-check` failing with "the seat never went active"): time `couch-viewer --probe`, which starts SDL's controllers alone; it should take about 1 s. Steps of about 5 s mean a device that doesn't answer, most often a controller still paired over Bluetooth but switched off or lost (M16a: a DualShock 4 lost a year earlier cost 15 s). Removing that pairing in Settings → Bluetooth & devices fixes it; a device in an error state in Device Manager is the next suspect.
+
 ## The viewer's HUD without a session
 
 ```powershell

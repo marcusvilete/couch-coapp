@@ -2494,6 +2494,21 @@ impl Engine {
             ))
             .await;
     }
+
+    /// For tests: dials `member` in `room` again while connected. When we
+    /// dialed the connection up now, the room keeps the new one and closes
+    /// the old one as a duplicate, on both sides: a connection replaced
+    /// while still working (M16a).
+    #[doc(hidden)]
+    pub async fn dial_again(&self, room: &str, member: &str) {
+        let _ = self
+            .actor
+            .send(rooms::Input::DialAgain(
+                room.to_string(),
+                member.to_string(),
+            ))
+            .await;
+    }
 }
 
 #[cfg(test)]

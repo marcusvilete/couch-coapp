@@ -342,10 +342,46 @@ impl Actor {
 
     /// The connection to the host we watch went: wait for it to come back,
     /// with the window open, unless we were only joining.
+    ///
+    /// Unless another connection to the host is already up: when both of us
+    /// dialed at once and one connection was kept, the host's announcement
+    /// came on that one already, so waiting for one would wait in vain, and
+    /// a request still waiting would be refused for nothing (seen on Linux,
+    /// M16a). Then we ask again there at once, as a new viewer: the seats
+    /// went with the old connection, as on any reconnection.
     fn lost_host(&mut self, now: Instant) {
         let Some(w) = self.sessions.watching.as_ref() else {
             return;
         };
+        // Only a connection we can ask on (`ask_again` needs it): otherwise
+        // the usual reconnecting below, which times out.
+        if !matches!(w.state, WatchState::Reconnecting)
+            && w.watch.is_some()
+            && let Some(conn) = self
+                .current_conn(w.room, w.host)
+                .filter(|conn| *conn != w.conn && self.conns.contains_key(conn))
+        {
+            let room = w.room;
+            let w = self.sessions.watching.as_mut().expect("checked above");
+            // A seat held, or asked for, went with the old connection: say so,
+            // or the bar and the app would still show it.
+            let had_seat = !w.holding.is_empty() || matches!(w.state, WatchState::Asking(_));
+            w.holding.clear();
+            w.note = if had_seat {
+                "Joined again on a new connection; ask the host for a seat".into()
+            } else {
+                String::new()
+            };
+            // A request waiting for the host's answer keeps waiting.
+            if !matches!(w.state, WatchState::Joining(Some(_))) {
+                w.state = WatchState::Joining(None);
+            }
+            tracing::info!(room = ?room, "the connection to the host was replaced; joining its stream again on the one kept");
+            self.ask_again(conn);
+            self.send_hud();
+            self.announce(room, now);
+            return;
+        }
         match w.state {
             WatchState::Reconnecting => return,
             // Asked to watch, not watching yet: the waiting command hears.
@@ -426,30 +462,40 @@ impl Actor {
             self.end_watch(WatchEnd::Ended, true, now);
             return;
         }
-        let Some(c) = self.conns.get(&conn) else {
+        if !self.ask_again(conn) {
             return;
+        }
+        let w = self.sessions.watching.as_mut().expect("checked above");
+        w.state = WatchState::Joining(None);
+        w.note = String::new();
+        tracing::info!(room = ?room, "the host is back; joining its stream again");
+        self.send_hud();
+        self.announce(room, now);
+    }
+
+    /// Asks the host we watch to take us again, on `conn`: the watch moves to
+    /// that connection (subscribed before asking, as when watching starts),
+    /// and a new join attempt is timed. False if `conn` or the watch is gone.
+    fn ask_again(&mut self, conn: ConnId) -> bool {
+        let Some(w) = self.sessions.watching.as_ref() else {
+            return false;
         };
-        let Some(watch) = w.watch.as_ref() else {
-            return;
+        let (Some(c), Some(watch)) = (self.conns.get(&conn), w.watch.as_ref()) else {
+            return false;
         };
-        // Subscribed before asking, as when watching starts.
         let link = watch.reconnect(c.conn.clone(), &c.datagrams, &c.streams);
         let w = self.sessions.watching.as_mut().expect("checked above");
         w.conn = conn;
         w.link = link;
-        w.state = WatchState::Joining(None);
-        w.note = String::new();
         w.attempt += 1;
-        let attempt = w.attempt;
-        tracing::info!(room = ?room, "the host is back; joining its stream again");
+        let (session, attempt) = (w.session, w.attempt);
         let codecs = self.backend.decodes();
         self.send(
             conn,
             Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session, codecs })),
         );
         self.join_timer(session, attempt);
-        self.send_hud();
-        self.announce(room, now);
+        true
     }
 
     // ---- Messages ----

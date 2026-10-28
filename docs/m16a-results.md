@@ -56,15 +56,30 @@ Version 0.23.2, the same wire revision as 0.23.1: nothing changes on Windows.
 
 - **The tests' port picker looped forever on Linux.** It held an IPv4 socket on a port while binding IPv6 to it. On Windows an IPv6 socket covers IPv6 only; on Linux it covers IPv4 too, so every port looked taken. The rooms tests hung for 37 minutes before this was found.
 - **Engines restarting on their own port lost it sometimes:** rarely on Windows, often on Linux. The picker probed with port 0, and the OS could hand a parallel test the port a restarting engine had just let go. Test ports now come from a counter in a range no OS picks by itself (`couch_testkit::net::free_udp_port`), still checked free on both IPv4 and IPv6.
-- **A newcomer asking to watch while its connections settle is refused** ("lost the connection to the host"). When two members dial each other at once, one connection replaces the other; a watch request waiting on the replaced one fails (`rooms::sessions`, `lost_host` in `WatchState::Joining`). In the app, Watch works on a second click.
-  - Seen once in six Linux runs of `a_newcomer_sees_a_session_already_live`, never on Windows.
-  - The scenario now waits for the connections to settle before watching, since it is about the newcomer seeing the session.
-  - **The race itself is left for a session change of its own**, with the room-security and input-safety checks.
+- **A real race in the app, fixed (the author's choice: in this PR):** a watcher whose connection to the host was *replaced* treated it as *lost*. When two members dial each other at once, one connection is kept and the other closed.
+  - **What went wrong:**
+    - a watch request still waiting for the host's answer was refused ("lost the connection to the host");
+    - a resume waited for the host's announcement, which had already come on the kept connection, until it timed out.
+  - **Where it showed:** in about one Linux run in five, in `a_newcomer_sees_a_session_already_live` and `watching_resumes_when_the_connection_to_the_host_comes_back`; never seen on Windows.
+  - **The fix:** `rooms::sessions::lost_host` now first looks for another connection to the host already up, and asks again there at once (`ask_again`, shared with `resume_watching`):
+    - a request waiting for its answer keeps waiting;
+    - the seats go, as on any reconnection, so the watcher joins again as a new viewer;
+    - only when no connection remains does the old behaviour apply (refuse a first request, or wait to resume).
+  - **A scenario that always reaches it,** `a_replaced_connection_rejoins_at_once_and_frees_the_seat`. A guest holding a seat has its connection to the host replaced while it still works: the side that dialed it dials again, through a new test hook, `Engine::dial_again`, with `Room::member_addr` to read the address. The scenario checks that:
+    - the host gets the seat back;
+    - the window is told;
+    - the guest watches again in the same window, with frames;
+    - no stale "You have …" note is left;
+    - control can be given again.
+  - **The review's points:** the note now says the seat went ("Joined again on a new connection; ask the host for a seat") or is cleared, and a connection that can't be asked on falls back to reconnecting.
+  - **Checked:** fifteen Linux runs of the rooms and sessions scenarios, all green. The room-security checks pass. The input-safety checks pass: the input crates, the session machine and its property test, `release-check` (5 of 5), `input-sink`, and `lifecycle-check` (6 of 6).
+- **Engines restarting on their own port in the tests,** on CI's runner: iroh lets go of its socket a moment after `shutdown` returns. The tests' start helpers now wait out a port still held, up to 5 s. The app restarts as a new process, so it never meets this.
 - **A desktop control scenario raced its own waits** (`desktop_control_ends_with_the_operator`, once in six Linux runs). After remote play was switched off and on, it waited for the device to see "an offer", and the old offer, its withdrawal still on the way, passed the wait. It now waits for the offer to go first, as for the device removed and added back; 20 runs then passed.
-- **WSL's wall clock jumped back and forth by 33.7 s** every few seconds (`journald`: "Time jumped backwards"). The author's Windows clock was 33.7 s fast (`w32tm /stripchart` against time.windows.com): WSL pushed Windows' time in, Ubuntu's own sync set the right one. Invite expiry rightly uses the wall clock, so `revoked_and_expired_invites_stop_working`, with its 1-second invite, once saw an expired invite accepted (once in eight runs in WSL).
+- **WSL's wall clock jumped back and forth by 33.7 s** every few seconds (`journald`: "Time jumped backwards"). The author's Windows clock was 33.7 s fast (`w32tm /stripchart` against time.windows.com): WSL pushed Windows' time in, Ubuntu's own sync set the right one. Invite expiry rightly uses the wall clock, so the two scenarios with a 1-second invite can fail in WSL: `revoked_and_expired_invites_stop_working` once saw an expired invite accepted, and `an_opened_invite_is_previewed_before_joining` once saw it previewed as "32 s left" (each about once in ten runs).
   - The app is right: on a real clock an invite expires on time, and a clock half a minute off doesn't matter for invites lasting a week.
   - The test is kept as it is. CI's runners and real Linux PCs keep a sane clock. The cure is syncing Windows' clock; `wsl --shutdown` doesn't help.
 - **The first clock test compared with `/proc/uptime`,** which counts time asleep where `CLOCK_MONOTONIC` doesn't. It would have failed on any Linux PC after a suspend.
+- **The stream window took 11–21 s to open on the author's PC** (`release-check` couldn't start its scenarios). SDL's controller scan waited about 5 s per query on a DualShock 4 still paired over Bluetooth but lost a year ago. Removing the pairing brought it back to 1 s, and SDL then found the DualSense too. Not the code; noted in the `app-manual-run` skill.
 - **A full disk on the author's PC:** `target\debug` had reached 225 GB, and a build ran out of space and corrupted itself. `cargo clean --profile dev` freed it, keeping the release build and the installer.
 
 ## The review

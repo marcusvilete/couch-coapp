@@ -94,6 +94,10 @@ pub(crate) enum Input {
     HomeRelay(oneshot::Sender<Option<String>>),
     /// For tests: drop the connection with a member, as a dead path would.
     DropConnection(String, String),
+    /// For tests: dial a member we are connected to again; the room keeps
+    /// the new connection and closes the old one, as when a dial crosses
+    /// one already up (M16a).
+    DialAgain(String, String),
     Shutdown(oneshot::Sender<()>),
     /// A backup, opened, to restore into this profile (M13): here, so no
     /// room is created or joined under the old identity meanwhile.
@@ -546,6 +550,17 @@ impl Actor {
                 if let Some(c) = conn {
                     // As if the peer had gone silent.
                     admission::close(&c.conn, close_code::TIMED_OUT);
+                }
+            }
+            Input::DialAgain(room, member) => {
+                let target = RoomId::from_hex(&room)
+                    .zip(MemberId::from_hex(&member))
+                    .and_then(|(room, member)| {
+                        let addr = self.rooms.get(&room)?.room.member_addr(member)?;
+                        Some((room, member, addr))
+                    });
+                if let Some((room, member, addr)) = target {
+                    self.spawn_dial(room, member, addr);
                 }
             }
             Input::Shutdown(_) => unreachable!("handled by run"),

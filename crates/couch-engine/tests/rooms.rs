@@ -50,14 +50,29 @@ async fn start_with(dir: &Path, name: &str, options: EngineOptions) -> Engine {
         .with_test_writer()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
-    let engine = Engine::start(Profile::new("test", dir).unwrap(), options)
-        .await
-        .expect("engine starts");
+    let engine = start_engine(dir, options).await;
     engine
         .handle(Command::SetDisplayName { name: name.into() })
         .await
         .unwrap();
     engine
+}
+
+/// Starts an engine, waiting out a port its previous run still holds: iroh
+/// lets go of its socket a moment after `shutdown` returns, and only tests
+/// restart an engine on its own port within one process (the app restarts as
+/// a new process). Seen on CI's Linux runner (M16a).
+async fn start_engine(dir: &Path, options: EngineOptions) -> Engine {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Engine::start(Profile::new("test", dir).unwrap(), options.clone()).await {
+            Ok(engine) => return engine,
+            Err(EngineError::Net(e)) if e.contains("bind") && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("engine starts: {e:?}"),
+        }
+    }
 }
 
 async fn start(dir: &Path, name: &str, port: u16) -> Engine {

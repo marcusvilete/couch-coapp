@@ -1211,10 +1211,21 @@ impl Member {
     }
 }
 
+/// Starts an engine, waiting out a port its previous run still holds: iroh
+/// lets go of its socket a moment after `shutdown` returns, and only tests
+/// restart an engine on its own port within one process (the app restarts as
+/// a new process). Seen on CI's Linux runner (M16a).
 async fn start(dir: &Path, options: EngineOptions) -> Engine {
-    Engine::start(Profile::new("test", dir).unwrap(), options)
-        .await
-        .expect("engine starts")
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Engine::start(Profile::new("test", dir).unwrap(), options.clone()).await {
+            Ok(engine) => return engine,
+            Err(EngineError::Net(e)) if e.contains("bind") && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("engine starts: {e:?}"),
+        }
+    }
 }
 
 /// A session with one controller seat, nothing streamed yet (M19).
@@ -2873,6 +2884,60 @@ async fn watching_resumes_when_the_connection_to_the_host_comes_back() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M16a: the connection to the host replaced by another while both are up
+/// (a dial crossing one already working, which Linux's timing showed). The
+/// guest's seat goes with the old connection, as on any reconnection; it
+/// joins again at once on the one kept, in the same window, without waiting
+/// for an announcement that already came, and is told it lost the seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_connection_rejoins_at_once_and_frees_the_seat() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &window).await;
+
+    // Whoever dialed the connection dials again: both sides keep the new one
+    // and close the old one as a duplicate.
+    let b_dialed = b
+        .engine()
+        .connections(&room)
+        .await
+        .into_iter()
+        .find(|(m, _)| *m == a.id())
+        .map(|(_, dialed)| dialed)
+        .expect("B is connected to A");
+    if b_dialed {
+        b.engine().dial_again(&room, &a.id()).await;
+    } else {
+        a.engine().dial_again(&room, &b.id()).await;
+    }
+
+    a.wait_session(&room, &a, "the seat back with the host", |s| {
+        s.is_some_and(|s| holder(s, 0).is_none())
+    })
+    .await;
+    wait("the window told it lost the seat", || !window.holding()).await;
+    // Whichever way it heard first (the stream link, or the room), never the
+    // stale "You have …" note: none, or that the seat went.
+    b.wait_session(&room, &a, "watching again, no stale note", |s| {
+        s.is_some_and(|s| {
+            s.role == SessionRole::Watching
+                && s.note.as_deref().is_none_or(|n| n.contains("ask the host"))
+        })
+    })
+    .await;
+    a.wait_session(&room, &a, "B among the viewers again", |s| {
+        s.is_some_and(|s| s.viewers.contains(&b.id()))
+    })
+    .await;
+    let before = window.frames();
+    wait("frames again", || window.frames() > before + 5).await;
+    assert_eq!(b.fake.viewers.lock().unwrap().len(), 1, "the same window");
+    // The seat is the host's to give again, as after any reconnection.
+    give_control(&room, &mut a, &b, &window).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_that_ended_meanwhile_is_not_resumed() {
     let (mut a, mut b, mut c, room) = three().await;
@@ -4337,15 +4402,8 @@ async fn a_newcomer_sees_a_session_already_live() {
             |s| s.is_some_and(|s| s.stream == StreamStateView::Live),
         )
         .await;
-        // The newcomer's connections settle first: asked to watch while one
-        // replaces another, the request is refused ("lost the connection to
-        // the host", seen on Linux, M16a), a known race of its own.
-        if owner_hosts {
-            // Bia never joined.
-            full_mesh(&room, &[&host, &c]).await;
-        } else {
-            full_mesh(&room, &[&host, &other, &c]).await;
-        }
+        // Asked at once, while the newcomer's connections may still be
+        // settling: a connection replaced meanwhile must not refuse it (M16a).
         let window = watching(&room, &host, &c).await;
         wait("frames for the newcomer", || window.frames() > 0).await;
         stop_all(&mut [&mut host, &mut other, &mut c]).await;
