@@ -136,6 +136,11 @@ bitflags! {
         const GAMEPAD = 1 << 0;
         const KEYBOARD = 1 << 1;
         const MOUSE = 1 << 2;
+        /// Desktop control (M25b, ADR 0010): keyboard and mouse reach the
+        /// whole desktop, without the game window in front, and the Windows
+        /// key, Alt+Tab and the rest pass. Only ever granted, with the
+        /// keyboard-and-mouse seat, to the home PC's unlocked operator.
+        const DESKTOP = 1 << 3;
     }
 }
 
@@ -143,6 +148,10 @@ impl Permissions {
     /// Guests get the gamepad only. Keyboard and mouse amount to remote control
     /// of the host's PC, so the host grants them explicitly.
     pub const GUEST_DEFAULT: Self = Self::GAMEPAD;
+    /// Every kind of input, without desktop control: what a seat with a
+    /// controller, keyboard and mouse gives. Never `Permissions::all()`
+    /// for that, which includes [`Self::DESKTOP`].
+    pub const ALL_INPUT: Self = Self::GAMEPAD.union(Self::KEYBOARD).union(Self::MOUSE);
 }
 
 fn short_hex(bytes: &[u8]) -> String {

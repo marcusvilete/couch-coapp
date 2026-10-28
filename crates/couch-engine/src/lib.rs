@@ -315,6 +315,9 @@ pub enum Command {
     /// setting up (P10). They are unplugged, and their seats go on without
     /// one.
     StopWaitingForPads,
+    /// The host: the window we stream to the front (M25b), restored if
+    /// minimized. Only ever that window.
+    BringToFront,
     /// While watching: the stream window's volume (P11), 0 to 100%, saved
     /// for the profile as the window's own slider is.
     SetStreamVolume {
@@ -429,6 +432,14 @@ pub enum RemoteAction {
     },
     AllowControl,
     StopWaitingForPads,
+    /// Desktop control of the home PC (M25b), for this device: its keyboard
+    /// and mouse reach the whole desktop through the session's keyboard
+    /// seat, or stop.
+    Desktop {
+        on: bool,
+    },
+    /// The window the home PC streams, to the front (M25b).
+    BringToFront,
 }
 
 impl RemoteAction {
@@ -447,6 +458,8 @@ impl RemoteAction {
             Self::PlaySeat { .. } => "PlaySeat",
             Self::AllowControl => "AllowControl",
             Self::StopWaitingForPads => "StopWaitingForPads",
+            Self::Desktop { .. } => "Desktop",
+            Self::BringToFront => "BringToFront",
         }
     }
 }
@@ -945,6 +958,8 @@ pub struct SessionView {
     pub stream_window: Option<StreamWindowView>,
     /// For a viewer: whether the host's game is in front on their PC, as the
     /// host last said (keyboard and mouse don't reach it while it isn't).
+    /// For the host, and a session we run from afar (M25b): whether the
+    /// streamed window is, for Bring to front; `None` for a screen.
     pub game_in_front: Option<bool>,
     /// For a viewer: the latest news, as the stream window's bar shows it
     /// ("The host said no, for now"); `None` for none.
@@ -954,6 +969,9 @@ pub struct SessionView {
     pub operator: bool,
     /// For the host: our devices running this session from afar, by name.
     pub operated_by: Vec<String>,
+    /// For the host, and a session we run from afar: the member controlling
+    /// the host's desktop (M25b), by id. The host's banner names its device.
+    pub desktop: Option<String>,
 }
 
 /// Whether a session streams anything (M19).
@@ -981,6 +999,8 @@ pub struct StreamView {
     pub fps: u32,
     pub max_mbps: u32,
     pub upload_mbps: Option<u32>,
+    /// A screen rather than a window (M25b): nothing to bring to the front.
+    pub screen: bool,
 }
 
 impl fmt::Debug for StreamView {
@@ -990,6 +1010,7 @@ impl fmt::Debug for StreamView {
             .field("fps", &self.fps)
             .field("max_mbps", &self.max_mbps)
             .field("upload_mbps", &self.upload_mbps)
+            .field("screen", &self.screen)
             .finish()
     }
 }
@@ -1162,6 +1183,9 @@ pub struct RemotePlayView {
     pub wait_secs: Option<u32>,
     /// On a device: the home PCs it accepted.
     pub hosts: Vec<RemoteDeviceView>,
+    /// The device controlling this PC's desktop now, by name (M25b): adding
+    /// a device and changing the PIN wait until it ends.
+    pub desktop: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1337,6 +1361,7 @@ impl fmt::Debug for Command {
                 .finish(),
             Self::AllowControl => f.write_str("AllowControl"),
             Self::StopWaitingForPads => f.write_str("StopWaitingForPads"),
+            Self::BringToFront => f.write_str("BringToFront"),
             Self::SetStreamVolume { percent, muted } => f
                 .debug_struct("SetStreamVolume")
                 .field("percent", percent)
@@ -2462,6 +2487,7 @@ mod tests {
                 fps: 60,
                 max_mbps: 20,
                 upload_mbps: None,
+                screen: false,
             }
         );
         assert!(!streaming.contains("Bank"), "{streaming}");

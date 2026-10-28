@@ -33,6 +33,14 @@
 //! the router carries out only if the seat is still free, so it can never
 //! take a seat from a viewer it was just passed to. A seat the host takes
 //! back, their own included, stays empty until they play one again.
+//!
+//! **Desktop control** (M25b, ADR 0010) goes to one viewer at a time, the
+//! one the engine names ([`HostSession::set_desktop`]: the home PC's own
+//! unlocked device, never a guest; this machine doesn't know who that is).
+//! Only a grant of the keyboard-and-mouse seat to that viewer carries
+//! [`Permissions::DESKTOP`], never another seat or member, nor the host. It
+//! ends with the engine's word, the viewer leaving, the panic key, taking
+//! that seat back, passing it to someone else, and the session's end.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -100,6 +108,8 @@ pub enum SessionError {
     NoPad,
     #[error("say which of their controllers moves to it: each of them plays a seat already")]
     ChooseController,
+    #[error("this session has no keyboard-and-mouse seat")]
+    NoKeyboardSeat,
     #[error("the session has ended")]
     Ended,
 }
@@ -213,6 +223,9 @@ pub struct HostSession {
     /// sent: they count toward a viewer's seats too, so two quick grants
     /// never give it more than its controllers allow.
     pending: Vec<PendingGrant>,
+    /// The viewer whose grant of the keyboard-and-mouse seat carries desktop
+    /// control (M25b), as the engine last said.
+    desktop: Option<MemberId>,
 }
 
 /// A grant on its way to the router (M18).
@@ -274,6 +287,7 @@ impl HostSession {
             drivers: BTreeMap::new(),
             asked_with: BTreeMap::new(),
             pending: Vec::new(),
+            desktop: None,
         })
     }
 
@@ -455,6 +469,29 @@ impl HostSession {
         self.paused
     }
 
+    /// The keyboard-and-mouse seat, if the session has one.
+    pub fn keyboard_seat(&self) -> Option<SeatId> {
+        self.config
+            .seats
+            .iter()
+            .position(|k| k.permissions().contains(Permissions::KEYBOARD))
+            .map(|i| SeatId(i as u8))
+    }
+
+    /// The viewer given desktop control (M25b), whether or not the router
+    /// has reported its grant yet.
+    pub fn desktop(&self) -> Option<MemberId> {
+        self.desktop
+    }
+
+    /// The viewer controlling the desktop now: given it, and holding the
+    /// keyboard-and-mouse seat as the router last reported.
+    pub fn desktop_holder(&self) -> Option<MemberId> {
+        let seat = self.keyboard_seat()?;
+        self.desktop
+            .filter(|m| self.holders[usize::from(seat.0)] == Some(*m))
+    }
+
     pub fn is_ended(&self) -> bool {
         self.ended
     }
@@ -623,6 +660,9 @@ impl HostSession {
         self.drivers.remove(&member);
         self.asked_with.remove(&member);
         self.pending.retain(|p| p.member != member);
+        if self.desktop == Some(member) {
+            self.desktop = None;
+        }
         // Stopping the viewer releases what it held; the router's own report
         // of that follows.
         for holder in &mut self.holders {
@@ -705,9 +745,25 @@ impl HostSession {
         if self.ended {
             return Vec::new();
         }
-        self.seats_of(member)
+        let mut seats: Vec<SeatId> = self
+            .seats_of(member)
             .into_iter()
             .filter(|s| seat.is_none_or(|one| one == *s))
+            .collect();
+        // Giving the keyboard-and-mouse seat back ends desktop control, and
+        // takes back its grant even if the router hasn't reported it yet:
+        // otherwise it would land after, untracked (M25b review).
+        if self.desktop == Some(member)
+            && let Some(kbm) = self.keyboard_seat()
+            && seat.is_none_or(|s| s == kbm)
+        {
+            self.desktop = None;
+            if !seats.contains(&kbm) {
+                seats.push(kbm);
+            }
+        }
+        seats
+            .into_iter()
             .map(|s| Effect::Revoke {
                 seat: s,
                 holder: Some(member),
@@ -917,6 +973,9 @@ impl HostSession {
                 for h in self.homes.iter_mut().filter(|h| h.seat == seat) {
                     h.home = Home::LeftEmpty;
                 }
+                if Some(seat) == self.keyboard_seat() {
+                    self.desktop = None;
+                }
                 vec![Effect::Revoke { seat, holder: None }]
             }
             Some(_) => Vec::new(),
@@ -924,9 +983,52 @@ impl HostSession {
             // may not know of it yet.
             None => {
                 self.everything_taken_back();
+                self.desktop = None;
                 vec![Effect::RevokeViewers]
             }
         }
+    }
+
+    /// Desktop control for `member` (M25b), or for nobody with `None`: the
+    /// engine's word, for the home PC's unlocked device alone. Giving it
+    /// hands `member` the keyboard-and-mouse seat again with
+    /// [`Permissions::DESKTOP`], even if it holds it already (a new epoch, so
+    /// nothing sent without it counts); ending it takes that seat back from
+    /// them, to stay empty.
+    pub fn set_desktop(&mut self, member: Option<MemberId>) -> Result<Vec<Effect>, SessionError> {
+        if self.ended {
+            return Err(SessionError::Ended);
+        }
+        let Some(member) = member else {
+            let Some(was) = self.desktop.take() else {
+                return Ok(Vec::new());
+            };
+            let mut fx: Vec<Effect> = self
+                .keyboard_seat()
+                .map(|seat| Effect::Revoke {
+                    seat,
+                    holder: Some(was),
+                })
+                .into_iter()
+                .collect();
+            fx.push(Effect::Changed);
+            return Ok(fx);
+        };
+        let seat = self.keyboard_seat().ok_or(SessionError::NoKeyboardSeat)?;
+        if !self.is_viewer(member) {
+            return Err(SessionError::NotViewer);
+        }
+        if self.paused {
+            return Err(SessionError::ControlPaused);
+        }
+        self.desktop = Some(member);
+        if self.requests.contains(&(member, seat)) {
+            self.requests.retain(|r| *r != (member, seat));
+            self.asked_with.remove(&member);
+        }
+        let mut fx = self.grant(member, seat, None);
+        fx.push(Effect::Changed);
+        Ok(fx)
     }
 
     /// Every viewer's seat taken back: the host's they had passed on stay
@@ -1023,6 +1125,7 @@ impl HostSession {
         let host = self.host();
         self.pending.retain(|p| Some(p.member) == host);
         self.everything_taken_back();
+        self.desktop = None;
         let waiting = std::mem::take(&mut self.requests);
         self.asked_with.clear();
         fx.extend(waiting.into_iter().map(|(member, _)| self.declined(member)));
@@ -1068,6 +1171,7 @@ impl HostSession {
         self.requests.clear();
         self.asked_with.clear();
         self.pending.clear();
+        self.desktop = None;
         vec![
             Effect::Broadcast(ControlMessage::SessionEnded(SessionEnded {
                 session: self.id,
@@ -1116,8 +1220,15 @@ impl HostSession {
             .collect();
         // The host's keyboard and mouse reach the game directly; only their
         // controller goes through the seat.
+        let keyboard = Some(seat) == self.keyboard_seat();
+        // The keyboard-and-mouse seat to anyone else ends desktop control.
+        if keyboard && self.desktop.is_some_and(|d| d != member) {
+            self.desktop = None;
+        }
         let permissions = if self.is_host(member) {
             Permissions::GAMEPAD
+        } else if keyboard && self.desktop == Some(member) {
+            self.permissions(seat) | Permissions::DESKTOP
         } else {
             self.permissions(seat)
         };

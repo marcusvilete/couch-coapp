@@ -132,6 +132,14 @@ pub enum RemoteOp {
     },
     AllowControl,
     StopWaitingForPads,
+    /// Desktop control (M25b): the session's keyboard-and-mouse seat goes to
+    /// this operator with [`crate::ids::Permissions::DESKTOP`], or comes back.
+    Desktop {
+        on: bool,
+    },
+    /// The streamed window to the front (M25b). Only ever the streamed
+    /// window: the op names none.
+    BringToFront,
 }
 
 impl fmt::Debug for RemoteOp {
@@ -192,6 +200,8 @@ impl fmt::Debug for RemoteOp {
                 .finish(),
             Self::AllowControl => f.write_str("AllowControl"),
             Self::StopWaitingForPads => f.write_str("StopWaitingForPads"),
+            Self::Desktop { on } => f.debug_struct("Desktop").field("on", on).finish(),
+            Self::BringToFront => f.write_str("BringToFront"),
         }
     }
 }
@@ -338,6 +348,11 @@ pub struct RemoteSession {
     pub host_homes: Vec<SeatId>,
     /// Whether the home PC has its panic key.
     pub panic_key: bool,
+    /// The operator controlling the desktop, if one does (M25b).
+    pub desktop: Option<MemberId>,
+    /// Whether the streamed window is in front, once the home PC knows;
+    /// `None` for a screen (M25b).
+    pub in_front: Option<bool>,
 }
 
 /// Its `Debug` leaves out the name, a window's title.
@@ -347,6 +362,8 @@ pub struct RemoteStream {
     pub fps: u32,
     pub max_mbps: u32,
     pub upload_mbps: Option<u32>,
+    /// A screen rather than a window (M25b): nothing to bring to the front.
+    pub screen: bool,
 }
 
 impl fmt::Debug for RemoteStream {
@@ -354,6 +371,7 @@ impl fmt::Debug for RemoteStream {
         f.debug_struct("RemoteStream")
             .field("fps", &self.fps)
             .field("max_mbps", &self.max_mbps)
+            .field("screen", &self.screen)
             .finish_non_exhaustive()
     }
 }
@@ -479,6 +497,7 @@ mod tests {
                     fps: 60,
                     max_mbps: 20,
                     upload_mbps: None,
+                    screen: false,
                 }
             ),
         ];
@@ -538,6 +557,8 @@ mod tests {
                 host_controllers: Vec::new(),
                 host_homes: Vec::new(),
                 panic_key: true,
+                desktop: None,
+                in_front: None,
             }),
         };
         assert!(state(vec![guest(0)]).checked().is_some());

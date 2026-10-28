@@ -8,4 +8,8 @@ export type StreamView = {
 /**
  * The window's title or the screen's name, as the panel named it.
  */
-name: string, fps: number, maxMbps: number, uploadMbps: number | null, };
+name: string, fps: number, maxMbps: number, uploadMbps: number | null, 
+/**
+ * A screen rather than a window (M25b): nothing to bring to the front.
+ */
+screen: boolean, };

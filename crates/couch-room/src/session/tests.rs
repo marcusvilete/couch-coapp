@@ -277,6 +277,99 @@ fn two_guests_play_two_seats() {
     assert_eq!(s.holders(), &[None, Some(BIA)]);
 }
 
+/// M25b: desktop control goes with the keyboard-and-mouse seat to the one
+/// viewer the engine names, and to nobody else.
+#[test]
+fn desktop_control_rides_the_keyboard_seat_of_the_viewer_named() {
+    let kbm = Permissions::KEYBOARD | Permissions::MOUSE;
+    let desktop = kbm | Permissions::DESKTOP;
+    let mut s = with_seats(&[SeatKind::Controller, SeatKind::KeyboardMouse]);
+    s.join(ANA);
+    s.join(BIA);
+    assert_eq!(
+        s.set_desktop(Some(CAIO)).unwrap_err(),
+        SessionError::NotViewer
+    );
+    // Bia holds the keyboard seat: Ana's desktop control takes it.
+    s.pass(BIA, S1).unwrap();
+    s.seat_changed(S1, Some(BIA));
+    let fx = s.set_desktop(Some(ANA)).unwrap();
+    assert_eq!(grant_of(&fx), Some((S1, ANA, desktop)));
+    s.seat_changed(S1, Some(ANA));
+    assert_eq!(s.desktop_holder(), Some(ANA));
+    // Again while holding it: granted again, with a new epoch at the router.
+    assert_eq!(
+        grant_of(&s.set_desktop(Some(ANA)).unwrap()),
+        Some((S1, ANA, desktop))
+    );
+    // Her pad seat carries none of it, nor does Bia's keyboard seat.
+    assert_eq!(
+        grant_of(&s.pass(ANA, S0).unwrap()),
+        Some((S0, ANA, Permissions::GAMEPAD))
+    );
+    assert_eq!(grant_of(&s.pass(BIA, S1).unwrap()), Some((S1, BIA, kbm)));
+    assert_eq!(s.desktop(), None, "passing the seat on ends it");
+    s.seat_changed(S1, Some(BIA));
+    // Ended by the engine: the seat comes back from her alone.
+    s.set_desktop(Some(ANA)).unwrap();
+    s.seat_changed(S1, Some(ANA));
+    assert_eq!(
+        s.set_desktop(None).unwrap(),
+        vec![
+            Effect::Revoke {
+                seat: S1,
+                holder: Some(ANA)
+            },
+            Effect::Changed
+        ]
+    );
+    s.seat_changed(S1, None);
+    assert_eq!(grant_of(&s.pass(ANA, S1).unwrap()), Some((S1, ANA, kbm)));
+}
+
+#[test]
+fn desktop_control_ends_with_the_viewer_the_panic_key_and_the_end() {
+    let mut s = with_seats(&[SeatKind::KeyboardMouse]);
+    s.join(ANA);
+    s.set_desktop(Some(ANA)).unwrap();
+    s.leave(ANA);
+    assert_eq!(s.desktop(), None);
+    s.join(ANA);
+    s.set_desktop(Some(ANA)).unwrap();
+    s.panic();
+    assert_eq!(s.desktop(), None);
+    assert_eq!(
+        s.set_desktop(Some(ANA)).unwrap_err(),
+        SessionError::ControlPaused
+    );
+    s.allow_control();
+    s.set_desktop(Some(ANA)).unwrap();
+    s.take_back(Some(S0));
+    assert_eq!(s.desktop(), None);
+    // Given back before the router reported the grant: it is taken back
+    // all the same (M25b review), so it can't land untracked.
+    s.set_desktop(Some(ANA)).unwrap();
+    assert_eq!(
+        s.give_back(ANA, None),
+        vec![Effect::Revoke {
+            seat: S0,
+            holder: Some(ANA)
+        }]
+    );
+    assert_eq!(s.desktop(), None);
+    s.set_desktop(Some(ANA)).unwrap();
+    s.end(EndReason::HostStopped);
+    assert_eq!(s.desktop(), None);
+    assert_eq!(s.set_desktop(Some(ANA)).unwrap_err(), SessionError::Ended);
+    // No keyboard seat, no desktop control.
+    let mut pads = with_seats(&[SeatKind::Controller]);
+    pads.join(ANA);
+    assert_eq!(
+        pads.set_desktop(Some(ANA)).unwrap_err(),
+        SessionError::NoKeyboardSeat
+    );
+}
+
 /// M24: a session nobody plays. Viewers watch; nothing they ask for, and
 /// nothing the host tries, hands out a seat.
 #[test]
@@ -1387,6 +1480,8 @@ enum Op {
     Deliver,
     /// The router gives a seat back on its own (a holder gone quiet).
     Lapse(u8),
+    /// The engine gives a viewer desktop control, or ends it (M25b).
+    Desktop(Option<u8>),
     Wait(u64),
     End,
 }
@@ -1410,6 +1505,7 @@ fn op() -> impl Strategy<Value = Op> {
         5 => (who.clone(), seat.clone()).prop_map(|(w, s)| Op::Pass(w, s)),
         3 => (who.clone(), seat.clone(), 0u8..4).prop_map(|(w, s, c)| Op::PassWith(w, s, c)),
         2 => (who.clone(), seat.clone(), 0u8..4).prop_map(|(w, s, c)| Op::RequestWith(w, s, c)),
+        2 => proptest::option::of(who.clone()).prop_map(Op::Desktop),
         2 => (who, 0u8..4).prop_map(|(w, c)| Op::Drive(w, c)),
         1 => proptest::option::of(seat.clone()).prop_map(Op::TakeBack),
         2 => (seat.clone(), 0u8..3).prop_map(|(s, c)| Op::Play(s, c)),
@@ -1569,6 +1665,10 @@ proptest! {
         let max_host = homes.len();
         let mut host_held_two = false;
         let mut viewer_two = false;
+        // Who was given desktop control, from the ops alone (M25b): the
+        // session may end it on more (a pass to another, a give-back), never
+        // grant it to anyone else.
+        let mut desktop: Option<MemberId> = None;
 
         for op in ops {
             let paused_before = s.control_paused();
@@ -1641,6 +1741,13 @@ proptest! {
                     router.release(usize::from(seat));
                     Vec::new()
                 }
+                Op::Desktop(i) => match s.set_desktop(i.map(member)) {
+                    Ok(fx) => {
+                        desktop = i.map(member);
+                        fx
+                    }
+                    Err(_) => Vec::new(),
+                },
                 Op::Wait(ms) => {
                     now += Duration::from_millis(ms);
                     Vec::new()
@@ -1667,6 +1774,11 @@ proptest! {
                     _ => {}
                 }
             }
+            match op {
+                Op::Leave(i) if desktop == Some(member(i)) => desktop = None,
+                Op::Panic | Op::End | Op::TakeBack(None) | Op::TakeBack(Some(2)) => desktop = None,
+                _ => {}
+            }
             for effect in &fx {
                 if let Effect::Grant { seat, member, .. } = effect
                     && *member != HOST
@@ -1687,7 +1799,13 @@ proptest! {
                     } else {
                         prop_assert!(!paused_before, "a grant to a viewer while paused");
                         prop_assert!(s.is_viewer(*member), "a grant to a non-viewer");
-                        prop_assert_eq!(*permissions, SEATS[usize::from(seat.0)].permissions());
+                        let kind = SEATS[usize::from(seat.0)].permissions();
+                        if permissions.contains(Permissions::DESKTOP) {
+                            prop_assert_eq!(desktop, Some(*member), "desktop control to another");
+                            prop_assert_eq!(*seat, SeatId(2), "desktop control on a pad seat");
+                            prop_assert_eq!(*permissions, kind | Permissions::DESKTOP);                        } else {
+                            prop_assert_eq!(*permissions, kind);
+                        }
                     }
                 }
                 if let Effect::Claim { seat, member } = effect {

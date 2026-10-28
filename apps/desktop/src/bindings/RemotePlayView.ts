@@ -29,4 +29,9 @@ waitSecs: number | null,
 /**
  * On a device: the home PCs it accepted.
  */
-hosts: Array<RemoteDeviceView>, };
+hosts: Array<RemoteDeviceView>, 
+/**
+ * The device controlling this PC's desktop now, by name (M25b): adding
+ * a device and changing the PIN wait until it ends.
+ */
+desktop: string | null, };

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { viaRemote, waitText } from "./remote";
+import type { SeatView } from "../bindings/SeatView";
+import type { SessionView } from "../bindings/SessionView";
+import { desktopBlocked, desktopCommand, viaRemote, waitText } from "./remote";
 
 const target = { room: "r1", member: "pc" };
 
@@ -51,5 +53,47 @@ describe("commands for a home PC run from afar", () => {
   it("says how long to wait", () => {
     expect(waitText(45)).toBe("45 s");
     expect(waitText(600)).toBe("10 min");
+  });
+
+  it("brings the home PC's window forward, and controls its desktop (M25b)", () => {
+    expect(viaRemote(target, { type: "bringToFront" })).toEqual({
+      type: "remote",
+      room: "r1",
+      member: "pc",
+      action: { type: "bringToFront" },
+    });
+    // Already the home PC's: passed through as it is.
+    const desktop = desktopCommand(target, true);
+    expect(desktop).toEqual({ type: "remote", room: "r1", member: "pc", action: { type: "desktop", on: true } });
+    expect(viaRemote(target, desktop)).toBe(desktop);
+  });
+});
+
+describe("when desktop control can start (M25b)", () => {
+  const seat = (keyboardMouse: boolean): SeatView => ({
+    label: keyboardMouse ? "Keyboard and mouse" : "Controller 1",
+    pad: !keyboardMouse,
+    keyboardMouse,
+    holder: null,
+    host: false,
+    hostController: null,
+    guestController: null,
+  });
+  const session = (over: Partial<SessionView>) =>
+    ({
+      seats: [seat(false), seat(true)],
+      role: "watching",
+      streaming: { name: "Screen 1", fps: 30, maxMbps: 20, uploadMbps: null, screen: true },
+      controlPaused: false,
+      ...over,
+    }) as SessionView;
+
+  it("needs the keyboard seat, watching, a stream, and control allowed", () => {
+    expect(desktopBlocked(session({}))).toBeNull();
+    expect(desktopBlocked(session({ role: "controlling" }))).toBeNull();
+    expect(desktopBlocked(session({ seats: [seat(false)] }))).toMatch(/no keyboard-and-mouse seat/);
+    expect(desktopBlocked(session({ role: "none" }))).toMatch(/Watch/);
+    expect(desktopBlocked(session({ streaming: null }))).toMatch(/Stream/);
+    expect(desktopBlocked(session({ controlPaused: true }))).toMatch(/paused/);
   });
 });

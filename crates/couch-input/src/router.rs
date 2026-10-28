@@ -15,6 +15,14 @@
 //!
 //! Only one holder at a time has keyboard or mouse ([`SeatRouter::grant`]).
 //!
+//! **Desktop control** (M25b, ADR 0010): a holder granted
+//! [`Permissions::DESKTOP`] (the home PC's own unlocked device, never a
+//! guest: the session decides) has three of these lifted, for keyboard and
+//! mouse alone: they need no window in front, a click needs no pointer over
+//! it, and no key is blocked. Losing the foreground doesn't release its keys
+//! either: Alt+Tab itself moves the foreground. Everything else holds for it:
+//! the Guide button, the hold, epochs, suspension and every release.
+//!
 //! The caller refreshes the foreground and pointer state right before every
 //! `handle`, so a window that just took the foreground never gets input.
 //!
@@ -314,11 +322,17 @@ impl SeatRouter {
     }
 
     /// The game window gained or lost the foreground. Losing it releases
-    /// every key and mouse button; the pads are unaffected.
+    /// every key and mouse button, but a desktop holder's (its keys go to
+    /// whatever is in front); the pads are unaffected.
     pub fn set_foreground(&mut self, foreground: bool) -> Vec<Effect> {
         let mut effects = Vec::new();
         if self.foreground && !foreground {
-            for h in self.seats.iter_mut().filter_map(|s| s.holder.as_mut()) {
+            for h in self
+                .seats
+                .iter_mut()
+                .filter_map(|s| s.holder.as_mut())
+                .filter(|h| !h.may(Permissions::DESKTOP))
+            {
                 h.release_kbm(&mut effects);
             }
         }
@@ -372,7 +386,9 @@ impl SeatRouter {
         h.suspended_since = None;
         // Held off (M19): nothing goes in, but what is tracked keeps up.
         let held = self.held.is_some_and(|except| except != Some(from));
-        let kbm = self.foreground && !held;
+        // Desktop control: wherever the front is, every key (M25b).
+        let desktop = h.may(Permissions::DESKTOP);
+        let kbm = (self.foreground || desktop) && !held;
 
         match input {
             Input::Pad(d) => {
@@ -404,7 +420,7 @@ impl SeatRouter {
                     if h.buttons.remove(&button) {
                         effects.push(Effect::MouseButton(button, false));
                     }
-                } else if allowed && pointer_inside && h.buttons.insert(button) {
+                } else if allowed && (pointer_inside || desktop) && h.buttons.insert(button) {
                     effects.push(Effect::MouseButton(button, true));
                 }
             }
@@ -420,7 +436,7 @@ impl SeatRouter {
                 } else if kbm
                     && h.may(Permissions::KEYBOARD)
                     && !h.keys.contains(&key)
-                    && filter::key_allowed(key, &all_keys)
+                    && (desktop || filter::key_allowed(key, &all_keys))
                 {
                     h.keys.insert(key);
                     effects.push(Effect::Key(key, true));
@@ -538,7 +554,7 @@ mod tests {
     const SEAT: SeatId = SeatId(0);
     const GUEST: MemberId = MemberId([1; 32]);
     const OTHER: MemberId = MemberId([2; 32]);
-    const ALL: Permissions = Permissions::all();
+    const ALL: Permissions = Permissions::ALL_INPUT;
     const W: u16 = 0x1A;
 
     struct Fixture {
@@ -823,6 +839,83 @@ mod tests {
             totals: f.motion(2, 103, -1),
         });
         assert_eq!(f.send(moved, 50), vec![Effect::MouseMove(3, -1)]);
+    }
+
+    /// The keyboard-and-mouse seat with desktop control (M25b).
+    const DESKTOP: Permissions = Permissions::KEYBOARD
+        .union(Permissions::MOUSE)
+        .union(Permissions::DESKTOP);
+
+    #[test]
+    fn desktop_control_needs_no_window_in_front_and_blocks_no_key() {
+        let mut f = Fixture::new(DESKTOP);
+        f.router.set_foreground(false);
+        f.router.set_pointer_inside(false);
+        assert_eq!(
+            f.send(f.key(LEFT_GUI.0, true), 10),
+            vec![Effect::Key(LEFT_GUI, true)]
+        );
+        assert_eq!(
+            f.send(f.key(LEFT_ALT.0, true), 20),
+            vec![Effect::Key(LEFT_ALT, true)]
+        );
+        assert_eq!(f.send(f.key(TAB.0, true), 30), vec![Effect::Key(TAB, true)]);
+        let click = Input::MouseButton(MouseButtonEvent {
+            seat: SEAT,
+            seat_epoch: f.epoch,
+            button: mouse_button::LEFT,
+            down: true,
+            totals: f.motion(1, 4, -2),
+        });
+        assert_eq!(
+            f.send(click, 40),
+            vec![
+                Effect::MouseMove(4, -2),
+                Effect::MouseButton(MouseButton::Left, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_same_keys_without_desktop_control_stay_blocked_out_of_front() {
+        let mut f = Fixture::new(Permissions::KEYBOARD | Permissions::MOUSE);
+        f.router.set_foreground(false);
+        assert_eq!(f.send(f.key(W, true), 10), vec![]);
+        f.router.set_foreground(true);
+        assert_eq!(f.send(f.key(LEFT_GUI.0, true), 20), vec![]);
+        f.send(f.key(LEFT_ALT.0, true), 30);
+        assert_eq!(f.send(f.key(TAB.0, true), 40), vec![]);
+    }
+
+    /// Alt+Tab moves the foreground itself: Alt must stay down through it.
+    #[test]
+    fn a_desktop_holders_keys_survive_the_front_moving() {
+        let mut f = Fixture::new(DESKTOP);
+        f.send(f.key(LEFT_ALT.0, true), 10);
+        f.send(f.key(TAB.0, true), 20);
+        assert_eq!(f.router.set_foreground(false), vec![]);
+        assert_eq!(
+            f.send(f.key(TAB.0, false), 30),
+            vec![Effect::Key(TAB, false)]
+        );
+        // Every release still lets go of it.
+        let revoked = f.router.revoke(SEAT);
+        assert!(
+            revoked.contains(&Effect::Key(LEFT_ALT, false)),
+            "{revoked:?}"
+        );
+    }
+
+    #[test]
+    fn desktop_control_is_still_held_off_and_never_presses_guide() {
+        let mut f = Fixture::new(DESKTOP | Permissions::GAMEPAD);
+        f.router.hold(Some(None));
+        assert_eq!(f.send(f.key(LEFT_GUI.0, true), 10), vec![]);
+        f.router.hold(None);
+        assert_eq!(
+            f.send(f.pad(1, PadButtons::GUIDE | PadButtons::A), 20),
+            vec![Effect::Pad(SEAT, pressed(PadButtons::A))]
+        );
     }
 
     #[test]

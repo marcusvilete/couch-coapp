@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { sessionEvents } from "./overlay";
+import { desktopBanner, sessionEvents } from "./overlay";
 
 const names: Record<string, string> = { a: "Ana", b: "Bia" };
 const name = (m: string) => names[m] ?? "someone";
@@ -40,6 +41,7 @@ function view(over: Partial<SessionView>): SessionView {
     note: null,
     operator: false,
     operatedBy: [],
+    desktop: null,
     ...over,
   };
 }
@@ -86,6 +88,22 @@ describe("notes over the game", () => {
   it("says control was paused", () => {
     expect(sessionEvents(name, view({}), view({ controlPaused: true }))).toEqual([
       "Control paused: allow it again in the app",
+    ]);
+  });
+});
+
+describe("the desktop control banner (M25b)", () => {
+  const room = { members: [{ id: "b", name: "Ana's laptop" }] } as unknown as RoomView;
+
+  it("names the device and the key that ends it, while it lasts", () => {
+    expect(desktopBanner(room, view({}))).toEqual([]);
+    expect(desktopBanner(room, view({ desktop: "b", panicKey: "Ctrl+Alt+Shift+Backspace" }))).toEqual([
+      {
+        kind: "banner",
+        id: "desktop:b",
+        text: "Ana's laptop is controlling this PC",
+        panic: "Ctrl+Alt+Shift+Backspace",
+      },
     ]);
   });
 });

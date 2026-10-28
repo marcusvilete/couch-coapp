@@ -68,7 +68,9 @@ async fn local_input_reaches_the_router_and_rumble_comes_back() {
     router.set_pointer_inside(true);
     let Some(&Effect::Granted {
         epoch, permissions, ..
-    }) = router.grant(SEAT, member, Permissions::all(), now).last()
+    }) = router
+        .grant(SEAT, member, Permissions::ALL_INPUT, now)
+        .last()
     else {
         panic!("no grant");
     };

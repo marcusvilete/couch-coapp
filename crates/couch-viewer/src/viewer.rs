@@ -484,7 +484,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
             }
         }
         redraw |= hud.needs_paint();
-        input.sync_capture(&mouse, &window);
+        input.sync_capture(&mouse, &mut window);
         // Captured, the pointer reaches the game, not the HUD: no hover or
         // tooltip may stay drawn over the game. Either way the bar's mouse
         // hint changes.

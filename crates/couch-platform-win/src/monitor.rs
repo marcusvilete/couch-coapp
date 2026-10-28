@@ -1,7 +1,9 @@
 //! The monitor showing the streamed window, or the streamed screen:
 //! - its work area (the monitor without the taskbar), where the host's
 //!   overlay goes (M8), in physical pixels and desktop coordinates;
-//! - its refresh rate, which caps how many frames a capture gets (M9d).
+//! - its refresh rate, which caps how many frames a capture gets (M9d);
+//! - a streamed screen's whole area, where desktop control keeps the
+//!   pointer (M25b).
 //!
 //! It also lists the monitors a capture can take, with their names and sizes
 //! (M9f, replacing the `windows-capture` crate's listing).
@@ -212,23 +214,36 @@ fn mode(monitor: HMONITOR) -> Option<DEVMODEW> {
     found.then_some(mode)
 }
 
+/// The whole of `monitor` (a monitor handle value, as screens are listed),
+/// taskbar included: what a capture of it shows (M25b, the pointer kept on a
+/// streamed screen). `None` if it is gone: no other screen stands in.
+pub fn whole(monitor: isize) -> Option<Area> {
+    info(HMONITOR(monitor as *mut c_void)).map(|info| rect(info.rcMonitor))
+}
+
 fn work_area(monitor: HMONITOR) -> Option<Area> {
+    info(monitor).map(|info| rect(info.rcWork))
+}
+
+fn info(monitor: HMONITOR) -> Option<MONITORINFO> {
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
     // SAFETY: `info` is a live MONITORINFO with its size set; a handle that
     // isn't a monitor makes the call fail, which we report as `None`.
-    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-        return None;
-    }
-    let r = info.rcWork;
-    Some(Area {
+    unsafe { GetMonitorInfoW(monitor, &mut info) }
+        .as_bool()
+        .then_some(info)
+}
+
+fn rect(r: RECT) -> Area {
+    Area {
         x: r.left,
         y: r.top,
         width: r.right - r.left,
         height: r.bottom - r.top,
-    })
+    }
 }
 
 #[cfg(test)]

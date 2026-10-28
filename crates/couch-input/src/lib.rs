@@ -260,6 +260,20 @@ pub trait KbmInjector: Send {
     fn mouse_move(&mut self, dx: i32, dy: i32) -> Result<(), InputError>;
     fn mouse_button(&mut self, button: MouseButton, down: bool) -> Result<(), InputError>;
     fn wheel(&mut self, dx: i32, dy: i32) -> Result<(), InputError>;
+    /// Keeps the pointer on a screen (M25b, desktop control of a streamed
+    /// screen): while set, each move puts the pointer where it is plus the
+    /// motion, within `bounds`, without Windows' acceleration. `None` moves
+    /// it relatively again, as games want.
+    fn set_bounds(&mut self, _bounds: Option<Bounds>) {}
+}
+
+/// A screen's area on the desktop, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[cfg(test)]

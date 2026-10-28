@@ -61,7 +61,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// `SeatKind::Both` (one seat with a controller, keyboard and mouse) is gone.
 /// 10: remote play (M25a): a trusted device runs the home PC's sessions,
 /// the `0x07xx` messages.
-pub const PROTOCOL_MINOR: u16 = 10;
+/// 11: desktop control (M25b): `Permissions::DESKTOP`, `RemoteOp::Desktop`
+/// and `BringToFront`, and the console state's desktop and window fields.
+pub const PROTOCOL_MINOR: u16 = 11;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -79,6 +81,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (8, "0.19"),
     (9, "0.20"),
     (10, "0.21"),
+    (11, "0.22"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

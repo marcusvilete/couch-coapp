@@ -158,6 +158,7 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - Every handoff, disconnect and teardown releases held keys and sends `PadState::NEUTRAL`.
 - Input with a stale `SeatEpoch` is dropped.
 - Remote input reaches `KbmInjector` and `VirtualPad` only through `couch_input::router::SeatRouter`, which enforces all of the above. Its tests are the guard; don't weaken them. After touching input or teardown code, follow the `input-safety-checks` skill.
+- **The one exception: desktop control** (M25b, ADR 0010), for the home PC's own unlocked device alone (below, Remote play). A holder granted `Permissions::DESKTOP` has keyboard and mouse without a window in front or the pointer over it, no key blocked, and keeps its keys when the front moves. Guide stays blocked, and every other rule above holds for it. Only `HostSession::set_desktop`'s member gets the bit, only with the keyboard-and-mouse seat; never write `Permissions::all()` for a seat's grant (it includes `DESKTOP`): use `Permissions::ALL_INPUT`.
 - Peer data is size-limited: 64 KiB control frames, 16 MiB IPC frames.
 
 **Rooms** ([ADR 0006](docs/adr/0006-rooms-without-a-server.md), `docs/protocol.md` Rooms and Admission)
@@ -209,6 +210,13 @@ The desktop app with several profiles: start `npm run tauri dev` (the default pr
 - **An operator is per connection:** unlocked on the connection that gave the PIN, from a trusted id, while it is on the roster and remote play is on. Remote messages are never relayed, and a device acts on its PC's only on the connection its offer came on.
 - **An operator gets the host's console and nothing else** (`RemoteOp`): each op becomes the home PC's own window command, through the same `Actor::command` and its checks. `StartSession` goes in the operator's room, never with the home PC's controllers; the others act only on a session in that room. Never add room, invite, ban, settings or remote-play ops.
 - **The panic key at the home PC locks every operator out** (`RemoteLock { Panic }`, the PIN again), as do a new PIN, removing the device and turning remote play off.
+- **Desktop control** (M25b, `RemoteOp::Desktop`, `docs/protocol.md` Desktop control): the session's keyboard-and-mouse seat goes to the unlocked operator with `Permissions::DESKTOP`. Keep these:
+  - only from an unlocked operator, in the session's room, watching it, handled in the actor itself (`remote_command_in`), never as one of the home PC's window commands; no other member, seat or the host ever gets the bit (`HostSession::set_desktop`, its property test);
+  - **it ends whenever its device stops being an operator:** every path that removes one ends in `announce_hosting`, which checks; keep it so for any new path. Leaving the session, the panic key, the seat passed or taken back, and the end end it too;
+  - a member drops `DESKTOP` from any host it doesn't run, unlocked (`rooms::sessions`, `SeatAssigned`);
+  - while it lasts, the home PC refuses adding a device, changing the PIN, and accepting, unlocking or running another PC from its own window (the device could click through it; a speed bump, since desktop control is the whole PC), shows the banner in the host overlay whatever its setting, and keeps the pointer on a streamed screen (`KbmInjector::set_bounds`);
+  - the stream window grabs the system keys only while its mouse is captured (a click into the picture), and the Free the mouse shortcut gives them back.
+- **Bring to front** (`Command::BringToFront`, `RemoteOp::BringToFront`) acts only on the window streamed, never a window named in a command: the op carries none. It taps F24 first (`couch_platform_win::foreground::bring_to_front`), down and up in one `SendInput` call.
 - After touching any of it, follow the `room-security-checks` skill, and the `input-safety-checks` skill too when it reaches sessions or input.
 
 **Licensing.** The app is **GPL-3.0-only** (`LICENSE`; [ADR 0008](docs/adr/0008-gpl-3.0.md)). Every crate inherits it (`license.workspace = true`).

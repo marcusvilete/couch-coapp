@@ -168,10 +168,34 @@ impl Actor {
         }
     }
 
-    fn announce_hosting(&self, now: Instant) {
+    /// After any operator goes (every path that removes one comes here):
+    /// desktop control ends unless its device is still our operator in the
+    /// session's room (M25b), then our session is announced.
+    fn announce_hosting(&mut self, now: Instant) {
+        if let Some(device) = self.desktop_given() {
+            let room = self.session_room();
+            let still = self.remote.settings.trusts(device)
+                && self.remote.operators.iter().any(|(conn, m)| {
+                    *m == device && self.conns.get(conn).is_some_and(|c| Some(c.room) == room)
+                });
+            if !still {
+                tracing::info!(device = ?device, "remote play: desktop control ends with the unlock");
+                if let Err(e) = self.set_desktop(None, now) {
+                    tracing::warn!("desktop control didn't end: {e}");
+                }
+            }
+        }
         if let Some(room) = self.hosting_room() {
             self.announce(room, now);
         }
+    }
+
+    /// Whether a device of ours is unlocked in `room` (M25b: a screen with
+    /// the keyboard seat is then for its desktop control).
+    pub(super) fn operator_in(&self, room: RoomId) -> bool {
+        self.remote.operators.iter().any(|(conn, m)| {
+            self.remote.settings.trusts(*m) && self.conns.get(conn).is_some_and(|c| c.room == room)
+        })
     }
 
     // ---- Messages ----
@@ -425,8 +449,25 @@ impl Actor {
             });
             return;
         }
+        // Desktop control (M25b): for this operator, on this connection.
+        if let RemoteOp::Desktop { on } = m.op {
+            let result = if !on && self.desktop_given().is_some_and(|d| d != peer) {
+                Err(EngineError::Refused("another device controls the desktop"))
+            } else {
+                self.set_desktop(on.then_some(peer), now)
+            };
+            let result = match result {
+                Ok(()) => RemoteResult::Done,
+                Err(e) => RemoteResult::Failed(e.to_string()),
+            };
+            self.remote_answered(conn, id, result);
+            return;
+        }
         tracing::info!(device = ?peer, "remote play: a command from afar");
-        let command = command_for(room, m.op);
+        let Some(command) = command_for(room, m.op) else {
+            refuse(self, "that can't be done");
+            return;
+        };
         let (tx, rx) = oneshot::channel();
         self.command(command, tx, now);
         tokio::spawn(async move {
@@ -528,6 +569,28 @@ impl Actor {
     // ---- Settings (the home PC's own window only) ----
 
     pub(super) fn remote_settings_command(&mut self, command: Command, reply: Reply, now: Instant) {
+        // While a device of ours controls the desktop, it could click
+        // through this PC's own window: no new device or PIN then, and no
+        // running another PC of ours from here, which would stretch this
+        // PIN to it (M25b). Removing a device and turning remote play off
+        // still work. A speed bump, not a wall: desktop control is the whole
+        // PC, its files included.
+        if matches!(
+            command,
+            Command::AddRemoteDevice { .. }
+                | Command::SetRemotePin { .. }
+                | Command::AcceptRemoteHost { .. }
+                | Command::UnlockRemote { .. }
+                | Command::Remote { .. }
+        ) && self.desktop_given().is_some()
+        {
+            let _ = reply.send(Err(EngineError::Remote(
+                "a device of yours controls this PC's desktop: end that first, or press the \
+                 panic key"
+                    .into(),
+            )));
+            return;
+        }
         let result = match command {
             Command::GetRemotePlay => Ok(()),
             Command::SetRemotePlay { on } => self.set_remote_play(on, now),
@@ -754,6 +817,15 @@ impl Actor {
             candidates,
             wait_secs: self.remote.settings.wait_secs(remote::unix_now()),
             hosts: self.remote.hosts.iter().map(view).collect(),
+            desktop: self.desktop_given().and_then(|id| {
+                let hex = id.to_hex();
+                self.remote
+                    .settings
+                    .devices
+                    .iter()
+                    .find(|d| d.id == hex)
+                    .map(|d| d.name.clone())
+            }),
         }
     }
 
@@ -1211,8 +1283,8 @@ fn wait_text(secs: u32) -> String {
 }
 
 /// The home PC's own command for an operator's `op`, in `room`.
-fn command_for(room: RoomId, op: RemoteOp) -> Command {
-    match op {
+fn command_for(room: RoomId, op: RemoteOp) -> Option<Command> {
+    Some(match op {
         RemoteOp::ListSources => Command::ListSources,
         RemoteOp::StartSession {
             title,
@@ -1275,7 +1347,11 @@ fn command_for(room: RoomId, op: RemoteOp) -> Command {
         },
         RemoteOp::AllowControl => Command::AllowControl,
         RemoteOp::StopWaitingForPads => Command::StopWaitingForPads,
-    }
+        RemoteOp::BringToFront => Command::BringToFront,
+        // Our own window has no such command: `remote_command_in` handles
+        // it with the operator's id.
+        RemoteOp::Desktop { .. } => return None,
+    })
 }
 
 /// The wire's form of a device's `action`.
@@ -1338,6 +1414,8 @@ fn op_for(action: RemoteAction) -> Result<RemoteOp, EngineError> {
         },
         RemoteAction::AllowControl => RemoteOp::AllowControl,
         RemoteAction::StopWaitingForPads => RemoteOp::StopWaitingForPads,
+        RemoteAction::Desktop { on } => RemoteOp::Desktop { on },
+        RemoteAction::BringToFront => RemoteOp::BringToFront,
     })
 }
 

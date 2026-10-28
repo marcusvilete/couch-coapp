@@ -345,6 +345,23 @@ impl Backend for WindowsBackend {
         }
     }
 
+    fn bring_to_front(&self, window: NativeId) -> bool {
+        foreground::bring_to_front(WindowId(window))
+    }
+
+    fn screen_area(&self, source: &Source) -> Option<ScreenArea> {
+        let Source::Screen(screen) = source else {
+            return None;
+        };
+        let area = monitor::whole(*screen)?;
+        Some(ScreenArea {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        })
+    }
+
     fn drivers(&self) -> Vec<(DriverName, DriverState, bool)> {
         [DriverName::Vigembus, DriverName::Hidhide]
             .into_iter()
