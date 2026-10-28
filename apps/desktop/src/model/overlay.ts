@@ -18,7 +18,23 @@ export type Toast =
       /** The oldest request: the one the keys answer. */
       first: boolean;
     }
-  | { kind: "event"; id: string; text: string };
+  | { kind: "event"; id: string; text: string }
+  /** Desktop control (M25b): stays while it lasts, whatever the overlay
+   * setting, so whoever is at this PC sees it. */
+  | { kind: "banner"; id: string; text: string; panic: string | null };
+
+/** The banner while a device of ours controls this PC's desktop. */
+export function desktopBanner(room: RoomView, s: SessionView): Toast[] {
+  if (s.desktop == null) return [];
+  return [
+    {
+      kind: "banner",
+      id: `desktop:${s.desktop}`,
+      text: `${nameOf(room, s.desktop)} is controlling this PC`,
+      panic: s.panicKey,
+    },
+  ];
+}
 
 /** One toast per pending request, oldest first. */
 export function requestToasts(room: RoomView, s: SessionView): Toast[] {

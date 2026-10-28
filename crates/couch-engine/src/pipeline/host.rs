@@ -44,8 +44,8 @@ use std::{
 
 use couch_codec_opus::OpusEncoder;
 use couch_input::{
-    KbmInjector, MemberId, PadState, PendingPad, Permissions, Plugged, Rumble, SeatEpoch, SeatId,
-    VirtualPad,
+    Bounds, KbmInjector, MemberId, PadState, PendingPad, Permissions, Plugged, Rumble, SeatEpoch,
+    SeatId, VirtualPad,
     local::{ControllerChoice, ControllerIds, ControllerKind, LocalController, LocalPad},
     router::{self, Effect, Input, SeatRouter, SeatStatus},
 };
@@ -2331,6 +2331,11 @@ struct Inputs {
     focus: FocusReport,
     /// The host's controller, while it plays through a seat.
     local: Option<Local>,
+    /// The seat granted with desktop control, if any (M25b).
+    desktop: Option<SeatId>,
+    /// The stream the pointer is kept on the screen of, for desktop control
+    /// of a streamed screen.
+    bounds_for: Option<u32>,
 }
 
 /// The host's controllers, in the input task.
@@ -2371,6 +2376,9 @@ impl Inputs {
     /// Called right before every input, not just on the tick: a window that
     /// just took the foreground must not get a key meant for the game.
     fn refresh_focus(&mut self) -> Vec<Effect> {
+        // A stream switched since: the pointer's bounds follow before this
+        // input moves it (M25b review).
+        self.sync_bounds();
         // No stream, no window: nothing of the keyboard's reaches anything.
         let focus = match self.shared.window() {
             0 => Focus::default(),
@@ -2420,24 +2428,37 @@ impl Inputs {
                     epoch,
                     member,
                     permissions,
-                } => self.shared.event(HostEvent::Granted {
-                    member,
-                    seat,
-                    epoch,
-                    permissions,
-                }),
+                } => {
+                    if permissions.contains(Permissions::DESKTOP) {
+                        self.desktop = Some(seat);
+                    } else if self.desktop == Some(seat) {
+                        self.desktop = None;
+                    }
+                    self.shared.event(HostEvent::Granted {
+                        member,
+                        seat,
+                        epoch,
+                        permissions,
+                    });
+                }
                 Effect::Revoked {
                     seat,
                     epoch,
                     member,
-                } => self.shared.event(HostEvent::Revoked {
-                    member,
-                    seat,
-                    epoch,
-                }),
+                } => {
+                    if self.desktop == Some(seat) {
+                        self.desktop = None;
+                    }
+                    self.shared.event(HostEvent::Revoked {
+                        member,
+                        seat,
+                        epoch,
+                    });
+                }
                 _ => {}
             }
         }
+        self.sync_bounds();
         for seat in self.seats() {
             let status = self.router.seat(seat).map(|s| s.2);
             let slot = &mut self.status[usize::from(seat.0)];
@@ -2449,6 +2470,34 @@ impl Inputs {
                 }
             }
         }
+    }
+
+    /// Desktop control of a streamed screen keeps the pointer on that screen,
+    /// moved absolutely (M25b); anything else moves it relatively, as games
+    /// want.
+    fn sync_bounds(&mut self) {
+        let stream = self
+            .shared
+            .current()
+            .filter(|s| self.desktop.is_some() && !s.options.source.is_window());
+        let want = stream.as_ref().map(|s| s.number);
+        if want == self.bounds_for {
+            return;
+        }
+        self.bounds_for = want;
+        let bounds = stream
+            .and_then(|s| self.shared.backend.screen_area(&s.options.source))
+            .map(|a| Bounds {
+                x: a.x,
+                y: a.y,
+                width: a.width,
+                height: a.height,
+            });
+        tracing::info!(
+            on = bounds.is_some(),
+            "the pointer kept on the streamed screen"
+        );
+        self.kbm.set_bounds(bounds);
     }
 
     fn tick(&mut self, now: Instant) {
@@ -2631,6 +2680,8 @@ async fn input_loop(
             stream: 0,
         },
         local,
+        desktop: None,
+        bounds_for: None,
         shared,
     };
     for seat in st.seats() {

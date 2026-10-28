@@ -232,7 +232,7 @@ impl Guest {
     fn new(sink: u32) -> Self {
         let mut router = SeatRouter::new(1);
         let mut epoch = SeatEpoch(0);
-        for effect in router.grant(SEAT, GUEST, Permissions::all(), Instant::now()) {
+        for effect in router.grant(SEAT, GUEST, Permissions::ALL_INPUT, Instant::now()) {
             if let Effect::Granted { epoch: e, .. } = effect {
                 epoch = e;
             }

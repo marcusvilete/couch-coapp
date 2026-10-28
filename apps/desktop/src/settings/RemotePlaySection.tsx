@@ -72,7 +72,19 @@ export function RemotePlaySection() {
           label="Let my devices run this PC from afar"
           detail={view.pinSet ? "Off locks every device out at once." : "Set a PIN first."}
         />
-        <PinForm pinSet={view.pinSet} working={working} onSet={(pin) => send({ type: "setRemotePin", pin })} />
+        <PinForm
+          pinSet={view.pinSet}
+          working={working || view.desktop != null}
+          onSet={(pin) => send({ type: "setRemotePin", pin })}
+        />
+        {view.desktop != null && (
+          // M25b: a device clicking through these settings must not add
+          // another or lock you out with a PIN of its own.
+          <p className="settings-warn">
+            {view.desktop} controls this PC's desktop: adding a device and changing the PIN wait until that ends. The
+            panic key ends it.
+          </p>
+        )}
         {view.waitSecs != null && (
           <p className="settings-warn">
             Wrong PINs were tried: the next try can come in {waitText(view.waitSecs)}.
@@ -106,7 +118,7 @@ export function RemotePlaySection() {
         )}
         <AddDevice
           candidates={view.candidates}
-          disabled={working || !view.pinSet}
+          disabled={working || !view.pinSet || view.desktop != null}
           onAdd={(member) => send({ type: "addRemoteDevice", member })}
         />
       </div>
@@ -179,7 +191,7 @@ function PinForm(props: { pinSet: boolean; working: boolean; onSet: (pin: string
     return (
       <div className="settings-row">
         <span className="settings-note">A PIN is set.</span>
-        <Button size="sm" onClick={() => setOpen(true)}>
+        <Button size="sm" onClick={() => setOpen(true)} disabled={props.working}>
           Change the PIN…
         </Button>
       </div>

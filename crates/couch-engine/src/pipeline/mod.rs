@@ -307,6 +307,19 @@ pub trait Backend: Send + Sync + 'static {
     /// otherwise; the app is in front when its button is clicked.
     fn allow_foreground(&self, _pid: u32) {}
 
+    /// Brings the streamed `window` to the front (M25b), restoring it if it
+    /// is minimized; `false` if Windows wouldn't.
+    fn bring_to_front(&self, _window: NativeId) -> bool {
+        false
+    }
+
+    /// The whole of a streamed screen, taskbar included, where desktop
+    /// control keeps the pointer (M25b); `None` for a window, or a screen
+    /// that is gone (moves then stay relative).
+    fn screen_area(&self, _source: &Source) -> Option<ScreenArea> {
+        None
+    }
+
     /// At start, before any input: lets go of keys and buttons a host on
     /// this machine left held when it crashed or was killed, shows games any
     /// controller it left hidden, and makes a panic in this process let go

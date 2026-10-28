@@ -268,6 +268,7 @@ export function hostSession(
     note: null,
     operator: false,
     operatedBy: [],
+    desktop: null,
   };
 }
 
@@ -474,16 +475,41 @@ function remoteAction(room: FakeRoom, pc: MemberView, action: RemoteAction): Res
       room.sessions.push(started);
       return roomReply(room);
     }
-    case "startStream":
+    case "startStream": {
       if (!s) throw "there's no session";
       s.stream = { state: "live" };
-      s.streaming = { name: action.name, fps: action.fps, maxMbps: action.max_mbps, uploadMbps: action.upload_mbps };
+      const screen = action.source.kind === "screen";
+      s.streaming = {
+        name: action.name,
+        fps: action.fps,
+        maxMbps: action.max_mbps,
+        uploadMbps: action.upload_mbps,
+        screen,
+      };
+      s.gameInFront = screen ? null : true;
       return roomReply(room);
+    }
     case "stopStream":
       if (!s) throw "there's no session";
       s.stream = { state: "stopped", reason: "hostStopped" };
       s.streaming = null;
+      s.desktop = null;
       return roomReply(room);
+    // Desktop control (M25b): the keyboard seat comes to us with it.
+    case "desktop": {
+      if (!s) throw "there's no session";
+      const seat = s.seats.find((x) => x.keyboardMouse);
+      if (!seat) throw "this session has no keyboard-and-mouse seat";
+      s.desktop = action.on ? me() : null;
+      Object.assign(seat, { holder: action.on ? me() : null, host: false });
+      changed(room);
+      return { type: "done" };
+    }
+    case "bringToFront":
+      if (s?.streaming == null || s.streaming.screen) throw "only a window being streamed can be brought to the front";
+      s.gameInFront = true;
+      changed(room);
+      return { type: "done" };
     case "endSession":
       room.sessions = room.sessions.filter((x) => x !== s);
       return roomReply(room);
@@ -780,7 +806,9 @@ function handle(cmd: Command): Response | Promise<Response> {
       later(1200, () => {
         if (s.stream.state !== "starting") return;
         s.stream = { state: "live" };
-        s.streaming = { name: cmd.name, fps: cmd.fps, maxMbps: cmd.max_mbps, uploadMbps: cmd.upload_mbps };
+        const screen = cmd.source.kind === "screen";
+        s.streaming = { name: cmd.name, fps: cmd.fps, maxMbps: cmd.max_mbps, uploadMbps: cmd.upload_mbps, screen };
+        s.gameInFront = screen ? null : true;
         changed(room);
       });
       return roomReply(room);
@@ -925,6 +953,13 @@ function handle(cmd: Command): Response | Promise<Response> {
       const { room, session: s } = hosting();
       s.padsMissing = [...s.padsMissing, ...s.padsSettingUp];
       s.padsSettingUp = [];
+      changed(room);
+      return { type: "done" };
+    }
+    case "bringToFront": {
+      const { room, session: s } = hosting();
+      if (s.streaming == null || s.streaming.screen) throw "only a window being streamed can be brought to the front";
+      s.gameInFront = true;
       changed(room);
       return { type: "done" };
     }

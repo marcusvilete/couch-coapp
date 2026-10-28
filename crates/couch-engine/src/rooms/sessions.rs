@@ -729,7 +729,13 @@ impl Actor {
                     self.announce(room, now);
                 }
             }
-            ControlMessage::SeatAssigned(s) => {
+            ControlMessage::SeatAssigned(mut s) => {
+                // Desktop control only from one of our own PCs, unlocked
+                // (M25b): any other host saying so would just take our
+                // Windows key and Alt+Tab from us.
+                if !self.operating(room, peer) {
+                    s.permissions.remove(couch_proto::ids::Permissions::DESKTOP);
+                }
                 let labels = self.seat_labels();
                 let Some(w) = self.sessions.watching.as_mut() else {
                     return;
@@ -1208,6 +1214,63 @@ impl Actor {
         );
     }
 
+    // ---- Desktop control (M25b) ----
+
+    /// Desktop control in our session for `member`, or for nobody: only for
+    /// a device of ours, unlocked, which `rooms::remote` alone decides.
+    pub(super) fn set_desktop(
+        &mut self,
+        member: Option<MemberId>,
+        now: Instant,
+    ) -> Result<(), EngineError> {
+        let h = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| h.pipeline.is_some())
+            .ok_or(EngineError::NotLive)?;
+        let room = h.room;
+        let fx = h.session.set_desktop(member)?;
+        match member {
+            Some(m) => tracing::warn!(device = ?m, "remote play: a device controls the desktop"),
+            None if !fx.is_empty() => tracing::info!("remote play: desktop control ended"),
+            None => {}
+        }
+        self.apply_session(room, fx, now);
+        self.announce(room, now);
+        Ok(())
+    }
+
+    /// The member our session gives desktop control to, if any.
+    pub(super) fn desktop_given(&self) -> Option<MemberId> {
+        self.sessions.hosting.as_ref()?.session.desktop()
+    }
+
+    /// The streamed window to the front (M25b), from our console here or
+    /// from afar: only ever the window we stream, never one named.
+    pub(super) fn bring_to_front(&self) -> Result<(), EngineError> {
+        let h = self
+            .sessions
+            .hosting
+            .as_ref()
+            .filter(|h| h.pipeline.is_some())
+            .ok_or(EngineError::NotLive)?;
+        let window = match &h.stream {
+            Some(OurStream::Live { .. }) => h.pipeline.as_ref().and_then(|p| p.window()),
+            _ => None,
+        };
+        let window = window.ok_or(EngineError::Refused(
+            "only a window being streamed can be brought to the front",
+        ))?;
+        if self.backend.bring_to_front(window) {
+            Ok(())
+        } else {
+            Err(EngineError::Refused(
+                "Windows wouldn't bring that window to the front",
+            ))
+        }
+    }
+
     // ---- Streams in our session (M19) ----
 
     /// Starts streaming in our session, stopping a stream already running
@@ -1260,6 +1323,10 @@ impl Actor {
             SourceChoice::Screen { id } => Source::Screen(id.parse().map_err(|_| gone)?),
         };
         let overlay_area = self.backend.overlay_area(&source);
+        // A device of ours runs this session (M25b): a screen with the
+        // keyboard seat is for its desktop control. The router gives a
+        // screen's keyboard and mouse to a desktop holder alone.
+        let operated = self.session_room().is_some_and(|r| self.operator_in(r));
         let h = self
             .sessions
             .hosting
@@ -1270,7 +1337,7 @@ impl Actor {
             return Err(EngineError::Refused("a stream is starting already"));
         }
         let seats = &h.session.config().seats;
-        if seats.iter().any(|s| s.has_keyboard_mouse()) && !source.is_window() {
+        if seats.iter().any(|s| s.has_keyboard_mouse()) && !source.is_window() && !operated {
             return Err(EngineError::Refused(
                 "keyboard and mouse need a window as the source: stream a window, or start \
                  a session without them",
@@ -1304,6 +1371,7 @@ impl Actor {
             fps: options.fps,
             max_mbps: start.max_mbps.max(2),
             upload_mbps: start.upload_mbps,
+            screen: !options.source.is_window(),
         };
         let session = h.session.id();
         let room = h.room;
@@ -1506,6 +1574,18 @@ impl Actor {
                 epoch,
                 permissions,
             } => {
+                // Desktop control the session no longer gives that member
+                // (a grant that crossed its end): taken straight back, never
+                // left untracked (M25b review). Errs on the side of taking
+                // back a later plain grant to the same member too.
+                if permissions.contains(couch_proto::ids::Permissions::DESKTOP)
+                    && h.session.desktop() != Some(member)
+                {
+                    tracing::warn!(member = ?member, "a desktop grant no longer given: taken back");
+                    if let Some(pipeline) = self.pipeline() {
+                        pipeline.revoke(seat, Some(member));
+                    }
+                }
                 if h.session.is_viewer(member) {
                     // The controller we chose goes with the grant it was for
                     // (P12), once.
@@ -1559,6 +1639,8 @@ impl Actor {
                 for viewer in viewers {
                     self.send_to(room, viewer, focus.clone());
                 }
+                // Our console shows it too, here and from afar (M25b).
+                self.announce(room, now);
             }
             HostEvent::ViewerFailed { member, error } => {
                 tracing::warn!(member = ?member, "no stream for a viewer: {error}");
@@ -2445,6 +2527,7 @@ impl Actor {
                 fps: v.fps,
                 max_mbps: v.max_mbps,
                 upload_mbps: v.upload_mbps,
+                screen: v.screen,
             }),
             requests: s
                 .requests()
@@ -2481,6 +2564,8 @@ impl Actor {
                 .collect(),
             host_homes: s.host_homes().to_vec(),
             panic_key: h.panic_key.is_some(),
+            desktop: s.desktop_holder(),
+            in_front: h.in_front.filter(|_| streaming.is_some_and(|v| !v.screen)),
         })
     }
 
@@ -2576,10 +2661,12 @@ impl Actor {
                     .map_or(0, |since| since.elapsed().as_secs() as u32),
                 pads_missing: h.pads_missing.iter().map(|seat| seat.0).collect(),
                 stream_window: None,
-                game_in_front: None,
+                // The streamed window's, for Bring to front (M25b).
+                game_in_front: h.in_front.filter(|_| streaming.is_some_and(|v| !v.screen)),
                 note: None,
                 operator: false,
                 operated_by: self.operated_by(),
+                desktop: s.desktop_holder().map(|m| m.to_hex()),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -2726,6 +2813,7 @@ impl Actor {
                         fps: s.fps,
                         max_mbps: s.max_mbps,
                         upload_mbps: s.upload_mbps,
+                        screen: s.screen,
                     }),
                 sound_level: console.map(|c| c.sound_level),
                 pads_setting_up: console.map_or_else(Vec::new, |c| {
@@ -2745,10 +2833,13 @@ impl Actor {
                         stats: state.is_some_and(|s| s.stats),
                     }
                 }),
-                game_in_front: ours.map(|w| w.in_front),
+                game_in_front: ours
+                    .map(|w| w.in_front)
+                    .or_else(|| console.and_then(|c| c.in_front)),
                 note: ours.map(|w| w.note.clone()).filter(|n| !n.is_empty()),
                 operator,
                 operated_by: Vec::new(),
+                desktop: console.and_then(|c| c.desktop).map(|m| m.to_hex()),
             });
         }
         views

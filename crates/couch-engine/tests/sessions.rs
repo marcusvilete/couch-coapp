@@ -120,6 +120,8 @@ struct Fake {
     away: AtomicBool,
     /// The stream windows allowed to take the foreground, by process (P11).
     foreground_allowed: Mutex<Vec<u32>>,
+    /// The windows brought to the front (M25b); it brings them in front.
+    brought_to_front: Mutex<Vec<NativeId>>,
     /// The host's own controller.
     local: FakeLocal,
     /// How many of the host's controllers are hidden from games now.
@@ -640,6 +642,22 @@ impl Backend for Fake {
         self.foreground_allowed.lock().unwrap().push(pid);
     }
 
+    fn bring_to_front(&self, window: NativeId) -> bool {
+        self.brought_to_front.lock().unwrap().push(window);
+        self.away.store(false, Ordering::SeqCst);
+        true
+    }
+
+    /// A screen's area, for desktop control's pointer (M25b).
+    fn screen_area(&self, source: &Source) -> Option<couch_engine::ScreenArea> {
+        matches!(source, Source::Screen(_)).then_some(couch_engine::ScreenArea {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        })
+    }
+
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
@@ -973,6 +991,17 @@ impl FakeViewer {
             .unwrap()
             .as_ref()
             .map_or_else(Vec::new, |s| s.seats.iter().map(|h| h.seat).collect())
+    }
+
+    /// Whether the window was told one of its seats has desktop control
+    /// (M25b), so it takes the system keys once clicked into.
+    fn desktop(&self) -> bool {
+        self.seat.lock().unwrap().as_ref().is_some_and(|s| {
+            s.seats.iter().any(|h| {
+                h.permissions
+                    .contains(couch_proto::ids::Permissions::DESKTOP)
+            })
+        })
     }
 }
 
@@ -4963,5 +4992,305 @@ async fn a_device_is_locked_out_by_the_home_pc() {
         panic!("settings");
     };
     assert!(settings.wait_secs.is_some());
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+// ---- Desktop control (M25b) ----
+
+const LEFT_ALT: u16 = 0xE2;
+const LEFT_GUI: u16 = 0xE3;
+const TAB: u16 = 0x2B;
+/// The fake's screen area (`Fake::overlay_area`).
+const SCREEN: couch_input::Bounds = couch_input::Bounds {
+    x: -1920,
+    y: 0,
+    width: 1920,
+    height: 1080,
+};
+
+/// B, unlocked, starts a session at A with a keyboard seat and streams
+/// A's screen, both watching.
+async fn desktop_session(room: &str, a: &Member, b: &Member) {
+    b.ok(unlock(room, a, PIN)).await;
+    wait_remote(b, room, a, "unlocked", |r| r.is_some_and(|r| r.unlocked)).await;
+    let start = b
+        .handle(remote(
+            room,
+            a,
+            RemoteAction::StartSession {
+                title: "Desktop".into(),
+                max_viewers: 4,
+                input: setup(1, KeyboardMouseSeat::OwnSeat),
+            },
+        ))
+        .await;
+    assert!(matches!(start, Ok(Response::Room(_))), "{start:?}");
+    // A screen with the keyboard seat: allowed, B runs the session.
+    b.ok(remote(
+        room,
+        a,
+        RemoteAction::StartStream {
+            source: SourceChoice::Screen { id: "1".into() },
+            name: "Desktop".into(),
+            fps: 30,
+            max_mbps: 20,
+            upload_mbps: None,
+        },
+    ))
+    .await;
+}
+
+/// B turns desktop control on, and holds the keyboard seat with it.
+async fn desktop_on(room: &str, a: &Member, b: &Member, b_window: &FakeViewer) {
+    b.ok(remote(room, a, RemoteAction::Desktop { on: true }))
+        .await;
+    wait("B's desktop control", || {
+        b_window.held_seats().contains(&1) && b_window.desktop()
+    })
+    .await;
+    a.wait_session(room, a, "A's banner", |s| {
+        s.is_some_and(|s| s.desktop.as_deref() == Some(b.id().as_str()))
+    })
+    .await;
+}
+
+fn injected(a: &Member, key: u16, down: bool) -> bool {
+    a.fake
+        .kbm
+        .calls()
+        .contains(&couch_testkit::KbmCall::Key(HidUsage(key), down))
+}
+
+/// M25b: B, A's own laptop, controls A's desktop on a streamed screen: the
+/// Windows key and Alt+Tab go in with nothing in front, the pointer stays
+/// on the screen, and A refuses to grow trust meanwhile. C, a friend, gets
+/// none of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_device_controls_the_home_desktop() {
+    use couch_testkit::KbmCall;
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    desktop_session(&room, &a, &b).await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+
+    // C can't ask for it, and with the keyboard seat on a screen, C's keys
+    // go nowhere: the router gives a screen's keys to desktop control only.
+    assert!(refused_remotely(
+        &c.handle(remote(&room, &a, RemoteAction::Desktop { on: true }))
+            .await,
+        "isn't offering"
+    ));
+    a.ok(Command::PassControl {
+        member: c.id(),
+        seat: 1,
+        controller: None,
+    })
+    .await;
+    wait("C's keyboard seat", || c_window.held_seats().contains(&1)).await;
+    assert!(!c_window.desktop());
+    c_window.key(0x04, true);
+    c_window.key(0x04, false);
+
+    // B's desktop control takes the seat from C.
+    desktop_on(&room, &a, &b, &b_window).await;
+    wait("C let go", || !c_window.held_seats().contains(&1)).await;
+    b.wait_session(&room, &a, "desktop control on B", |s| {
+        s.is_some_and(|s| s.desktop.as_deref() == Some(b.id().as_str()))
+    })
+    .await;
+    wait("the pointer kept on A's screen", || {
+        a.fake.kbm.calls().contains(&KbmCall::Bounds(Some(SCREEN)))
+    })
+    .await;
+
+    // The Windows key and Alt+Tab reach A, with no game window in front.
+    a.fake.away.store(true, Ordering::SeqCst);
+    for (key, down) in [
+        (LEFT_GUI, true),
+        (LEFT_GUI, false),
+        (LEFT_ALT, true),
+        (TAB, true),
+        (TAB, false),
+        (LEFT_ALT, false),
+    ] {
+        b_window.key(key, down);
+    }
+    wait("the Windows key and Alt+Tab at A", || {
+        injected(&a, LEFT_GUI, true) && injected(&a, TAB, true) && injected(&a, LEFT_ALT, false)
+    })
+    .await;
+    assert!(!injected(&a, 0x04, true), "C's key went nowhere");
+
+    // Meanwhile A grows no trust: no new device, no new PIN.
+    for command in [
+        Command::SetRemotePin {
+            pin: "135790".into(),
+        },
+        Command::AddRemoteDevice { member: c.id() },
+        // Nor does A run another PC from here with it (M25b review).
+        Command::AcceptRemoteHost { member: c.id() },
+        remote(&room, &c, RemoteAction::EndSession),
+    ] {
+        assert!(
+            refused_remotely(&a.handle(command).await, "controls this PC's desktop"),
+            "the trust guard"
+        );
+    }
+
+    // B ends it: the seat comes back, the pointer moves freely again.
+    b.ok(remote(&room, &a, RemoteAction::Desktop { on: false }))
+        .await;
+    wait("B let go", || !b_window.held_seats().contains(&1)).await;
+    wait("the pointer let go", || {
+        a.fake.kbm.calls().last() == Some(&KbmCall::Bounds(None))
+    })
+    .await;
+    a.wait_session(&room, &a, "no banner", |s| {
+        s.is_some_and(|s| s.desktop.is_none())
+    })
+    .await;
+    // On a window, C's blocked keys stay blocked as ever.
+    a.fake.away.store(false, Ordering::SeqCst);
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::StartStream {
+            source: SourceChoice::Window {
+                id: WINDOW.to_string(),
+            },
+            name: "Celeste".into(),
+            fps: 30,
+            max_mbps: 20,
+            upload_mbps: None,
+        },
+    ))
+    .await;
+    a.ok(Command::PassControl {
+        member: c.id(),
+        seat: 1,
+        controller: None,
+    })
+    .await;
+    wait("C's keyboard seat again", || {
+        c_window.held_seats().contains(&1)
+    })
+    .await;
+    c_window.key(LEFT_GUI, true);
+    c_window.key(0x05, true);
+    // C's B key, sent after its Windows key, went in: so the Windows key
+    // was dropped.
+    wait("C's B key", || injected(&a, 0x05, true)).await;
+    let guis = a
+        .fake
+        .kbm
+        .calls()
+        .iter()
+        .filter(|k| **k == KbmCall::Key(HidUsage(LEFT_GUI), true))
+        .count();
+    assert_eq!(guis, 1, "only B's Windows key ever went in");
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M25b: desktop control ends whenever B stops being A's unlocked operator
+/// or viewer, letting go of what B held: the panic key, B's own lock,
+/// removing B, remote play off, B closing its stream window.
+#[tokio::test(flavor = "multi_thread")]
+async fn desktop_control_ends_with_the_operator() {
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    desktop_session(&room, &a, &b).await;
+    let b_window = watching(&room, &a, &b).await;
+    let ended = |s: Option<&SessionView>| s.is_some_and(|s| s.desktop.is_none());
+
+    // The panic key: Alt let go of, and the PIN again.
+    desktop_on(&room, &a, &b, &b_window).await;
+    b_window.key(LEFT_ALT, true);
+    wait("B's Alt at A", || injected(&a, LEFT_ALT, true)).await;
+    assert!(a.fake.press_panic_key(), "the hook is in place");
+    wait("Alt let go", || injected(&a, LEFT_ALT, false)).await;
+    a.wait_session(&room, &a, "ended by the panic key", ended)
+        .await;
+    wait("B's window told", || !b_window.desktop()).await;
+    b_window.key(LEFT_ALT, false);
+    b.ok(unlock(&room, &a, PIN)).await;
+    b.ok(remote(&room, &a, RemoteAction::AllowControl)).await;
+
+    // B's own lock.
+    desktop_on(&room, &a, &b, &b_window).await;
+    b.ok(Command::LockRemote {
+        room: room.clone(),
+        member: a.id(),
+    })
+    .await;
+    a.wait_session(&room, &a, "ended by B's lock", ended).await;
+    wait("B's window told", || !b_window.desktop()).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+
+    // B removed at A, and added back.
+    desktop_on(&room, &a, &b, &b_window).await;
+    a.ok(Command::RemoveRemoteDevice { member: b.id() }).await;
+    a.wait_session(&room, &a, "ended by the removal", ended)
+        .await;
+    a.ok(Command::AddRemoteDevice { member: b.id() }).await;
+    wait_remote(&b, &room, &a, "offered again", |r| r.is_some()).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+
+    // Remote play off, and on again.
+    desktop_on(&room, &a, &b, &b_window).await;
+    a.ok(Command::SetRemotePlay { on: false }).await;
+    a.wait_session(&room, &a, "ended by remote play off", ended)
+        .await;
+    a.ok(Command::SetRemotePlay { on: true }).await;
+    wait_remote(&b, &room, &a, "on again", |r| r.is_some()).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+
+    // B closes its stream window: it no longer watches.
+    desktop_on(&room, &a, &b, &b_window).await;
+    b_window.close();
+    a.wait_session(&room, &a, "ended by B leaving", ended).await;
+    a.ok(Command::SetRemotePin {
+        pin: "135790".into(),
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M25b: Bring to front, from A's console and from B's, acts on the
+/// streamed window alone; a screen has none.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_streamed_window_is_brought_to_front() {
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    // Nothing streamed, nothing to bring forward.
+    a.ok(go_live(&room, 4)).await;
+    assert!(matches!(
+        a.handle(Command::BringToFront).await,
+        Err(EngineError::Refused(_))
+    ));
+    a.ok(stream_window()).await;
+    a.fake.away.store(true, Ordering::SeqCst);
+    a.wait_session(&room, &a, "the window out of front", |s| {
+        s.is_some_and(|s| s.game_in_front == Some(false))
+    })
+    .await;
+    a.ok(Command::BringToFront).await;
+    a.wait_session(&room, &a, "in front again", |s| {
+        s.is_some_and(|s| s.game_in_front == Some(true))
+    })
+    .await;
+    // From afar.
+    b.ok(unlock(&room, &a, PIN)).await;
+    a.fake.away.store(true, Ordering::SeqCst);
+    b.wait_session(&room, &a, "B sees it out of front", |s| {
+        s.is_some_and(|s| s.operator && s.game_in_front == Some(false))
+    })
+    .await;
+    b.ok(remote(&room, &a, RemoteAction::BringToFront)).await;
+    b.wait_session(&room, &a, "B sees it in front", |s| {
+        s.is_some_and(|s| s.game_in_front == Some(true))
+    })
+    .await;
+    assert_eq!(*a.fake.brought_to_front.lock().unwrap(), [WINDOW, WINDOW]);
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

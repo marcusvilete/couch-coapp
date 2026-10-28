@@ -68,7 +68,9 @@ export function StreamPicker(props: {
   // reports whole hertz, 59 for 59.94, hence the 1 Hz of room.
   const pickedRefresh = (pickedWindow ?? pickedScreen)?.refreshHz ?? null;
   const refreshTooLow = pickedRefresh != null && fps > pickedRefresh + 1;
-  const screenWithKbm = kbmSeats && picked?.kind === "screen";
+  // From afar a screen goes with the keyboard seat: it is desktop control's
+  // (M25b), and a guest holding it gets nothing in on a screen.
+  const screenWithKbm = kbmSeats && picked?.kind === "screen" && props.remote == null;
   const needle = search.trim().toLowerCase();
   const windows = (sources?.windows ?? []).filter(
     (w) => needle === "" || w.title.toLowerCase().includes(needle) || w.app.toLowerCase().includes(needle),

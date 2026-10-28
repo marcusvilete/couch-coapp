@@ -9,8 +9,8 @@
 //!   pipe, a made-up session in one of `viewer::Preview::NAMES`, to check the
 //!   HUD by eye (`scripts/viewer-shots.ps1` shoots them all);
 //! - `--clock [x y] [--clicks] [--fps N] [--gpu-load N]`: the latency clock window (see `clock.rs`);
-//! - `--input-sink FILE`: a window that records the input it receives (see
-//!   `sink.rs`);
+//! - `--input-sink FILE [--grab]`: a window that records the input it
+//!   receives (see `sink.rs`); `--grab` takes the system keys too (M25b);
 //! - `--probe`: print SDL3 and gamepad information as one JSON line, for
 //!   `couch-cli probe`;
 //! - `--version`.
@@ -95,7 +95,8 @@ fn main() -> anyhow::Result<()> {
             let path = args
                 .get(1)
                 .ok_or_else(|| anyhow!("--input-sink needs a file"))?;
-            sink::run(std::path::Path::new(path))
+            let grab = args.get(2).is_some_and(|a| a == "--grab");
+            sink::run(std::path::Path::new(path), grab)
         }
         Some("--probe") => probe(),
         Some("--version") => {

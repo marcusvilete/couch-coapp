@@ -49,6 +49,13 @@
   border-width: 2px;
 }
 
+.overlay .toast.banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 2px solid #e9c255;
+}
+
 .overlay .toast.event {
   color: var(--fg-muted);
   font-size: 0.9rem;

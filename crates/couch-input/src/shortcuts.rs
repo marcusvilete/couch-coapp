@@ -256,7 +256,7 @@ pub const SHORTCUTS: &[Binding] = &[
         shortcut: Shortcut::FreeMouse,
         chord: true,
         key: KEY_M,
-        action: "Free the mouse, or capture it again",
+        action: "Free the mouse (with desktop control, the keyboard too), or capture it again",
         scope: Scope::Viewer,
         condition: "while you may use the mouse",
     },

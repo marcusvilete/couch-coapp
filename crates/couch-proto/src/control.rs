@@ -747,8 +747,18 @@ mod tests {
                     host_controllers: Vec::new(),
                     host_homes: Vec::new(),
                     panic_key: true,
+                    desktop: Some(MemberId([6; 32])),
+                    in_front: Some(false),
                 }),
             })),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 9,
+                op: RemoteOp::Desktop { on: true },
+            }),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 10,
+                op: RemoteOp::BringToFront,
+            }),
             ControlMessage::RemoteLock(RemoteLock {
                 reason: LockReason::Panic,
             }),
@@ -795,6 +805,7 @@ mod tests {
                     fps: u32::MAX,
                     max_mbps: u32::MAX,
                     upload_mbps: Some(u32::MAX),
+                    screen: true,
                 }),
                 requests: (0..MAX_REMOTE_LISTED)
                     .map(|i| RemoteRequest {
@@ -816,6 +827,8 @@ mod tests {
                 host_controllers: vec![text.clone(); 4],
                 host_homes: (0..4).map(SeatId).collect(),
                 panic_key: true,
+                desktop: Some(MemberId([u8::MAX; 32])),
+                in_front: Some(true),
             }),
         };
         let sources = RemoteSources {

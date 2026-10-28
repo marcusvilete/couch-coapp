@@ -13,7 +13,8 @@ use std::{
 
 use bytes::Bytes;
 use couch_input::{
-    HidUsage, InputError, KbmInjector, MouseButton, PadState, Rumble, VirtualPad, VirtualPadFactory,
+    Bounds, HidUsage, InputError, KbmInjector, MouseButton, PadState, Rumble, VirtualPad,
+    VirtualPadFactory,
 };
 use couch_media::{
     BgraFrame, CaptureEvent, Capturer, EncodedFrame, EncoderCaps, EncoderInput, GpuFrame,
@@ -238,6 +239,8 @@ pub enum KbmCall {
     MouseMove(i32, i32),
     MouseButton(MouseButton, bool),
     Wheel(i32, i32),
+    /// The pointer kept on a screen, or let go (M25b).
+    Bounds(Option<Bounds>),
 }
 
 /// Records injected keyboard and mouse input instead of sending it to the OS.
@@ -274,6 +277,10 @@ impl KbmInjector for RecordingInjector {
     fn wheel(&mut self, dx: i32, dy: i32) -> Result<(), InputError> {
         self.calls.lock().unwrap().push(KbmCall::Wheel(dx, dy));
         Ok(())
+    }
+
+    fn set_bounds(&mut self, bounds: Option<Bounds>) {
+        self.calls.lock().unwrap().push(KbmCall::Bounds(bounds));
     }
 }
 

@@ -853,6 +853,7 @@ impl Actor {
             Command::PlaySeat { seat, controller } => self.play_seat(SeatId(seat), controller, now),
             Command::AllowControl => self.allow_control(now),
             Command::StopWaitingForPads => self.stop_waiting_for_pads(),
+            Command::BringToFront => self.bring_to_front().map(|()| Response::Done),
             Command::SetStreamVolume { percent, muted } => {
                 self.set_stream_volume(StreamVolume { percent, muted }, now)
             }

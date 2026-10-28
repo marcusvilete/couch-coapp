@@ -26,6 +26,7 @@ function actionOf(c: Command): RemoteAction | null {
     case "endSession":
     case "allowControl":
     case "stopWaitingForPads":
+    case "bringToFront":
       return { type: c.type };
     // The home PC's own controllers stay out: nobody is there to play.
     case "startSession":
@@ -63,6 +64,24 @@ export function remotePcs(room: RoomView): MemberView[] {
 /** The session of one of our PCs we run from here, in this room. */
 export function operatedSession(room: RoomView, pc: string): SessionView | undefined {
   return room.sessions.find((s) => s.host === pc && s.operator);
+}
+
+/** Desktop control of a home PC (M25b): this device's keyboard and mouse
+ * reach its whole desktop, through the session's keyboard seat. Only from
+ * afar: the home PC's own window has no such command. */
+export function desktopCommand(target: RemoteTarget, on: boolean): Command {
+  return { type: "remote", room: target.room, member: target.member, action: { type: "desktop", on } };
+}
+
+/** Why desktop control can't start in `session` now, or `null` if it can:
+ * it has a keyboard-and-mouse seat, we watch it, and something is
+ * streamed. */
+export function desktopBlocked(session: SessionView): string | null {
+  if (!session.seats.some((s) => s.keyboardMouse)) return "This session has no keyboard-and-mouse seat";
+  if (!["watching", "asking", "controlling"].includes(session.role)) return "Watch the session first";
+  if (session.streaming == null) return "Stream a screen or a window first";
+  if (session.controlPaused) return "Control is paused at the home PC: allow it first";
+  return null;
 }
 
 /** "45 s", "3 min": how long until a PIN may be tried. */

@@ -6,8 +6,10 @@
 // low-level hook answers with keys (CLAUDE.md), and only a request pending
 // for 1 s.
 import {
+  AppWindow,
   Eye,
   Gamepad2,
+  MousePointer2,
   Hand,
   Keyboard,
   MonitorPlay,
@@ -22,7 +24,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import type { RemoteTarget } from "../model/remote";
+import { desktopBlocked, desktopCommand, type RemoteTarget } from "../model/remote";
 import { hostIdleText, isLive, listed, nameOf, seatPhrase } from "../model/sessions";
 import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
@@ -60,6 +62,14 @@ export function HostConsole(props: {
   const live = isLive(s);
   const pads = ourPads(s);
   const starting = s.stream.state === "starting";
+  // Bring to front (M25b): only the window streamed, never a screen.
+  const windowStream = live && s.streaming != null && !s.streaming.screen;
+  const front = () => void run("front", { type: "bringToFront" });
+  const frontBlocked = !windowStream
+    ? "Only a window being streamed can be brought to the front"
+    : busy != null
+      ? true
+      : false;
 
   const end = () => {
     if (s.viewers.length === 0) {
@@ -98,6 +108,16 @@ export function HostConsole(props: {
               <>
                 <strong>{s.streaming.name}</strong> · {s.streaming.fps} fps · up to {s.streaming.maxMbps} Mbit/s each
                 {s.streaming.uploadMbps != null && ` · ${s.streaming.uploadMbps} Mbit/s in all`}
+                {windowStream && s.gameInFront === false && (
+                  <>
+                    {" · "}
+                    <span className="console-away">not in front</span>{" "}
+                    <Why>
+                      Keyboard and mouse reach the window only while it's in front, and many games ignore controllers
+                      in the background.
+                    </Why>
+                  </>
+                )}
               </>
             ) : starting ? (
               "Starting the stream…"
@@ -116,6 +136,11 @@ export function HostConsole(props: {
         <div className="console-actions">
           {live ? (
             <>
+              {windowStream && s.gameInFront === false && (
+                <Button icon={<AppWindow />} onClick={front} disabled={busy != null}>
+                  Bring to front
+                </Button>
+              )}
               <Button icon={<MonitorPlay />} onClick={props.onStream} disabled={busy != null}>
                 Stream something else…
               </Button>
@@ -135,7 +160,16 @@ export function HostConsole(props: {
             </Button>
           )}
           <DropdownMenu
-            items={[{ label: "End session…", icon: <Power />, danger: true, onSelect: end }]}
+            items={[
+              {
+                label: "Bring the window to front",
+                icon: <AppWindow />,
+                hint: windowStream && s.gameInFront === true ? "in front now" : undefined,
+                disabled: frontBlocked,
+                onSelect: front,
+              },
+              { label: "End session…", icon: <Power />, danger: true, onSelect: end },
+            ]}
           >
             <IconButton label="Session options" variant="secondary">
               <MoreHorizontal />
@@ -217,6 +251,66 @@ export function HostConsole(props: {
           />
         </section>
       )}
+      {remote && pcName && <DesktopPanel room={room} session={s} remote={remote} pc={pcName} busy={busy} run={run} />}
+    </section>
+  );
+}
+
+/** Desktop control of the home PC (M25b), on the device running it: last in
+ * the console, so its changes move nothing above. */
+function DesktopPanel(props: {
+  room: RoomView;
+  session: SessionView;
+  remote: RemoteTarget;
+  pc: string;
+  busy: string | null;
+  run: ReturnType<typeof useRun>["run"];
+}) {
+  const { room, session: s, remote, pc } = props;
+  const me = room.members.find((m) => m.link === "me")?.id;
+  const ours = s.desktop != null && s.desktop === me;
+  const blocked = desktopBlocked(s);
+  return (
+    <section className="panel" aria-label="The desktop">
+      <header className="panel-head">
+        <h3>{pc}'s desktop</h3>
+        <span className="panel-why">
+          <Why>
+            Your keyboard and mouse reach everything on {pc} through the session's keyboard seat, not just the game:
+            start games, switch windows, answer a prompt. Click the picture to take them, the Windows key and Alt+Tab
+            included; the Free the mouse shortcut (Ctrl+Alt+Shift+M unless you moved it) gives them back, and so does
+            leaving the stream window. Ctrl+Alt+Del always stays this PC's. Someone at {pc} sees a banner, and the
+            panic key there ends it.
+          </Why>
+        </span>
+      </header>
+      <div className="desktop-row">
+        <p className="desktop-text">
+          {ours
+            ? `You control ${pc}'s desktop. Click the picture to take the keyboard and mouse.`
+            : s.desktop != null
+              ? `${nameOf(room, s.desktop)} controls ${pc}'s desktop.`
+              : `Use ${pc} as if you were at it: start a game, switch windows.`}
+        </p>
+        {ours ? (
+          <Button
+            disabled={props.busy != null}
+            onClick={() => void props.run("desktop", desktopCommand(remote, false))}
+          >
+            Stop controlling
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            icon={<MousePointer2 />}
+            disabled={props.busy != null || blocked != null || s.desktop != null}
+            reason={blocked}
+            onClick={() => void props.run("desktop", desktopCommand(remote, true))}
+          >
+            Control the desktop
+          </Button>
+        )}
+      </div>
     </section>
   );
 }
@@ -254,12 +348,21 @@ function ConsoleBanners(props: {
   const { session: s, pads, remote } = props;
   return (
     <div className="console-banners">
-      {s.operatedBy.length > 0 && (
-        <Callout tone="info" icon={<Router />}>
-          {listed(s.operatedBy)} {s.operatedBy.length === 1 ? "is" : "are"} running this session from afar. The panic
-          key locks {s.operatedBy.length === 1 ? "it" : "them"} out until the PIN is given again; to keep{" "}
-          {s.operatedBy.length === 1 ? "it" : "them"} out, turn remote play off in Settings.
+      {s.desktop != null && !remote ? (
+        // Desktop control (M25b): said where anyone at this PC looks.
+        <Callout tone="warn" icon={<MousePointer2 />}>
+          {nameOf(props.room, s.desktop)} is controlling this PC: its keyboard and mouse reach everything here, not
+          just the game. {s.panicKey ? <Kbd keys={s.panicKey} /> : "The panic key"} ends it and locks the device out
+          until its PIN is given again.
         </Callout>
+      ) : (
+        s.operatedBy.length > 0 && (
+          <Callout tone="info" icon={<Router />}>
+            {listed(s.operatedBy)} {s.operatedBy.length === 1 ? "is" : "are"} running this session from afar. The
+            panic key locks {s.operatedBy.length === 1 ? "it" : "them"} out until the PIN is given again; to keep{" "}
+            {s.operatedBy.length === 1 ? "it" : "them"} out, turn remote play off in Settings.
+          </Callout>
+        )
       )}
       {s.controlPaused && (
         <Callout

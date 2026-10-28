@@ -62,6 +62,8 @@ pub struct InputCapture {
     /// The user freed the mouse with the hotkey.
     mouse_freed: bool,
     captured: bool,
+    /// The system keys are ours (M25b, desktop control).
+    keyboard_grabbed: bool,
     /// Sub-pixel motion and sub-notch wheel carried to the next event.
     motion_rest: (f32, f32),
     wheel_rest: (f32, f32),
@@ -95,6 +97,7 @@ impl InputCapture {
             focused: false,
             mouse_freed: false,
             captured: false,
+            keyboard_grabbed: false,
             motion_rest: (0.0, 0.0),
             wheel_rest: (0.0, 0.0),
             keys: BTreeSet::new(),
@@ -215,13 +218,18 @@ impl InputCapture {
         if !self.seats.holding() || !self.may(Permissions::MOUSE) {
             return None;
         }
+        let what = if self.may(Permissions::DESKTOP) {
+            "the keyboard and mouse"
+        } else {
+            "the mouse"
+        };
         Some(if self.captured {
             format!(
-                "{} frees the mouse",
+                "{} frees {what}",
                 self.shortcuts.binding(Shortcut::FreeMouse).keys()
             )
         } else {
-            "Click the picture to capture the mouse".to_string()
+            format!("Click the picture to capture {what}")
         })
     }
 
@@ -351,13 +359,24 @@ impl InputCapture {
         self.captured
     }
 
-    /// Captures or frees the mouse to match the state. Call after events.
-    pub fn sync_capture(&mut self, mouse: &MouseUtil, window: &Window) {
+    /// Captures or frees the mouse to match the state, and with desktop
+    /// control (M25b) the keyboard with it: SDL's keyboard grab takes the
+    /// Windows key, Alt+Tab and the rest from this PC while the window has
+    /// the focus. Only after a click into the picture, never by itself, and
+    /// the free shortcut gives both back (Ctrl+Alt+Del always stays this
+    /// PC's). Call after events.
+    pub fn sync_capture(&mut self, mouse: &MouseUtil, window: &mut Window) {
         let want = self.focused && !self.mouse_freed && self.may(Permissions::MOUSE);
         if want != self.captured {
             mouse.set_relative_mouse_mode(window, want);
             self.captured = want;
             self.motion_rest = (0.0, 0.0);
+        }
+        let grab = self.captured && self.may(Permissions::DESKTOP);
+        if grab != self.keyboard_grabbed {
+            window.set_keyboard_grab(grab);
+            self.keyboard_grabbed = grab;
+            tracing::info!(grab, "the keyboard's system keys");
         }
     }
 

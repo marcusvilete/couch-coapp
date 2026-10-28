@@ -473,7 +473,7 @@ async fn main() -> ExitCode {
                 rc_trace,
                 pacing_trace,
                 permissions: if allow_kbm {
-                    couch_input::Permissions::all()
+                    couch_input::Permissions::ALL_INPUT
                 } else {
                     couch_input::Permissions::GUEST_DEFAULT
                 },

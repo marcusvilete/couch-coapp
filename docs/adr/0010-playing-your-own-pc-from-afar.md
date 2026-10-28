@@ -84,6 +84,12 @@ Today none of that works:
   - while the operator controls the desktop, H shows a banner, "Marcus's laptop is controlling this PC · the panic key ends it": unfocusable, click-through, and kept out of the capture (the host overlay's rules);
   - the panic key, pressed by anyone at H, ends desktop control and the operator's unlock: the operator must give the PIN again;
   - injected keys never press the panic key (as before), so the operator can't defeat it.
+- **Settled while building M25b** ([results](../m25b-results.md)):
+  - **SDL3's keyboard grab sees the keys** in our stream window, with the mouse in relative mode (the author pressed them: the Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc and Alt+F4 stayed in the window, and Ctrl+Alt+Shift+M gave them back). No hook of our own was needed: SDL reads the keyboard without raw input.
+  - **The mouse stays relative, as in games:** the laptop's pointer is captured and the home PC's cursor shows in the stream. On a streamed screen, H applies each move to its cursor's position, clamped to that screen, as an absolute move: no acceleration, and the cursor can't wander onto a screen nobody sees. Nothing new on the wire. An absolute pointer (the laptop's own, over the picture) was left for later.
+  - **Trust changes wait while the desktop is controlled:** the operator could click through H's own window, so H refuses adding a device, changing the PIN, and accepting, unlocking or running another PC of the owner's from H (which would stretch H's PIN to it) until desktop control ends. Removing a device and turning remote play off still work. This is a speed bump, not a wall: desktop control is the whole PC, so someone holding it could edit `remote-play.json` and restart the app, or install anything. The threat model's row for a thief with the laptop and the PIN stands as written: anything you could do at your PC.
+  - **The shortcut keeps its row** (`freeMouse`, Ctrl+Alt+Shift+M): its label says that with desktop control it frees the keyboard too.
+  - **Bring to front:** with nobody at H, the streamed window can't be clicked forward, so both consoles have Bring to front for the streamed window (never a window named in the command). Windows lets a background process take the front only as the one that gave the last input, so H taps F24 first: measured, refused without it, every time with it, minimized windows included.
 
 ### Unattended PC
 

@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn repeats_are_not_resent() {
         let now = Instant::now();
-        let mut f = holding(Permissions::all(), now);
+        let mut f = holding(Permissions::ALL_INPUT, now);
         assert_eq!(f.local(key(0x04, true), now).len(), 1);
         assert!(f.local(key(0x04, true), now).is_empty());
         assert!(f.local(pad(0, 0), now).is_empty());
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     fn the_pad_refreshes_and_held_input_syncs() {
         let t0 = Instant::now();
-        let mut f = holding(Permissions::all(), t0);
+        let mut f = holding(Permissions::ALL_INPUT, t0);
         assert!(f.tick(t0 + Duration::from_millis(99)).is_empty());
         assert!(matches!(
             f.tick(t0 + PAD_REFRESH)[..],
@@ -800,9 +800,9 @@ mod tests {
     fn a_new_seat_restarts_the_totals_and_old_releases_are_ignored() {
         let mut f = Forwarder::new();
         let now = Instant::now();
-        f.seat_assigned(SEAT, SeatEpoch(1), Permissions::all(), None, now);
+        f.seat_assigned(SEAT, SeatEpoch(1), Permissions::ALL_INPUT, None, now);
         f.local(LocalInput::MouseMotion { dx: 50, dy: 0 }, now);
-        f.seat_assigned(SEAT, SeatEpoch(2), Permissions::all(), None, now);
+        f.seat_assigned(SEAT, SeatEpoch(2), Permissions::ALL_INPUT, None, now);
         f.seat_released(SEAT, SeatEpoch(1));
         assert_eq!(f.holding().len(), 1);
         let out = f.local(LocalInput::MouseMotion { dx: 1, dy: 0 }, now);
@@ -1120,7 +1120,7 @@ mod tests {
         let mut router = SeatRouter::new(1);
         router.set_foreground(true);
         router.set_pointer_inside(true);
-        let grant = router.grant(SEAT, ME, Permissions::all(), t0);
+        let grant = router.grant(SEAT, ME, Permissions::ALL_INPUT, t0);
         let Some(Effect::Granted {
             epoch, permissions, ..
         }) = grant.last().copied()

@@ -64,6 +64,7 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     note: null,
     operator: false,
     operatedBy: [],
+    desktop: null,
   };
 }
 

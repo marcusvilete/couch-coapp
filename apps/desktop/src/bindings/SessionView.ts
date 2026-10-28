@@ -127,6 +127,8 @@ streamWindow: StreamWindowView | null,
 /**
  * For a viewer: whether the host's game is in front on their PC, as the
  * host last said (keyboard and mouse don't reach it while it isn't).
+ * For the host, and a session we run from afar (M25b): whether the
+ * streamed window is, for Bring to front; `None` for a screen.
  */
 gameInFront: boolean | null, 
 /**
@@ -142,4 +144,9 @@ operator: boolean,
 /**
  * For the host: our devices running this session from afar, by name.
  */
-operatedBy: Array<string>, };
+operatedBy: Array<string>, 
+/**
+ * For the host, and a session we run from afar: the member controlling
+ * the host's desktop (M25b), by id. The host's banner names its device.
+ */
+desktop: string | null, };

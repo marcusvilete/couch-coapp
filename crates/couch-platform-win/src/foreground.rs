@@ -11,7 +11,8 @@ use windows::Win32::{
     Foundation::{HWND, POINT},
     UI::WindowsAndMessaging::{
         AllowSetForegroundWindow, GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow,
-        GetWindowThreadProcessId, IsWindow, WindowFromPoint,
+        GetWindowThreadProcessId, IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
+        WindowFromPoint,
     },
 };
 
@@ -61,6 +62,29 @@ pub fn window_exists(window: WindowId) -> bool {
 pub fn allow_foreground(pid: u32) -> bool {
     // SAFETY: takes a process id by value.
     unsafe { AllowSetForegroundWindow(pid) }.is_ok()
+}
+
+/// Brings `window` to the front (M25b, the console's Bring to front), from
+/// a process that isn't in front: restored first if minimized, then a tap
+/// of F24 makes this process the last to give input, which Windows requires
+/// of a background process (measured: refused without it, every time
+/// with it). `false` if Windows still said no.
+pub fn bring_to_front(window: WindowId) -> bool {
+    let hwnd = HWND(window.0 as *mut _);
+    if !window_exists(window) {
+        return false;
+    }
+    // SAFETY: both take a handle value, which Windows checks.
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+    }
+    if let Err(e) = crate::sendinput::tap_harmless_key() {
+        tracing::debug!("no key tap before bringing a window forward: {e}");
+    }
+    // SAFETY: takes a handle value, which Windows checks.
+    unsafe { SetForegroundWindow(hwnd) }.as_bool() || is_foreground(window)
 }
 
 /// The process that owns `window`, if it still exists.

@@ -88,6 +88,7 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     note: null,
     operator: false,
     operatedBy: [],
+    desktop: null,
     ...over,
   };
 }
@@ -161,6 +162,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       ],
       waitSecs: null,
       hosts: [],
+      desktop: null,
     },
     ...over,
   };
@@ -203,7 +205,8 @@ function hosting(over: Partial<SessionView> = {}, live = true): SessionView {
   ];
   if (live) {
     s.stream = { state: "live" };
-    s.streaming = { name: "The Witcher 3: Wild Hunt", fps: 60, maxMbps: 20, uploadMbps: null };
+    s.streaming = { name: "The Witcher 3: Wild Hunt", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
+    s.gameInFront = true;
   }
   return Object.assign(s, over);
 }
@@ -316,7 +319,7 @@ export const SCENARIOS: Record<string, Scenario> = {
       s.seats[0].guestController = 0;
       s.requests = [{ member: bia.id, seat: 1, controller: null }];
       s.stream = { state: "live" };
-      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null };
+      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
       s.streamWindow = ourWindow({});
       s.gameInFront = true;
       return base([sofa({ members: [you(false), homePc({ unlocked: true }), bia, caio], sessions: [s] })]);
@@ -330,7 +333,8 @@ export const SCENARIOS: Record<string, Scenario> = {
       s.viewerControllers = [1];
       s.operatedBy = ["Ana's laptop"];
       s.stream = { state: "live" };
-      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null };
+      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
+      s.gameInFront = true;
       const laptop = member(LAPTOP, "Ana's laptop", "relay");
       const world = base([sofa({ members: [you(true), laptop, bia, caio], sessions: [s] })]);
       Object.assign(world.remotePlay, {
@@ -339,6 +343,69 @@ export const SCENARIOS: Record<string, Scenario> = {
         devices: [{ id: LAPTOP, name: "Ana's laptop", code: "7B31 E05C", online: true }],
       });
       return world;
+    },
+  },
+  // ---- Desktop control and Bring to front (M25b) ----
+  "remote-desktop": {
+    title: "Remote play: controlling our PC's desktop from here",
+    world: () => {
+      const s = hostSession(HOME_PC, "Desktop", 4, { controllers: 1, keyboardMouse: "ownSeat" }, []);
+      Object.assign(s, { role: "controlling", operator: true, panicKey: null, answerKeys: null });
+      s.viewers = [ME];
+      s.viewerControllers = [1];
+      s.seats[1].holder = ME;
+      s.desktop = ME;
+      s.stream = { state: "live" };
+      s.streaming = { name: "Screen 1", fps: 60, maxMbps: 20, uploadMbps: null, screen: true };
+      s.streamWindow = ourWindow({});
+      return base([sofa({ members: [you(false), homePc({ unlocked: true }), bia, caio], sessions: [s] })]);
+    },
+  },
+  "remote-desktop-ready": {
+    title: "Remote play: our PC's screen streamed, desktop control not on yet",
+    world: () => {
+      const s = hostSession(HOME_PC, "Desktop", 4, { controllers: 1, keyboardMouse: "ownSeat" }, []);
+      Object.assign(s, { role: "watching", operator: true, panicKey: null, answerKeys: null });
+      s.viewers = [ME];
+      s.viewerControllers = [1];
+      s.stream = { state: "live" };
+      s.streaming = { name: "Screen 1", fps: 60, maxMbps: 20, uploadMbps: null, screen: true };
+      s.streamWindow = ourWindow({});
+      return base([sofa({ members: [you(false), homePc({ unlocked: true }), bia, caio], sessions: [s] })]);
+    },
+  },
+  "remote-home-desktop": {
+    title: "Remote play at the home PC: our laptop controls the desktop",
+    world: () => {
+      const s = hostSession(ME, "Desktop", 4, { controllers: 1, keyboardMouse: "ownSeat" }, []);
+      s.viewers = [LAPTOP];
+      s.viewerControllers = [1];
+      s.operatedBy = ["Ana's laptop"];
+      s.seats[1].holder = LAPTOP;
+      s.desktop = LAPTOP;
+      s.stream = { state: "live" };
+      s.streaming = { name: "Screen 1", fps: 60, maxMbps: 20, uploadMbps: null, screen: true };
+      const laptop = member(LAPTOP, "Ana's laptop", "relay");
+      const world = base([sofa({ members: [you(true), laptop, bia, caio], sessions: [s] })]);
+      Object.assign(world.remotePlay, {
+        on: true,
+        pinSet: true,
+        devices: [{ id: LAPTOP, name: "Ana's laptop", code: "7B31 E05C", online: true }],
+        desktop: "Ana's laptop",
+      });
+      return world;
+    },
+  },
+  "bring-to-front": {
+    title: "Our session: the streamed window isn't in front",
+    world: () => {
+      const s = hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []);
+      s.viewers = [bia.id];
+      s.viewerControllers = [1];
+      s.stream = { state: "live" };
+      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
+      s.gameInFront = false;
+      return base([sofa({ sessions: [s] })]);
     },
   },
   "watching-together": {
@@ -476,7 +543,8 @@ export const SCENARIOS: Record<string, Scenario> = {
       s.viewers = [bia.id, caio.id, dani.id];
       s.viewerControllers = [0, 0, 0];
       s.stream = { state: "live" };
-      s.streaming = { name: "VLC media player", fps: 60, maxMbps: 20, uploadMbps: null };
+      s.streaming = { name: "VLC media player", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
+      s.gameInFront = true;
       return base([sofa({ sessions: [s] })]);
     },
   },

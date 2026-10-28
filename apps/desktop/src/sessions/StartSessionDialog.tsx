@@ -39,7 +39,9 @@ export function StartSessionDialog(props: {
   const [title, setTitle] = useState(() => truncateBytes(readStored(KEYS.sessionTitle) || "Game night"));
   const [viewers, setViewers] = useState(4);
   const [controllers, setControllers] = useState(() => storedSetup().controllers);
-  const [kbm, setKbm] = useState<KeyboardMouseSeat>(() => storedSetup().keyboardMouse);
+  // From afar the keyboard seat is also desktop control's (M25b): on by
+  // default there.
+  const [kbm, setKbm] = useState<KeyboardMouseSeat>(() => (remote ? "ownSeat" : storedSetup().keyboardMouse));
   // Our controllers to play through seats, as `padKeys` (M23), in the
   // order listed: each takes the next seat with a pad. None plays outside.
   const [myPads, setMyPads] = useState<string[]>([]);
@@ -265,7 +267,13 @@ export function StartSessionDialog(props: {
               })
             )}
           </ul>
-          {kbm !== "none" ? (
+          {kbm !== "none" && remote ? (
+            <Callout tone="info" icon={<Keyboard />} title="The keyboard seat is how you control the desktop">
+              Stream {pcName}'s screen and turn on desktop control in its console: your keyboard and mouse then reach
+              everything on {pcName}, to start a game or switch windows. You can still give the seat to a guest for a
+              game's window; they never get the desktop.
+            </Callout>
+          ) : kbm !== "none" ? (
             <Callout tone="danger" icon={<ShieldAlert />} title="Keyboard and mouse are control of your PC">
               Whoever holds that seat types only into the game, and only while its window is in front, so you'll stream
               a window, not a whole screen; the Windows key, Alt+Tab, Alt+F4, Ctrl+Esc and Ctrl+Shift+Esc never go

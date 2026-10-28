@@ -70,6 +70,25 @@
   }
 }
 
+.console-away {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+/* Desktop control (M25b): one line, its button at the end. */
+.desktop-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 40px;
+}
+
+.desktop-text {
+  flex: 1;
+  margin: 0;
+  color: var(--text-muted);
+}
+
 .console-actions {
   display: flex;
   gap: var(--s2);

@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { hosted, requestToasts, sessionEvents, type Toast } from "../model/overlay";
+import { desktopBanner, hosted, requestToasts, sessionEvents, type Toast } from "../model/overlay";
 import { platform } from "../platform";
 import { overlaySettings } from "../state/overlaySettings";
 
@@ -65,8 +65,12 @@ export function useOverlay(rooms: RoomView[]) {
     };
   }, []);
 
-  const toasts: Toast[] = host ? [...requestToasts(host.room, host.session), ...events] : [];
-  const show = host != null && toasts.length > 0 && !appInFront && overlaySettings().show;
+  // Desktop control's banner (M25b) shows whatever the setting, and over the
+  // app too: whoever is at this PC must see it.
+  const banner = host ? desktopBanner(host.room, host.session) : [];
+  const toasts: Toast[] = host ? [...banner, ...requestToasts(host.room, host.session), ...events] : [];
+  const show =
+    host != null && toasts.length > 0 && (banner.length > 0 || (!appInFront && overlaySettings().show));
   const area = host?.session.overlayArea ?? null;
 
   // The overlay page asks for the list when it has loaded.

@@ -7,7 +7,20 @@ export function OverlayToasts(props: { toasts: Toast[] }) {
   return (
     <div className="overlay">
       {props.toasts.map((t) =>
-        t.kind === "request" ? (
+        t.kind === "banner" ? (
+          <div key={t.id} className="toast banner">
+            <strong>{t.text}</strong>
+            <span className="keys">
+              {t.panic ? (
+                <>
+                  <kbd>{t.panic}</kbd> ends it
+                </>
+              ) : (
+                "End it in the app"
+              )}
+            </span>
+          </div>
+        ) : t.kind === "request" ? (
           <div key={t.id} className={`toast request${t.first ? " first" : ""}`}>
             <strong>{t.text}</strong>
             {t.first && t.accept && t.decline ? (
