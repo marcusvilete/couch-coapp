@@ -97,6 +97,11 @@ Today none of that works:
 - **Close to the notification area:** while remote play is on, closing the window hides it instead of quitting. The tray icon's menu quits.
 - **Stay awake** while remote play is on (`SetThreadExecutionState`, the system), and keep the display on during a remote session: a sleeping display stops the capture.
 - **Say what can't be done:** H tells the operator when Windows is locked, so the operator sees "Your PC is locked: Windows won't let anything in until someone unlocks it at home", not a black stream.
+- **Settled while building M25c** ([results](../m25c-results.md)):
+  - **Start at sign-in is the user's own switch** (the author's choice), off until turned on, not tied to remote play. Only an installed app's default profile offers it: a development build would start the debug exe, and a Run entry can't name another profile.
+  - **The notification area icon is always there,** not only while remote play is on, so a hidden window can always be found. Closing the window hides it only while remote play is on; otherwise it quits, as before.
+  - **Awake is a power request** (`PowerCreateRequest`), not `SetThreadExecutionState`: a handle, not tied to a thread, cleared when closed. The display stays on only while a device is unlocked.
+  - **Locked means the input desktop isn't the user's own:** the lock screen, and a UAC prompt too, which a device can't get past either. Looked at every 2 s while a device is unlocked.
 
 ### What can't work
 

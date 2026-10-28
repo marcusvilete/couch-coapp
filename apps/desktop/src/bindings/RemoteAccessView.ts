@@ -15,4 +15,9 @@ code: string,
 /**
  * Wrong PINs make the next try wait this long, in seconds.
  */
-waitSecs: number | null, };
+waitSecs: number | null, 
+/**
+ * Unlocked, and Windows is locked at that PC (M25c): nothing gets in
+ * until someone unlocks it there.
+ */
+locked: boolean, };

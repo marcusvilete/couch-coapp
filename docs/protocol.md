@@ -22,13 +22,14 @@ The wire protocol between room members, and the pipe between the main process an
 - M24 lets a session have no seats, to watch together, and drops `SeatKind::Both` (wire revision 9).
 - M25a adds remote play: a device of the user's own runs a home PC's sessions from afar, the `0x07xx` messages (wire revision 10).
 - M25b adds desktop control for that device: the `DESKTOP` permission bit, `RemoteOp::Desktop` and `BringToFront`, and the console state's desktop holder and window focus (wire revision 11).
+- M25c tells the device when Windows is locked at its home PC: `RemoteState.locked` (wire revision 12).
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 11, for desktop control in M25b). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 12, for the locked home PC in M25c). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -78,7 +79,7 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x8703` | `RemoteUnlockReply { result: Unlocked \| WrongPin { wait_secs u32 } \| Wait { secs u32 } \| Off }` | Home PC to the device that sent `RemoteUnlock` |
 | `0x8704` | `RemoteCommand { id u32, op }` | Operator to home PC: one of the host's commands (`RemoteOp`: `ListSources`, `StartSession { title, max_viewers, controllers u8, keyboard_mouse }`, `StartStream { source: Window(i64) \| Screen(i64), name, fps, max_mbps, upload_mbps? }`, `StopStream`, `SetStreamLevel`, `EndSession`, `AnswerControl`, `PassControl`, `TakeBackControl`, `PlaySeat`, `AllowControl`, `StopWaitingForPads`; M25b: `Desktop { on }`, `BringToFront`); texts at most 200 bytes |
 | `0x8705` | `RemoteReply { id u32, result: Done \| Sources(...) \| Failed(text) }` | Home PC to its operator: how that command went. Sources: at most 64 windows and 16 screens, texts at most 200 bytes |
-| `0x8706` | `RemoteState { session? }` | Home PC to each operator, on unlocking and on every change: what its host console shows that members don't otherwise hear (requests, each guest's controllers report, the stream's name and rate, the sound level, pads setting up or missing, its own controllers and their seats, whether it has a panic key; M25b: the member controlling its desktop, and whether a streamed window is in front, with the stream's `screen` flag). Lists within the room's size; each guest's report checked as a host checks one |
+| `0x8706` | `RemoteState { session?, locked }` | Home PC to each operator, on unlocking and on every change: what its host console shows that members don't otherwise hear (requests, each guest's controllers report, the stream's name and rate, the sound level, pads setting up or missing, its own controllers and their seats, whether it has a panic key; M25b: the member controlling its desktop, and whether a streamed window is in front, with the stream's `screen` flag). Lists within the room's size; each guest's report checked as a host checks one |
 | `0x8707` | `RemoteLock { reason: ByOperator \| Panic \| Removed \| PinChanged \| Off }` | Either way: the operator locks itself, or the home PC locks it out |
 
 Message families still to come, all on this stream: **media control** (`VideoConfig`, `BitrateHint`).
@@ -543,6 +544,13 @@ M25b: the operator's keyboard and mouse reach the home PC's whole desktop, to la
 - **The stream window** takes the system keys (SDL's keyboard grab) only while its mouse is captured: after a click into the picture, while it has the focus, until the Free the mouse shortcut. Ctrl+Alt+Del always stays the operator's.
 
 **`RemoteOp::BringToFront`** (and the home PC's own `Command::BringToFront`) brings the streamed window forward, restoring it if minimized. The op names no window: only the one streamed, never a screen. A background process may take the front only as the one that gave the last input, so the home PC first taps F24, down and up in one `SendInput` call (measured: refused without it, every time with it).
+
+### The unattended PC
+
+M25c: nothing on the wire but `RemoteState.locked`. The rest is the home PC's own.
+- **Locked:** while a device is unlocked, the home PC looks every 2 s whether Windows shows its own desktop (the input desktop is `Default`) or a secure one (the lock screen, a UAC prompt), and sends `RemoteState` when that changes, and with the unlock. A device takes it only as part of its PC's state, on the connection that PC's offer came on.
+- **Awake:** while remote play is on, the home PC holds a power request that keeps the system from sleeping, and while a device is unlocked, the display on too. A display that turns off stops the capture, and Windows may lock then.
+- **Sign-in and the notification area:** an installed app's default profile may start at sign-in, to the notification area (the user's own switch). While remote play is on, closing the window keeps the app running there; Quit in its icon's menu ends it.
 
 ## Close and reset codes
 

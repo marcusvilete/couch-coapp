@@ -42,6 +42,8 @@ fn platform_driver(name: DriverName) -> drivers::Driver {
 
 /// The viewer, next to our own exe.
 const VIEWER_EXE: &str = "couch-viewer.exe";
+/// The app's value under the user's Run key (M25c).
+const STARTUP_NAME: &str = "Couch Co-App";
 /// `CREATE_NO_WINDOW`: a console program started this way gets no console
 /// window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -347,6 +349,30 @@ impl Backend for WindowsBackend {
 
     fn bring_to_front(&self, window: NativeId) -> bool {
         foreground::bring_to_front(WindowId(window))
+    }
+
+    fn keep_awake(&self, display: bool) -> Option<Box<dyn Any + Send>> {
+        match couch_platform_win::power::Awake::new("Couch Co-App: remote play is on", display) {
+            Ok(awake) => Some(Box::new(awake)),
+            Err(e) => {
+                tracing::warn!("this PC can't be kept awake: {e}");
+                None
+            }
+        }
+    }
+
+    fn screen_locked(&self) -> bool {
+        couch_platform_win::session_lock::locked()
+    }
+
+    fn start_at_sign_in(&self) -> Result<bool, String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        couch_platform_win::startup::is_set(STARTUP_NAME, &exe).map_err(|e| e.to_string())
+    }
+
+    fn set_start_at_sign_in(&self, on: bool) -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        couch_platform_win::startup::set(STARTUP_NAME, &exe, on).map_err(|e| e.to_string())
     }
 
     fn screen_area(&self, source: &Source) -> Option<ScreenArea> {

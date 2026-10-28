@@ -750,6 +750,7 @@ mod tests {
                     desktop: Some(MemberId([6; 32])),
                     in_front: Some(false),
                 }),
+                locked: true,
             })),
             ControlMessage::RemoteCommand(RemoteCommand {
                 id: 9,
@@ -830,6 +831,7 @@ mod tests {
                 desktop: Some(MemberId([u8::MAX; 32])),
                 in_front: Some(true),
             }),
+            locked: true,
         };
         let sources = RemoteSources {
             windows: (0..MAX_REMOTE_WINDOWS)

@@ -92,6 +92,27 @@ export function RemotePlaySection() {
         )}
       </div>
 
+      <h3 className="settings-subtitle">This PC while you're away</h3>
+      <div className="settings-card">
+        <Switch
+          checked={view.startAtSignIn === true}
+          disabled={working || view.startAtSignIn == null}
+          onChange={(on) => void send({ type: "setStartAtSignIn", on })}
+          label="Start Couch Co-App when I sign in to Windows"
+          detail={
+            view.startAtSignIn == null
+              ? "Only an installed Couch Co-App can, for its main profile."
+              : "It starts in the notification area, without opening its window."
+          }
+        />
+        <p className="settings-note">
+          {view.on
+            ? "While remote play is on, closing the window keeps Couch Co-App running in the notification area (Quit there ends it), and this PC doesn't fall asleep on its own (choosing Sleep, or closing a laptop's lid, still works). While a device of yours is unlocked, its screen stays on too."
+            : "With remote play on, closing the window keeps Couch Co-App running in the notification area, and this PC doesn't fall asleep on its own."}
+          {view.on && view.startAtSignIn === false && " After a restart, start Couch Co-App yourself, or turn on the switch above."}
+        </p>
+      </div>
+
       <h3 className="settings-subtitle">My devices</h3>
       <div className="settings-card">
         {view.devices.length === 0 ? (

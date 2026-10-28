@@ -58,6 +58,18 @@ pub(super) struct Remote {
     listing: BTreeMap<ConnId, u32>,
     /// The state last sent to each operator: only changes go out.
     sent: RefCell<BTreeMap<ConnId, RemoteState>>,
+    /// Whether remote play is on, for the app's shell (M25c): it keeps
+    /// running when its window closes then.
+    on: Arc<std::sync::atomic::AtomicBool>,
+    /// Keeping this PC awake (M25c): whether the display too, and the
+    /// backend's guard (none where it can't).
+    awake: Option<(bool, Option<Box<dyn std::any::Any + Send>>)>,
+    /// Windows is locked here, as last looked at while a device is
+    /// unlocked, and when to look again.
+    locked: bool,
+    next_lock_check: Option<Instant>,
+    /// This app may start itself at sign-in ([`EngineOptions::start_at_sign_in`]).
+    startup_offered: bool,
     // ---- On a device ----
     /// The home PCs we accepted as our own.
     hosts: Vec<Device>,
@@ -76,6 +88,8 @@ struct Link {
     unlocked: bool,
     /// Its session as its host console shows it, while unlocked.
     session: Option<RemoteSession>,
+    /// Windows is locked there, as it last said (M25c).
+    locked: bool,
     /// An unlock on its way: its id (for its timeout), who waits (none for
     /// one made by itself after a reconnect), and the PIN, remembered if
     /// right.
@@ -85,14 +99,20 @@ struct Link {
 }
 
 impl Remote {
-    pub(super) fn load(dir: &std::path::Path) -> Self {
+    pub(super) fn load(dir: &std::path::Path, startup_offered: bool) -> Self {
+        let settings = remote::load(dir);
         Self {
-            settings: remote::load(dir),
+            on: Arc::new(std::sync::atomic::AtomicBool::new(settings.on)),
+            settings,
             operators: BTreeMap::new(),
             checking: BTreeMap::new(),
             pin_generation: 0,
             listing: BTreeMap::new(),
             sent: RefCell::default(),
+            awake: None,
+            locked: false,
+            next_lock_check: None,
+            startup_offered,
             hosts: remote::hosts(dir),
             links: BTreeMap::new(),
             pins: BTreeMap::new(),
@@ -105,7 +125,16 @@ impl Remote {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         id
     }
+
+    /// Whether remote play is on, shared with the engine (M25c).
+    pub(super) fn remote_on(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.on.clone()
+    }
 }
+
+/// How often a home PC with a device unlocked looks whether Windows is
+/// locked (M25c).
+const LOCK_CHECK_EVERY: Duration = Duration::from_secs(2);
 
 fn message(item: ControlMessage) -> Outgoing {
     Outgoing::Message(item)
@@ -172,6 +201,8 @@ impl Actor {
     /// desktop control ends unless its device is still our operator in the
     /// session's room (M25b), then our session is announced.
     fn announce_hosting(&mut self, now: Instant) {
+        // The display needn't stay on for nobody (M25c).
+        self.sync_awake();
         if let Some(device) = self.desktop_given() {
             let room = self.session_room();
             let still = self.remote.settings.trusts(device)
@@ -187,6 +218,50 @@ impl Actor {
         }
         if let Some(room) = self.hosting_room() {
             self.announce(room, now);
+        }
+    }
+
+    /// Keeps this PC awake while remote play is on, and its display on too
+    /// while a device of ours is unlocked: a display that turns off stops
+    /// the capture, and Windows may lock the PC then (M25c). Call after
+    /// either changes.
+    pub(super) fn sync_awake(&mut self) {
+        let want = self
+            .remote
+            .settings
+            .on
+            .then_some(!self.remote.operators.is_empty());
+        if want == self.remote.awake.as_ref().map(|(display, _)| *display) {
+            return;
+        }
+        // The new request is made before the old one goes: no moment
+        // without one.
+        self.remote.awake = want.map(|screen_on| {
+            tracing::info!(screen_on, "remote play: keeping this PC awake");
+            (screen_on, self.backend.keep_awake(screen_on))
+        });
+        if want.is_none() {
+            tracing::info!("remote play: this PC may sleep again");
+        }
+    }
+
+    /// While a device of ours is unlocked: whether Windows is locked here,
+    /// looked at every [`LOCK_CHECK_EVERY`], and told when it changes (M25c).
+    pub(super) fn remote_tick(&mut self, now: Instant) {
+        if self.remote.operators.is_empty() {
+            self.remote.locked = false;
+            self.remote.next_lock_check = None;
+            return;
+        }
+        if self.remote.next_lock_check.is_some_and(|at| now < at) {
+            return;
+        }
+        self.remote.next_lock_check = Some(now + LOCK_CHECK_EVERY);
+        let locked = self.backend.screen_locked();
+        if locked != self.remote.locked {
+            self.remote.locked = locked;
+            tracing::info!(locked, "remote play: Windows' lock screen here");
+            self.remote_push();
         }
     }
 
@@ -254,7 +329,10 @@ impl Actor {
                     return;
                 };
                 match m.checked() {
-                    Some(state) => link.session = state.session,
+                    Some(state) => {
+                        link.session = state.session;
+                        link.locked = state.locked;
+                    }
                     None => tracing::warn!("remote play: a malformed state from the home PC"),
                 }
                 self.announce(room, now);
@@ -384,6 +462,11 @@ impl Actor {
             );
         }
         if unlocked {
+            // The display stays on now, and the device hears at once
+            // whether Windows is locked here (M25c).
+            self.sync_awake();
+            self.remote.locked = self.backend.screen_locked();
+            self.remote.next_lock_check = Some(now + LOCK_CHECK_EVERY);
             self.remote_push();
             self.announce_hosting(now);
         }
@@ -516,6 +599,7 @@ impl Actor {
             let here = self.conns.get(conn).is_some_and(|c| Some(c.room) == room);
             let state = RemoteState {
                 session: session.clone().filter(|_| here),
+                locked: self.remote.locked,
             };
             if sent.get(conn) != Some(&state) {
                 self.send(
@@ -582,6 +666,8 @@ impl Actor {
                 | Command::AcceptRemoteHost { .. }
                 | Command::UnlockRemote { .. }
                 | Command::Remote { .. }
+                // Turned on, the PC comes back online at every sign-in (M25c).
+                | Command::SetStartAtSignIn { on: true }
         ) && self.desktop_given().is_some()
         {
             let _ = reply.send(Err(EngineError::Remote(
@@ -594,6 +680,7 @@ impl Actor {
         let result = match command {
             Command::GetRemotePlay => Ok(()),
             Command::SetRemotePlay { on } => self.set_remote_play(on, now),
+            Command::SetStartAtSignIn { on } => self.set_start_at_sign_in(on),
             Command::SetRemotePin { pin } => {
                 // Answers later, once hashed.
                 if let Err(e) = self.set_remote_pin(&pin, reply) {
@@ -638,13 +725,35 @@ impl Actor {
             return Err(EngineError::Remote("set a PIN first".into()));
         }
         self.remote.settings.on = on;
-        self.save_remote()?;
+        // Acted on even if it can't be saved (M25c review): turned off,
+        // devices are locked out and the PC may sleep at once; the failed
+        // save is still reported.
+        let saved = self.save_remote();
+        self.remote
+            .on
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+        self.sync_awake();
         if on {
             self.offer_remote_everywhere();
         } else {
             self.remote_lock_all(LockReason::Off, now);
             self.tell_devices(LockReason::Off, |_| true);
         }
+        saved
+    }
+
+    /// Starts this app at sign-in, or stops (M25c): the user's own choice,
+    /// independent of remote play, where it is offered.
+    fn set_start_at_sign_in(&mut self, on: bool) -> Result<(), EngineError> {
+        if !self.remote.startup_offered {
+            return Err(EngineError::Refused(
+                "only an installed Couch Co-App can start with Windows",
+            ));
+        }
+        self.backend
+            .set_start_at_sign_in(on)
+            .map_err(EngineError::Remote)?;
+        tracing::info!(on, "starting at sign-in");
         Ok(())
     }
 
@@ -826,6 +935,12 @@ impl Actor {
                     .find(|d| d.id == hex)
                     .map(|d| d.name.clone())
             }),
+            start_at_sign_in: self.remote.startup_offered.then(|| {
+                self.backend.start_at_sign_in().unwrap_or_else(|e| {
+                    tracing::warn!("whether we start at sign-in: {e}");
+                    false
+                })
+            }),
         }
     }
 
@@ -845,6 +960,7 @@ impl Actor {
             wait_secs: None,
             unlocked: false,
             session: None,
+            locked: false,
             unlocking: None,
             pending: BTreeMap::new(),
         });
@@ -856,6 +972,7 @@ impl Actor {
                     wait_secs: None,
                     unlocked: false,
                     session: None,
+                    locked: false,
                     unlocking: None,
                     pending: BTreeMap::new(),
                 },
@@ -1234,6 +1351,7 @@ impl Actor {
             unlocked: link.unlocked,
             code: remote::device_code(member),
             wait_secs: link.wait_secs,
+            locked: link.unlocked && link.locked,
         })
     }
 

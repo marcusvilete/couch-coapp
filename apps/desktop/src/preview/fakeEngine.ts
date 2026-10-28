@@ -366,6 +366,7 @@ type RemoteCommand = Extract<
     type:
       | "getRemotePlay"
       | "setRemotePlay"
+      | "setStartAtSignIn"
       | "setRemotePin"
       | "addRemoteDevice"
       | "removeRemoteDevice"
@@ -405,6 +406,10 @@ function remoteCommand(cmd: RemoteCommand): Response {
     case "setRemotePlay":
       if (cmd.on && !rp.pinSet) throw "set a PIN first";
       rp.on = cmd.on;
+      return reply();
+    case "setStartAtSignIn":
+      if (rp.startAtSignIn == null) throw "only an installed Couch Co-App can start with Windows";
+      rp.startAtSignIn = cmd.on;
       return reply();
     case "setRemotePin":
       if ([...cmd.pin.trim()].length < 6) throw "the PIN must be at least 6 characters";
@@ -709,6 +714,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       return { type: "streamWindow", bar: world.streamWindowBar };
     case "getRemotePlay":
     case "setRemotePlay":
+    case "setStartAtSignIn":
     case "setRemotePin":
     case "addRemoteDevice":
     case "removeRemoteDevice":

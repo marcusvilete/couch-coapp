@@ -343,6 +343,12 @@ pub enum Command {
     SetRemotePlay {
         on: bool,
     },
+    /// This app starts when the user signs in to Windows, to the
+    /// notification area (M25c), or stops doing so. Only where
+    /// [`RemotePlayView::start_at_sign_in`] offers it.
+    SetStartAtSignIn {
+        on: bool,
+    },
     /// At the home PC: the PIN its devices unlock with. A new one locks them
     /// out until they give it.
     SetRemotePin {
@@ -1186,6 +1192,9 @@ pub struct RemotePlayView {
     /// The device controlling this PC's desktop now, by name (M25b): adding
     /// a device and changing the PIN wait until it ends.
     pub desktop: Option<String>,
+    /// Whether this app starts when the user signs in to Windows (M25c);
+    /// `None` where it isn't offered (a development build, another profile).
+    pub start_at_sign_in: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1212,6 +1221,9 @@ pub struct RemoteAccessView {
     pub code: String,
     /// Wrong PINs make the next try wait this long, in seconds.
     pub wait_secs: Option<u32>,
+    /// Unlocked, and Windows is locked at that PC (M25c): nothing gets in
+    /// until someone unlocks it there.
+    pub locked: bool,
 }
 
 impl fmt::Debug for Command {
@@ -1377,6 +1389,9 @@ impl fmt::Debug for Command {
             }
             Self::GetRemotePlay => f.write_str("GetRemotePlay"),
             Self::SetRemotePlay { on } => f.debug_struct("SetRemotePlay").field("on", on).finish(),
+            Self::SetStartAtSignIn { on } => {
+                f.debug_struct("SetStartAtSignIn").field("on", on).finish()
+            }
             // The PIN guards the whole PC.
             Self::SetRemotePin { .. } => f.write_str("SetRemotePin { .. }"),
             Self::AddRemoteDevice { member } => f
@@ -1807,6 +1822,9 @@ pub struct EngineOptions {
     /// The app's file dialogs for backups (M13); without them, backups are
     /// refused.
     pub backup_files: Option<Arc<dyn BackupFiles>>,
+    /// Whether this app may start itself when the user signs in (M25c):
+    /// Settings offers it only then.
+    pub start_at_sign_in: bool,
 }
 
 impl EngineOptions {
@@ -1828,6 +1846,7 @@ impl EngineOptions {
             reconnect_wait: Duration::from_secs(30),
             relay_only: false,
             backup_files: None,
+            start_at_sign_in: false,
         }
     }
 
@@ -1852,6 +1871,10 @@ impl EngineOptions {
             });
         Self {
             relays,
+            // An installed app's default profile only (M25c): a development
+            // build would start the debug exe, which needs the dev server,
+            // and a Run entry can't name another profile.
+            start_at_sign_in: !cfg!(debug_assertions) && profile.is_default(),
             ..Self::development()
         }
     }
@@ -1971,6 +1994,8 @@ pub struct Engine {
     shortcuts_edit: Mutex<()>,
     /// A driver's setup is running ([`Command::InstallDriver`]).
     installing_driver: AtomicBool,
+    /// Whether remote play is on, as the actor last set it (M25c).
+    remote_on: Arc<AtomicBool>,
     /// Held while this engine runs; see [`lock_profile`].
     _lock: std::fs::File,
 }
@@ -2006,8 +2031,15 @@ impl Engine {
             relay_in_use,
             shortcuts_edit: Mutex::new(()),
             installing_driver: AtomicBool::new(false),
+            remote_on: started.remote_on,
             _lock: lock,
         })
+    }
+
+    /// Whether remote play is on (M25c): the app then keeps running when its
+    /// window closes. Read without waiting on the engine.
+    pub fn remote_play_on(&self) -> bool {
+        self.remote_on.load(Ordering::SeqCst)
     }
 
     /// Runs a backup or restore, one at a time, with the app's dialogs.

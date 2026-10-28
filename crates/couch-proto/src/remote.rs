@@ -324,6 +324,9 @@ pub fn cut(text: &mut String) {
 pub struct RemoteState {
     /// The home PC's session, if it has one.
     pub session: Option<RemoteSession>,
+    /// Windows is locked at the home PC (M25c): nothing gets in until
+    /// someone unlocks it there, and a capture shows black or freezes.
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -560,10 +563,18 @@ mod tests {
                 desktop: None,
                 in_front: None,
             }),
+            locked: false,
         };
         assert!(state(vec![guest(0)]).checked().is_some());
         // Seat 0 driven by a controller the guest doesn't have.
         assert!(state(vec![guest(1)]).checked().is_none());
-        assert!(RemoteState { session: None }.checked().is_some());
+        assert!(
+            RemoteState {
+                session: None,
+                locked: true
+            }
+            .checked()
+            .is_some()
+        );
     }
 }

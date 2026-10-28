@@ -42,6 +42,13 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; Start with Windows (M25c) goes with the app, or Windows tries the missing
+  ; program at every sign-in: the current user's Run value, which the app
+  ; writes in either install mode. Never during an update, which would turn
+  ; the user's switch off.
+  ${If} $UpdateMode <> 1
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Couch Co-App"
+  ${EndIf}
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
     SetShellVarContext current

@@ -50,6 +50,11 @@ fn restart_app(app: AppHandle) {
 struct WindowFile(PathBuf);
 
 fn save_window(app: &AppHandle) {
+    // Never placed (started at sign-in and never opened, M25c): its place
+    // isn't the user's, and mustn't replace the one saved.
+    if !PLACED.load(Ordering::SeqCst) {
+        return;
+    }
     if let (Some(window), Some(file)) = (
         app.get_webview_window(MAIN_WINDOW),
         app.try_state::<WindowFile>(),
@@ -91,12 +96,16 @@ pub fn run() {
     }
 
     let window_profile = profile.clone();
+    let background = std::env::args().any(|a| a == BACKGROUND);
     let app = tauri::Builder::default()
         // First, so a second launch of this profile hands its arguments (an
         // invite link) to the running one and exits inside `build`, before
-        // it brings our identity online.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
+        // it brings our identity online. A second start at sign-in (signing
+        // out and in without the app quitting) shows nothing.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|a| a == BACKGROUND) {
+                show_main_window(app);
+            }
         }))
         .plugin(tauri_plugin_deep_link::init())
         // Where a profile's backup goes, and which to restore (M13): opened
@@ -120,8 +129,14 @@ pub fn run() {
             }
             let window = window.build()?;
             let file = window_state::path(window_profile.data_dir());
-            window_state::restore(&window, &file);
+            // Started at sign-in (M25c): the notification area only, until
+            // the window is first opened, which places it then.
+            if !background {
+                window_state::restore(&window, &file);
+                PLACED.store(true, Ordering::SeqCst);
+            }
             app.manage(WindowFile(file));
+            tray(app.handle())?;
 
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -179,9 +194,24 @@ pub fn run() {
     app.run(|app, event| match event {
         RunEvent::WindowEvent {
             label,
-            event: WindowEvent::CloseRequested { .. },
+            event: WindowEvent::CloseRequested { api, .. },
             ..
-        } if label == MAIN_WINDOW => save_window(app),
+        } if label == MAIN_WINDOW => {
+            save_window(app);
+            // While remote play is on, the app keeps running in the
+            // notification area (M25c): a device of ours may need it. Quit
+            // from the tray ends it.
+            if app
+                .try_state::<Engine>()
+                .is_some_and(|e| e.remote_play_on())
+            {
+                api.prevent_close();
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                    let _ = window.hide();
+                }
+                tracing::info!("remote play is on: the window went to the notification area");
+            }
+        }
         // The app is its main window: closing it while the host overlay is
         // up (M8) must still end the app.
         RunEvent::WindowEvent {
@@ -311,20 +341,81 @@ fn dev_links(app: &AppHandle) {
 /// logged: an invite is half of what lets someone in.
 fn open_links(app: &AppHandle, urls: impl IntoIterator<Item = tauri::Url>) {
     let engine = app.state::<Engine>();
+    let mut opened = false;
     for url in urls {
         if url.scheme() == INVITE_SCHEME {
             engine.open_link(url.as_str());
+            opened = true;
         }
     }
-    show_main_window(app);
+    // Only for a link: a start at sign-in (M25c) may come with none, and
+    // stays in the notification area.
+    if opened {
+        show_main_window(app);
+    }
 }
 
 fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    // Started in the notification area: placed where it was, the first time.
+    if !PLACED.swap(true, Ordering::SeqCst)
+        && let Some(file) = app.try_state::<WindowFile>()
+    {
+        window_state::restore(&window, &file.0);
+        return;
     }
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// The argument the app starts with at sign-in (M25c,
+/// `couch_platform_win::startup`): the notification area only.
+const BACKGROUND: &str = "--background";
+
+/// The main window was placed where it was last ([`window_state::restore`]).
+static PLACED: AtomicBool = AtomicBool::new(false);
+
+/// The app's icon in the notification area (M25c), always there, so a
+/// window closed while remote play is on can always be found again: a click
+/// opens the window, its menu opens it or quits.
+fn tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::{
+        menu::{Menu, MenuItem},
+        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    };
+    let open = MenuItem::with_id(app, "open", "Open Couch Co-App", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Couch Co-App")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "quit" => {
+                save_window(app);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 fn fail(error: impl std::fmt::Display) -> ! {

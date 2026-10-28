@@ -179,6 +179,8 @@ export const SHOTS = [
   ["settings-remote-new", "lobby", settings("Remote play")],
   // M25b: the home PC's settings while a device controls its desktop.
   ["settings-remote-desktop", "remote-home-desktop", settings("Remote play")],
+  // M25c: the home PC's card for while you're away.
+  ["settings-remote-away", "remote-away", settings("Remote play")],
   ["remote-unlock", "remote-locked", async (page) => page.getByRole("button", { name: "Unlock…" }).click()],
   ["settings-network", "lobby", settings("Network")],
   ["settings-network-release", "release-build", settings("Network")],
