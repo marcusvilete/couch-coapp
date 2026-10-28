@@ -4,7 +4,7 @@
 
 The first part of M16 ([ADR 0011](adr/0011-linux.md)): the workspace builds, passes clippy and passes its tests on Linux, so a Linux viewer (M16b) can follow, and work on Windows can't break Linux unnoticed. Nothing streams on Linux yet.
 
-Version 0.23.2, the same wire revision as 0.23.1: nothing changes on Windows.
+Version 0.23.2, the same wire revision as 0.23.1. On Windows, only the reconnection fix below changes anything.
 
 ## What changed
 
