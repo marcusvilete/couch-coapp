@@ -1,75 +1,142 @@
-/* The app's High Contrast look (apps/desktop/src/App.css). */
+/* The app's look (apps/desktop/src/styles/tokens.css): near-neutral greys, main
+   buttons in the text's colour, blue for focus; dark or light as the system is. */
 :root {
-  --bg: #000000;
-  --fg: #ffffff;
-  --fg-muted: #b8b8b8;
-  --accent: #6fc3df;
-  --accent-fg: #000000;
-  --focus: #f38518;
-  --radius: 6px;
-  color-scheme: dark;
+  color-scheme: light dark;
+  --bg: light-dark(#f2f1ec, #1f1e1d);
+  --card: light-dark(#ffffff, #2c2c2a);
+  --border: light-dark(#e6e4dc, #3a3936);
+  --border-strong: light-dark(#d4d1c6, #4b4a46);
+  --text: light-dark(#141413, #faf9f5);
+  --text-muted: light-dark(#5e5d59, #c2c0b6);
+  --primary: light-dark(#141413, #faf9f5);
+  --primary-hover: light-dark(#30302e, #e3e1d9);
+  --primary-fg: light-dark(#faf9f5, #141413);
+  --hover: light-dark(rgb(20 20 19 / 0.045), rgb(250 249 245 / 0.05));
+  --focus: light-dark(#2c84db, #4a9ff0);
+  --ok: light-dark(#1d8a4c, #57c785);
+  --radius: 10px;
+  --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
 }
 
 body {
   margin: 0;
   background: var(--bg);
-  color: var(--fg);
-  font: 16px/1.5 "Segoe UI", system-ui, sans-serif;
+  color: var(--text);
+  font: 15px/1.55 var(--font);
 }
 
 main {
-  max-width: 34rem;
+  max-width: 30rem;
   margin: 0 auto;
-  padding: 3rem 16px;
+  padding: 3.5rem 16px 3rem;
 }
 
 .brand {
-  font-family: "Cascadia Mono", Consolas, monospace;
-  color: var(--accent);
-  margin: 0 0 0.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.75rem;
+
+  & p {
+    margin: 0;
+    font: 650 1.05rem var(--font-display);
+  }
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.75rem 1.75rem 1.5rem;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 6px 24px rgb(0 0 0 / 0.06);
 }
 
 h1 {
-  font-size: 1.6rem;
-  line-height: 1.25;
-  margin: 0 0 1.5rem;
+  font: 650 1.5rem/1.25 var(--font-display);
+  margin: 0 0 1rem;
   overflow-wrap: anywhere;
 }
 
 h2 {
-  font-size: 1.1rem;
-  margin: 2.5rem 0 0.25rem;
+  font: 650 1rem var(--font-display);
+  color: var(--text);
+  margin: 0 0 0.25rem;
+}
+
+p {
+  margin: 0 0 1rem;
 }
 
 .quiet {
-  color: var(--fg-muted);
+  color: var(--text-muted);
+}
+
+.away {
+  margin-top: 2rem;
+  text-align: center;
+  font-size: 0.93rem;
+}
+
+.copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+#copied {
+  color: var(--ok);
 }
 
 .button,
 button {
   display: inline-block;
-  font: inherit;
+  box-sizing: border-box;
+  font: 600 0.95rem var(--font);
   border-radius: var(--radius);
   padding: 0.6rem 1.1rem;
   cursor: pointer;
+  transition: background 120ms;
 }
 
+/* The main action, as the app's: the text's colour, the page's on it. */
 .button {
-  background: var(--accent);
-  color: var(--accent-fg);
-  border: 1px solid var(--accent);
+  display: block;
+  text-align: center;
+  background: var(--primary);
+  color: var(--primary-fg);
+  border: 1px solid var(--primary);
   text-decoration: none;
-  font-weight: 600;
+
+  &:hover {
+    background: var(--primary-hover);
+  }
 }
 
 button {
   background: transparent;
-  color: var(--fg);
-  border: 1px solid var(--accent);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+
+  &:hover {
+    background: var(--hover);
+  }
 }
 
 .button:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+/* Windows' High Contrast themes pick their own colours; keep the edges. */
+@media (forced-colors: active) {
+  .card,
+  .button,
+  button {
+    border-color: CanvasText;
+  }
 }

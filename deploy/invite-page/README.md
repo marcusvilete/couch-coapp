@@ -9,7 +9,7 @@ The app's Join box takes both kinds of link.
 
 **What the page never does:**
 - **Receive the invite.** The invite is the part after `#`, which browsers never send to a server. The page reads it in the browser.
-- **Make requests,** other than for its own two files.
+- **Make requests,** other than for its own three files (its script, its styles and the app's icon).
 - **Send a referrer, or use cookies or analytics.**
 
 A strict Content-Security-Policy enforces all three.
@@ -18,12 +18,13 @@ Opening a `couchco://` link only fills in the app's join screen. Joining still n
 
 ## Files
 
-- `j/index.html`, `j/invite.js`, `j/invite.css`: the page, served at `/j/`.
+- `j/index.html`, `j/invite.js`, `j/invite.css`: the page, served at `/j/`, in the app's look (dark or light as the visitor's system is).
+- `j/icon.svg`: the app's icon (a copy of `apps/desktop/src-tauri/icons/source/icon.svg`), for the page and its tab.
 - `check.js`: run `node deploy/invite-page/check.js` after changing the page. It reads an invite the app made: the payload pinned in `couch_proto::invite`'s `the_layout_is_pinned` test.
 
 ## Hosting
 
-Any static host works: it only needs to serve the three files over https.
+Any static host works: it only needs to serve the four files over https.
 - **GitHub Pages** (free; P4). The repository's workflow, `.github/workflows/invite-page.yml`, checks the page (`check.js`) and publishes `j/` on every push to main that changes it. Switch it on once: the repository's Settings → Pages → Source: "GitHub Actions". Do it before merging the workflow, whose own push runs it; otherwise run it again by hand afterwards (Actions → Invite page → Run workflow). The page is then at `https://<user>.github.io/<repository>/j/`.
 - **The relay's server.** iroh-relay serves only the relay, so this would need a separate web server there (not set up).
 
