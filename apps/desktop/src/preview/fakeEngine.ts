@@ -57,6 +57,8 @@ export type World = {
   sound: "game" | "silent";
   /** Settings → Stream window (P11): new stream windows show their bar. */
   streamWindowBar: boolean;
+  /** The app keeps an icon in the notification area (M25c). */
+  tray: boolean;
   /** Remote play (M25): Settings → Remote play. Members offering it carry
    * their `remote` in the rooms. A PC unlocks with "246810". */
   remotePlay: RemotePlayView;
@@ -712,6 +714,11 @@ function handle(cmd: Command): Response | Promise<Response> {
       return { type: "network", ...world.network };
     case "getStreamWindow":
       return { type: "streamWindow", bar: world.streamWindowBar };
+    case "getTray":
+      return { type: "tray", on: world.tray };
+    case "setTray":
+      world.tray = cmd.on;
+      return { type: "tray", on: world.tray };
     case "getRemotePlay":
     case "setRemotePlay":
     case "setStartAtSignIn":

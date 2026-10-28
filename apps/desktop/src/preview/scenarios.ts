@@ -150,6 +150,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     startFailure: null,
     sound: "game",
     streamWindowBar: true,
+    tray: false,
     remotePlay: {
       on: false,
       pinSet: false,
@@ -406,7 +407,7 @@ export const SCENARIOS: Record<string, Scenario> = {
     title: "Remote play at the home PC: on, starting with Windows",
     world: () => {
       const laptop = member(LAPTOP, "Ana's laptop", "relay");
-      const world = base([sofa({ members: [you(true), laptop, bia, caio] })]);
+      const world = base([sofa({ members: [you(true), laptop, bia, caio] })], { tray: true });
       Object.assign(world.remotePlay, {
         on: true,
         pinSet: true,

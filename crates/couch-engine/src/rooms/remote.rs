@@ -58,9 +58,6 @@ pub(super) struct Remote {
     listing: BTreeMap<ConnId, u32>,
     /// The state last sent to each operator: only changes go out.
     sent: RefCell<BTreeMap<ConnId, RemoteState>>,
-    /// Whether remote play is on, for the app's shell (M25c): it keeps
-    /// running when its window closes then.
-    on: Arc<std::sync::atomic::AtomicBool>,
     /// Keeping this PC awake (M25c): whether the display too, and the
     /// backend's guard (none where it can't).
     awake: Option<(bool, Option<Box<dyn std::any::Any + Send>>)>,
@@ -100,10 +97,8 @@ struct Link {
 
 impl Remote {
     pub(super) fn load(dir: &std::path::Path, startup_offered: bool) -> Self {
-        let settings = remote::load(dir);
         Self {
-            on: Arc::new(std::sync::atomic::AtomicBool::new(settings.on)),
-            settings,
+            settings: remote::load(dir),
             operators: BTreeMap::new(),
             checking: BTreeMap::new(),
             pin_generation: 0,
@@ -124,11 +119,6 @@ impl Remote {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         id
-    }
-
-    /// Whether remote play is on, shared with the engine (M25c).
-    pub(super) fn remote_on(&self) -> Arc<std::sync::atomic::AtomicBool> {
-        self.on.clone()
     }
 }
 
@@ -729,9 +719,6 @@ impl Actor {
         // devices are locked out and the PC may sleep at once; the failed
         // save is still reported.
         let saved = self.save_remote();
-        self.remote
-            .on
-            .store(on, std::sync::atomic::Ordering::SeqCst);
         self.sync_awake();
         if on {
             self.offer_remote_everywhere();

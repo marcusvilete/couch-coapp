@@ -334,6 +334,14 @@ pub enum Command {
     SetStreamWindow {
         bar: bool,
     },
+    /// Whether the app keeps an icon in the notification area (M25c): with
+    /// it, closing the window hides it there, and starting with Windows
+    /// stays there.
+    GetTray,
+    /// Saves it; the app's icon follows at once.
+    SetTray {
+        on: bool,
+    },
     // ---- Remote play (M25, ADR 0010) ----
     /// Remote play's settings: on the home PC, the devices it trusts and the
     /// members that could be added; on a device, the home PCs it accepted.
@@ -509,6 +517,16 @@ impl From<StreamWindowRequest> for couch_proto::ipc::WindowRequest {
 pub struct StreamWindowSettingsView {
     /// New stream windows show the session bar over the picture.
     pub bar: bool,
+}
+
+/// Answer to [`Command::GetTray`] (M25c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TrayView {
+    /// The app keeps an icon in the notification area, and closing its
+    /// window hides it there.
+    pub on: bool,
 }
 
 /// The stream window of a session we watch, for the app's controls (P11).
@@ -1155,6 +1173,7 @@ pub enum Response {
     },
     Network(NetworkView),
     StreamWindow(StreamWindowSettingsView),
+    Tray(TrayView),
     Drivers {
         drivers: Vec<DriverView>,
     },
@@ -1384,6 +1403,8 @@ impl fmt::Debug for Command {
                 .field("request", request)
                 .finish(),
             Self::GetStreamWindow => f.write_str("GetStreamWindow"),
+            Self::GetTray => f.write_str("GetTray"),
+            Self::SetTray { on } => f.debug_struct("SetTray").field("on", on).finish(),
             Self::SetStreamWindow { bar } => {
                 f.debug_struct("SetStreamWindow").field("bar", bar).finish()
             }
@@ -1459,6 +1480,7 @@ impl fmt::Debug for Response {
                 .finish(),
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
             Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
+            Self::Tray(tray) => f.debug_tuple("Tray").field(tray).finish(),
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
@@ -1994,8 +2016,9 @@ pub struct Engine {
     shortcuts_edit: Mutex<()>,
     /// A driver's setup is running ([`Command::InstallDriver`]).
     installing_driver: AtomicBool,
-    /// Whether remote play is on, as the actor last set it (M25c).
-    remote_on: Arc<AtomicBool>,
+    /// Whether the app keeps an icon in the notification area (M25c,
+    /// `app.json`).
+    tray: AtomicBool,
     /// Held while this engine runs; see [`lock_profile`].
     _lock: std::fs::File,
 }
@@ -2016,6 +2039,7 @@ impl Engine {
         let relay_in_use = relay_in_use(&options.relays, build_config::relay().as_ref());
         let secrets = options.secret_store.clone();
         let backup_files = options.backup_files.clone();
+        let tray = store::app(profile.data_dir()).tray;
         let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
         Ok(Self {
             profile,
@@ -2031,15 +2055,16 @@ impl Engine {
             relay_in_use,
             shortcuts_edit: Mutex::new(()),
             installing_driver: AtomicBool::new(false),
-            remote_on: started.remote_on,
+            tray: AtomicBool::new(tray),
             _lock: lock,
         })
     }
 
-    /// Whether remote play is on (M25c): the app then keeps running when its
-    /// window closes. Read without waiting on the engine.
-    pub fn remote_play_on(&self) -> bool {
-        self.remote_on.load(Ordering::SeqCst)
+    /// Whether the app keeps an icon in the notification area (M25c): its
+    /// window then closes to it, and a start at sign-in stays there. Read
+    /// without waiting on the engine.
+    pub fn tray_on(&self) -> bool {
+        self.tray.load(Ordering::SeqCst)
     }
 
     /// Runs a backup or restore, one at a time, with the app's dialogs.
@@ -2313,6 +2338,12 @@ impl Engine {
             Command::GetStreamWindow => Ok(Response::StreamWindow(StreamWindowSettingsView {
                 bar: store::stream_window(self.profile.data_dir()).bar,
             })),
+            Command::GetTray => Ok(Response::Tray(TrayView { on: self.tray_on() })),
+            Command::SetTray { on } => {
+                store::save_app(self.profile.data_dir(), store::AppSettings { tray: on })?;
+                self.tray.store(on, Ordering::SeqCst);
+                Ok(Response::Tray(TrayView { on }))
+            }
             Command::ListSources => {
                 let backend = self.backend.clone();
                 let (sources, controllers, host_controllers, hiding, virtual_pads) =

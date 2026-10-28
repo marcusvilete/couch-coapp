@@ -23,9 +23,11 @@ Wire revision 12, version 0.23.0, which doesn't talk to 0.22.0 or earlier.
   - while remote play is on, closing the window keeps the app running in the notification area, and the PC doesn't fall asleep on its own;
   - with remote play on and the switch off: after a restart, start the app yourself.
 
-**The notification area:** an icon is always there, whose click opens the window and whose menu has Open Couch Co-App and Quit.
-- **While remote play is on,** closing the window hides it there; Quit ends the app. With remote play off, closing quits, as before.
-- **Started at sign-in** (`--background`), the window stays hidden until first opened, which puts it where it was. A second start at sign-in (signing out and in with the app running) shows nothing.
+**Keep Couch Co-App in the notification area:** a second switch, off by default (the author, after the run of 0.23.0: the icon had come and gone with remote play, which was confusing).
+- **On:** an icon shows, whose click opens the window and whose menu has Open Couch Co-App and Quit. Closing the window hides it there.
+- **Off:** no icon, and closing quits.
+- **The switch takes effect at once.**
+- **Started at sign-in** (`--background`): with the icon on, the window stays hidden until first opened, which puts it where it was; with it off, the window opens. A second start at sign-in (signing out and in with the app running) shows nothing.
 
 **Awake:**
 - **While remote play is on,** the home PC holds a power request that keeps the system from sleeping on its own (`powercfg /requests` names it: "Couch Co-App: remote play is on").
@@ -95,6 +97,18 @@ Fixed:
 - **The startup tests wrote to the developer's real Run key:** a killed test run could have left an entry starting at sign-in. They use a scratch key now.
 - **Turning Start with Windows on** is refused while a device controls the desktop.
 - **"Doesn't go to sleep" overstated it:** choosing Sleep or closing a lid still works.
+
+## The author's run of 0.23.0 (2026-10-28, two PCs)
+
+- **Worked:**
+  - desktop control from the laptop: the Windows key, Alt+Tab, launching a game;
+  - Bring to front.
+- **The tray icon came only with remote play on:** as built, closing hid the window only while remote play was on, so with it off the app quit and its icon went. The author asked for a switch of its own (above), which starting with Windows follows.
+- **Closing the laptop's stream window:** the session's card still offered Watch, further down the stage, which brought it back. A scenario now checks watching again after closing the window, desktop control included (`an_operator_watches_again_after_closing_its_window`).
+
+**Found while building the switch:** Tauri runs `setup` (which makes the window and the icon) only once the app runs, so code right after `build` found neither. The icon was shown and the window opened there, so with the tray on the icon would have stayed hidden. Both moved to the app's Ready event. Checked by hand in a throwaway profile:
+- started with `--background`: the tray on kept the window hidden, the tray off opened it;
+- closing: the tray on hid the window and the app kept running, the tray off quit it.
 
 ## Still to try
 

@@ -550,7 +550,7 @@ M25b: the operator's keyboard and mouse reach the home PC's whole desktop, to la
 M25c: nothing on the wire but `RemoteState.locked`. The rest is the home PC's own.
 - **Locked:** while a device is unlocked, the home PC looks every 2 s whether Windows shows its own desktop (the input desktop is `Default`) or a secure one (the lock screen, a UAC prompt), and sends `RemoteState` when that changes, and with the unlock. A device takes it only as part of its PC's state, on the connection that PC's offer came on.
 - **Awake:** while remote play is on, the home PC holds a power request that keeps the system from sleeping, and while a device is unlocked, the display on too. A display that turns off stops the capture, and Windows may lock then.
-- **Sign-in and the notification area:** an installed app's default profile may start at sign-in, to the notification area (the user's own switch). While remote play is on, closing the window keeps the app running there; Quit in its icon's menu ends it.
+- **Sign-in and the notification area:** two switches of the user's own. An installed app's default profile may start at sign-in. With the notification area icon on, closing the window keeps the app running there (Quit in its menu ends it), and a start at sign-in stays there; off, closing quits, and a start at sign-in opens the window.
 
 ## Close and reset codes
 

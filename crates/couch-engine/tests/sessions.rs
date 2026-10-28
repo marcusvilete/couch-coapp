@@ -5342,6 +5342,30 @@ async fn the_streamed_window_is_brought_to_front() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// The author's run of 0.23.0: the laptop, running its PC's session, closes
+/// its stream window and watches again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_operator_watches_again_after_closing_its_window() {
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    desktop_session(&room, &a, &b).await;
+    let b_window = watching(&room, &a, &b).await;
+    desktop_on(&room, &a, &b, &b_window).await;
+    b_window.close();
+    b.wait_session(&room, &a, "B not watching", |s| {
+        s.is_some_and(|s| s.role == SessionRole::None)
+    })
+    .await;
+    a.wait_session(&room, &a, "B gone from the viewers", |s| {
+        s.is_some_and(|s| s.viewers.is_empty())
+    })
+    .await;
+    let again = watching(&room, &a, &b).await;
+    // And desktop control again, on the new window.
+    desktop_on(&room, &a, &b, &again).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 // ---- The unattended PC (M25c) ----
 
 /// M25c: the home PC stays awake while remote play is on, its display on
@@ -5430,5 +5454,18 @@ async fn starting_at_sign_in_is_the_users_choice() {
         Err(EngineError::Refused(_))
     ));
     assert!(!b.fake.starts_at_sign_in.load(Ordering::SeqCst));
+    // The notification area is a choice of its own, off until turned on,
+    // and the shell reads it without waiting on the engine.
+    assert!(!a.engine().tray_on());
+    assert!(matches!(
+        a.handle(Command::GetTray).await,
+        Ok(Response::Tray(couch_engine::TrayView { on: false }))
+    ));
+    a.ok(Command::SetTray { on: true }).await;
+    assert!(a.engine().tray_on());
+    assert!(matches!(
+        a.handle(Command::GetTray).await,
+        Ok(Response::Tray(couch_engine::TrayView { on: true }))
+    ));
     stop_all(&mut [&mut a, &mut b]).await;
 }

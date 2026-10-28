@@ -285,8 +285,6 @@ struct Conn {
 pub(crate) struct Started {
     pub member_id: MemberId,
     pub inbox: mpsc::Sender<Input>,
-    /// Whether remote play is on, kept by the actor (M25c).
-    pub remote_on: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct Actor {
@@ -440,13 +438,11 @@ pub(crate) async fn start(
     actor.restore_rooms(now);
     // Awake from the start while remote play is on (M25c).
     actor.sync_awake();
-    let remote_on = actor.remote.remote_on();
     tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
     tokio::spawn(actor.run(inbox_rx));
     Ok(Started {
         member_id: me,
         inbox,
-        remote_on,
     })
 }
 
@@ -789,6 +785,8 @@ impl Actor {
             | Command::GetNetwork
             | Command::SetNetwork { .. }
             | Command::GetStreamWindow
+            | Command::GetTray
+            | Command::SetTray { .. }
             | Command::GetDrivers
             | Command::GetNotices
             | Command::ExportProfile { .. }

@@ -6,6 +6,8 @@
 //! - `audio.json`: the stream window's volume (P6).
 //! - `host-audio.json`: how loud guests hear our stream's sound (P7).
 //! - `stream-window.json`: how stream windows open: with the bar or not (P11).
+//! - `app.json`: whether the app keeps an icon in the notification area
+//!   (M25c).
 //!
 //! The room actor rewrites `settings.json` whole, so what the engine itself
 //! writes has files of its own.
@@ -44,6 +46,7 @@ const NETWORK_FILE: &str = "network.json";
 const AUDIO_FILE: &str = "audio.json";
 const HOST_AUDIO_FILE: &str = "host-audio.json";
 const STREAM_WINDOW_FILE: &str = "stream-window.json";
+const APP_FILE: &str = "app.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread. `CCR3` (M13) adds the chain of
@@ -68,13 +71,14 @@ pub enum StoreError {
 
 /// The settings files a backup carries, as they are (`crate::backup`).
 /// Not the webview's own storage (the room order, the last session setup).
-const BACKED_UP_FILES: [&str; 6] = [
+const BACKED_UP_FILES: [&str; 7] = [
     SETTINGS_FILE,
     SHORTCUTS_FILE,
     NETWORK_FILE,
     AUDIO_FILE,
     HOST_AUDIO_FILE,
     STREAM_WINDOW_FILE,
+    APP_FILE,
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,6 +518,30 @@ pub(crate) fn save_stream_window(
 ) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
     write_atomic(&dir.join(STREAM_WINDOW_FILE), &bytes)
+}
+
+/// `app.json` (M25c): the app's own behaviour on this PC.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AppSettings {
+    /// An icon in the notification area: closing the window hides it there,
+    /// and a start at sign-in stays there. Off, closing quits.
+    pub tray: bool,
+}
+
+pub(crate) fn app(dir: &Path) -> AppSettings {
+    let path = dir.join(APP_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            AppSettings::default()
+        }),
+        Err(_) => AppSettings::default(),
+    }
+}
+
+pub(crate) fn save_app(dir: &Path, settings: AppSettings) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
+    write_atomic(&dir.join(APP_FILE), &bytes)
 }
 
 /// `host-audio.json` (P7): how loud guests hear our stream's sound.

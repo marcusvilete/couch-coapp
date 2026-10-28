@@ -28,10 +28,20 @@ const INVITE_SCHEME: &str = "couchco";
 
 #[tauri::command]
 async fn engine_command(
+    app: AppHandle,
     engine: tauri::State<'_, Engine>,
     command: Command,
 ) -> Result<Response, String> {
-    engine.handle(command).await.map_err(|e| e.to_string())
+    // The app's icon follows its setting at once (M25c).
+    let tray = match command {
+        Command::SetTray { on } => Some(on),
+        _ => None,
+    };
+    let reply = engine.handle(command).await.map_err(|e| e.to_string())?;
+    if let Some(on) = tray {
+        show_tray(&app, on);
+    }
+    Ok(reply)
 }
 
 /// Starts the app again, as after a change in Settings → Network. It goes
@@ -191,25 +201,32 @@ pub fn run() {
         tauri::async_runtime::block_on(Engine::start(profile, options)).unwrap_or_else(|e| fail(e));
     app.manage(engine);
 
-    app.run(|app, event| match event {
+    app.run(move |app, event| match event {
+        // Setup has made the window and the icon by now: the notification
+        // area as the user chose (M25c), and started at sign-in without it,
+        // the window opens after all.
+        RunEvent::Ready => {
+            let tray = app.state::<Engine>().tray_on();
+            show_tray(app, tray);
+            if background && !tray {
+                show_main_window(app);
+            }
+        }
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { api, .. },
             ..
         } if label == MAIN_WINDOW => {
             save_window(app);
-            // While remote play is on, the app keeps running in the
-            // notification area (M25c): a device of ours may need it. Quit
-            // from the tray ends it.
-            if app
-                .try_state::<Engine>()
-                .is_some_and(|e| e.remote_play_on())
-            {
+            // With its icon in the notification area, the app keeps running
+            // there (M25c): a device of ours may need it. Quit from the icon
+            // ends it.
+            if app.try_state::<Engine>().is_some_and(|e| e.tray_on()) {
                 api.prevent_close();
                 if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                     let _ = window.hide();
                 }
-                tracing::info!("remote play is on: the window went to the notification area");
+                tracing::info!("the window went to the notification area");
             }
         }
         // The app is its main window: closing it while the host overlay is
@@ -378,9 +395,20 @@ const BACKGROUND: &str = "--background";
 /// The main window was placed where it was last ([`window_state::restore`]).
 static PLACED: AtomicBool = AtomicBool::new(false);
 
-/// The app's icon in the notification area (M25c), always there, so a
-/// window closed while remote play is on can always be found again: a click
-/// opens the window, its menu opens it or quits.
+/// Shows or hides the app's icon in the notification area (M25c).
+fn show_tray(app: &AppHandle, on: bool) {
+    if let Some(tray) = app.tray_by_id(TRAY)
+        && let Err(e) = tray.set_visible(on)
+    {
+        tracing::warn!("the notification area icon: {e}");
+    }
+}
+
+const TRAY: &str = "main";
+
+/// The app's icon in the notification area (M25c), made hidden: shown while
+/// the user keeps the app there ([`show_tray`]), when closing the window
+/// hides it there. A click opens the window, its menu opens it or quits.
 fn tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::{
         menu::{Menu, MenuItem},
@@ -389,7 +417,7 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Couch Co-App", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
-    let mut tray = TrayIconBuilder::with_id("main")
+    let mut tray = TrayIconBuilder::with_id(TRAY)
         .tooltip("Couch Co-App")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -414,7 +442,8 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
-    tray.build(app)?;
+    // Hidden until the engine says the user keeps it (after `build`).
+    tray.build(app)?.set_visible(false)?;
     Ok(())
 }
 
