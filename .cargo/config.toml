@@ -11,5 +11,12 @@ LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
 COUCH_SDL3_DIR = { value = "third_party/sdl3", relative = true }
 TS_RS_EXPORT_DIR = { value = "apps/desktop/src/bindings", relative = true }
 
+# Linux (M16): binaries find the FFmpeg libraries staged beside them (`stage-dlls`),
+# as Windows finds DLLs beside the exe. DT_RPATH, not the newer DT_RUNPATH, which
+# reaches only direct dependencies (libavcodec needs libswresample too). A RUSTFLAGS
+# variable would replace these flags: don't set one. scripts/dev.sh sets Linux's bindings.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN", "-C", "link-arg=-Wl,--disable-new-dtags"]
+
 [alias]
 xtask = "run -p xtask --"

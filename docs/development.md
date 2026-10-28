@@ -1,6 +1,6 @@
 # Developing Couch Co-App
 
-How to set up a Windows PC to build, run and test the app. If you only want an installer and a relay for your friends, [self-hosting.md](self-hosting.md) is the shorter path. [CLAUDE.md](../CLAUDE.md) has the full command list and the rules that aren't obvious from the code; [architecture.md](architecture.md) explains how the pieces fit.
+How to set up a Windows PC to build, run and test the app, and Linux to build and test it. If you only want an installer and a relay for your friends, [self-hosting.md](self-hosting.md) is the shorter path. [CLAUDE.md](../CLAUDE.md) has the full command list and the rules that aren't obvious from the code; [architecture.md](architecture.md) explains how the pieces fit.
 
 ## Setup (Windows 11)
 
@@ -32,6 +32,26 @@ How to set up a Windows PC to build, run and test the app. If you only want an i
 - [HidHide](https://github.com/nefarius/HidHide) lets your own controllers play through seats, one seat each (a remapper's virtual pad, DS4Windows's say, included).
 
 The app's Settings → Drivers installs either.
+
+## Setup (Linux)
+
+Linux builds and passes the tests (M16a, [ADR 0011](adr/0011-linux.md)), but nothing streams there yet: the Linux viewer is M16b. Ubuntu 24.04, also in WSL:
+
+1. **The system packages,** once: `sudo bash scripts/linux-deps.sh`.
+2. **Rust:** `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then the repository's `rust-toolchain.toml` picks the version. **Node.js 24** (Ubuntu's own is too old for Vite), e.g. from NodeSource.
+3. **In WSL, keep the repository on Linux's own disk** (`~/couch-coapp`), not under `/mnt/c`: builds across the two are slow. If Windows' clock is off, WSL's wall clock jumps back and forth by the difference every few seconds (`journald` says "Time jumped backwards"): WSL pushes Windows' time in, Ubuntu's own sync sets the right one. That can fail the invite-expiry scenario. Sync Windows' clock (Settings → Time & language → Date & time → Sync now; `w32tm /stripchart /computer:time.windows.com /samples:3` shows how far off it is). Its disk image grows on C: and doesn't shrink by itself.
+4. **Load the environment in every new shell,** from the repository's root. It chooses Linux's FFmpeg bindings:
+   ```bash
+   . scripts/dev.sh
+   ```
+5. **Fetch and stage FFmpeg** (SDL3 is built from source on Linux, at the same version):
+   ```bash
+   cargo xtask fetch-deps
+   cargo xtask stage-dlls
+   ```
+6. **Build and test** with the same commands as on Windows (below). Only `probe`, `host` and `view` exist in `couch-cli` there.
+
+A workflow (`.github/workflows/linux.yml`) runs clippy, the tests and the front end's checks on Linux for every pull request.
 
 ## Running each part
 

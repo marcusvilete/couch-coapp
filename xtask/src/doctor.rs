@@ -40,7 +40,13 @@ pub fn run(root: &Path) -> ExitCode {
         "CMake",
         output_of("cmake", &["--version"])
             .map(|v| v.lines().next().unwrap_or_default().to_string())
-            .map_err(|e| format!("{e} (winget install Kitware.CMake)")),
+            .map_err(|e| {
+                if cfg!(windows) {
+                    format!("{e} (winget install Kitware.CMake)")
+                } else {
+                    format!("{e} (scripts/linux-deps.sh installs it)")
+                }
+            }),
     );
     checks.require("FFmpeg bindings", ffmpeg_bindings(root));
     for dep in deps::DEPS {
@@ -51,7 +57,8 @@ pub fn run(root: &Path) -> ExitCode {
         };
         checks.require(dep.name.split(' ').next().unwrap_or(dep.name), result);
     }
-    for driver in deps::DRIVERS {
+    // The drivers are Windows' (virtual pads, hiding controllers).
+    for driver in deps::DRIVERS.iter().filter(|_| cfg!(windows)) {
         let result = if deps::driver_fetched(root, driver) {
             Ok(format!("third_party/drivers/{}", driver.staged_as))
         } else {
@@ -83,7 +90,7 @@ pub fn run(root: &Path) -> ExitCode {
     checks.recommend("Relay tool", relay::relay_tool_version(root));
     checks.recommend("Release config", release_config());
     checks.require("FFmpeg license", ffmpeg_license(root));
-    checks.recommend("Staged DLLs", staged_dlls(root));
+    checks.recommend("Staged libraries", staged_dlls(root));
     checks.require("cargo-deny", output_of("cargo", &["deny", "--version"]));
     checks.require("Node.js", output_of("node", &["--version"]));
     checks.require("npm", npm_version());
@@ -126,12 +133,17 @@ fn libclang() -> Result<String, String> {
         "LIBCLANG_PATH is not set (it comes from .cargo/config.toml when run through cargo)"
             .to_string()
     })?;
-    let dll = Path::new(&dir).join("libclang.dll");
+    let (file, install) = if cfg!(windows) {
+        ("libclang.dll", "winget install LLVM.LLVM")
+    } else {
+        ("libclang.so", "scripts/linux-deps.sh installs it")
+    };
+    let dll = Path::new(&dir).join(file);
     if dll.exists() {
         Ok(format!("{} (for gen-ffmpeg-bindings)", dll.display()))
     } else {
         Err(format!(
-            "{} not found; only needed to regenerate FFmpeg bindings (winget install LLVM.LLVM)",
+            "{} not found; only needed to regenerate FFmpeg bindings ({install})",
             dll.display()
         ))
     }
@@ -161,7 +173,7 @@ fn ffmpeg_license(root: &Path) -> Result<String, String> {
     let exe = deps::third_party(root)
         .join("ffmpeg")
         .join("bin")
-        .join("ffmpeg.exe");
+        .join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX));
     let output = Command::new(&exe)
         .args(["-hide_banner", "-buildconf"])
         .output()
@@ -184,10 +196,14 @@ fn staged_dlls(root: &Path) -> Result<String, String> {
         .filter(|name| !debug.join(name).exists())
         .collect();
     if missing.is_empty() {
-        Ok(format!("{} DLL(s) in {}", dlls.len(), debug.display()))
+        Ok(format!(
+            "{} runtime librar(ies) in {}",
+            dlls.len(),
+            debug.display()
+        ))
     } else {
         Err(format!(
-            "{} DLL(s) missing from target/debug; run `cargo xtask stage-dlls`",
+            "{} runtime librar(ies) missing from target/debug; run `cargo xtask stage-dlls`",
             missing.len()
         ))
     }

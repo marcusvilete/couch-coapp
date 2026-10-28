@@ -1295,23 +1295,28 @@ async fn three() -> (Member, Member, Member, String) {
         })
         .await;
     }
-    for m in [&a, &b, &c] {
+    full_mesh(&room.id, &[&a, &b, &c]).await;
+    (a, b, c, room.id)
+}
+
+/// Waits until each of `members` is linked to all the others in `room`.
+async fn full_mesh(room: &str, members: &[&Member]) {
+    for m in members {
         let deadline = Instant::now() + WAIT;
         loop {
-            let view = m.room(&room.id).await.unwrap();
+            let view = m.room(room).await.unwrap();
             let linked = view
                 .members
                 .iter()
                 .filter(|x| matches!(x.link, MemberLink::Direct | MemberLink::Relay))
                 .count();
-            if view.members.len() == 3 && linked == 2 {
+            if view.members.len() == members.len() && linked == members.len() - 1 {
                 break;
             }
             assert!(Instant::now() < deadline, "{}: no full mesh", m.name);
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    (a, b, c, room.id)
 }
 
 /// `viewer` watches `host`'s live session; returns its viewer window once
@@ -1384,20 +1389,10 @@ async fn stop_all(members: &mut [&mut Member]) {
     }
 }
 
-/// A UDP port free on both IPv4 and IPv6, never handed out twice in this
-/// process: the OS may offer a port again once our probe lets go of it,
-/// before the engine that got it first has bound it.
+/// A UDP port free on both IPv4 and IPv6, never handed out twice, and never
+/// one the OS picks by itself (so a restart onto it can't lose it).
 fn free_port() -> u16 {
-    static GIVEN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
-    loop {
-        let v4 = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-        let port = v4.local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) && std::net::UdpSocket::bind(("::", port)).is_ok() {
-            given.push(port);
-            return port;
-        }
-    }
+    couch_testkit::net::free_udp_port()
 }
 
 fn refused_because(reply: &Result<Response, EngineError>, words: &str) -> bool {
@@ -4342,6 +4337,15 @@ async fn a_newcomer_sees_a_session_already_live() {
             |s| s.is_some_and(|s| s.stream == StreamStateView::Live),
         )
         .await;
+        // The newcomer's connections settle first: asked to watch while one
+        // replaces another, the request is refused ("lost the connection to
+        // the host", seen on Linux, M16a), a known race of its own.
+        if owner_hosts {
+            // Bia never joined.
+            full_mesh(&room, &[&host, &c]).await;
+        } else {
+            full_mesh(&room, &[&host, &other, &c]).await;
+        }
         let window = watching(&room, &host, &c).await;
         wait("frames for the newcomer", || window.frames() > 0).await;
         stop_all(&mut [&mut host, &mut other, &mut c]).await;
@@ -5279,6 +5283,9 @@ async fn desktop_control_ends_with_the_operator() {
     a.ok(Command::RemoveRemoteDevice { member: b.id() }).await;
     a.wait_session(&room, &a, "ended by the removal", ended)
         .await;
+    // B hears the offer go before it comes back: the wait below must see the
+    // new offer, not the old one still on its way out.
+    wait_remote(&b, &room, &a, "the offer withdrawn", |r| r.is_none()).await;
     a.ok(Command::AddRemoteDevice { member: b.id() }).await;
     wait_remote(&b, &room, &a, "offered again", |r| r.is_some()).await;
     b.ok(unlock(&room, &a, PIN)).await;
@@ -5288,6 +5295,7 @@ async fn desktop_control_ends_with_the_operator() {
     a.ok(Command::SetRemotePlay { on: false }).await;
     a.wait_session(&room, &a, "ended by remote play off", ended)
         .await;
+    wait_remote(&b, &room, &a, "the offer withdrawn", |r| r.is_none()).await;
     a.ok(Command::SetRemotePlay { on: true }).await;
     wait_remote(&b, &room, &a, "on again", |r| r.is_some()).await;
     b.ok(unlock(&room, &a, PIN)).await;

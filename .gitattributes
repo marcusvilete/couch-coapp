@@ -1,3 +1,4 @@
 # Files that run or are read on a Linux server (deploy/relay) keep LF line endings,
 # whatever core.autocrlf says: bash fails on CRLF.
 deploy/** text eol=lf
+*.sh text eol=lf

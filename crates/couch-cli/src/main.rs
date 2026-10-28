@@ -11,23 +11,40 @@
 //! - `release-check`: the host releases input whenever a session ends badly;
 //! - `fake-game` and `lifecycle-check`: a game swapping its window or
 //!   exiting, and a host killed, are noticed in time.
+//!
+//! On Linux (M16a) only `probe`, `host` and `view` exist: the rest measure or
+//! drive Windows' capture, sound and input.
 
+#[cfg(windows)]
 mod audio_probe;
+#[cfg(windows)]
 mod capture_test;
+#[cfg(windows)]
 mod fake_game;
+#[cfg(windows)]
 mod gates;
 mod host;
+#[cfg(windows)]
 mod host_pad;
+#[cfg(windows)]
 mod input_sink;
+#[cfg(windows)]
 mod latency_probe;
+#[cfg(windows)]
 mod lifecycle_check;
 mod net_args;
+#[cfg(windows)]
 mod pad_origins;
+#[cfg(windows)]
 mod pad_test;
 mod probe;
+#[cfg(windows)]
 mod release_check;
+#[cfg(windows)]
 mod remapper_hop;
+#[cfg(windows)]
 mod remapper_probe;
+#[cfg(windows)]
 mod screen_probe;
 mod stats;
 mod view;
@@ -36,7 +53,9 @@ use std::{path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::net_args::{CongestionArg, NetArgs};
+#[cfg(windows)]
+use crate::net_args::CongestionArg;
+use crate::net_args::NetArgs;
 
 #[derive(Parser)]
 #[command(name = "couch-cli", version, about = "Couch Co-App developer harness")]
@@ -45,12 +64,14 @@ struct Cli {
     command: Cmd,
 }
 
+#[cfg(windows)]
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CodecArg {
     H264,
     Hevc,
 }
 
+#[cfg(windows)]
 impl From<CodecArg> for couch_media::Codec {
     fn from(c: CodecArg) -> Self {
         match c {
@@ -90,8 +111,10 @@ enum Cmd {
         net_timeout_secs: u64,
     },
     /// List windows that can be captured.
+    #[cfg(windows)]
     Windows,
     /// Capture, encode, decode and read the latency clock, without a network.
+    #[cfg(windows)]
     CaptureTest {
         /// Window title to capture (substring). Defaults to the latency clock.
         #[arg(long)]
@@ -212,12 +235,14 @@ enum Cmd {
         net: NetArgs,
     },
     /// Capture the screen once and list the latency barcodes on it.
+    #[cfg(windows)]
     ScreenScan {
         /// Also write the frame as raw BGRA here.
         #[arg(long)]
         out: Option<PathBuf>,
     },
     /// Measure clock-to-present latency on this machine (gates G1, G1b).
+    #[cfg(windows)]
     LatencyProbe {
         #[arg(long, default_value_t = 30)]
         secs: u64,
@@ -277,6 +302,7 @@ enum Cmd {
     },
     /// Run the rate-control gates (G1, G3, G4, G5) on this machine and judge
     /// them. About 12 minutes, or 4 with `--quick`.
+    #[cfg(windows)]
     Gates {
         /// Run G3 for 2 minutes instead of 10.
         #[arg(long)]
@@ -291,6 +317,7 @@ enum Cmd {
         congestion: CongestionArg,
     },
     /// Plug a virtual Xbox 360 pad and move it; watch it in joy.cpl.
+    #[cfg(windows)]
     PadTest {
         #[arg(long, default_value_t = 30)]
         secs: u64,
@@ -304,6 +331,7 @@ enum Cmd {
     /// M22's probe: watches the gamepads, and with `--hide` hides each other
     /// program's virtual pad (a remapper's) through HidHide while still
     /// reading it, again whenever it is plugged anew. Shown again at the end.
+    #[cfg(windows)]
     RemapperProbe {
         #[arg(long, default_value_t = 120)]
         secs: u64,
@@ -326,12 +354,14 @@ enum Cmd {
     /// What a remapper's pad adds before the host's input reaches a seat
     /// (M22): an unmarked pad stands in for it, and each press is timed from
     /// its write to the host's reader.
+    #[cfg(windows)]
     RemapperHop {
         #[arg(long, default_value_t = 200)]
         presses: u32,
     },
     /// Every gamepad SDL finds, where it sits in Windows' device tree, and the
     /// origin the app gives it (P9). Plugs pads only when asked to.
+    #[cfg(windows)]
     PadOrigins {
         /// Our own virtual pads to plug first, marked as a host's are.
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=4))]
@@ -349,6 +379,7 @@ enum Cmd {
     },
     /// List this PC's controllers and HidHide's state; with `--feed N`, hide
     /// controller N and drive a virtual pad from it, as a host on a seat does.
+    #[cfg(windows)]
     HostPad {
         /// The controller to feed, as listed (from 1).
         #[arg(long)]
@@ -361,12 +392,15 @@ enum Cmd {
     },
     /// Inject a scripted keyboard and mouse run into a test window and check
     /// it arrived intact.
+    #[cfg(windows)]
     InputSink,
     /// Kill, close, freeze and stop host and viewer processes, and check the
     /// host releases the viewer's input each time, in time. About 1 minute.
+    #[cfg(windows)]
     ReleaseCheck,
     /// A stand-in game window: swaps its window, closes it or exits when told
     /// on stdin (`swap`, `close`, `exit`) or at the given times.
+    #[cfg(windows)]
     FakeGame {
         #[arg(long)]
         swap_after: Option<f64>,
@@ -377,6 +411,7 @@ enum Cmd {
     },
     /// A game swapping its window, exiting, closing it; a host killed, and
     /// killed holding a key: check each is noticed in time. About 1 minute.
+    #[cfg(windows)]
     LifecycleCheck {
         /// Run only these: swap, exit, close, kill-host, stale-key.
         #[arg(long, value_delimiter = ',')]
@@ -384,6 +419,7 @@ enum Cmd {
     },
     /// For `lifecycle-check`: hold one key (a hex HID usage) through the
     /// host's injector.
+    #[cfg(windows)]
     #[command(hide = true)]
     HoldKey { usage: String },
 }
@@ -398,13 +434,16 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    #[cfg(windows)]
     couch_platform_win::timer::request_1ms_resolution();
 
     let result = match Cli::parse().command {
         Cmd::Probe { net_timeout_secs } => {
             return probe::run(Duration::from_secs(net_timeout_secs)).await;
         }
+        #[cfg(windows)]
         Cmd::Windows => list_windows(),
+        #[cfg(windows)]
         Cmd::CaptureTest {
             window,
             monitor,
@@ -516,9 +555,11 @@ async fn main() -> ExitCode {
             })
             .await
         }
+        #[cfg(windows)]
         Cmd::ScreenScan { out } => {
             tokio::task::block_in_place(|| screen_probe::scan_once(out.as_deref()))
         }
+        #[cfg(windows)]
         Cmd::LatencyProbe {
             secs,
             fps,
@@ -562,6 +603,7 @@ async fn main() -> ExitCode {
             .await
             .map(drop),
         },
+        #[cfg(windows)]
         Cmd::Gates {
             quick,
             only,
@@ -576,18 +618,22 @@ async fn main() -> ExitCode {
             })
             .await
         }
+        #[cfg(windows)]
         Cmd::PadTest {
             secs,
             real_pad_ids,
             count,
         } => tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids, count)),
+        #[cfg(windows)]
         Cmd::PadOrigins {
             ours,
             unmarked,
             settle,
             hold,
         } => tokio::task::block_in_place(|| pad_origins::run(ours, unmarked, settle, hold)),
+        #[cfg(windows)]
         Cmd::RemapperHop { presses } => tokio::task::block_in_place(|| remapper_hop::run(presses)),
+        #[cfg(windows)]
         Cmd::RemapperProbe {
             secs,
             hide,
@@ -597,13 +643,17 @@ async fn main() -> ExitCode {
         } => tokio::task::block_in_place(|| {
             remapper_probe::run(secs, hide, sticky, rumble, unmarked)
         }),
+        #[cfg(windows)]
         Cmd::HostPad {
             feed,
             secs,
             no_hide,
         } => tokio::task::block_in_place(|| host_pad::run(feed, secs, !no_hide)),
+        #[cfg(windows)]
         Cmd::InputSink => tokio::task::block_in_place(input_sink::run),
+        #[cfg(windows)]
         Cmd::ReleaseCheck => tokio::task::block_in_place(release_check::run),
+        #[cfg(windows)]
         Cmd::FakeGame {
             swap_after,
             close_after,
@@ -615,7 +665,9 @@ async fn main() -> ExitCode {
                 exit_after,
             })
         }),
+        #[cfg(windows)]
         Cmd::LifecycleCheck { only } => tokio::task::block_in_place(|| lifecycle_check::run(&only)),
+        #[cfg(windows)]
         Cmd::HoldKey { usage } => tokio::task::block_in_place(|| lifecycle_check::hold_key(&usage)),
     };
     match result {
@@ -627,6 +679,7 @@ async fn main() -> ExitCode {
     }
 }
 
+#[cfg(windows)]
 fn list_windows() -> anyhow::Result<()> {
     for w in couch_platform_win::capture::list_windows()? {
         println!("{:>6}  {:<28} {}", w.process_id, w.process, w.title);

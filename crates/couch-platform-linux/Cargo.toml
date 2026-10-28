@@ -1,0 +1,18 @@
+[package]
+name = "couch-platform-linux"
+description = "All Linux-specific code (M16, ADR 0011): the clock, for now."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+couch-media.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true

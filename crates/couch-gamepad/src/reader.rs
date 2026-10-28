@@ -494,6 +494,10 @@ enum Whose {
     /// virtual pad, proven so, with its device (M22).
     Hosts(ControllerKind, Option<String>),
     /// One of the hosts' own virtual pads, by its serial.
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "only Windows tells a pad's origin so far")
+    )]
     Ours,
     /// Not now, and why: its origin can't be told and it has our pads' ids,
     /// or it may be ours (a host is plugging a pad). Looked at again later.

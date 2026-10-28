@@ -18,5 +18,10 @@ tracing.workspace = true
 # Where a controller comes from: physical, or a virtual pad (P9).
 couch-platform-win.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# SDL 3.4.16 built from source and linked in, as Windows' prebuilt one is
+# pinned (ADR 0011).
+sdl3 = { workspace = true, features = ["build-from-source-static"] }
+
 [lints]
 workspace = true

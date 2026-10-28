@@ -14,9 +14,26 @@ use bindgen::callbacks::{MacroParsingBehavior, ParseCallbacks};
 
 use crate::deps;
 
-/// Where the generated bindings live, relative to the repository root.
-pub const BINDING_FILE: &str =
+/// Where the generated bindings live, relative to the repository root: one
+/// file per system, generated on it (C's `long` is 32 bits on Windows, 64 on
+/// Linux). `.cargo/config.toml` points builds at Windows'; `scripts/dev.sh`
+/// at Linux's (ADR 0011).
+pub const BINDING_FILE: &str = if cfg!(windows) {
+    WINDOWS_BINDING_FILE
+} else {
+    LINUX_BINDING_FILE
+};
+const WINDOWS_BINDING_FILE: &str =
     "crates/couch-codec-ffmpeg/bindings/ffmpeg-x86_64-pc-windows-msvc.rs";
+const LINUX_BINDING_FILE: &str =
+    "crates/couch-codec-ffmpeg/bindings/ffmpeg-x86_64-unknown-linux-gnu.rs";
+
+/// The target clang parses the headers for, matching [`BINDING_FILE`].
+const CLANG_TARGET: &str = if cfg!(windows) {
+    "x86_64-pc-windows-msvc"
+} else {
+    "x86_64-unknown-linux-gnu"
+};
 
 /// The headers rusty_ffmpeg 0.16.7 binds, in its order. Headers missing from
 /// the FFmpeg version at hand (such as `avfft.h`, removed in 8.0) are skipped.
@@ -188,7 +205,7 @@ pub fn generate(root: &Path) -> anyhow::Result<()> {
         .impl_debug(true)
         .rust_target(bindgen::RustTarget::stable(68, 0).map_err(|e| anyhow!("{e}"))?)
         .parse_callbacks(Box::new(IgnoreMathMacros))
-        .clang_arg("--target=x86_64-pc-windows-msvc")
+        .clang_arg(format!("--target={CLANG_TARGET}"))
         .clang_arg(format!("-I{}", include.display()))
         .blocklist_type("__mingw_ldbl_type_t")
         .prepend_enum_name(false);
@@ -227,4 +244,29 @@ fn is_fieldless(text: &str, name: &str) -> bool {
     let body = &text[start + needle.len()..];
     let body = &body[..body.find('}').unwrap_or(body.len())];
     body.trim() == "pub _address: u8," || body.trim().starts_with("_unused")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each system's committed bindings come from its own FFmpeg pin: a pin
+    /// bumped on one system fails here, on both, until the other system's
+    /// file is generated again (on that system).
+    #[test]
+    fn each_systems_bindings_match_its_pin() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for (deps, file) in [
+            (deps::WINDOWS_DEPS, WINDOWS_BINDING_FILE),
+            (deps::LINUX_DEPS, LINUX_BINDING_FILE),
+        ] {
+            let ffmpeg = deps.iter().find(|d| d.dir == "ffmpeg").unwrap();
+            let text = fs::read_to_string(root.join(file)).unwrap();
+            assert!(
+                text.contains(&provenance(ffmpeg.sha256)),
+                "{file} wasn't generated from {}: run `cargo xtask gen-ffmpeg-bindings` on that system",
+                ffmpeg.url
+            );
+        }
+    }
 }
