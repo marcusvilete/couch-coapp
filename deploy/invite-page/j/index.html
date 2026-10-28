@@ -3,32 +3,39 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- Nothing leaves this page: no requests but its own two files, and no referrer. The
+<!-- Nothing leaves this page: no requests but its own files, and no referrer. The
      invite after "#" is never sent to this server by the browser. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex">
 <title>Couch Co-App invite</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="invite.css">
 <script src="invite.js" defer></script>
 </head>
 <body>
 <main>
-  <p class="brand">Couch Co-App</p>
-  <h1 id="title">You're invited to a room</h1>
+  <header class="brand">
+    <img src="icon.svg" alt="" width="72" height="72">
+    <p>Couch Co-App</p>
+  </header>
 
-  <section id="invite" hidden>
-    <p>Open it in Couch Co-App. The app asks for the room's password before joining; whoever invited you has it.</p>
-    <p><a id="open" class="button" href="#">Open in Couch Co-App</a></p>
-    <p class="quiet">Nothing happens? Copy the invite and paste it into the app's Join box.</p>
-    <p><button id="copy" type="button">Copy the invite</button> <span id="copied" role="status"></span></p>
-  </section>
+  <div class="card">
+    <h1 id="title">You're invited to a room</h1>
 
-  <section id="broken" hidden>
-    <p>This link doesn't hold a Couch Co-App invite, or it was cut short. Ask for the invite again.</p>
-  </section>
+    <section id="invite" hidden>
+      <p>Open it in Couch Co-App. The app asks for the room's password before joining; whoever invited you has it.</p>
+      <p><a id="open" class="button" href="#">Open in Couch Co-App</a></p>
+      <p class="quiet">Nothing happens? Copy the invite and paste it into the app's Join box.</p>
+      <p class="copy"><button id="copy" type="button">Copy the invite</button> <span id="copied" role="status"></span></p>
+    </section>
 
-  <section class="quiet">
+    <section id="broken" hidden>
+      <p>This link doesn't hold a Couch Co-App invite, or it was cut short. Ask for the invite again.</p>
+    </section>
+  </div>
+
+  <section class="quiet away">
     <h2>Don't have the app?</h2>
     <p>Couch Co-App is for Windows. Ask whoever invited you for the installer, then open this link again.</p>
   </section>

@@ -64,11 +64,14 @@ function show() {
   const payload = payloadOf(location.hash);
   document.getElementById("invite").hidden = !payload;
   document.getElementById("broken").hidden = !!payload;
-  if (!payload) return;
+  const title = document.getElementById("title");
+  if (!payload) {
+    title.textContent = "This invite doesn't work";
+    return;
+  }
   const link = LINK_PREFIX + payload;
   document.getElementById("open").href = link;
   const name = roomName(payload);
-  const title = document.getElementById("title");
   title.textContent = name ? `You're invited to ${name}` : "You're invited to a room";
   document.getElementById("copy").onclick = async () => {
     const status = document.getElementById("copied");
