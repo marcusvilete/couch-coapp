@@ -1,0 +1,9 @@
+<!-- Couch Co-App's icon, 24 px, heavier lines: a couch whose backrest is a controller. scripts/icons.mjs renders the app's icon files from these. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="33 6 958 958" width="1024" height="1024">
+<defs><linearGradient id="f" x1="0" y1="0" x2="0.3" y2="1"><stop offset="0" stop-color="#9670ff"/><stop offset="1" stop-color="#5f33d6"/></linearGradient>
+<mask id="m" maskUnits="userSpaceOnUse" x="33" y="6" width="958" height="958">
+<g fill="#000" stroke="#fff" stroke-width="96" stroke-linejoin="round"><rect x="210" y="150" width="604" height="420" rx="120"/><rect x="295" y="580" width="434" height="200" rx="20"/><rect x="105" y="420" width="190" height="400" rx="95"/><rect x="729" y="420" width="190" height="400" rx="95"/></g>
+<path d="M 512 600 V 760" stroke="#fff" stroke-width="96" stroke-linecap="round"/>
+<g fill="#fff"><rect x="294" y="321" width="156" height="58" rx="19.333333333333332"/><rect x="343" y="272" width="58" height="156" rx="19.333333333333332"/>
+<circle cx="640" cy="312" r="40"/><circle cx="700" cy="376" r="40"/></g>
+</mask></defs><rect x="33" y="6" width="958" height="958" fill="url(#f)" mask="url(#m)"/></svg>

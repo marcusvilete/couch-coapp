@@ -1,6 +1,6 @@
 /* The app's design tokens (M21): every colour, size and shadow the screens
    use. Two themes in one list, `light-dark(day, night)`, near-neutral greys
-   in the manner of claude.ai's own settings: clay only for the brand,
+   in the manner of claude.ai's own settings: violet only for the brand,
    blue for what you interact with, and main buttons in the text's colour.
    The one shown follows Windows unless Settings → Appearance picks one
    (`data-theme` on <html>, which sets `color-scheme`). Windows' High
@@ -78,12 +78,10 @@
   --primary-hover: light-dark(#30302e, #e3e1d9);
   --primary-fg: light-dark(#faf9f5, #141413);
 
-  /* The brand: clay, for the app's mark and the owner's crown only. */
-  --brand: light-dark(#c96442, #d97757);
-  --brand-soft: light-dark(rgb(201 100 66 / 0.1), rgb(217 119 87 / 0.14));
-  --brand-text: light-dark(#b0542f, #e8936f);
-  --brand-fg: #ffffff;
-
+  /* The brand: violet, as the app's icon, for its mark and the owner's crown only. */
+  --brand: light-dark(#6a3fe0, #9670ff);
+  --brand-soft: light-dark(rgb(106 63 224 / 0.1), rgb(150 112 255 / 0.16));
+  --brand-text: light-dark(#5a32c8, #b39dfa);
   /* Red is only for LIVE and danger. */
   --live: light-dark(#d93a35, #f1544f);
   --live-soft: light-dark(rgb(217 58 53 / 0.11), rgb(241 84 79 / 0.16));

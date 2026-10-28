@@ -21,14 +21,11 @@
   width: 64px;
   height: 64px;
   margin-bottom: var(--s2);
-  border-radius: 20px;
-  background: var(--brand);
-  color: var(--brand-fg);
-  box-shadow: var(--shadow-md);
+  color: var(--brand);
 
   & svg {
-    width: 34px;
-    height: 34px;
+    width: 64px;
+    height: 64px;
   }
 }
 

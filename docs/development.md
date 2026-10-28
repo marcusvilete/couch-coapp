@@ -54,6 +54,8 @@ npm run shots              # every scenario in dark, light and High Contrast at 
 ```
 `npm run shots` uses the Microsoft Edge already on Windows (nothing to download) and also fails on text spilling out of its box, a menu that doesn't open, or a region that moves as you go between rooms, Settings pages or a dialog's tabs. A development build can be looked at from a script too: start it with `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'` in its own shell (never a shared one: the port lets any program on the PC drive the app; release builds ignore the variable), then attach with Playwright's `connectOverCDP`.
 
+**The app's icon** is drawn in `apps\desktop\src-tauri\icons\source`: `icon.svg`, and heavier drawings for 32, 24 and 16 px, which the taskbar and the notification area show. After changing one, `npm run icons` (in `apps\desktop`) renders every icon file from them, also with Edge, and `cargo clean -p couch-desktop` makes the next build take the new icon. The README shows `docs\images\icon.svg`, a copy of `icon.svg`.
+
 **The stream window and the developer CLI:** `couch-viewer` is the window that shows a stream. Its bar and cards can be seen without a session: `cargo run -p couch-viewer -- --hud-preview watching` (fourteen states), or all of them as screenshots with `cargo build -p couch-viewer` then `.\scripts\viewer-shots.ps1` (into `target\ui-shots\viewer`). `couch-cli` runs hosts, viewers and the measurements without the app.
 ```powershell
 cargo build --release -p couch-cli -p couch-viewer

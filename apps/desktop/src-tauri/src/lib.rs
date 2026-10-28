@@ -439,12 +439,34 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
                 show_main_window(tray.app_handle());
             }
         });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
+    if let Some(icon) = tray_icon(app) {
+        tray = tray.icon(icon);
     }
     // Hidden until the engine says the user keeps it (after `build`).
     tray.build(app)?.set_visible(false)?;
     Ok(())
+}
+
+/// The tray's icon: the exe's icon at the notification area's size (16 px
+/// scaled with the primary display, where the taskbar is, not the window's),
+/// so Windows takes the drawing made for that size rather than shrinking the
+/// window's.
+fn tray_icon(app: &AppHandle) -> Option<tauri::image::Image<'static>> {
+    #[cfg(windows)]
+    {
+        let scale = app
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|monitor| monitor.scale_factor())
+            .unwrap_or(1.0);
+        if let Ok(icon) = tauri::image::Image::from_app_icon_resource((16.0 * scale).round() as u32)
+        {
+            return Some(icon);
+        }
+    }
+    app.default_window_icon()
+        .map(|icon| icon.clone().to_owned())
 }
 
 fn fail(error: impl std::fmt::Display) -> ! {

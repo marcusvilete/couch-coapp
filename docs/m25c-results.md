@@ -15,13 +15,14 @@ Wire revision 12, version 0.23.0, which doesn't talk to 0.22.0 or earlier.
 ## What changed
 
 **At the home PC, Settings → Remote play → This PC while you're away:**
-- **Start Couch Co-App when I sign in to Windows:** it starts in the notification area, without opening its window.
+- **Start Couch Co-App when I sign in to Windows:** it starts in the notification area, without opening its window (with that icon on, below; otherwise with its window open).
   - It writes the current user's Run value (`"<exe>" --background`). Turning it off removes the value only if it names this exe.
   - Only an installed app offers it, for its main profile. A development build would start the debug exe at sign-in, which needs the dev server, and a Run entry can't name another profile. Elsewhere the switch shows, disabled, with why.
   - While a device controls the desktop (M25b), it can't be turned on.
 - **Notes below the switch:**
-  - while remote play is on, closing the window keeps the app running in the notification area, and the PC doesn't fall asleep on its own;
-  - with remote play on and the switch off: after a restart, start the app yourself.
+  - while remote play is on, the PC doesn't fall asleep on its own;
+  - with remote play on and the notification area icon off: closing the window quits, and devices can't reach the PC until it runs again;
+  - with remote play on and Start with Windows off: after a restart, start the app yourself.
 
 **Keep Couch Co-App in the notification area:** a second switch, off by default (the author, after the run of 0.23.0: the icon had come and gone with remote play, which was confusing).
 - **On:** an icon shows, whose click opens the window and whose menu has Open Couch Co-App and Quit. Closing the window hides it there.
