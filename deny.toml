@@ -7,8 +7,8 @@
 # covered by its own notice.
 
 [graph]
-# Windows first. Add Linux and macOS triples when their backends land.
-targets = ["x86_64-pc-windows-msvc"]
+# Windows, and Linux since M16a (ADR 0011). Add macOS's triple when its backend lands.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
 all-features = false
 no-default-features = false
 
@@ -16,6 +16,12 @@ no-default-features = false
 ignore = [
     # `paste` is unmaintained, not vulnerable: a compile-time macro used by rsmpeg.
     { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled in by rsmpeg; no runtime code" },
+    # Linux only (M16a), through Tauri's stack; unmaintained, not vulnerable, and
+    # only Tauri can move off them.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: a compile-time macro under gtk-rs, via Tauri's tray on Linux" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: D-Bus, via tauri-plugin-single-instance on Linux" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: D-Bus, via tauri-plugin-single-instance on Linux" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: D-Bus, via tauri-plugin-single-instance on Linux" },
 ]
 
 [licenses]

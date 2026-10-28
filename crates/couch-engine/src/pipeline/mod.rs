@@ -414,8 +414,17 @@ struct Unsupported;
 
 #[cfg(not(windows))]
 impl Backend for Unsupported {
+    /// The stream window's clock (`couch-viewer`'s `now_us`), so times from
+    /// it compare with ours.
     fn clock(&self) -> Arc<dyn Clock> {
-        Arc::new(couch_media::clock::ProcessClock::new())
+        #[cfg(target_os = "linux")]
+        {
+            Arc::new(couch_platform_linux::clock::MonotonicClock)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Arc::new(couch_media::clock::ProcessClock::new())
+        }
     }
     fn sources(&self) -> Result<Sources, MediaError> {
         Ok(Sources::default())

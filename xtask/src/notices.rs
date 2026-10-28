@@ -85,6 +85,11 @@ struct Group {
 }
 
 pub fn generate(root: &Path) -> anyhow::Result<()> {
+    // The bundled components below are Windows' (SDL3's DLL, the drivers);
+    // Linux's package and its notices come with M16b (ADR 0011).
+    if !cfg!(windows) {
+        anyhow::bail!("the notices are Windows' only until the Linux package (M16b)");
+    }
     let crates = crate_licences(root)?;
     let packages = npm_licences(root)?;
     let mut out = header(root)?;

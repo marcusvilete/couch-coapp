@@ -1029,6 +1029,13 @@ fn decoder_label(decoder: &FfmpegDecoder) -> String {
     format!("{codec}, {path}")
 }
 
+#[cfg_attr(
+    not(windows),
+    allow(
+        clippy::clone_on_copy,
+        reason = "the device is Infallible off Windows; a COM handle on it"
+    )
+)]
 fn decode_loop(
     rx: mpsc::Receiver<Incoming>,
     decoded: &Mailbox<Decoded>,

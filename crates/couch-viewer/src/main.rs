@@ -33,13 +33,18 @@ use std::io::Write;
 use anyhow::{anyhow, bail};
 use couch_media::Micros;
 
-/// Now, on the clock frames are stamped with (QPC on Windows).
+/// Now, on the clock frames are stamped with (QPC on Windows,
+/// `CLOCK_MONOTONIC` on Linux).
 pub fn now_us() -> Micros {
     #[cfg(windows)]
     {
         couch_platform_win::clock::now()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        couch_platform_linux::clock::now()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         compile_error!("couch-viewer needs a cross-process clock on this platform")
     }

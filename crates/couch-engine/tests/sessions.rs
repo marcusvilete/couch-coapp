@@ -1211,10 +1211,21 @@ impl Member {
     }
 }
 
+/// Starts an engine, waiting out a port its previous run still holds: iroh
+/// lets go of its socket a moment after `shutdown` returns, and only tests
+/// restart an engine on its own port within one process (the app restarts as
+/// a new process). Seen on CI's Linux runner (M16a).
 async fn start(dir: &Path, options: EngineOptions) -> Engine {
-    Engine::start(Profile::new("test", dir).unwrap(), options)
-        .await
-        .expect("engine starts")
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Engine::start(Profile::new("test", dir).unwrap(), options.clone()).await {
+            Ok(engine) => return engine,
+            Err(EngineError::Net(e)) if e.contains("bind") && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("engine starts: {e:?}"),
+        }
+    }
 }
 
 /// A session with one controller seat, nothing streamed yet (M19).
@@ -1295,23 +1306,28 @@ async fn three() -> (Member, Member, Member, String) {
         })
         .await;
     }
-    for m in [&a, &b, &c] {
+    full_mesh(&room.id, &[&a, &b, &c]).await;
+    (a, b, c, room.id)
+}
+
+/// Waits until each of `members` is linked to all the others in `room`.
+async fn full_mesh(room: &str, members: &[&Member]) {
+    for m in members {
         let deadline = Instant::now() + WAIT;
         loop {
-            let view = m.room(&room.id).await.unwrap();
+            let view = m.room(room).await.unwrap();
             let linked = view
                 .members
                 .iter()
                 .filter(|x| matches!(x.link, MemberLink::Direct | MemberLink::Relay))
                 .count();
-            if view.members.len() == 3 && linked == 2 {
+            if view.members.len() == members.len() && linked == members.len() - 1 {
                 break;
             }
             assert!(Instant::now() < deadline, "{}: no full mesh", m.name);
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    (a, b, c, room.id)
 }
 
 /// `viewer` watches `host`'s live session; returns its viewer window once
@@ -1384,20 +1400,10 @@ async fn stop_all(members: &mut [&mut Member]) {
     }
 }
 
-/// A UDP port free on both IPv4 and IPv6, never handed out twice in this
-/// process: the OS may offer a port again once our probe lets go of it,
-/// before the engine that got it first has bound it.
+/// A UDP port free on both IPv4 and IPv6, never handed out twice, and never
+/// one the OS picks by itself (so a restart onto it can't lose it).
 fn free_port() -> u16 {
-    static GIVEN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
-    loop {
-        let v4 = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-        let port = v4.local_addr().unwrap().port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) && std::net::UdpSocket::bind(("::", port)).is_ok() {
-            given.push(port);
-            return port;
-        }
-    }
+    couch_testkit::net::free_udp_port()
 }
 
 fn refused_because(reply: &Result<Response, EngineError>, words: &str) -> bool {
@@ -2878,6 +2884,60 @@ async fn watching_resumes_when_the_connection_to_the_host_comes_back() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M16a: the connection to the host replaced by another while both are up
+/// (a dial crossing one already working, which Linux's timing showed). The
+/// guest's seat goes with the old connection, as on any reconnection; it
+/// joins again at once on the one kept, in the same window, without waiting
+/// for an announcement that already came, and is told it lost the seat.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_connection_rejoins_at_once_and_frees_the_seat() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    give_control(&room, &mut a, &b, &window).await;
+
+    // Whoever dialed the connection dials again: both sides keep the new one
+    // and close the old one as a duplicate.
+    let b_dialed = b
+        .engine()
+        .connections(&room)
+        .await
+        .into_iter()
+        .find(|(m, _)| *m == a.id())
+        .map(|(_, dialed)| dialed)
+        .expect("B is connected to A");
+    if b_dialed {
+        b.engine().dial_again(&room, &a.id()).await;
+    } else {
+        a.engine().dial_again(&room, &b.id()).await;
+    }
+
+    a.wait_session(&room, &a, "the seat back with the host", |s| {
+        s.is_some_and(|s| holder(s, 0).is_none())
+    })
+    .await;
+    wait("the window told it lost the seat", || !window.holding()).await;
+    // Whichever way it heard first (the stream link, or the room), never the
+    // stale "You have …" note: none, or that the seat went.
+    b.wait_session(&room, &a, "watching again, no stale note", |s| {
+        s.is_some_and(|s| {
+            s.role == SessionRole::Watching
+                && s.note.as_deref().is_none_or(|n| n.contains("ask the host"))
+        })
+    })
+    .await;
+    a.wait_session(&room, &a, "B among the viewers again", |s| {
+        s.is_some_and(|s| s.viewers.contains(&b.id()))
+    })
+    .await;
+    let before = window.frames();
+    wait("frames again", || window.frames() > before + 5).await;
+    assert_eq!(b.fake.viewers.lock().unwrap().len(), 1, "the same window");
+    // The seat is the host's to give again, as after any reconnection.
+    give_control(&room, &mut a, &b, &window).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_that_ended_meanwhile_is_not_resumed() {
     let (mut a, mut b, mut c, room) = three().await;
@@ -4342,6 +4402,8 @@ async fn a_newcomer_sees_a_session_already_live() {
             |s| s.is_some_and(|s| s.stream == StreamStateView::Live),
         )
         .await;
+        // Asked at once, while the newcomer's connections may still be
+        // settling: a connection replaced meanwhile must not refuse it (M16a).
         let window = watching(&room, &host, &c).await;
         wait("frames for the newcomer", || window.frames() > 0).await;
         stop_all(&mut [&mut host, &mut other, &mut c]).await;
@@ -5279,6 +5341,9 @@ async fn desktop_control_ends_with_the_operator() {
     a.ok(Command::RemoveRemoteDevice { member: b.id() }).await;
     a.wait_session(&room, &a, "ended by the removal", ended)
         .await;
+    // B hears the offer go before it comes back: the wait below must see the
+    // new offer, not the old one still on its way out.
+    wait_remote(&b, &room, &a, "the offer withdrawn", |r| r.is_none()).await;
     a.ok(Command::AddRemoteDevice { member: b.id() }).await;
     wait_remote(&b, &room, &a, "offered again", |r| r.is_some()).await;
     b.ok(unlock(&room, &a, PIN)).await;
@@ -5288,6 +5353,7 @@ async fn desktop_control_ends_with_the_operator() {
     a.ok(Command::SetRemotePlay { on: false }).await;
     a.wait_session(&room, &a, "ended by remote play off", ended)
         .await;
+    wait_remote(&b, &room, &a, "the offer withdrawn", |r| r.is_none()).await;
     a.ok(Command::SetRemotePlay { on: true }).await;
     wait_remote(&b, &room, &a, "on again", |r| r.is_some()).await;
     b.ok(unlock(&room, &a, PIN)).await;

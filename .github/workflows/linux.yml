@@ -1,0 +1,70 @@
+# Builds and tests the workspace on Linux (M16a, ADR 0011), so work on Windows
+# can't break Linux unnoticed. Windows is built and checked on the author's PC.
+# The same steps as by hand: scripts/linux-deps.sh, `cargo xtask fetch-deps`,
+# then the commands in CLAUDE.md under scripts/dev.sh.
+
+name: Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch replaces a run still going.
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      - name: System packages
+        run: sudo bash scripts/linux-deps.sh
+      - name: Rust (the version in rust-toolchain.toml)
+        run: rustup toolchain install
+      # The registry and target/, pruned of what this build no longer uses.
+      - uses: Swatinem/rust-cache@v2
+      # FFmpeg and its source, pinned by URL and SHA-256 (xtask/src/deps.rs).
+      # Only what fetch-deps downloads: third_party also holds vendored code.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/sources
+            third_party/_downloads
+          key: linux-third-party-${{ hashFiles('xtask/src/deps.rs') }}
+      # Every step sources dev.sh, so they share one environment and nothing
+      # rebuilds between them.
+      - name: Native dependencies
+        run: |
+          . scripts/dev.sh
+          cargo xtask fetch-deps
+      - name: Clippy
+        run: |
+          . scripts/dev.sh
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: |
+          . scripts/dev.sh
+          cargo xtask stage-dlls
+          cargo test --workspace
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Front end
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npx vitest run

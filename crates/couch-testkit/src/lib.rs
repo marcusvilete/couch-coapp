@@ -1,5 +1,6 @@
 //! Fakes for tests. Only ever a dev-dependency.
 
+pub mod net;
 pub mod relay;
 
 use std::{

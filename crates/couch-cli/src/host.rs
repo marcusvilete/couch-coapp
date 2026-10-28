@@ -435,9 +435,17 @@ fn event_line(what: &str, qpc_us: u64) {
     println!("EVENT {what} {qpc_us}");
 }
 
+/// Now on the clock the stream window and the checks read (QPC on Windows,
+/// `CLOCK_MONOTONIC` on Linux).
 fn qpc_now() -> u64 {
-    use couch_media::clock::Clock;
-    couch_platform_win::clock::QpcClock.now().0
+    #[cfg(windows)]
+    {
+        couch_platform_win::clock::now().0
+    }
+    #[cfg(not(windows))]
+    {
+        couch_platform_linux::clock::now().0
+    }
 }
 
 /// Accepts viewers, runs each one's control stream, and reports to the main
@@ -516,6 +524,7 @@ async fn accept_viewers(endpoint: couch_net::Endpoint, to_main: mpsc::UnboundedS
 }
 
 /// Ctrl+C, Ctrl+Break, or the console window closing.
+#[cfg(windows)]
 async fn stop_requested() {
     use tokio::signal::windows::{ctrl_break, ctrl_close};
     match (ctrl_break(), ctrl_close()) {
@@ -527,6 +536,23 @@ async fn stop_requested() {
             }
         }
         _ => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// Ctrl+C, or SIGTERM (`kill`).
+#[cfg(unix)]
+async fn stop_requested() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        Err(_) => {
             let _ = tokio::signal::ctrl_c().await;
         }
     }

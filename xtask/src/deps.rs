@@ -24,8 +24,16 @@ pub struct Dep {
 
 /// Bump a pin by changing the URL and hash together; `fetch-deps` replaces the
 /// old copy. FFmpeg comes from BtbN's month-end builds, which are kept for two
-/// years (daily builds expire after two weeks).
-pub const DEPS: &[Dep] = &[
+/// years (daily builds expire after two weeks); Windows and Linux take the
+/// same build of the same source (ADR 0011). Both lists are visible on both
+/// systems, so a test checks each one's generated bindings.
+pub const DEPS: &[Dep] = if cfg!(windows) {
+    WINDOWS_DEPS
+} else {
+    LINUX_DEPS
+};
+
+pub const WINDOWS_DEPS: &[Dep] = &[
     Dep {
         name: "FFmpeg 8.1.3 (LGPL, shared)",
         dir: "ffmpeg",
@@ -47,6 +55,34 @@ pub const DEPS: &[Dep] = &[
         dll_dir: "lib/x64",
     },
 ];
+
+/// On Linux, FFmpeg only: SDL3 is built from source by the `sdl3` crate, at
+/// the same version (`sdl3-src` in Cargo.lock; keep it on Windows' SDL3).
+pub const LINUX_DEPS: &[Dep] = &[Dep {
+    name: "FFmpeg 8.1.3 (LGPL, shared)",
+    dir: "ffmpeg",
+    url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-linux64-lgpl-shared-8.1.tar.xz",
+    sha256: "d4d7b6936f492c0b866b1cb4a29a1bbae09d6a064b4ec4eb90c95bed7969535a",
+    expect: &[
+        "include/libavcodec/avcodec.h",
+        "lib/libavcodec.so",
+        "bin/ffmpeg",
+    ],
+    dll_dir: "lib",
+}];
+
+/// A runtime library's file name: `.dll` on Windows; on Linux `.so` and its
+/// versioned names (`libavcodec.so.62`, links among them included).
+fn is_runtime_library(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if cfg!(windows) {
+        name.to_ascii_lowercase().ends_with(".dll")
+    } else {
+        name.ends_with(".so") || name.contains(".so.")
+    }
+}
 
 /// A driver the installer offers (M10a): its official installer, pinned like
 /// the archives above but used as it is, not extracted.
@@ -290,7 +326,10 @@ pub fn fetch(root: &Path) -> anyhow::Result<()> {
         }
         println!("{}: installed to {}", dep.name, dest.display());
     }
-    fetch_drivers(root)?;
+    // The drivers are Windows' (virtual pads, hiding controllers).
+    if cfg!(windows) {
+        fetch_drivers(root)?;
+    }
     fetch_sources(root)
 }
 
@@ -301,10 +340,7 @@ pub fn dlls(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
         let dir = third_party(root).join(dep.dir).join(dep.dll_dir);
         for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
             let path = entry?.path();
-            if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("dll"))
-            {
+            if is_runtime_library(&path) {
                 dlls.push(path);
             }
         }
@@ -346,12 +382,14 @@ pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
         }
     }
     println!(
-        "{} DLL(s) staged in {} ({} updated)",
+        "{} runtime librar(ies) staged in {} ({} updated)",
         dlls.len(),
         target.display(),
         placed
     );
-    stage_drivers(root, &target)?;
+    if cfg!(windows) {
+        stage_drivers(root, &target)?;
+    }
     stage_notices(root, &target)
 }
 

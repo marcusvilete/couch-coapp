@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "couch-cli"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1143,6 +1143,7 @@ dependencies = [
  "couch-input",
  "couch-media",
  "couch-net",
+ "couch-platform-linux",
  "couch-platform-win",
  "couch-proto",
  "iroh-tickets",
@@ -1154,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "couch-codec-ffmpeg"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bytes",
  "couch-media",
@@ -1166,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "couch-codec-opus"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "couch-media",
  "couch-proto",
@@ -1175,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "couch-desktop"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "couch-engine",
  "serde",
@@ -1192,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "couch-engine"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "argon2",
  "bytes",
@@ -1203,6 +1204,7 @@ dependencies = [
  "couch-input",
  "couch-media",
  "couch-net",
+ "couch-platform-linux",
  "couch-platform-win",
  "couch-proto",
  "couch-room",
@@ -1225,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "couch-gamepad"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "couch-input",
  "couch-platform-win",
@@ -1236,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "couch-input"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bitflags 2.13.2",
  "couch-proto",
@@ -1246,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "couch-media"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bytes",
  "proptest",
@@ -1255,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "couch-net"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1279,8 +1281,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "couch-platform-linux"
+version = "0.23.2"
+dependencies = [
+ "couch-media",
+ "rustix",
+]
+
+[[package]]
 name = "couch-platform-win"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1294,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "couch-proto"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bitflags 2.13.2",
  "data-encoding",
@@ -1306,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "couch-room"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "couch-proto",
  "ed25519-dalek",
@@ -1318,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "couch-testkit"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "bytes",
  "couch-input",
@@ -1329,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "couch-viewer"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "anyhow",
  "couch-codec-ffmpeg",
@@ -1337,6 +1347,7 @@ dependencies = [
  "couch-gamepad",
  "couch-input",
  "couch-media",
+ "couch-platform-linux",
  "couch-platform-win",
  "couch-proto",
  "egui",
@@ -5644,6 +5655,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpkg-config"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a2d2f3481209a6b42eec2fbb49063fb4e8d35b57023401495d4fe0f85c817f0"
+
+[[package]]
 name = "rsmpeg"
 version = "0.18.0+ffmpeg.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5944,8 +5961,57 @@ dependencies = [
  "libc",
  "objc2",
  "raw-window-handle",
+ "sdl3-image-sys",
+ "sdl3-mixer-sys",
  "sdl3-sys",
+ "sdl3-ttf-sys",
 ]
+
+[[package]]
+name = "sdl3-image-src"
+version = "3.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f77980b408defef1b774b067b8f19d8dd0f2e19f39e0859b13a16211b38f046a"
+
+[[package]]
+name = "sdl3-image-sys"
+version = "0.7.1+SDL-image-3.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eeed3ac9786736021364dae342070ac3e9e0074b420b130d70a37ed4b879cdd"
+dependencies = [
+ "cmake",
+ "pkg-config",
+ "rpkg-config",
+ "sdl3-image-src",
+ "sdl3-sys",
+ "vcpkg",
+]
+
+[[package]]
+name = "sdl3-mixer-src"
+version = "3.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cd815ae87084588c7dbd027c1667b0a5e21a6b5ae7b22ecb230bc21c7063eca"
+
+[[package]]
+name = "sdl3-mixer-sys"
+version = "0.7.0+SDL-mixer-3.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6150136321198ec95cccfb6168d838f114273a7615d21b513e5277c86f7d3aa1"
+dependencies = [
+ "cmake",
+ "pkg-config",
+ "rpkg-config",
+ "sdl3-mixer-src",
+ "sdl3-sys",
+ "vcpkg",
+]
+
+[[package]]
+name = "sdl3-src"
+version = "3.4.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bfd475a15a4679b94f6579aed7d52c69f3e04d80e6707712373f12903a2ef91"
 
 [[package]]
 name = "sdl3-sys"
@@ -5953,7 +6019,31 @@ version = "0.7.1+SDL-3.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c10781cd13b03f18f26af765c9909ac64d362fd645c4fa92db51685c834cf8b"
 dependencies = [
+ "cc",
+ "cmake",
  "pkg-config",
+ "rpkg-config",
+ "sdl3-src",
+ "vcpkg",
+]
+
+[[package]]
+name = "sdl3-ttf-src"
+version = "3.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f28923d2ce72ff317d8eb7cec97ddfb8f351c330d7bcbf8c76e91332122c93b3"
+
+[[package]]
+name = "sdl3-ttf-sys"
+version = "0.7.1+SDL-ttf-3.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d254e537d2d96b3e2d6e8a3dd4850a1361b8689c3d95c6c1dfdc02b091307eef"
+dependencies = [
+ "cmake",
+ "pkg-config",
+ "rpkg-config",
+ "sdl3-sys",
+ "sdl3-ttf-src",
  "vcpkg",
 ]
 
@@ -8769,7 +8859,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "anyhow",
  "bindgen 0.73.2",

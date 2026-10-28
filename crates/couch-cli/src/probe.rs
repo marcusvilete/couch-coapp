@@ -8,6 +8,10 @@ use couch_net::endpoint::RelayChoice;
 enum Status {
     Ok,
     /// Works without it for now, but a later milestone needs it.
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "only Windows' checks warn so far")
+    )]
     Warn,
     Fail,
     /// Context only, e.g. an encoder this GPU doesn't have.

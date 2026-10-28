@@ -82,7 +82,9 @@ impl NetArgs {
         Ok((options, netem))
     }
 
-    /// The flags to pass on to a child `host` or `view` process.
+    /// The flags to pass on to a child `host` or `view` process (for
+    /// `latency-probe`, Windows only).
+    #[cfg(windows)]
     pub fn to_args(&self) -> Vec<String> {
         let mut args = vec!["--relay".into(), self.relay.clone()];
         if let Some(token) = &self.relay_token {

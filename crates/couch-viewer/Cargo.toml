@@ -31,6 +31,12 @@ couch-platform-win.workspace = true
 # wgpu-hal (zero_copy.rs, M9c); wgpu-hal already builds these.
 windows = { workspace = true, features = ["Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+couch-platform-linux.workspace = true
+# SDL 3.4.16 built from source and linked in, as Windows' prebuilt one is
+# pinned (ADR 0011).
+sdl3 = { workspace = true, features = ["build-from-source-static"] }
+
 [dev-dependencies]
 # wgpu's own shader compiler (already built for it), to validate the
 # shaders without a GPU (gpu.rs's tests, P8).
