@@ -1,0 +1,15 @@
+<!-- An alternative for Couch Co-App's icon, not used: two controllers, the one behind in lavender (2026-10-28, the runner-up to the couch-controller). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+<linearGradient id="front" x1="0" y1="0" x2="0.3" y2="1"><stop offset="0" stop-color="#9670ff"/><stop offset="1" stop-color="#5f33d6"/></linearGradient>
+<linearGradient id="back" x1="0" y1="0" x2="0.3" y2="1"><stop offset="0" stop-color="#cbb9ff"/><stop offset="1" stop-color="#9d82f2"/></linearGradient>
+<path id="pad" d="M -150 -130 H 150 C 225 -130 262 -90 280 -10 L 310 110 C 324 168 270 196 232 158 L 172 98 H -172 L -232 158 C -270 196 -324 168 -310 110 L -280 -10 C -262 -90 -225 -130 -150 -130 Z"/>
+<g id="holes"><rect x="-210" y="-40" width="120" height="40" rx="12"/><rect x="-170" y="-80" width="40" height="120" rx="12"/><circle cx="120" cy="10" r="30"/><circle cx="195" cy="-55" r="30"/></g>
+<mask id="padm" maskUnits="userSpaceOnUse" x="-400" y="-300" width="800" height="600"><use href="#pad" fill="#fff"/><use href="#holes" fill="#000"/></mask>
+<mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="#fff"/><g transform="translate(600 610) rotate(10) scale(1.2)"><use href="#pad" fill="#000" stroke="#000" stroke-width="60" stroke-linejoin="round"/></g></mask>
+</defs>
+<g transform="translate(512 512) scale(0.95) translate(-498.5 -521)">
+<g mask="url(#cut)"><g transform="translate(400 390) rotate(-12) scale(1.2)"><use href="#pad" fill="url(#back)" mask="url(#padm)"/></g></g>
+<g transform="translate(600 610) rotate(10) scale(1.2)"><use href="#pad" fill="url(#front)" mask="url(#padm)"/></g>
+</g>
+</svg>

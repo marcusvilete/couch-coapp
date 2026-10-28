@@ -1,7 +1,7 @@
 {
   "name": "couch-desktop",
   "private": true,
-  "version": "0.23.0",
+  "version": "0.23.1",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "shots": "node scripts/shots.mjs",
+    "icons": "node scripts/icons.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

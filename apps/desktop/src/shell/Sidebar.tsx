@@ -3,7 +3,7 @@
 // going on there; at the bottom, you. Below 900 px wide it narrows to a
 // rail of room icons.
 import { Pencil, Plus, Settings } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { EngineInfo } from "../bindings/EngineInfo";
 import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
@@ -171,18 +171,29 @@ export function hostOf(url: string): string {
   }
 }
 
-/** The app's mark: a couch, two seats. */
-export function CouchMark() {
+/** The app's mark, as its icon (`src-tauri/icons/source`): a couch whose
+ *  backrest is a controller, two seats. Each part hides the lines of those
+ *  drawn before it; `weight` is the line width, of 1024. */
+export function CouchMark(props: { weight?: number }) {
+  const mask = useId();
   return (
-    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-      <path
-        d="M5 10V8a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v2M3 12a2 2 0 0 1 4 0v2h10v-2a2 2 0 0 1 4 0v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1zM6 18v1.5M18 18v1.5M12 9.5v4.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.9"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+    <svg viewBox="37 10 950 950" aria-hidden="true">
+      <mask id={mask} maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+        <g fill="#000" stroke="#fff" strokeWidth={props.weight ?? 88} strokeLinejoin="round">
+          <rect x="210" y="150" width="604" height="420" rx="120" />
+          <rect x="295" y="580" width="434" height="200" rx="20" />
+          <rect x="105" y="420" width="190" height="400" rx="95" />
+          <rect x="729" y="420" width="190" height="400" rx="95" />
+        </g>
+        <path d="M 512 600 V 760" stroke="#fff" strokeWidth={props.weight ?? 88} strokeLinecap="round" />
+        <g fill="#fff">
+          <rect x="296" y="322" width="152" height="56" rx="19" />
+          <rect x="344" y="274" width="56" height="152" rx="19" />
+          <circle cx="640" cy="312" r="38" />
+          <circle cx="700" cy="376" r="38" />
+        </g>
+      </mask>
+      <rect width="1024" height="1024" fill="currentColor" mask={`url(#${mask})`} />
     </svg>
   );
 }

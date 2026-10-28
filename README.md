@@ -1,4 +1,6 @@
-# Couch Co-App
+<p align="center"><img src="docs/images/icon.svg" width="128" alt="Couch Co-App's icon: a couch whose backrest is a controller"></p>
+
+<h1 align="center">Couch Co-App</h1>
 
 ### What is it?
 
