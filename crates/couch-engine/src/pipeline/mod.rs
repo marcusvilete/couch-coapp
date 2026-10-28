@@ -320,6 +320,28 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Keeps the system awake, and with `display` the screen on too, until
+    /// the guard drops (M25c). `None` where it can't.
+    fn keep_awake(&self, _display: bool) -> Option<Box<dyn Any + Send>> {
+        None
+    }
+
+    /// Whether Windows shows the lock screen (or a UAC prompt) rather than
+    /// the user's desktop (M25c).
+    fn screen_locked(&self) -> bool {
+        false
+    }
+
+    /// Whether this app starts when the user signs in (M25c).
+    fn start_at_sign_in(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// Starts this app at sign-in, to the notification area, or stops.
+    fn set_start_at_sign_in(&self, _on: bool) -> Result<(), String> {
+        Err("not on this system".into())
+    }
+
     /// At start, before any input: lets go of keys and buttons a host on
     /// this machine left held when it crashed or was killed, shows games any
     /// controller it left hidden, and makes a panic in this process let go

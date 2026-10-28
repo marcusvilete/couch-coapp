@@ -20,6 +20,8 @@ const MIN_PIN = 6;
 
 export function RemotePlaySection() {
   const [view, setView] = useState<RemotePlayView | null>(null);
+  // The notification area icon (M25c): the app's own, beside remote play's.
+  const [tray, setTray] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
@@ -27,7 +29,22 @@ export function RemotePlaySection() {
     request({ type: "getRemotePlay" }, "remotePlay")
       .then(setView)
       .catch((e) => setError(errorText(e)));
+    request({ type: "getTray" }, "tray")
+      .then((t) => setTray(t.on))
+      .catch((e) => setError(errorText(e)));
   }, []);
+
+  const sendTray = async (on: boolean) => {
+    setWorking(true);
+    setError(null);
+    try {
+      setTray((await request({ type: "setTray", on }, "tray")).on);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setWorking(false);
+    }
+  };
 
   const send = async (command: Parameters<typeof request>[0]) => {
     setWorking(true);
@@ -90,6 +107,37 @@ export function RemotePlaySection() {
             Wrong PINs were tried: the next try can come in {waitText(view.waitSecs)}.
           </p>
         )}
+      </div>
+
+      <h3 className="settings-subtitle">This PC while you're away</h3>
+      <div className="settings-card">
+        <Switch
+          checked={view.startAtSignIn === true}
+          disabled={working || view.startAtSignIn == null}
+          onChange={(on) => void send({ type: "setStartAtSignIn", on })}
+          label="Start Couch Co-App when I sign in to Windows"
+          detail={
+            view.startAtSignIn == null
+              ? "Only an installed Couch Co-App can, for its main profile."
+              : tray
+                ? "It starts in the notification area, without opening its window."
+                : "It starts with its window open."
+          }
+        />
+        <Switch
+          checked={tray}
+          disabled={working}
+          onChange={(on) => void sendTray(on)}
+          label="Keep Couch Co-App in the notification area"
+          detail="Closing the window hides it there; Quit in the icon's menu ends the app. Off, closing the window quits."
+        />
+        <p className="settings-note">
+          {view.on
+            ? "While remote play is on, this PC doesn't fall asleep on its own (choosing Sleep, or closing a laptop's lid, still works), and while a device of yours is unlocked, its screen stays on too."
+            : "With remote play on, this PC doesn't fall asleep on its own."}
+          {view.on && !tray && " Closing the window now quits Couch Co-App, and your devices can't reach this PC until it runs again."}
+          {view.on && view.startAtSignIn === false && " After a restart, start Couch Co-App yourself, or turn on Start with Windows."}
+        </p>
       </div>
 
       <h3 className="settings-subtitle">My devices</h3>

@@ -57,6 +57,8 @@ export type World = {
   sound: "game" | "silent";
   /** Settings → Stream window (P11): new stream windows show their bar. */
   streamWindowBar: boolean;
+  /** The app keeps an icon in the notification area (M25c). */
+  tray: boolean;
   /** Remote play (M25): Settings → Remote play. Members offering it carry
    * their `remote` in the rooms. A PC unlocks with "246810". */
   remotePlay: RemotePlayView;
@@ -366,6 +368,7 @@ type RemoteCommand = Extract<
     type:
       | "getRemotePlay"
       | "setRemotePlay"
+      | "setStartAtSignIn"
       | "setRemotePin"
       | "addRemoteDevice"
       | "removeRemoteDevice"
@@ -405,6 +408,10 @@ function remoteCommand(cmd: RemoteCommand): Response {
     case "setRemotePlay":
       if (cmd.on && !rp.pinSet) throw "set a PIN first";
       rp.on = cmd.on;
+      return reply();
+    case "setStartAtSignIn":
+      if (rp.startAtSignIn == null) throw "only an installed Couch Co-App can start with Windows";
+      rp.startAtSignIn = cmd.on;
       return reply();
     case "setRemotePin":
       if ([...cmd.pin.trim()].length < 6) throw "the PIN must be at least 6 characters";
@@ -707,8 +714,14 @@ function handle(cmd: Command): Response | Promise<Response> {
       return { type: "network", ...world.network };
     case "getStreamWindow":
       return { type: "streamWindow", bar: world.streamWindowBar };
+    case "getTray":
+      return { type: "tray", on: world.tray };
+    case "setTray":
+      world.tray = cmd.on;
+      return { type: "tray", on: world.tray };
     case "getRemotePlay":
     case "setRemotePlay":
+    case "setStartAtSignIn":
     case "setRemotePin":
     case "addRemoteDevice":
     case "removeRemoteDevice":

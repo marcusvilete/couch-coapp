@@ -4,13 +4,13 @@
 // then no PIN ever goes to it. Then unlocking it with its PIN, starting a
 // session on it, and locking it again. Its session, once there, shows on the
 // stage as a host console run from here.
-import { Lock, LockOpen, Play, Router } from "lucide-react";
+import { Lock, LockOpen, MonitorX, Play, Router } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import type { MemberView } from "../bindings/MemberView";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { errorText, request } from "../engine";
-import { waitText } from "../model/remote";
+import { lockedText, waitText } from "../model/remote";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { Dialog } from "../ui/Dialog";
@@ -87,9 +87,11 @@ export function RemotePanel(props: {
 
   return (
     <Callout
-      tone="info"
-      icon={<Router />}
-      title={`You run ${pc.name} from here`}
+      // Windows locked there (M25c): said in the same place, so nothing
+      // moves.
+      tone={remote.locked ? "warn" : "info"}
+      icon={remote.locked ? <MonitorX /> : <Router />}
+      title={remote.locked ? `${pc.name} is locked` : `You run ${pc.name} from here`}
       why="Its sessions start, stream and hand out seats as if you were at it. Someone there can stop it with the panic key, which locks this device out until you give the PIN again."
       actions={
         <>
@@ -109,7 +111,11 @@ export function RemotePanel(props: {
         </>
       }
     >
-      {props.session ? "Its session is below." : "No session there now."}
+      {remote.locked
+        ? lockedText()
+        : props.session
+          ? "Its session is below."
+          : "No session there now."}
     </Callout>
   );
 }

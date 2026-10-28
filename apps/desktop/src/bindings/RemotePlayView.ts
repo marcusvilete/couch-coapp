@@ -34,4 +34,9 @@ hosts: Array<RemoteDeviceView>,
  * The device controlling this PC's desktop now, by name (M25b): adding
  * a device and changing the PIN wait until it ends.
  */
-desktop: string | null, };
+desktop: string | null, 
+/**
+ * Whether this app starts when the user signs in to Windows (M25c);
+ * `None` where it isn't offered (a development build, another profile).
+ */
+startAtSignIn: boolean | null, };

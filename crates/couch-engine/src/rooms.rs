@@ -433,9 +433,11 @@ pub(crate) async fn start(
         other_versions: BTreeMap::new(),
         views: AtomicU64::new(0),
         restored: false,
-        remote: remote::Remote::load(profile.data_dir()),
+        remote: remote::Remote::load(profile.data_dir(), options.start_at_sign_in),
     };
     actor.restore_rooms(now);
+    // Awake from the start while remote play is on (M25c).
+    actor.sync_awake();
     tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
     tokio::spawn(actor.run(inbox_rx));
     Ok(Started {
@@ -783,6 +785,8 @@ impl Actor {
             | Command::GetNetwork
             | Command::SetNetwork { .. }
             | Command::GetStreamWindow
+            | Command::GetTray
+            | Command::SetTray { .. }
             | Command::GetDrivers
             | Command::GetNotices
             | Command::ExportProfile { .. }
@@ -861,6 +865,7 @@ impl Actor {
             Command::SetStreamWindow { bar } => self.set_stream_window(bar),
             command @ (Command::GetRemotePlay
             | Command::SetRemotePlay { .. }
+            | Command::SetStartAtSignIn { .. }
             | Command::SetRemotePin { .. }
             | Command::AddRemoteDevice { .. }
             | Command::RemoveRemoteDevice { .. }
@@ -1722,6 +1727,8 @@ impl Actor {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        // Whether Windows is locked here, for our devices (M25c).
+        self.remote_tick(now);
         if now >= self.next_addr_check {
             self.next_addr_check = now + ADDR_CHECK_EVERY;
             self.refresh_addr(now);

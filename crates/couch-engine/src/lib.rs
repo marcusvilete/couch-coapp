@@ -334,6 +334,14 @@ pub enum Command {
     SetStreamWindow {
         bar: bool,
     },
+    /// Whether the app keeps an icon in the notification area (M25c): with
+    /// it, closing the window hides it there, and starting with Windows
+    /// stays there.
+    GetTray,
+    /// Saves it; the app's icon follows at once.
+    SetTray {
+        on: bool,
+    },
     // ---- Remote play (M25, ADR 0010) ----
     /// Remote play's settings: on the home PC, the devices it trusts and the
     /// members that could be added; on a device, the home PCs it accepted.
@@ -341,6 +349,12 @@ pub enum Command {
     /// At the home PC: turns remote play on (a PIN set first) or off. Off
     /// locks every device out at once.
     SetRemotePlay {
+        on: bool,
+    },
+    /// This app starts when the user signs in to Windows, to the
+    /// notification area (M25c), or stops doing so. Only where
+    /// [`RemotePlayView::start_at_sign_in`] offers it.
+    SetStartAtSignIn {
         on: bool,
     },
     /// At the home PC: the PIN its devices unlock with. A new one locks them
@@ -503,6 +517,16 @@ impl From<StreamWindowRequest> for couch_proto::ipc::WindowRequest {
 pub struct StreamWindowSettingsView {
     /// New stream windows show the session bar over the picture.
     pub bar: bool,
+}
+
+/// Answer to [`Command::GetTray`] (M25c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TrayView {
+    /// The app keeps an icon in the notification area, and closing its
+    /// window hides it there.
+    pub on: bool,
 }
 
 /// The stream window of a session we watch, for the app's controls (P11).
@@ -1149,6 +1173,7 @@ pub enum Response {
     },
     Network(NetworkView),
     StreamWindow(StreamWindowSettingsView),
+    Tray(TrayView),
     Drivers {
         drivers: Vec<DriverView>,
     },
@@ -1186,6 +1211,9 @@ pub struct RemotePlayView {
     /// The device controlling this PC's desktop now, by name (M25b): adding
     /// a device and changing the PIN wait until it ends.
     pub desktop: Option<String>,
+    /// Whether this app starts when the user signs in to Windows (M25c);
+    /// `None` where it isn't offered (a development build, another profile).
+    pub start_at_sign_in: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1212,6 +1240,9 @@ pub struct RemoteAccessView {
     pub code: String,
     /// Wrong PINs make the next try wait this long, in seconds.
     pub wait_secs: Option<u32>,
+    /// Unlocked, and Windows is locked at that PC (M25c): nothing gets in
+    /// until someone unlocks it there.
+    pub locked: bool,
 }
 
 impl fmt::Debug for Command {
@@ -1372,11 +1403,16 @@ impl fmt::Debug for Command {
                 .field("request", request)
                 .finish(),
             Self::GetStreamWindow => f.write_str("GetStreamWindow"),
+            Self::GetTray => f.write_str("GetTray"),
+            Self::SetTray { on } => f.debug_struct("SetTray").field("on", on).finish(),
             Self::SetStreamWindow { bar } => {
                 f.debug_struct("SetStreamWindow").field("bar", bar).finish()
             }
             Self::GetRemotePlay => f.write_str("GetRemotePlay"),
             Self::SetRemotePlay { on } => f.debug_struct("SetRemotePlay").field("on", on).finish(),
+            Self::SetStartAtSignIn { on } => {
+                f.debug_struct("SetStartAtSignIn").field("on", on).finish()
+            }
             // The PIN guards the whole PC.
             Self::SetRemotePin { .. } => f.write_str("SetRemotePin { .. }"),
             Self::AddRemoteDevice { member } => f
@@ -1444,6 +1480,7 @@ impl fmt::Debug for Response {
                 .finish(),
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
             Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
+            Self::Tray(tray) => f.debug_tuple("Tray").field(tray).finish(),
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
@@ -1807,6 +1844,9 @@ pub struct EngineOptions {
     /// The app's file dialogs for backups (M13); without them, backups are
     /// refused.
     pub backup_files: Option<Arc<dyn BackupFiles>>,
+    /// Whether this app may start itself when the user signs in (M25c):
+    /// Settings offers it only then.
+    pub start_at_sign_in: bool,
 }
 
 impl EngineOptions {
@@ -1828,6 +1868,7 @@ impl EngineOptions {
             reconnect_wait: Duration::from_secs(30),
             relay_only: false,
             backup_files: None,
+            start_at_sign_in: false,
         }
     }
 
@@ -1852,6 +1893,10 @@ impl EngineOptions {
             });
         Self {
             relays,
+            // An installed app's default profile only (M25c): a development
+            // build would start the debug exe, which needs the dev server,
+            // and a Run entry can't name another profile.
+            start_at_sign_in: !cfg!(debug_assertions) && profile.is_default(),
             ..Self::development()
         }
     }
@@ -1971,6 +2016,9 @@ pub struct Engine {
     shortcuts_edit: Mutex<()>,
     /// A driver's setup is running ([`Command::InstallDriver`]).
     installing_driver: AtomicBool,
+    /// Whether the app keeps an icon in the notification area (M25c,
+    /// `app.json`).
+    tray: AtomicBool,
     /// Held while this engine runs; see [`lock_profile`].
     _lock: std::fs::File,
 }
@@ -1991,6 +2039,7 @@ impl Engine {
         let relay_in_use = relay_in_use(&options.relays, build_config::relay().as_ref());
         let secrets = options.secret_store.clone();
         let backup_files = options.backup_files.clone();
+        let tray = store::app(profile.data_dir()).tray;
         let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
         Ok(Self {
             profile,
@@ -2006,8 +2055,16 @@ impl Engine {
             relay_in_use,
             shortcuts_edit: Mutex::new(()),
             installing_driver: AtomicBool::new(false),
+            tray: AtomicBool::new(tray),
             _lock: lock,
         })
+    }
+
+    /// Whether the app keeps an icon in the notification area (M25c): its
+    /// window then closes to it, and a start at sign-in stays there. Read
+    /// without waiting on the engine.
+    pub fn tray_on(&self) -> bool {
+        self.tray.load(Ordering::SeqCst)
     }
 
     /// Runs a backup or restore, one at a time, with the app's dialogs.
@@ -2281,6 +2338,12 @@ impl Engine {
             Command::GetStreamWindow => Ok(Response::StreamWindow(StreamWindowSettingsView {
                 bar: store::stream_window(self.profile.data_dir()).bar,
             })),
+            Command::GetTray => Ok(Response::Tray(TrayView { on: self.tray_on() })),
+            Command::SetTray { on } => {
+                store::save_app(self.profile.data_dir(), store::AppSettings { tray: on })?;
+                self.tray.store(on, Ordering::SeqCst);
+                Ok(Response::Tray(TrayView { on }))
+            }
             Command::ListSources => {
                 let backend = self.backend.clone();
                 let (sources, controllers, host_controllers, hiding, virtual_pads) =

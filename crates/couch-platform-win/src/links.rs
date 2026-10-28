@@ -52,14 +52,23 @@ pub fn forget_user_scheme(scheme: &str, exe: &Path) -> io::Result<bool> {
 /// The default value of a key under the current user's hive, if the key
 /// and its default value exist.
 fn read_default(subkey: &str) -> io::Result<Option<String>> {
+    read_value(subkey, None)
+}
+
+/// A string value of a key under the current user's hive (`None`: its
+/// default value), if the key and the value exist.
+pub(crate) fn read_value(subkey: &str, value: Option<&str>) -> io::Result<Option<String>> {
     let subkey = HSTRING::from(subkey);
+    let name = value.map(HSTRING::from);
+    let name = name.as_ref().map_or(PCWSTR::null(), |n| PCWSTR(n.as_ptr()));
     let mut bytes = 0u32;
-    // SAFETY: asks only for the size, into a live local.
+    // SAFETY: asks only for the size, into a live local; `name` is null or
+    // a live NUL-terminated wide string.
     let sized = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             &subkey,
-            PCWSTR::null(),
+            name,
             RRF_RT_REG_SZ,
             None,
             None,
@@ -77,7 +86,7 @@ fn read_default(subkey: &str) -> io::Result<Option<String>> {
         RegGetValueW(
             HKEY_CURRENT_USER,
             &subkey,
-            PCWSTR::null(),
+            name,
             RRF_RT_REG_SZ,
             None,
             Some(text.as_mut_ptr().cast()),
@@ -93,21 +102,21 @@ fn read_default(subkey: &str) -> io::Result<Option<String>> {
 }
 
 /// The program in an open command such as `"C:\path\app.exe" "%1"`.
-fn command_exe(command: &str) -> Option<String> {
+pub(crate) fn command_exe(command: &str) -> Option<String> {
     let rest = command.trim_start().strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
 }
 
 /// Whether two paths name the same file, however each is spelled.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
 }
 
-fn check(code: WIN32_ERROR) -> io::Result<()> {
+pub(crate) fn check(code: WIN32_ERROR) -> io::Result<()> {
     if code == ERROR_SUCCESS {
         Ok(())
     } else {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
-import { desktopBlocked, desktopCommand, viaRemote, waitText } from "./remote";
+import { desktopBlocked, desktopCommand, lockedText, viaRemote, waitText } from "./remote";
 
 const target = { room: "r1", member: "pc" };
 
@@ -53,6 +53,12 @@ describe("commands for a home PC run from afar", () => {
   it("says how long to wait", () => {
     expect(waitText(45)).toBe("45 s");
     expect(waitText(600)).toBe("10 min");
+  });
+
+  it("says a home PC is locked, and why the picture may be black (M25c)", () => {
+    const text = lockedText();
+    expect(text).toMatch(/until someone unlocks it at the PC/);
+    expect(text).toMatch(/black or frozen/);
   });
 
   it("brings the home PC's window forward, and controls its desktop (M25b)", () => {

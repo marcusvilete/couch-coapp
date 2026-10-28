@@ -122,6 +122,14 @@ struct Fake {
     foreground_allowed: Mutex<Vec<u32>>,
     /// The windows brought to the front (M25b); it brings them in front.
     brought_to_front: Mutex<Vec<NativeId>>,
+    /// The power requests held now (M25c), each with whether it keeps the
+    /// display on, in the order made.
+    awake: Arc<Mutex<Vec<(u64, bool)>>>,
+    awake_made: AtomicU64,
+    /// Windows shows the lock screen (M25c).
+    locked: AtomicBool,
+    /// The app starts at sign-in (M25c).
+    starts_at_sign_in: AtomicBool,
     /// The host's own controller.
     local: FakeLocal,
     /// How many of the host's controllers are hidden from games now.
@@ -648,6 +656,25 @@ impl Backend for Fake {
         true
     }
 
+    fn keep_awake(&self, display: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        let id = self.awake_made.fetch_add(1, Ordering::SeqCst);
+        self.awake.lock().unwrap().push((id, display));
+        Some(Box::new(AwakeGuard(self.awake.clone(), id)))
+    }
+
+    fn screen_locked(&self) -> bool {
+        self.locked.load(Ordering::SeqCst)
+    }
+
+    fn start_at_sign_in(&self) -> Result<bool, String> {
+        Ok(self.starts_at_sign_in.load(Ordering::SeqCst))
+    }
+
+    fn set_start_at_sign_in(&self, on: bool) -> Result<(), String> {
+        self.starts_at_sign_in.store(on, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// A screen's area, for desktop control's pointer (M25b).
     fn screen_area(&self, source: &Source) -> Option<couch_engine::ScreenArea> {
         matches!(source, Source::Screen(_)).then_some(couch_engine::ScreenArea {
@@ -739,6 +766,25 @@ struct FakeViewer {
     started_without_bar: Arc<AtomicBool>,
     /// It was started with its stats shown (no `--hide-stats`).
     started_with_stats: Arc<AtomicBool>,
+}
+
+/// A fake power request: gone from the list when dropped.
+struct AwakeGuard(Arc<Mutex<Vec<(u64, bool)>>>, u64);
+
+impl Drop for AwakeGuard {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().retain(|(id, _)| *id != self.1);
+    }
+}
+
+impl Fake {
+    /// What the power requests held now keep on: `None` for nothing,
+    /// `Some(display)` for the system, and the display too if so (M25c).
+    fn awake(&self) -> Option<bool> {
+        let held = self.awake.lock().unwrap();
+        assert!(held.len() <= 1, "more than one request held: {held:?}");
+        held.first().map(|(_, display)| *display)
+    }
 }
 
 /// The process id every fake stream window has, to see the foreground
@@ -1028,6 +1074,7 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
         reconnect_wait: Duration::from_secs(5),
         relay_only: false,
         backup_files: None,
+        start_at_sign_in: false,
     }
 }
 
@@ -5293,4 +5340,132 @@ async fn the_streamed_window_is_brought_to_front() {
     .await;
     assert_eq!(*a.fake.brought_to_front.lock().unwrap(), [WINDOW, WINDOW]);
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// The author's run of 0.23.0: the laptop, running its PC's session, closes
+/// its stream window and watches again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_operator_watches_again_after_closing_its_window() {
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    desktop_session(&room, &a, &b).await;
+    let b_window = watching(&room, &a, &b).await;
+    desktop_on(&room, &a, &b, &b_window).await;
+    b_window.close();
+    b.wait_session(&room, &a, "B not watching", |s| {
+        s.is_some_and(|s| s.role == SessionRole::None)
+    })
+    .await;
+    a.wait_session(&room, &a, "B gone from the viewers", |s| {
+        s.is_some_and(|s| s.viewers.is_empty())
+    })
+    .await;
+    let again = watching(&room, &a, &b).await;
+    // And desktop control again, on the new window.
+    desktop_on(&room, &a, &b, &again).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+// ---- The unattended PC (M25c) ----
+
+/// M25c: the home PC stays awake while remote play is on, its display on
+/// too while a device is unlocked; never two requests at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_home_pc_stays_awake_while_remote_play_is_on() {
+    let (mut a, mut b, mut c, room) = three().await;
+    assert_eq!(a.fake.awake(), None, "nothing asked before remote play");
+    trusted(&room, &a, &b).await;
+    wait("the system kept awake", || a.fake.awake() == Some(false)).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+    wait("the display kept on", || a.fake.awake() == Some(true)).await;
+    b.ok(Command::LockRemote {
+        room: room.clone(),
+        member: a.id(),
+    })
+    .await;
+    wait("the display let go", || a.fake.awake() == Some(false)).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+    wait("the display on again", || a.fake.awake() == Some(true)).await;
+    // Off: everything let go, the device locked out with it.
+    a.ok(Command::SetRemotePlay { on: false }).await;
+    wait("the PC may sleep", || a.fake.awake().is_none()).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M25c: a device hears when Windows is locked at its home PC, and when it
+/// is unlocked again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_locked_home_pc_is_reported() {
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    // Locked already when the device unlocks: it hears at once.
+    a.fake.locked.store(true, Ordering::SeqCst);
+    b.ok(unlock(&room, &a, PIN)).await;
+    wait_remote(&b, &room, &a, "locked from the start", |r| {
+        r.is_some_and(|r| r.unlocked && r.locked)
+    })
+    .await;
+    a.fake.locked.store(false, Ordering::SeqCst);
+    wait_remote(&b, &room, &a, "unlocked at home", |r| {
+        r.is_some_and(|r| r.unlocked && !r.locked)
+    })
+    .await;
+    a.fake.locked.store(true, Ordering::SeqCst);
+    wait_remote(&b, &room, &a, "locked again", |r| {
+        r.is_some_and(|r| r.locked)
+    })
+    .await;
+    // A friend hears nothing of it.
+    wait_remote(&c, &room, &a, "no offer for C", |r| r.is_none()).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M25c: starting at sign-in is the user's own switch, offered only by an
+/// installed app's default profile (`EngineOptions::start_at_sign_in`).
+#[tokio::test(flavor = "multi_thread")]
+async fn starting_at_sign_in_is_the_users_choice() {
+    let mut a = Member::with("Ana", |o| EngineOptions {
+        start_at_sign_in: true,
+        ..o
+    })
+    .await;
+    let mut b = Member::new("Bia").await;
+    async fn offered(m: &Member) -> Option<bool> {
+        match m.handle(Command::GetRemotePlay).await {
+            Ok(Response::RemotePlay(view)) => view.start_at_sign_in,
+            other => panic!("settings: {other:?}"),
+        }
+    }
+    assert_eq!(offered(&a).await, Some(false), "off until turned on");
+    a.ok(Command::SetStartAtSignIn { on: true }).await;
+    assert!(a.fake.starts_at_sign_in.load(Ordering::SeqCst));
+    assert_eq!(offered(&a).await, Some(true));
+    // Independent of remote play.
+    a.ok(Command::SetRemotePin { pin: PIN.into() }).await;
+    a.ok(Command::SetRemotePlay { on: true }).await;
+    a.ok(Command::SetRemotePlay { on: false }).await;
+    assert_eq!(offered(&a).await, Some(true));
+    a.ok(Command::SetStartAtSignIn { on: false }).await;
+    assert_eq!(offered(&a).await, Some(false));
+    // Not offered: neither shown nor taken.
+    assert_eq!(offered(&b).await, None);
+    assert!(matches!(
+        b.handle(Command::SetStartAtSignIn { on: true }).await,
+        Err(EngineError::Refused(_))
+    ));
+    assert!(!b.fake.starts_at_sign_in.load(Ordering::SeqCst));
+    // The notification area is a choice of its own, off until turned on,
+    // and the shell reads it without waiting on the engine.
+    assert!(!a.engine().tray_on());
+    assert!(matches!(
+        a.handle(Command::GetTray).await,
+        Ok(Response::Tray(couch_engine::TrayView { on: false }))
+    ));
+    a.ok(Command::SetTray { on: true }).await;
+    assert!(a.engine().tray_on());
+    assert!(matches!(
+        a.handle(Command::GetTray).await,
+        Ok(Response::Tray(couch_engine::TrayView { on: true }))
+    ));
+    stop_all(&mut [&mut a, &mut b]).await;
 }

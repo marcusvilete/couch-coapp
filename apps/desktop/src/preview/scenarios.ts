@@ -26,7 +26,7 @@ const HOME_PC = "90ce0000000000000000000000000002";
 const LAPTOP = "1a970000000000000000000000000003";
 const homePc = (state: Partial<RemoteAccessView>): MemberView =>
   member(HOME_PC, "Ana's PC", "relay", {
-    remote: { accepted: true, unlocked: false, code: "4F2A 9C1B", waitSecs: null, ...state },
+    remote: { accepted: true, unlocked: false, code: "4F2A 9C1B", waitSecs: null, locked: false, ...state },
   });
 
 function room(id: string, name: string, over: Partial<FakeRoom> = {}): FakeRoom {
@@ -150,6 +150,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     startFailure: null,
     sound: "game",
     streamWindowBar: true,
+    tray: false,
     remotePlay: {
       on: false,
       pinSet: false,
@@ -163,6 +164,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       waitSecs: null,
       hosts: [],
       desktop: null,
+      startAtSignIn: false,
     },
     ...over,
   };
@@ -392,6 +394,25 @@ export const SCENARIOS: Record<string, Scenario> = {
         pinSet: true,
         devices: [{ id: LAPTOP, name: "Ana's laptop", code: "7B31 E05C", online: true }],
         desktop: "Ana's laptop",
+      });
+      return world;
+    },
+  },
+  // ---- The unattended PC (M25c) ----
+  "remote-locked-pc": {
+    title: "Remote play: our PC unlocked here, but Windows is locked there",
+    world: () => base([sofa({ members: [you(false), homePc({ unlocked: true, locked: true }), bia, caio] })]),
+  },
+  "remote-away": {
+    title: "Remote play at the home PC: on, starting with Windows",
+    world: () => {
+      const laptop = member(LAPTOP, "Ana's laptop", "relay");
+      const world = base([sofa({ members: [you(true), laptop, bia, caio] })], { tray: true });
+      Object.assign(world.remotePlay, {
+        on: true,
+        pinSet: true,
+        devices: [{ id: LAPTOP, name: "Ana's laptop", code: "7B31 E05C", online: true }],
+        startAtSignIn: true,
       });
       return world;
     },
