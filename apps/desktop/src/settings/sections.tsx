@@ -32,7 +32,7 @@ export function AppearanceSection(props: { theme: ThemeChoice; onTheme: (theme: 
             value={props.theme}
             onChange={props.onTheme}
             options={[
-              { value: "system", label: <span className="seg-icon"><Monitor /> Like Windows</span> },
+              { value: "system", label: <span className="seg-icon"><Monitor /> Like the system</span> },
               { value: "dark", label: <span className="seg-icon"><Moon /> Dark</span> },
               { value: "light", label: <span className="seg-icon"><Sun /> Light</span> },
             ]}
@@ -466,7 +466,7 @@ export function BackupSection(props: {
   return (
     <div className="settings-section">
       <p className="settings-lead">
-        A backup takes you to another PC, or back after reinstalling Windows: your identity, your rooms and your
+        A backup takes you to another PC, or back after reinstalling your system: your identity, your rooms and your
         settings, in one file sealed with a passphrase. Rooms you own come back without their password and invites: you
         set a new password there before inviting anyone.
       </p>

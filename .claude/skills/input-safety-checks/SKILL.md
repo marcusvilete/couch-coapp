@@ -53,6 +53,8 @@ Scenarios: `the_hosts_controller_plays_a_seat_and_gets_it_back`, `the_host_plays
 - **The stream window grabs the system keys** (SDL's keyboard grab) only while its mouse is captured; the Free the mouse shortcut gives them back. Check by a person: `couch-viewer --input-sink FILE --grab`, then the Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc and Alt+F4 must stay in the window, and Ctrl+Alt+Shift+M must give them back (M25b's run: they did).
 - **Bring to front** taps F24 through `SendInput` (down and up in one call, so nothing can stay held) before `SetForegroundWindow`.
 
+**A Linux viewer** (M16b). The stream window reads keys, mouse and controllers through SDL there too, and everything above is the Windows host's to enforce: a Linux member is only ever a guest or a device. Two differences on Linux: SDL's Alt+F4 hint does nothing, so the compositor may close the stream window (Leave, released as on Windows); and Wayland's keyboard grab for desktop control asks the compositor (GNOME prompts, Gamescope may lack it). The live checks above run on Windows; on Linux, `couch-cli view` against a Windows host in WSLg shows the viewer side working (the `app-manual-run` skill).
+
 ## Run
 
 ```powershell

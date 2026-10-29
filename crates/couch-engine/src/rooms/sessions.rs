@@ -1058,11 +1058,25 @@ impl Actor {
         }
     }
 
+    /// Hosting needs a system that can host (`Backend::can_host`; a Linux PC
+    /// watches only, M16b): refused before anything is set up or announced.
+    pub(super) fn check_can_host(&self) -> Result<(), EngineError> {
+        if self.backend.can_host() {
+            Ok(())
+        } else {
+            Err(EngineError::Refused(
+                "this system can't host sessions yet: it watches and plays them, and runs a \
+                 PC of yours from afar",
+            ))
+        }
+    }
+
     fn prepare_session(
         &mut self,
         start: StartSession,
         _now: Instant,
     ) -> Result<(SessionId, HostOptions), EngineError> {
+        self.check_can_host()?;
         let (room, _) = self.entry_mut(&start.room)?;
         if self.sessions.hosting.is_some() {
             return Err(EngineError::Refused("you have a session already"));
@@ -1357,6 +1371,7 @@ impl Actor {
         start: StartStream,
         now: Instant,
     ) -> Result<(SessionId, u32, StreamControl, StreamOptions), EngineError> {
+        self.check_can_host()?;
         let gone = EngineError::Refused("that window or screen is gone");
         let source = match &start.source {
             SourceChoice::Window { id } => {

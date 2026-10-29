@@ -26,9 +26,10 @@
 //! [`HOLD_UNDER_POINTER`]), then gets out of the way. Nothing animates every
 //! frame: the window presents in Mailbox mode, so that would spin the GPU.
 
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -40,9 +41,7 @@ use couch_proto::{
 };
 use egui::{
     Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Pos2, Rect, RichText,
-    Sense, Shadow, Stroke, StrokeKind, Ui,
-    epaint::text::VariationCoords,
-    pos2,
+    Sense, Shadow, Stroke, StrokeKind, Ui, pos2,
     text::{LayoutJob, TextFormat, TextWrapping},
     vec2,
 };
@@ -555,17 +554,48 @@ const HINT_H: f32 = 16.0;
 const SEMIBOLD: &str = "semibold";
 const ICONS: &str = "icons";
 
-// Icons, from Segoe Fluent Icons or else Segoe MDL2 Assets: only code points
-// both have.
+// Icons, on Windows from Segoe Fluent Icons or else Segoe MDL2 Assets: only
+// code points both have.
+#[cfg(windows)]
 const ICON_VOLUME: char = '\u{E767}';
+#[cfg(windows)]
 const ICON_MUTED: char = '\u{E74F}';
+#[cfg(windows)]
 const ICON_FULL_SCREEN: char = '\u{E740}';
+#[cfg(windows)]
 const ICON_WINDOW: char = '\u{E73F}';
+#[cfg(windows)]
 const ICON_STATS: char = '\u{E9D9}';
+#[cfg(windows)]
 const ICON_CONTROLLER: char = '\u{E7FC}';
+#[cfg(windows)]
 const ICON_KEYBOARD: char = '\u{E765}';
+#[cfg(windows)]
 const ICON_WAIT: char = '\u{E916}';
+#[cfg(windows)]
 const ICON_PAUSE: char = '\u{E769}';
+
+// Elsewhere from Lucide's font, `lucide-static` 1.52.0 (its
+// `font/codepoints.json`; xtask's `LINUX_DEPS` pins it): the icons the app's
+// own stream-window panel shows (M16b). They move with Lucide's version.
+#[cfg(not(windows))]
+const ICON_VOLUME: char = '\u{E1AB}'; // volume-2
+#[cfg(not(windows))]
+const ICON_MUTED: char = '\u{E1AC}'; // volume-x
+#[cfg(not(windows))]
+const ICON_FULL_SCREEN: char = '\u{E112}'; // maximize
+#[cfg(not(windows))]
+const ICON_WINDOW: char = '\u{E11A}'; // minimize
+#[cfg(not(windows))]
+const ICON_STATS: char = '\u{E068}'; // chart-no-axes-column
+#[cfg(not(windows))]
+const ICON_CONTROLLER: char = '\u{E0DF}'; // gamepad-2
+#[cfg(not(windows))]
+const ICON_KEYBOARD: char = '\u{E284}'; // keyboard
+#[cfg(not(windows))]
+const ICON_WAIT: char = '\u{E296}'; // hourglass
+#[cfg(not(windows))]
+const ICON_PAUSE: char = '\u{E12E}'; // pause
 
 fn semibold() -> FontFamily {
     FontFamily::Name(SEMIBOLD.into())
@@ -575,40 +605,21 @@ fn icon_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(ICONS.into()))
 }
 
-/// Windows' own fonts, read once (never bundled): Segoe UI Variable, its
-/// semibold, Segoe's icons and Cascadia Mono for numbers. What is missing
+/// The HUD's fonts, as found on this system ([`font_files`]). What is missing
 /// falls back to egui's fonts; `true` with it if an icon font loaded.
 fn fonts() -> (egui::FontDefinitions, bool) {
     let mut defs = egui::FontDefinitions::default();
-    let dir = std::env::var_os("WINDIR")
-        .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from)
-        .join("Fonts");
-    let read = |names: &[&str]| {
-        names
-            .iter()
-            .find_map(|name| std::fs::read(dir.join(name)).ok())
-    };
-    let weight = |w: f32| egui::FontTweak {
-        coords: VariationCoords::new([(b"wght", w)]),
-        ..Default::default()
-    };
-    let (regular, bold) = match read(&["SegUIVar.ttf"]) {
-        Some(variable) => (
-            Some(egui::FontData::from_owned(variable.clone()).tweak(weight(400.0))),
-            Some(egui::FontData::from_owned(variable).tweak(weight(600.0))),
-        ),
-        None => (
-            read(&["segoeui.ttf"]).map(egui::FontData::from_owned),
-            read(&["seguisb.ttf"]).map(egui::FontData::from_owned),
-        ),
-    };
-    let mono = read(&["CascadiaMono.ttf", "consola.ttf"]).map(egui::FontData::from_owned);
-    let icons = read(&["SegoeIcons.ttf", "segmdl2.ttf"]).map(egui::FontData::from_owned);
+    let FontFiles {
+        regular,
+        bold,
+        mono,
+        icons,
+    } = font_files();
     let missing: Vec<&str> = [
-        ("Segoe UI", regular.is_none()),
+        ("the text font", regular.is_none()),
         ("its semibold", bold.is_none()),
-        ("Cascadia Mono", mono.is_none()),
-        ("Segoe's icons", icons.is_none()),
+        ("the numbers' font", mono.is_none()),
+        ("the icons", icons.is_none()),
     ]
     .into_iter()
     .filter_map(|(name, gone)| gone.then_some(name))
@@ -645,6 +656,92 @@ fn fonts() -> (egui::FontDefinitions, bool) {
     defs.families
         .insert(FontFamily::Name(ICONS.into()), icon_family);
     (defs, has_icons)
+}
+
+/// The fonts found, each `None` where missing.
+struct FontFiles {
+    regular: Option<egui::FontData>,
+    bold: Option<egui::FontData>,
+    mono: Option<egui::FontData>,
+    icons: Option<egui::FontData>,
+}
+
+/// Windows' own fonts, read once (never bundled): Segoe UI Variable, its
+/// semibold, Segoe's icons and Cascadia Mono for numbers.
+#[cfg(windows)]
+fn font_files() -> FontFiles {
+    let dir = std::env::var_os("WINDIR")
+        .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from)
+        .join("Fonts");
+    let read = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| std::fs::read(dir.join(name)).ok())
+    };
+    let weight = |w: f32| egui::FontTweak {
+        coords: egui::epaint::text::VariationCoords::new([(b"wght", w)]),
+        ..Default::default()
+    };
+    let (regular, bold) = match read(&["SegUIVar.ttf"]) {
+        Some(variable) => (
+            Some(egui::FontData::from_owned(variable.clone()).tweak(weight(400.0))),
+            Some(egui::FontData::from_owned(variable).tweak(weight(600.0))),
+        ),
+        None => (
+            read(&["segoeui.ttf"]).map(egui::FontData::from_owned),
+            read(&["seguisb.ttf"]).map(egui::FontData::from_owned),
+        ),
+    };
+    FontFiles {
+        regular,
+        bold,
+        mono: read(&["CascadiaMono.ttf", "consola.ttf"]).map(egui::FontData::from_owned),
+        icons: read(&["SegoeIcons.ttf", "segmdl2.ttf"]).map(egui::FontData::from_owned),
+    }
+}
+
+/// Elsewhere (M16b): the system's own text fonts, by the paths distributions
+/// install them at (Noto, else Cantarell or DejaVu; never bundled), and
+/// Lucide's icon font, which ships beside the stream window.
+#[cfg(not(windows))]
+fn font_files() -> FontFiles {
+    let read = |paths: &[&str]| {
+        paths
+            .iter()
+            .find_map(|path| std::fs::read(path).ok())
+            .map(egui::FontData::from_owned)
+    };
+    let icons = std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::read(exe.with_file_name("lucide.ttf")).ok())
+        .map(egui::FontData::from_owned);
+    FontFiles {
+        regular: read(&[
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/cantarell/Cantarell-Regular.otf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        ]),
+        bold: read(&[
+            "/usr/share/fonts/truetype/noto/NotoSans-SemiBold.ttf",
+            "/usr/share/fonts/noto/NotoSans-SemiBold.ttf",
+            "/usr/share/fonts/google-noto/NotoSans-SemiBold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/cantarell/Cantarell-Bold.otf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        ]),
+        mono: read(&[
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        ]),
+        icons,
+    }
 }
 
 fn set_style(ctx: &egui::Context) {

@@ -28,7 +28,7 @@ I believe no one wants to contribute to a "vibecoded" repository, but feel free 
 
 ---
 
-**Status:** in development, Windows only for now.
+**Status:** in development. Windows hosts and watches; Linux (built from source for now) watches and plays a Windows host, and can't host yet.
 
 <table align="center">
   <tr>

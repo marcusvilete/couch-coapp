@@ -1,8 +1,9 @@
 //! H.264 and HEVC decoding through FFmpeg. Low-delay mode and a single
-//! thread, so every packet yields its frame at once. Three ways:
+//! thread, so every packet yields its frame at once. The ways:
 //! - D3D12VA on the renderer's own device, frames left on the GPU (M9c);
-//! - D3D11VA, frames copied to memory as NV12;
-//! - software, when neither is available.
+//! - on Windows D3D11VA, on Linux VAAPI or CUDA (NVDEC; M16b), frames copied
+//!   to memory as NV12;
+//! - software, when none is available.
 
 use std::ffi::c_void;
 
@@ -26,32 +27,102 @@ pub enum DecoderKind {
     D3d12,
     /// D3D11VA; frames are copied to memory.
     D3d11,
+    /// VAAPI (Linux: AMD, Intel, the Steam Deck); frames are copied to memory.
+    Vaapi,
+    /// CUDA, NVDEC (Linux on NVIDIA); frames are copied to memory.
+    Cuda,
     Software,
 }
 
+/// A hardware decoder to try, in order, for frames copied to memory.
+struct Hardware {
+    device: ffi::AVHWDeviceType,
+    get_format: unsafe extern "C" fn(
+        *mut ffi::AVCodecContext,
+        *const ffi::AVPixelFormat,
+    ) -> ffi::AVPixelFormat,
+    kind: DecoderKind,
+    name: &'static str,
+}
+
+#[cfg(windows)]
+const HARDWARE: &[Hardware] = &[Hardware {
+    device: ffi::AV_HWDEVICE_TYPE_D3D11VA,
+    get_format: prefer_d3d11,
+    kind: DecoderKind::D3d11,
+    name: "D3D11VA",
+}];
+
+/// VAAPI first: the Steam Deck's, AMD's and Intel's; NVIDIA's driver offers
+/// CUDA instead (M16b).
+#[cfg(not(windows))]
+const HARDWARE: &[Hardware] = &[
+    Hardware {
+        device: ffi::AV_HWDEVICE_TYPE_VAAPI,
+        get_format: prefer_vaapi,
+        kind: DecoderKind::Vaapi,
+        name: "VAAPI",
+    },
+    Hardware {
+        device: ffi::AV_HWDEVICE_TYPE_CUDA,
+        get_format: prefer_cuda,
+        kind: DecoderKind::Cuda,
+        name: "CUDA",
+    },
+];
+
 pub struct FfmpegDecoder {
     ctx: AVCodecContext,
+    /// What decodes now: `opened`, or software while FFmpeg falls back.
     kind: DecoderKind,
+    /// What it was opened with.
+    opened: DecoderKind,
     codec: Codec,
+    /// A full-range picture was said once (M16b).
+    full_range_said: bool,
 }
 
 // Only ever used from the thread that owns the decoder.
 unsafe impl Send for FfmpegDecoder {}
 
+/// Each of this system's hardware decoders for frames in memory (D3D11VA;
+/// VAAPI, CUDA), and whether its device can be made here, for the probe.
+pub fn hardware_decoders() -> Vec<(&'static str, Result<(), String>)> {
+    HARDWARE
+        .iter()
+        .map(|h| {
+            let made = AVHWDeviceContext::create(h.device, None, None, 0)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            (h.name, made)
+        })
+        .collect()
+}
+
 impl FfmpegDecoder {
-    /// A `codec` decoder that uses D3D11VA if `prefer_hardware` and the GPU
-    /// allows it.
+    /// A `codec` decoder that uses the first of this system's hardware
+    /// decoders ([`HARDWARE`]) the GPU allows, if `prefer_hardware`.
     pub fn new(codec: Codec, prefer_hardware: bool) -> Result<Self, MediaError> {
         let mut ctx = Self::context(codec)?;
         let mut kind = DecoderKind::Software;
         if prefer_hardware {
-            match AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_D3D11VA, None, None, 0) {
-                Ok(device) => {
-                    ctx.set_hw_device_ctx(device);
-                    ctx.set_get_format(Some(prefer_d3d11));
-                    kind = DecoderKind::D3d11;
+            let mut tried = Vec::new();
+            for hardware in HARDWARE {
+                match AVHWDeviceContext::create(hardware.device, None, None, 0) {
+                    Ok(device) => {
+                        ctx.set_hw_device_ctx(device);
+                        ctx.set_get_format(Some(hardware.get_format));
+                        kind = hardware.kind;
+                        break;
+                    }
+                    Err(e) => tried.push(format!("{}: {e}", hardware.name)),
                 }
-                Err(e) => tracing::warn!("D3D11VA unavailable, decoding in software: {e}"),
+            }
+            if kind == DecoderKind::Software {
+                tracing::warn!(
+                    "no hardware decoder ({}); decoding in software",
+                    tried.join("; ")
+                );
             }
         }
         Self::open(ctx, kind, codec)
@@ -101,7 +172,13 @@ impl FfmpegDecoder {
     fn open(mut ctx: AVCodecContext, kind: DecoderKind, codec: Codec) -> Result<Self, MediaError> {
         ctx.open(None)
             .map_err(|e| MediaError::Backend(format!("opening the {codec:?} decoder: {e}")))?;
-        Ok(Self { ctx, kind, codec })
+        Ok(Self {
+            ctx,
+            kind,
+            opened: kind,
+            codec,
+            full_range_said: false,
+        })
     }
 
     pub fn kind(&self) -> DecoderKind {
@@ -137,12 +214,31 @@ unsafe fn prefer(
     }
 }
 
+#[cfg(windows)]
 unsafe extern "C" fn prefer_d3d11(
     _ctx: *mut ffi::AVCodecContext,
     formats: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
     // SAFETY: FFmpeg passes a list ended by AV_PIX_FMT_NONE.
     unsafe { prefer(formats, ffi::AV_PIX_FMT_D3D11) }
+}
+
+#[cfg(not(windows))]
+unsafe extern "C" fn prefer_vaapi(
+    _ctx: *mut ffi::AVCodecContext,
+    formats: *const ffi::AVPixelFormat,
+) -> ffi::AVPixelFormat {
+    // SAFETY: as above.
+    unsafe { prefer(formats, ffi::AV_PIX_FMT_VAAPI) }
+}
+
+#[cfg(not(windows))]
+unsafe extern "C" fn prefer_cuda(
+    _ctx: *mut ffi::AVCodecContext,
+    formats: *const ffi::AVPixelFormat,
+) -> ffi::AVPixelFormat {
+    // SAFETY: as above.
+    unsafe { prefer(formats, ffi::AV_PIX_FMT_CUDA) }
 }
 
 unsafe extern "C" fn prefer_d3d12(
@@ -248,12 +344,35 @@ impl VideoDecoder for FfmpegDecoder {
                 continue;
             }
             let matrix = matrix(&frame);
-            let frame = if frame.format == ffi::AV_PIX_FMT_D3D11 {
+            // Our shader takes limited range, as our encoders send (M16b).
+            if frame.color_range == ffi::AVCOL_RANGE_JPEG && !self.full_range_said {
+                self.full_range_said = true;
+                tracing::warn!("a full-range picture: shown as limited range, its contrast off");
+            }
+            // A hardware frame (D3D11VA, VAAPI, CUDA) comes to memory, in the
+            // format FFmpeg picks: NV12 for 8-bit video.
+            let frame = if !frame.hw_frames_ctx.is_null() {
+                // Back in hardware after a fallback (FFmpeg picks the format
+                // again on a new picture size): say so too.
+                if self.kind != self.opened {
+                    tracing::info!("{:?} decodes this stream again", self.opened);
+                    self.kind = self.opened;
+                }
                 let mut cpu = AVFrame::new();
-                cpu.hwframe_transfer_data(&frame)
-                    .map_err(|e| MediaError::Backend(format!("D3D11 to CPU copy: {e}")))?;
+                cpu.hwframe_transfer_data(&frame).map_err(|e| {
+                    MediaError::Backend(format!("{:?} to memory copy: {e}", self.kind))
+                })?;
                 cpu
             } else {
+                // FFmpeg falls back to software inside a hardware decoder that
+                // can't start: say so, as the stats panel shows it.
+                if self.kind != DecoderKind::Software {
+                    tracing::warn!(
+                        "{:?} couldn't decode this stream; decoding in software",
+                        self.kind
+                    );
+                    self.kind = DecoderKind::Software;
+                }
                 frame
             };
             out.push(DecodedFrame::CpuNv12(to_nv12(&frame, matrix, captured_at)?));
@@ -272,7 +391,9 @@ fn matrix(frame: &AVFrame) -> YuvMatrix {
     }
 }
 
-/// Copies a decoded NV12 or YUV420P frame into a tightly packed [`Nv12Frame`].
+/// Copies a decoded NV12 or YUV420P frame (or YUVJ420P, its full-range
+/// twin, decoded the same; our encoders don't send it) into a tightly packed
+/// [`Nv12Frame`].
 fn to_nv12(
     frame: &AVFrame,
     matrix: YuvMatrix,
@@ -295,10 +416,14 @@ fn to_nv12(
     let y = plane(0, w, h);
     let uv = match frame.format {
         f if f == ffi::AV_PIX_FMT_NV12 => plane(1, w.div_ceil(2) * 2, chroma_h),
-        f if f == ffi::AV_PIX_FMT_YUV420P => {
+        f if f == ffi::AV_PIX_FMT_YUV420P || f == ffi::AV_PIX_FMT_YUVJ420P => {
             let cw = w.div_ceil(2);
             let (u, v) = (plane(1, cw, chroma_h), plane(2, cw, chroma_h));
-            u.iter().zip(&v).flat_map(|(&u, &v)| [u, v]).collect()
+            let mut uv = vec![0; u.len() * 2];
+            for (pair, (&u, &v)) in uv.as_chunks_mut::<2>().0.iter_mut().zip(u.iter().zip(&v)) {
+                *pair = [u, v];
+            }
+            uv
         }
         other => {
             return Err(MediaError::Unsupported(format!(
@@ -316,4 +441,43 @@ fn to_nv12(
         matrix,
         captured_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 4x2 planar frame, Y counting up, U 10s, V 20s per chroma sample.
+    fn planar(format: ffi::AVPixelFormat) -> AVFrame {
+        let mut frame = AVFrame::new();
+        frame.set_width(4);
+        frame.set_height(2);
+        frame.set_format(format);
+        frame.alloc_buffer().unwrap();
+        // SAFETY: the buffers were just allocated for this size and format.
+        unsafe {
+            for row in 0..2 {
+                for x in 0..4 {
+                    *frame.data[0].add(row * frame.linesize[0] as usize + x) = (row * 4 + x) as u8;
+                }
+            }
+            for x in 0..2 {
+                *frame.data[1].add(x) = 10 + x as u8;
+                *frame.data[2].add(x) = 20 + x as u8;
+            }
+        }
+        frame
+    }
+
+    /// Software frames (and YUVJ420P, full range) come out as NV12, U and V
+    /// interleaved, whatever the planes' strides (M16b).
+    #[test]
+    fn planar_frames_become_nv12() {
+        for format in [ffi::AV_PIX_FMT_YUV420P, ffi::AV_PIX_FMT_YUVJ420P] {
+            let nv12 = to_nv12(&planar(format), YuvMatrix::Bt709, Micros(0)).unwrap();
+            assert_eq!(&nv12.y[..], &[0, 1, 2, 3, 4, 5, 6, 7]);
+            assert_eq!(&nv12.uv[..], &[10, 20, 11, 21]);
+            assert_eq!((nv12.y_stride, nv12.uv_stride), (4, 4));
+        }
+    }
 }

@@ -298,6 +298,7 @@ export default function App() {
                     <Stage
                       room={room}
                       busy={busy}
+                      canHost={lobby.info?.canHost ?? true}
                       onStartSession={() => setDialog({ kind: "startSession", room: room.id })}
                       onStream={() => setDialog({ kind: "streamPicker", room: room.id })}
                       onInvite={actions.invite}

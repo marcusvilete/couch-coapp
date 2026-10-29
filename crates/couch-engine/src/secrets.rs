@@ -28,7 +28,9 @@ impl SecretStore for Dpapi {
     }
 }
 
-/// Stores data as it is. For tests, and for platforms without a backend yet.
+/// Stores data as it is. For tests, and on Linux, where the profile's files
+/// are their owner's alone instead (0600 in 0700 folders, `store::
+/// write_atomic`; ADR 0011).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Unprotected;
 
@@ -42,7 +44,8 @@ impl SecretStore for Unprotected {
     }
 }
 
-/// The platform's store: DPAPI on Windows.
+/// The platform's store: DPAPI on Windows; elsewhere the files' own
+/// permissions protect them (ADR 0011).
 pub fn platform_store() -> std::sync::Arc<dyn SecretStore> {
     #[cfg(windows)]
     {
@@ -50,8 +53,8 @@ pub fn platform_store() -> std::sync::Arc<dyn SecretStore> {
     }
     #[cfg(not(windows))]
     {
-        tracing::warn!(
-            "no secret store on this platform yet: the identity key and remembered rooms are stored unencrypted"
+        tracing::debug!(
+            "the identity key and remembered rooms are kept in files only this user can read (0600)"
         );
         std::sync::Arc::new(Unprotected)
     }

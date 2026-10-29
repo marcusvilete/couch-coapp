@@ -24,7 +24,11 @@ const MODIFIERS = new Set([
   "MetaRight",
 ]);
 
-export function ShortcutsSection(props: { onCapturing: (capturing: boolean) => void }) {
+export function ShortcutsSection(props: {
+  onCapturing: (capturing: boolean) => void;
+  /** Where this system can't host (M16b), the host's keys don't apply. */
+  canHost: boolean;
+}) {
   const [shortcuts, setShortcuts] = useState<ShortcutView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** The row waiting for its new key. */
@@ -79,7 +83,7 @@ export function ShortcutsSection(props: { onCapturing: (capturing: boolean) => v
       .catch((e) => setError(errorText(e)));
   };
 
-  const groups: ShortcutView["scope"][] = ["host", "viewer"];
+  const groups: ShortcutView["scope"][] = props.canHost ? ["host", "viewer"] : ["viewer"];
   return (
     <div className="settings-section">
       <p className="settings-lead">

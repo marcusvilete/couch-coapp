@@ -2,7 +2,7 @@
 //! loopback, `SendInput`, ViGEm pads, the host's controller through SDL3 and
 //! HidHide, the panic-key hook, and `couch-viewer` as a child process.
 
-use std::{any::Any, process::Stdio, sync::Arc, time::Duration};
+use std::{any::Any, sync::Arc, time::Duration};
 
 use couch_codec_ffmpeg::{FfmpegEncoder, encoder::gpu_input_encoder};
 use couch_input::{
@@ -40,13 +40,8 @@ fn platform_driver(name: DriverName) -> drivers::Driver {
     }
 }
 
-/// The viewer, next to our own exe.
-const VIEWER_EXE: &str = "couch-viewer.exe";
 /// The app's value under the user's Run key (M25c).
 const STARTUP_NAME: &str = "Couch Co-App";
-/// `CREATE_NO_WINDOW`: a console program started this way gets no console
-/// window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct WindowsBackend;
 
@@ -84,6 +79,9 @@ fn wgc(source: CaptureSource, options: CaptureOptions) -> Result<Capture, MediaE
 impl Backend for WindowsBackend {
     fn clock(&self) -> Arc<dyn Clock> {
         Arc::new(QpcClock)
+    }
+    fn can_host(&self) -> bool {
+        true
     }
 
     fn sources(&self) -> Result<Sources, MediaError> {
@@ -287,58 +285,7 @@ impl Backend for WindowsBackend {
     }
 
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
-        let backend = |e: std::io::Error| MediaError::Backend(e.to_string());
-        let exe = std::env::current_exe()
-            .map_err(backend)?
-            .with_file_name(VIEWER_EXE);
-        if !exe.exists() {
-            return Err(MediaError::Backend(format!(
-                "{} is missing; build it with `cargo build -p couch-viewer`",
-                exe.display()
-            )));
-        }
-        let mut command = tokio::process::Command::new(&exe);
-        if let Some((x, y)) = options.position {
-            command.args(["--pos", &x.to_string(), &y.to_string()]);
-        }
-        if let Some((w, h)) = options.size {
-            command.args(["--size", &w.to_string(), &h.to_string()]);
-        }
-        if options.hide_hud {
-            command.arg("--no-hud");
-        }
-        if options.hide_bar {
-            command.arg("--no-bar");
-        }
-        if options.hide_stats {
-            command.arg("--hide-stats");
-        }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(log) = &options.log {
-            // Appended, so an earlier window's log survives the next one.
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log)
-                .map_err(|e| MediaError::Backend(format!("{}: {e}", log.display())))?;
-            command.stderr(Stdio::from(file));
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| MediaError::Backend(format!("starting {}: {e}", exe.display())))?;
-        let stdin = child.stdin.take().expect("piped");
-        let stdout = child.stdout.take().expect("piped");
-        let pid = child.id();
-        Ok(ViewerProcess {
-            stdin: Box::pin(stdin),
-            stdout: Box::pin(stdout),
-            guard: Box::new(child),
-            pid,
-        })
+        super::viewer_process::launch(options)
     }
 
     fn allow_foreground(&self, pid: u32) {

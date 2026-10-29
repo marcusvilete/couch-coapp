@@ -407,6 +407,7 @@ pub(crate) async fn start(
 
     let (inbox, inbox_rx) = mpsc::channel(INBOX);
     let now = Instant::now();
+    let can_host = options.backend.can_host();
     let mut actor = Actor {
         addr: addr::peer_addr(&endpoint.addr()),
         endpoint: endpoint.clone(),
@@ -437,7 +438,7 @@ pub(crate) async fn start(
         other_versions: BTreeMap::new(),
         views: AtomicU64::new(0),
         restored: false,
-        remote: remote::Remote::load(profile.data_dir(), options.start_at_sign_in),
+        remote: remote::Remote::load(profile.data_dir(), options.start_at_sign_in, can_host),
     };
     actor.restore_rooms(now);
     // Awake from the start while remote play is on (M25c).

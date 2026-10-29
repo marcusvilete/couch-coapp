@@ -102,6 +102,8 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       protocol: "6",
       profile: "default",
       dataDir: "C:\\Users\\ana\\AppData\\Local\\CouchCoApp\\profiles\\default",
+      platform: "windows",
+      canHost: true,
     },
     profile: { displayName: "Ana", memberId: ME },
     rooms,
@@ -615,6 +617,18 @@ export const SCENARIOS: Record<string, Scenario> = {
             { name: "DualSense Wireless Controller", vendor: 1356, product: 3302, kind: "physical" },
             { name: "Xbox 360 Controller", vendor: 1118, product: 654, kind: "otherVirtual" },
           ],
+        },
+      }),
+  },
+  "linux-viewer": {
+    title: "Linux: watches and plays, can't host (M16b)",
+    world: () =>
+      base([sofa({ sessions: [] }), friday()], {
+        info: {
+          ...base([]).info,
+          platform: "linux",
+          canHost: false,
+          dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
         },
       }),
   },

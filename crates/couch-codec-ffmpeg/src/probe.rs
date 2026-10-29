@@ -1,7 +1,7 @@
 //! Checks which encoders and hardware decoders work on this machine.
 
 use couch_media::{Codec, EncoderConfig, VideoEncoder};
-use rsmpeg::{avutil::AVHWDeviceContext, ffi};
+use rsmpeg::ffi;
 
 use crate::encoder::FfmpegEncoder;
 
@@ -32,8 +32,9 @@ pub struct EncoderProbe {
 pub struct FfmpegProbe {
     pub version: String,
     pub encoders: Vec<EncoderProbe>,
-    /// `Ok` if a D3D11VA device could be created for hardware decoding.
-    pub d3d11va: Result<(), String>,
+    /// Each of this system's hardware decoders (D3D11VA; on Linux VAAPI and
+    /// CUDA) and whether its device could be made here.
+    pub decoders: Vec<(&'static str, Result<(), String>)>,
 }
 
 impl FfmpegProbe {
@@ -63,15 +64,13 @@ pub fn probe() -> FfmpegProbe {
             result: try_open_encoder(codec, name),
         })
         .collect();
-    let d3d11va = AVHWDeviceContext::create(ffi::AV_HWDEVICE_TYPE_D3D11VA, None, None, 0)
-        .map(|_| ())
-        .map_err(|e| e.to_string());
+    let decoders = crate::decoder::hardware_decoders();
 
     unsafe { ffi::av_log_set_level(ffi::AV_LOG_WARNING as i32) };
     FfmpegProbe {
         version,
         encoders,
-        d3d11va,
+        decoders,
     }
 }
 

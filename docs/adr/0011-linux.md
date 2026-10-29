@@ -5,6 +5,12 @@
 - Wayland, on KDE or GNOME;
 - tested over time in WSL, a VM, on bare metal and on a Steam Deck.
 
+M16a built ([results](../m16a-results.md), 0.23.2), M16b part 1 built ([results](../m16b-results.md), 0.24.0). Settled while building M16b (the author's, 2026-10-28):
+- **the AppImage bundles WebKitGTK and GTK,** so it runs anywhere, the Steam Deck included; its notices list those libraries with their source packages;
+- **the stream window's bar draws Lucide's icon font** on Linux (ISC; the app's own icons), its text in the system's fonts;
+- **H.264 only on Linux for now,** decoded by VAAPI or NVDEC where the GPU allows, else in software. HEVC waits for tests on the Deck and bare metal;
+- **a system that can't host says so** (`EngineInfo.can_host`): the engine refuses hosting and the home PC's side of remote play before anything reaches the room, and the UI hides them.
+
 ## Context
 
 Couch Co-App runs on Windows only. Friends with Linux PCs, and a Steam Deck as a handheld to play from the couch, can't join a session. M16 in `docs/architecture.md` planned Linux "behind the same traits".

@@ -179,6 +179,8 @@ fn hud_scale(window: &Window, scale: Option<f32>) -> f32 {
 }
 
 pub fn run(options: WindowOptions) -> Result<()> {
+    // Before any library loads (`pipe::ipc_output`); a preview has no pipe.
+    let ipc_out = options.preview.is_none().then(pipe::ipc_output);
     InputCapture::allow_background_pads();
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
     // Audio first, so the pipe reader has somewhere to put packets.
@@ -199,7 +201,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let _keep_open = options.preview.map(|_| in_tx.clone());
     pipe::spawn_reader(in_tx, window_tx.clone(), net.clone(), audio_feed);
     let writer = match options.preview {
-        None => Some(pipe::spawn_writer(out_rx)),
+        None => ipc_out.map(|out| pipe::spawn_writer(out_rx, out)),
         Some(preview) => {
             drop(out_rx);
             let _ = window_tx.send(ForWindow::Hud(preview_session(preview)));
@@ -1024,6 +1026,8 @@ fn decoder_label(decoder: &FfmpegDecoder) -> String {
     let path = match decoder.kind() {
         DecoderKind::D3d12 => "D3D12VA (GPU frames)",
         DecoderKind::D3d11 => "D3D11VA (copied)",
+        DecoderKind::Vaapi => "VAAPI (copied)",
+        DecoderKind::Cuda => "NVDEC (copied)",
         DecoderKind::Software => "software",
     };
     format!("{codec}, {path}")
@@ -1147,7 +1151,14 @@ fn decode_loop(
             request_keyframe();
             continue;
         }
-        match decoder.decode(&data, Micros(header.capture_us)) {
+        let kind = decoder.kind();
+        let decoded_now = decoder.decode(&data, Micros(header.capture_us));
+        // A hardware decoder may have fallen back to software meanwhile
+        // (M16b): the stats panel says what really decodes.
+        if decoder.kind() != kind {
+            *decoder_name.lock().unwrap() = decoder_label(&decoder);
+        }
+        match decoded_now {
             Ok(frames) => {
                 need_keyframe = false;
                 d3d12_errors = 0;
