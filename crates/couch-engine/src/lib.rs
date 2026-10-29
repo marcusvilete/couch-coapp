@@ -1513,6 +1513,35 @@ pub struct EngineInfo {
     pub protocol: String,
     pub profile: String,
     pub data_dir: String,
+    /// The system this build runs on.
+    pub platform: Platform,
+    /// Whether this system can host sessions (`Backend::can_host`): the UI
+    /// hides Start a session and the home PC's side of remote play without
+    /// it (M16b).
+    pub can_host: bool,
+}
+
+/// The system this build runs on (M16b). `SystemPlatform` in TypeScript,
+/// beside the front end's own `Platform` (its window onto Tauri).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename = "SystemPlatform")]
+pub enum Platform {
+    Windows,
+    Linux,
+    Other,
+}
+
+impl Platform {
+    pub const fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "linux") {
+            Self::Linux
+        } else {
+            Self::Other
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1896,7 +1925,8 @@ impl EngineOptions {
             // An installed app's default profile only (M25c): a development
             // build would start the debug exe, which needs the dev server,
             // and a Run entry can't name another profile.
-            start_at_sign_in: !cfg!(debug_assertions) && profile.is_default(),
+            // Windows' Run value only: elsewhere the switch isn't offered (M16b).
+            start_at_sign_in: cfg!(windows) && !cfg!(debug_assertions) && profile.is_default(),
             ..Self::development()
         }
     }
@@ -1972,7 +2002,16 @@ async fn lock_profile(profile: &Profile, wait: Duration) -> Result<std::fs::File
         path: profile.data_dir().to_path_buf(),
         source,
     };
-    std::fs::create_dir_all(profile.data_dir()).map_err(io)?;
+    // Its owner's alone on Unix (0700), even made earlier (by the shell's
+    // log, or an older build): nothing inside is then reachable by others,
+    // whatever each file's own mode, the webview's data included (M16b).
+    store::create_private_dir(profile.data_dir()).map_err(io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(profile.data_dir(), std::fs::Permissions::from_mode(0o700))
+            .map_err(io)?;
+    }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -2272,6 +2311,8 @@ impl Engine {
                 protocol: String::from_utf8_lossy(couch_proto::ALPN).into_owned(),
                 profile: self.profile.name().to_string(),
                 data_dir: self.profile.data_dir().display().to_string(),
+                platform: Platform::current(),
+                can_host: self.backend.can_host(),
             })),
             Command::Ping { nonce } => {
                 // No subscribers is fine: the UI may not be listening yet.

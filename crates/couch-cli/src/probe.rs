@@ -89,9 +89,16 @@ async fn probe_ffmpeg(report: &mut Report) {
             "no hardware encoder opened",
         ),
     }
-    match &ffmpeg.d3d11va {
-        Ok(()) => report.line(Status::Ok, "D3D11VA decode", "device created"),
-        Err(e) => report.line(Status::Fail, "D3D11VA decode", e),
+    // One hardware decoder is enough: on Linux a PC has VAAPI or CUDA,
+    // rarely both (M16b).
+    let any = ffmpeg.decoders.iter().any(|(_, made)| made.is_ok());
+    for (name, made) in &ffmpeg.decoders {
+        let label = format!("{name} decode");
+        match made {
+            Ok(()) => report.line(Status::Ok, &label, "device created"),
+            Err(e) if any => report.line(Status::Info, &label, e),
+            Err(e) => report.line(Status::Fail, &label, e),
+        }
     }
     #[cfg(windows)]
     match tokio::task::spawn_blocking(probe_gpu_frames)

@@ -653,17 +653,62 @@ pub(crate) fn backed_up(name: &str) -> bool {
 
 /// Writes a sibling temporary file and renames it over `path`, so a crash
 /// leaves the old file or the new one, never half of one.
+///
+/// On Unix the file is its owner's alone (0600), in folders made 0700: with
+/// no DPAPI there, that is what keeps the identity and the rooms from other
+/// users (ADR 0011), as SSH keys are kept.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
         source,
     };
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(io)?;
+        create_private_dir(parent).map_err(io)?;
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes).map_err(io)?;
+    write_private(&tmp, bytes).map_err(io)?;
     fs::rename(&tmp, path).map_err(io)
+}
+
+/// Creates `dir` and its missing parents; on Unix, the ones made here are
+/// their owner's alone (0700).
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)
+    }
+}
+
+/// Writes `bytes` to `path`; on Unix its owner's alone (0600), set again if a
+/// file was there already (a temporary file a crash left).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::{
+            io::Write,
+            os::unix::fs::{OpenOptionsExt, PermissionsExt},
+        };
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes)
+    }
 }
 
 #[cfg(test)]
@@ -1088,5 +1133,29 @@ mod tests {
         );
         fs::write(dir.path().join(NETWORK_FILE), b"{}").unwrap();
         assert_eq!(network(dir.path()), NetworkSettings::default());
+    }
+
+    /// M16b, on Unix: what the profile keeps is its owner's alone (ADR 0011),
+    /// a temporary file a crash left with looser rights included.
+    #[cfg(unix)]
+    #[test]
+    fn profile_files_are_their_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("rooms").join("a.room");
+        fs::create_dir_all(dir.path().join("rooms")).unwrap();
+        fs::write(file.with_extension("tmp"), b"left by a crash").unwrap();
+        fs::set_permissions(
+            file.with_extension("tmp"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        write_atomic(&file, b"room").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        let fresh = dir.path().join("new").join("deeper");
+        create_private_dir(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        assert_eq!(mode(&dir.path().join("new")), 0o700);
     }
 }

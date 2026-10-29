@@ -1,7 +1,8 @@
 // Settings → Remote play (M25, ADR 0010). On the home PC: turning it on,
 // the PIN, and the devices of ours it trusts (added only here, never from
 // afar). On a device: its own code, to compare when a PC adds it, and the
-// PCs it accepted as its own.
+// PCs it accepted as its own. A system that can't host (M16b) is only ever a
+// device.
 import { Laptop, Router, ShieldAlert, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { RemoteDeviceView } from "../bindings/RemoteDeviceView";
@@ -18,7 +19,11 @@ import "./RemotePlaySection.css";
 /** As the engine counts it (`couch_engine::remote::MIN_PIN_CHARS`). */
 const MIN_PIN = 6;
 
-export function RemotePlaySection() {
+type Send = (command: Parameters<typeof request>[0]) => Promise<boolean>;
+
+/** `canHost`: where this system can't host (M16b), only "This device": it runs
+ * a PC of yours, never is one. */
+export function RemotePlaySection(props: { canHost: boolean }) {
   const [view, setView] = useState<RemotePlayView | null>(null);
   // The notification area icon (M25c): the app's own, beside remote play's.
   const [tray, setTray] = useState(false);
@@ -46,7 +51,7 @@ export function RemotePlaySection() {
     }
   };
 
-  const send = async (command: Parameters<typeof request>[0]) => {
+  const send: Send = async (command) => {
     setWorking(true);
     setError(null);
     try {
@@ -70,11 +75,74 @@ export function RemotePlaySection() {
 
   return (
     <div className="settings-section">
-      <p className="settings-lead">
-        Play this PC from a laptop of yours when you're away: a device you add here can start sessions on this PC,
-        pick what it streams and hand out its seats, once it gives the PIN. Leave Couch Co-App running, and this PC
-        signed in and unlocked: Windows lets nothing in on its lock screen.
-      </p>
+      {props.canHost ? (
+        <>
+          <p className="settings-lead">
+            Play this PC from a laptop of yours when you're away: a device you add here can start sessions on this
+            PC, pick what it streams and hand out its seats, once it gives the PIN. Leave Couch Co-App running, and
+            this PC signed in and unlocked: Windows lets nothing in on its lock screen.
+          </p>
+          <HomePc view={view} tray={tray} working={working} send={send} sendTray={sendTray} />
+        </>
+      ) : (
+        <p className="settings-lead">
+          Run a Windows PC of yours from here: add this device in that PC's Remote play settings, accept the PC here
+          when it offers itself, then give its PIN to start sessions on it.
+        </p>
+      )}
+
+      <h3 className="settings-subtitle">This device</h3>
+      <div className="settings-card">
+        <dl className="settings-facts">
+          <dt>Its code</dt>
+          <dd className="selectable mono">{view.myCode}</dd>
+        </dl>
+        <p className="settings-note">
+          Adding this device on your PC, check its code there reads the same. When your PC then offers itself here,
+          accept it in the room once its code matches the one in its own Remote play settings.
+        </p>
+        {view.hosts.length > 0 && (
+          <ul className="remote-devices">
+            {view.hosts.map((h) => (
+              <DeviceRow
+                key={h.id}
+                device={h}
+                pc
+                action={
+                  <Button
+                    size="sm"
+                    disabled={working}
+                    onClick={() => void send({ type: "forgetRemoteHost", member: h.id })}
+                  >
+                    Forget
+                  </Button>
+                }
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {error && (
+        <p className="field-error selectable" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The home PC's side: on and off, the PIN, staying reachable, its devices. */
+function HomePc(props: {
+  view: RemotePlayView;
+  tray: boolean;
+  working: boolean;
+  send: Send;
+  sendTray: (on: boolean) => Promise<void>;
+}) {
+  const { view, tray, working, send, sendTray } = props;
+  return (
+    <>
       <Callout tone="warn" icon={<ShieldAlert />} title="Only your own devices">
         With the PIN, a device you add runs this PC's sessions as you would at it. Add only your own, and choose a
         PIN nobody sees you type. Whoever is at this PC can stop it with the panic key.
@@ -170,45 +238,7 @@ export function RemotePlaySection() {
           onAdd={(member) => send({ type: "addRemoteDevice", member })}
         />
       </div>
-
-      <h3 className="settings-subtitle">This device</h3>
-      <div className="settings-card">
-        <dl className="settings-facts">
-          <dt>Its code</dt>
-          <dd className="selectable mono">{view.myCode}</dd>
-        </dl>
-        <p className="settings-note">
-          Adding this device on your PC, check its code there reads the same. When your PC then offers itself here,
-          accept it in the room once its code matches the one in its own Remote play settings.
-        </p>
-        {view.hosts.length > 0 && (
-          <ul className="remote-devices">
-            {view.hosts.map((h) => (
-              <DeviceRow
-                key={h.id}
-                device={h}
-                pc
-                action={
-                  <Button
-                    size="sm"
-                    disabled={working}
-                    onClick={() => void send({ type: "forgetRemoteHost", member: h.id })}
-                  >
-                    Forget
-                  </Button>
-                }
-              />
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {error && (
-        <p className="field-error selectable" role="alert">
-          {error}
-        </p>
-      )}
-    </div>
+    </>
   );
 }
 

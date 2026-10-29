@@ -96,9 +96,14 @@ struct Link {
 }
 
 impl Remote {
-    pub(super) fn load(dir: &std::path::Path, startup_offered: bool) -> Self {
+    /// `can_host`: a system that can't host (M16b) never offers itself,
+    /// whatever a profile from another build saved: its switch is hidden
+    /// there, so it could never be turned off (the file stays as it was).
+    pub(super) fn load(dir: &std::path::Path, startup_offered: bool, can_host: bool) -> Self {
+        let mut settings = remote::load(dir);
+        settings.on &= can_host;
         Self {
-            settings: remote::load(dir),
+            settings,
             operators: BTreeMap::new(),
             checking: BTreeMap::new(),
             pin_generation: 0,
@@ -665,6 +670,19 @@ impl Actor {
                  panic key"
                     .into(),
             )));
+            return;
+        }
+        // The home PC's side needs a system that can host (M16b): a device
+        // that can't stream would be offered to its devices for nothing.
+        // Turning it off, removing devices and a device's own side stay.
+        if matches!(
+            command,
+            Command::SetRemotePlay { on: true }
+                | Command::SetRemotePin { .. }
+                | Command::AddRemoteDevice { .. }
+        ) && let Err(e) = self.check_can_host()
+        {
+            let _ = reply.send(Err(e));
             return;
         }
         let result = match command {

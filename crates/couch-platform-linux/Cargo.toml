@@ -12,7 +12,7 @@ repository.workspace = true
 couch-media.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { workspace = true, features = ["time"] }
+rustix = { workspace = true, features = ["time", "stdio"] }
 
 [lints]
 workspace = true

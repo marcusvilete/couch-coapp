@@ -130,6 +130,8 @@ struct Fake {
     locked: AtomicBool,
     /// The app starts at sign-in (M25c).
     starts_at_sign_in: AtomicBool,
+    /// A system that watches but can't host, as Linux's (M16b).
+    cannot_host: AtomicBool,
     /// The host's own controller.
     local: FakeLocal,
     /// How many of the host's controllers are hidden from games now.
@@ -478,6 +480,10 @@ impl Fake {
 impl Backend for Fake {
     fn clock(&self) -> Arc<dyn Clock> {
         self.clock.clone()
+    }
+
+    fn can_host(&self) -> bool {
+        !self.cannot_host.load(Ordering::SeqCst)
     }
 
     fn sources(&self) -> Result<Sources, MediaError> {
@@ -5483,6 +5489,44 @@ async fn a_locked_home_pc_is_reported() {
     .await;
     // A friend hears nothing of it.
     wait_remote(&c, &room, &a, "no offer for C", |r| r.is_none()).await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M16b: a system that watches but can't host (Linux's): every hosting
+/// command and the home PC's side of remote play are refused before anything
+/// reaches the room, while watching and remote play's device side work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_only_platform_refuses_to_host_and_still_watches() {
+    let (mut a, mut b, mut c, room) = three().await;
+    b.fake.cannot_host.store(true, Ordering::SeqCst);
+    let Ok(Response::Info(info)) = b.handle(Command::GetInfo).await else {
+        panic!("info");
+    };
+    assert!(!info.can_host);
+    let refused = |reply: Result<Response, EngineError>| {
+        assert!(
+            matches!(&reply, Err(EngineError::Refused(why)) if why.contains("can't host")),
+            "{reply:?}"
+        );
+    };
+    refused(b.handle(go_live(&room, 4)).await);
+    refused(b.handle(stream_window()).await);
+    refused(b.handle(Command::SetRemotePin { pin: PIN.into() }).await);
+    refused(b.handle(Command::SetRemotePlay { on: true }).await);
+    refused(b.handle(Command::AddRemoteDevice { member: a.id() }).await);
+    // Nothing reached the room: no session of B's, no offer from B.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(a.session(&room, &b).await.is_none());
+    wait_remote(&a, &room, &b, "no offer from B", |r| r.is_none()).await;
+    // Turning remote play off is never refused.
+    b.ok(Command::SetRemotePlay { on: false }).await;
+
+    // The device side: A, a PC that hosts, is B's; B unlocks it and watches.
+    trusted(&room, &a, &b).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+    a.go_live(&room, 4).await;
+    let window = watching(&room, &a, &b).await;
+    assert!(window.frames() > 0);
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

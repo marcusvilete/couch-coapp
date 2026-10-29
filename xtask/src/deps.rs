@@ -56,20 +56,42 @@ pub const WINDOWS_DEPS: &[Dep] = &[
     },
 ];
 
-/// On Linux, FFmpeg only: SDL3 is built from source by the `sdl3` crate, at
-/// the same version (`sdl3-src` in Cargo.lock; keep it on Windows' SDL3).
-pub const LINUX_DEPS: &[Dep] = &[Dep {
-    name: "FFmpeg 8.1.3 (LGPL, shared)",
-    dir: "ffmpeg",
-    url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-linux64-lgpl-shared-8.1.tar.xz",
-    sha256: "d4d7b6936f492c0b866b1cb4a29a1bbae09d6a064b4ec4eb90c95bed7969535a",
-    expect: &[
-        "include/libavcodec/avcodec.h",
-        "lib/libavcodec.so",
-        "bin/ffmpeg",
-    ],
-    dll_dir: "lib",
-}];
+/// On Linux: FFmpeg; SDL3 is built from source by the `sdl3` crate, at the
+/// same version (`sdl3-src` in Cargo.lock; keep it on Windows' SDL3).
+/// Lucide's icon font draws the stream window's bar there, as Segoe's does
+/// on Windows (M16b): keep it at the app's `lucide-react` version, and
+/// `couch-viewer`'s `hud.rs` icon code points with it (from the package's
+/// `font/codepoints.json`).
+pub const LINUX_DEPS: &[Dep] = &[
+    Dep {
+        name: "FFmpeg 8.1.3 (LGPL, shared)",
+        dir: "ffmpeg",
+        url: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-linux64-lgpl-shared-8.1.tar.xz",
+        sha256: "d4d7b6936f492c0b866b1cb4a29a1bbae09d6a064b4ec4eb90c95bed7969535a",
+        expect: &[
+            "include/libavcodec/avcodec.h",
+            "lib/libavcodec.so",
+            "bin/ffmpeg",
+        ],
+        dll_dir: "lib",
+    },
+    Dep {
+        name: "Lucide icon font 1.52.0 (ISC)",
+        dir: "lucide",
+        url: "https://registry.npmjs.org/lucide-static/-/lucide-static-1.52.0.tgz",
+        sha256: "4d2aa079171e4eba4c704844b8b0c9edb6e4cfb2fb8bd86f7b14353994f04a87",
+        expect: &["font/lucide.ttf", "font/codepoints.json", "LICENSE"],
+        dll_dir: "font",
+    },
+];
+
+/// Files besides the runtime libraries that go next to the binaries: the
+/// stream window's icon font on Linux (M16b).
+const BESIDE_BINARIES: &[(&str, &str)] = if cfg!(windows) {
+    &[]
+} else {
+    &[("lucide", "font/lucide.ttf")]
+};
 
 /// A runtime library's file name: `.dll` on Windows; on Linux `.so` and its
 /// versioned names (`libavcodec.so.62`, links among them included).
@@ -358,7 +380,12 @@ pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
     if !DEPS.iter().all(|dep| is_installed(root, dep)) {
         bail!("native dependencies are missing; run `cargo xtask fetch-deps` first");
     }
-    let dlls = dlls(root)?;
+    let mut dlls = dlls(root)?;
+    dlls.extend(
+        BESIDE_BINARIES
+            .iter()
+            .map(|(dir, file)| third_party(root).join(dir).join(file)),
+    );
     let target = target_dir(root);
     let mut placed = 0;
     for profile in ["debug", "release"] {
@@ -382,7 +409,7 @@ pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
         }
     }
     println!(
-        "{} runtime librar(ies) staged in {} ({} updated)",
+        "{} runtime file(s) staged in {} ({} updated)",
         dlls.len(),
         target.display(),
         placed
@@ -460,4 +487,46 @@ fn run(command: &mut Command) -> anyhow::Result<()> {
         bail!("{:?} failed with {status}", command.get_program());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stream window's Lucide code points (`couch-viewer`'s `hud.rs`,
+    /// each `// name`) are the pinned font's: a Lucide bump without them
+    /// fails here, wherever the font is fetched (Linux, CI; M16b).
+    #[test]
+    fn the_huds_lucide_icons_match_the_pinned_font() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let file = third_party(root).join("lucide/font/codepoints.json");
+        let Ok(json) = fs::read_to_string(&file) else {
+            eprintln!("{} not fetched; nothing to check", file.display());
+            return;
+        };
+        let points: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&json).unwrap();
+        let hud = fs::read_to_string(root.join("crates/couch-viewer/src/hud.rs")).unwrap();
+        let mut checked = 0;
+        for line in hud
+            .lines()
+            .filter(|l| l.contains("'\\u{") && l.contains("; // "))
+        {
+            let hex = line
+                .split("'\\u{")
+                .nth(1)
+                .unwrap()
+                .split('}')
+                .next()
+                .unwrap();
+            let name = line.rsplit("// ").next().unwrap().trim();
+            let ours = u64::from_str_radix(hex, 16).unwrap();
+            let theirs = points.get(name).and_then(|v| v.as_u64());
+            assert_eq!(Some(ours), theirs, "{name}: hud.rs says {hex}");
+            checked += 1;
+        }
+        // Every one of the bar's icons, so a line without its `// name`
+        // can't slip past.
+        assert_eq!(checked, 9, "Lucide code points with their names in hud.rs");
+    }
 }

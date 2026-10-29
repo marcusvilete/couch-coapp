@@ -83,10 +83,27 @@ static RESTART: AtomicBool = AtomicBool::new(false);
 /// single-instance plugin has let go of its lock (on `RunEvent::Exit`, before
 /// our handler), and the new engine waits for this one's profile lock.
 fn start_again() {
-    let started = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn());
+    // From an AppImage (Linux, M16b), the AppImage itself: our own exe lives
+    // in its mount, which goes away with this process.
+    let exe = match own_appimage() {
+        Some(appimage) => Ok(appimage),
+        None => std::env::current_exe(),
+    };
+    let started = exe.and_then(|exe| std::process::Command::new(exe).spawn());
     if let Err(e) = started {
         tracing::error!("could not start the app again: {e}");
     }
+}
+
+/// The AppImage we run from (Linux, M16b), only when we really do: `APPIMAGE`
+/// alone may be inherited from a parent that is an AppImage (a terminal, say),
+/// and invite links registered to it, or a restart into it, would go to
+/// another program. Ours runs inside the mount its runtime names `APPDIR`.
+fn own_appimage() -> Option<PathBuf> {
+    let appimage = PathBuf::from(std::env::var_os("APPIMAGE")?);
+    let appdir = PathBuf::from(std::env::var_os("APPDIR")?);
+    let exe = std::env::current_exe().ok()?;
+    exe.starts_with(&appdir).then_some(appimage)
 }
 
 pub fn run() {
@@ -146,7 +163,12 @@ pub fn run() {
                 PLACED.store(true, Ordering::SeqCst);
             }
             app.manage(WindowFile(file));
-            tray(app.handle())?;
+            // Windows only: its switch belongs to the home PC (M25c), which a
+            // Linux PC isn't (M16b), and Linux's indicator library may be
+            // missing.
+            if cfg!(windows) {
+                tray(app.handle())?;
+            }
 
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -157,6 +179,18 @@ pub fn run() {
             }
             if cfg!(debug_assertions) && window_profile.is_default() {
                 dev_links(app.handle());
+            }
+            // Linux (M16b): an AppImage has no installer to register invite
+            // links, so it does at start, its `.desktop` handler pointing at
+            // the AppImage's own path (the plugin rewrites it when that
+            // changes: moved, or a newer version).
+            #[cfg(target_os = "linux")]
+            if !cfg!(debug_assertions)
+                && window_profile.is_default()
+                && own_appimage().is_some()
+                && let Err(e) = app.deep_link().register_all()
+            {
+                tracing::warn!("could not register invite links: {e}");
             }
 
             let mut events = app.state::<Engine>().subscribe();
@@ -206,7 +240,7 @@ pub fn run() {
         // area as the user chose (M25c), and started at sign-in without it,
         // the window opens after all.
         RunEvent::Ready => {
-            let tray = app.state::<Engine>().tray_on();
+            let tray = tray_kept(app);
             show_tray(app, tray);
             if background && !tray {
                 show_main_window(app);
@@ -221,7 +255,7 @@ pub fn run() {
             // With its icon in the notification area, the app keeps running
             // there (M25c): a device of ours may need it. Quit from the icon
             // ends it.
-            if app.try_state::<Engine>().is_some_and(|e| e.tray_on()) {
+            if tray_kept(app) {
                 api.prevent_close();
                 if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                     let _ = window.hide();
@@ -405,6 +439,13 @@ fn show_tray(app: &AppHandle, on: bool) {
 }
 
 const TRAY: &str = "main";
+
+/// Whether the app keeps an icon in the notification area: the user's
+/// choice, where there is an icon at all (none on Linux, M16b). Without it,
+/// closing the window quits and a start at sign-in opens the window.
+fn tray_kept(app: &AppHandle) -> bool {
+    app.tray_by_id(TRAY).is_some() && app.try_state::<Engine>().is_some_and(|e| e.tray_on())
+}
 
 /// The app's icon in the notification area (M25c), made hidden: shown while
 /// the user keeps the app there ([`show_tray`]), when closing the window

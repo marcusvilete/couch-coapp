@@ -49,15 +49,16 @@ export type SettingsSection =
   | "backup"
   | "about";
 
-const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode }[] = [
+/** `hostOnly`: only where this system can host (`EngineInfo.canHost`, M16b). */
+const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode; hostOnly?: true }[] = [
   { id: "profile", label: "Profile", icon: <UserRound /> },
   { id: "appearance", label: "Appearance", icon: <Palette /> },
   { id: "shortcuts", label: "Shortcuts", icon: <Keyboard /> },
-  { id: "overlay", label: "Overlay and sounds", icon: <Layers /> },
+  { id: "overlay", label: "Overlay and sounds", icon: <Layers />, hostOnly: true },
   { id: "streamWindow", label: "Stream window", icon: <AppWindow /> },
   { id: "network", label: "Network", icon: <Network /> },
   { id: "remotePlay", label: "Remote play", icon: <Router /> },
-  { id: "drivers", label: "Drivers", icon: <Cpu /> },
+  { id: "drivers", label: "Drivers", icon: <Cpu />, hostOnly: true },
   { id: "backup", label: "Backup", icon: <Archive /> },
   { id: "about", label: "About", icon: <Info /> },
 ];
@@ -82,7 +83,9 @@ export function SettingsPage(props: {
   restoredDev: boolean;
   onRestoredDev: () => void;
 }) {
-  const section = SECTIONS.find((s) => s.id === props.section) ?? SECTIONS[0];
+  const canHost = props.info?.canHost ?? true;
+  const sections = SECTIONS.filter((s) => canHost || !s.hostOnly);
+  const section = sections.find((s) => s.id === props.section) ?? sections[0];
   return (
     <div className="settings">
       <header className="settings-header">
@@ -93,7 +96,7 @@ export function SettingsPage(props: {
       </header>
       <div className="settings-body">
         <nav className="settings-nav" aria-label="Settings">
-          {SECTIONS.map((s) => (
+          {sections.map((s) => (
             <button
               key={s.id}
               className={s.id === section.id ? "settings-tab selected" : "settings-tab"}
@@ -126,11 +129,11 @@ export function SettingsPage(props: {
               </div>
             )}
             {section.id === "appearance" && <AppearanceSection theme={props.theme} onTheme={props.onTheme} />}
-            {section.id === "shortcuts" && <ShortcutsSection onCapturing={props.onCapturing} />}
+            {section.id === "shortcuts" && <ShortcutsSection onCapturing={props.onCapturing} canHost={canHost} />}
             {section.id === "overlay" && <OverlaySection />}
             {section.id === "streamWindow" && <StreamWindowSection />}
             {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
-            {section.id === "remotePlay" && <RemotePlaySection />}
+            {section.id === "remotePlay" && <RemotePlaySection canHost={canHost} />}
             {section.id === "drivers" && <DriversSection />}
             {section.id === "backup" && (
               <BackupSection

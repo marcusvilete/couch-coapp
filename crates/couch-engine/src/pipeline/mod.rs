@@ -19,6 +19,7 @@ pub mod ipc;
 #[cfg(windows)]
 pub mod platform;
 pub mod source;
+mod viewer_process;
 pub mod virtual_hiding;
 pub mod watch;
 
@@ -374,6 +375,14 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Whether this system can host sessions: capture, encode, and inject a
+    /// guest's input (Windows; a Linux PC watches, plays, and runs a PC of
+    /// yours from afar, M16b). Without it, every hosting command and the home
+    /// PC's side of remote play are refused before anything is announced.
+    fn can_host(&self) -> bool {
+        false
+    }
+
     /// The codecs this PC decodes in hardware, as `couch_proto::codec` bits,
     /// for watching (M12c): H.264 always, HEVC where the GPU has its decoder.
     fn decodes(&self) -> u8 {
@@ -392,8 +401,8 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Box<dyn Any + Send>, MediaError>;
 }
 
-/// This machine's backend: Windows' own, or one that refuses everything
-/// where none exists yet.
+/// This machine's backend: Windows' own, or elsewhere one that watches but can't
+/// host (M16b): it starts the stream window and refuses everything hosting needs.
 pub fn platform_backend() -> Arc<dyn Backend> {
     #[cfg(windows)]
     {
@@ -405,15 +414,15 @@ pub fn platform_backend() -> Arc<dyn Backend> {
     }
     #[cfg(not(windows))]
     {
-        Arc::new(Unsupported)
+        Arc::new(ViewerOnly)
     }
 }
 
 #[cfg(not(windows))]
-struct Unsupported;
+struct ViewerOnly;
 
 #[cfg(not(windows))]
-impl Backend for Unsupported {
+impl Backend for ViewerOnly {
     /// The stream window's clock (`couch-viewer`'s `now_us`), so times from
     /// it compare with ours.
     fn clock(&self) -> Arc<dyn Clock> {
@@ -458,8 +467,8 @@ impl Backend for Unsupported {
     fn window_exists(&self, _: NativeId) -> bool {
         false
     }
-    fn launch_viewer(&self, _: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
-        Err(unsupported())
+    fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
+        viewer_process::launch(options)
     }
     fn host_keys(
         &self,

@@ -18,6 +18,8 @@ import "./Stage.css";
 export function Stage(props: {
   room: RoomView;
   busy: Busy;
+  /** This system can start sessions (`EngineInfo.canHost`; Linux can't, M16b). */
+  canHost: boolean;
   onStartSession: () => void;
   onStream: () => void;
   onInvite: () => void;
@@ -65,16 +67,18 @@ export function Stage(props: {
           title="Nobody has a session yet"
           actions={
             <>
-              <Button
-                variant="primary"
-                size="lg"
-                icon={<Play />}
-                onClick={props.onStartSession}
-                disabled={startBlocked != null}
-                reason={startBlocked}
-              >
-                Start a session
-              </Button>
+              {props.canHost && (
+                <Button
+                  variant="primary"
+                  size="lg"
+                  icon={<Play />}
+                  onClick={props.onStartSession}
+                  disabled={startBlocked != null}
+                  reason={startBlocked}
+                >
+                  Start a session
+                </Button>
+              )}
               {room.isOwner && alone && !room.needsPassword && !room.catchingUp && (
                 <Button size="lg" icon={<UserPlus />} onClick={props.onInvite}>
                   Invite people
@@ -83,9 +87,18 @@ export function Stage(props: {
             </>
           }
         >
-          Set up the controller seats first, then stream a game window or a screen, as often as you like. The others
-          watch, and you hand them the controller.
-          {startBlocked && <span className="stage-blocked">{startBlocked}</span>}
+          {props.canHost ? (
+            <>
+              Set up the controller seats first, then stream a game window or a screen, as often as you like. The
+              others watch, and you hand them the controller.
+              {startBlocked && <span className="stage-blocked">{startBlocked}</span>}
+            </>
+          ) : (
+            <>
+              When someone starts one, it shows here: watch it, and ask for the controller. This system can't host
+              sessions yet.
+            </>
+          )}
         </EmptyState>
       </>
     );
@@ -119,7 +132,7 @@ export function Stage(props: {
         <section className="stage-sessions" aria-label="Sessions">
           <header className="stage-head">
             <h2>{mine ? "Other sessions here" : "Sessions"}</h2>
-            {!mine && (
+            {!mine && props.canHost && (
               <Button
                 variant="primary"
                 icon={<Play />}

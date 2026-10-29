@@ -166,12 +166,26 @@ pub fn spawn_reader(
         .expect("spawning the IPC reader")
 }
 
-/// Writes replies to stdout, the only code in the viewer allowed to.
-pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>) -> JoinHandle<()> {
+/// Where replies go: stdout, the only code in the viewer allowed to write
+/// there. On Linux it is set aside for us alone first, before SDL and the
+/// GPU's libraries load, and fd 1 points at stderr (M16b): a native library
+/// printing (a VAAPI driver's log, say) can't then corrupt the pipe, which
+/// `clippy::print_stdout` can't see.
+pub fn ipc_output() -> Box<dyn Write + Send> {
+    #[cfg(target_os = "linux")]
+    match couch_platform_linux::stdio::take_stdout() {
+        Ok(file) => return Box::new(file),
+        Err(e) => tracing::warn!("stdout not set aside for the pipe: {e}"),
+    }
+    Box::new(std::io::stdout())
+}
+
+/// Writes replies to `out` ([`ipc_output`]).
+pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>, out: Box<dyn Write + Send>) -> JoinHandle<()> {
     thread::Builder::new()
         .name("ipc-write".into())
         .spawn(move || {
-            let mut stdout = std::io::stdout().lock();
+            let mut stdout = out;
             let mut buf = Vec::new();
             let mut payload = Vec::new();
             for message in rx {
