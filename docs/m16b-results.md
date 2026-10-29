@@ -99,6 +99,7 @@ A review agent found no way to start hosting on a system that can't, and the dev
 
 ## Found while checking
 
+- **CI's runner raced `one_stream_starts_at_a_time`:** it sends two stream starts at once and expects the second refused while the first starts. On a fast runner the fake capture started at once, the first stream was live before the second arrived, and that one started a second stream, as the engine allows. The fake's capture now takes 300 ms to start in that scenario (`capture_slow`), so the second always arrives during the first; 8 Linux runs and 5 Windows runs then passed.
 - **WSL can't reach a Windows host directly** (its network address translation, and the firewall). Through a relay it connects, then goes direct.
 - **Screenshots of WSLg windows:** `PrintWindow` on WSLg's `msrdc` window, never the whole screen while the author is using the PC.
 

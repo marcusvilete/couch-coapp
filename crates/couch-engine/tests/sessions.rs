@@ -156,6 +156,9 @@ struct Fake {
     hevc_fails: AtomicBool,
     /// Captures fail to start (M19: a stream failing as it starts).
     capture_fails: AtomicBool,
+    /// Capture takes 300 ms to start, so a second start can't come after the
+    /// first ended, however fast the machine (CI's runner, M16b).
+    capture_slow: AtomicBool,
     /// The codec of every encoder opened, in order.
     codecs: Mutex<Vec<Codec>>,
 }
@@ -507,6 +510,9 @@ impl Backend for Fake {
         self.captures.lock().unwrap().push(request);
         if self.capture_fails.load(Ordering::SeqCst) {
             return Err(MediaError::Backend("no capture here".into()));
+        }
+        if self.capture_slow.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(300));
         }
         let window = match source {
             Source::Window(window) => Some(*window),
@@ -2530,7 +2536,10 @@ async fn one_stream_starts_at_a_time() {
     let (mut a, mut b, mut c, room) = three().await;
     a.ok(go_live(&room, 4)).await;
     let window = joined(&room, &a, &b).await;
+    // The first start still runs when the second comes, on any machine.
+    a.fake.capture_slow.store(true, Ordering::SeqCst);
     let (first, second) = tokio::join!(a.handle(stream_window()), a.handle(stream_window()));
+    a.fake.capture_slow.store(false, Ordering::SeqCst);
     assert!(matches!(first, Ok(Response::Room(_))), "{first:?}");
     assert!(refused_because(&second, "starting already"), "{second:?}");
     wait("frames", || window.frames() >= 5).await;
