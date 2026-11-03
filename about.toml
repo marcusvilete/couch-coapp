@@ -20,7 +20,9 @@ accepted = [
     "Ubuntu-font-1.0",
 ]
 
-# What ships: Windows, and only what the binaries link.
+# What ships: only what the binaries link, on the system being packaged.
+# `cargo xtask notices` passes that system's own (--target), Linux's for the
+# AppImage; this is the default for running cargo-about by hand.
 targets = ["x86_64-pc-windows-msvc"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true

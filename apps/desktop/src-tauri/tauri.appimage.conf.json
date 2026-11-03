@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "cargo build --release -p couch-viewer && npm run build"
+  },
+  "bundle": {
+    "targets": ["appimage"],
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/bin/couch-viewer": "../../../target/release/couch-viewer",
+          "/usr/bin/lucide.ttf": "../../../target/release/lucide.ttf",
+          "/usr/bin/LICENSE": "../../../target/release/LICENSE",
+          "/usr/bin/THIRD-PARTY-NOTICES.txt": "../../../target/release/THIRD-PARTY-NOTICES.txt"
+        }
+      }
+    }
+  }
+}
