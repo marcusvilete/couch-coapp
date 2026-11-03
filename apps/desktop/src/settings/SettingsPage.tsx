@@ -49,12 +49,13 @@ export type SettingsSection =
   | "backup"
   | "about";
 
-/** `hostOnly`: only where this system can host (`EngineInfo.capabilities.sessions`, M16b). */
-const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode; hostOnly?: true }[] = [
+/** `hostOnly`: only where this system can host (`EngineInfo.capabilities.sessions`, M16b).
+ * `notLinux`: not on Linux, whose host has no overlay or chime yet (M16c). */
+const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode; hostOnly?: true; notLinux?: true }[] = [
   { id: "profile", label: "Profile", icon: <UserRound /> },
   { id: "appearance", label: "Appearance", icon: <Palette /> },
   { id: "shortcuts", label: "Shortcuts", icon: <Keyboard /> },
-  { id: "overlay", label: "Overlay and sounds", icon: <Layers />, hostOnly: true },
+  { id: "overlay", label: "Overlay and sounds", icon: <Layers />, hostOnly: true, notLinux: true },
   { id: "streamWindow", label: "Stream window", icon: <AppWindow /> },
   { id: "network", label: "Network", icon: <Network /> },
   { id: "remotePlay", label: "Remote play", icon: <Router /> },
@@ -84,7 +85,8 @@ export function SettingsPage(props: {
   onRestoredDev: () => void;
 }) {
   const canHost = props.info?.capabilities.sessions ?? true;
-  const sections = SECTIONS.filter((s) => canHost || !s.hostOnly);
+  const linux = props.info?.platform === "linux";
+  const sections = SECTIONS.filter((s) => (canHost || !s.hostOnly) && !(linux && s.notLinux));
   const section = sections.find((s) => s.id === props.section) ?? sections[0];
   return (
     <div className="settings">
@@ -133,8 +135,8 @@ export function SettingsPage(props: {
             {section.id === "overlay" && <OverlaySection />}
             {section.id === "streamWindow" && <StreamWindowSection />}
             {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
-            {section.id === "remotePlay" && <RemotePlaySection canHost={canHost} />}
-            {section.id === "drivers" && <DriversSection linux={props.info?.platform === "linux"} />}
+            {section.id === "remotePlay" && <RemotePlaySection canHost={props.info?.homePc ?? true} />}
+            {section.id === "drivers" && <DriversSection linux={linux} />}
             {section.id === "backup" && (
               <BackupSection
                 busy={props.busy}

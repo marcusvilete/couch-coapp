@@ -1526,6 +1526,10 @@ pub struct EngineInfo {
     /// `sessions` (M16b), and the keyboard seat and desktop control without
     /// theirs (M16c).
     pub capabilities: HostCapabilities,
+    /// Whether this PC can be a home PC, run from afar (`Backend::home_pc`):
+    /// Settings offers the home PC's side of remote play only then (a Linux
+    /// host until M16c-1's fifth part doesn't).
+    pub home_pc: bool,
 }
 
 /// What a system can host (M16c, ADR 0012): Windows everything; Linux
@@ -1978,6 +1982,7 @@ impl EngineOptions {
             // and a Run entry can't name another profile.
             // Windows' Run value only: elsewhere the switch isn't offered (M16b).
             start_at_sign_in: cfg!(windows) && !cfg!(debug_assertions) && profile.is_default(),
+            backend: pipeline::profile_backend(profile.data_dir()),
             ..Self::development()
         }
     }
@@ -2364,6 +2369,7 @@ impl Engine {
                 data_dir: self.profile.data_dir().display().to_string(),
                 platform: Platform::current(),
                 capabilities: self.backend.capabilities(),
+                home_pc: self.backend.capabilities().sessions && self.backend.home_pc(),
             })),
             Command::Ping { nonce } => {
                 // No subscribers is fine: the UI may not be listening yet.

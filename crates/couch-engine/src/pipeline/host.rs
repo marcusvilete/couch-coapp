@@ -996,7 +996,7 @@ async fn start_now(
         state.share = stream.options.upload_bps.map(UploadShare::new);
         *lock(&sh.stream) = Some(stream.clone());
         reshare(&mut state);
-        if !state.viewers.is_empty() {
+        if !state.viewers.is_empty() || sh.backend.captures_without_viewers() {
             state.running = Some(start_capture(sh, &stream));
         }
     }
@@ -1126,6 +1126,7 @@ impl HostPipeline {
         lock(&sh.feeds).retain(|f| !Arc::ptr_eq(f, &viewer.feed));
         lock(&sh.audio_to).retain(|c| c.remote_id().as_bytes() != &member.0);
         if state.viewers.is_empty()
+            && !sh.backend.captures_without_viewers()
             && let Some(running) = state.running.take()
         {
             // Nobody watches: capture and sound stop.

@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.25.1"
+version = "0.25.2"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -49,10 +49,13 @@ vigem-rust = "0.2"
 rustix = { version = "1", default-features = false, features = ["std"] }
 # Linux input devices (M16c): guests' virtual controllers through `uinput`.
 evdev = "0.13"
-# Linux desktop portals (M16c): the host's keys (global shortcuts), later
-# capture.
+# Linux desktop portals (M16c): the host's keys (global shortcuts), screen
+# sharing.
 ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
 futures-util = "0.3"
+# PipeWire (M16c): the shared picture and the PC's sound on a Linux host.
+# Linked against the system's libpipewire (Ubuntu 24.04: 1.0), never bundled.
+pipewire = "0.10"
 
 # Viewer rendering
 egui = "0.36"

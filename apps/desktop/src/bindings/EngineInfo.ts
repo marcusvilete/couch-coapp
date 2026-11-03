@@ -23,4 +23,10 @@ platform: SystemPlatform,
  * `sessions` (M16b), and the keyboard seat and desktop control without
  * theirs (M16c).
  */
-capabilities: HostCapabilities, };
+capabilities: HostCapabilities, 
+/**
+ * Whether this PC can be a home PC, run from afar (`Backend::home_pc`):
+ * Settings offers the home PC's side of remote play only then (a Linux
+ * host until M16c-1's fifth part doesn't).
+ */
+homePc: boolean, };

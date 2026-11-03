@@ -107,6 +107,11 @@ struct Fake {
     game: Arc<FakeGame>,
     /// The current capture's window closed: capture says so.
     capture_closed: Mutex<Arc<AtomicBool>>,
+    /// Captures from a stream's start, watched or not (as Linux does).
+    captures_unwatched: AtomicBool,
+    /// Hosts, but can't be a home PC run from afar (Linux until M16c-1's
+    /// fifth part).
+    not_a_home_pc: AtomicBool,
     clock: Arc<ProcessClock>,
     /// The panic key's handler while the engine has it hooked.
     panic_key: PanicHook,
@@ -501,6 +506,10 @@ impl Backend for Fake {
         }
     }
 
+    fn home_pc(&self) -> bool {
+        !self.not_a_home_pc.load(Ordering::SeqCst)
+    }
+
     fn sources(&self) -> Result<Sources, MediaError> {
         Ok(Sources {
             windows: vec![WindowSource {
@@ -575,6 +584,10 @@ impl Backend for Fake {
 
     fn audio(&self, _kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
         Ok(Box::new(ToneSource::new(self.clock.clone())))
+    }
+
+    fn captures_without_viewers(&self) -> bool {
+        self.captures_unwatched.load(Ordering::SeqCst)
     }
 
     fn decodes(&self) -> u8 {
@@ -2437,6 +2450,35 @@ async fn a_session_starts_with_nothing_streamed() {
         s.is_some_and(|s| s.stream == StreamStateView::Live && s.streaming.is_some())
     })
     .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// A backend that captures without viewers (Linux, M16c, where starting may
+/// ask the user in the desktop's dialog): capture starts with the stream,
+/// before anyone watches, and a viewer coming and going starts none again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backend_capturing_unwatched_captures_once_from_the_streams_start() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.captures_unwatched.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    wait("captured before anyone watches", || {
+        !a.fake.captures.lock().unwrap().is_empty()
+    })
+    .await;
+    let window = watching(&room, &a, &b).await;
+    wait("frames", || window.frames() >= 5).await;
+    b.ok(Command::StopWatching).await;
+    a.wait_session(&room, &a, "nobody watches", |s| {
+        s.is_some_and(|s| s.viewers.is_empty())
+    })
+    .await;
+    let window = watching(&room, &a, &b).await;
+    wait("frames again", || window.frames() >= 5).await;
+    assert_eq!(
+        a.fake.captures.lock().unwrap().len(),
+        1,
+        "one capture all along"
+    );
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -5598,6 +5640,34 @@ async fn a_viewer_only_platform_refuses_to_host_and_still_watches() {
     b.ok(unlock(&room, &a, PIN)).await;
     a.go_live(&room, 4).await;
     let window = watching(&room, &a, &b).await;
+    assert!(window.frames() > 0);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M16c-1: a PC that hosts but isn't a home PC yet (Linux's, until it keeps
+/// itself awake and reads its lock screen): the home PC's side of remote
+/// play is refused, and it hosts and runs another PC from afar as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_that_isnt_a_home_pc_refuses_remote_play_and_still_hosts() {
+    let (mut a, mut b, mut c, room) = three().await;
+    b.fake.not_a_home_pc.store(true, Ordering::SeqCst);
+    let Ok(Response::Info(info)) = b.handle(Command::GetInfo).await else {
+        panic!("info");
+    };
+    assert!(info.capabilities.sessions && !info.home_pc);
+    let refused = |reply: Result<Response, EngineError>| {
+        assert!(
+            matches!(&reply, Err(EngineError::Refused(why)) if why.contains("run from afar")),
+            "{reply:?}"
+        );
+    };
+    refused(b.handle(Command::SetRemotePin { pin: PIN.into() }).await);
+    refused(b.handle(Command::SetRemotePlay { on: true }).await);
+    refused(b.handle(Command::AddRemoteDevice { member: a.id() }).await);
+    b.ok(Command::SetRemotePlay { on: false }).await;
+    // It hosts, and C watches.
+    b.go_live(&room, 4).await;
+    let window = watching(&room, &b, &c).await;
     assert!(window.frames() > 0);
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

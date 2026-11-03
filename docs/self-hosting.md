@@ -104,7 +104,7 @@ The first session someone hosts on a PC can take a while to get its controllers 
 
 ## 4. An AppImage for friends on Linux
 
-Optional. A Linux PC or a Steam Deck **watches and plays** sessions hosted on Windows, and runs a PC of yours from afar (remote play), but **can't host** yet. One file, the AppImage, carries WebKitGTK and GTK with it, and runs on a system whose glibc is 2.39 or newer (`ldd --version` says): Ubuntu 24.04 and Fedora 40 are. A Steam Deck should be, on a current SteamOS; it hasn't been tried yet.
+Optional. A Linux PC or a Steam Deck **watches and plays** sessions, and runs a PC of yours from afar (remote play). A Linux PC on KDE or GNOME also **hosts**, with controller seats only for now: guests' controllers need Settings → Drivers → Virtual controllers set up once, and the desktop asks which window or screen to share. The AppImage uses the system's own PipeWire library (`libpipewire-0.3`, which current desktops all have), even only to watch. One file, the AppImage, carries WebKitGTK and GTK with it, and runs on a system whose glibc is 2.39 or newer (`ldd --version` says): Ubuntu 24.04 and Fedora 40 are. A Steam Deck should be, on a current SteamOS; it hasn't been tried yet.
 
 **Build it on Ubuntu 24.04.** WSL on your Windows PC works: `wsl --install -d Ubuntu-24.04`, then everything below inside it.
 1. **Prepare it, once:**

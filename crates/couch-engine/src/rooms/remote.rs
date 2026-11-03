@@ -676,15 +676,16 @@ impl Actor {
             )));
             return;
         }
-        // The home PC's side needs a system that can host (M16b): a device
-        // that can't stream would be offered to its devices for nothing.
-        // Turning it off, removing devices and a device's own side stay.
+        // The home PC's side needs a system that can be one (M16b, M16c): a
+        // device that can't stream, or a Linux PC not yet kept awake, would
+        // be offered to its devices for nothing. Turning it off, removing
+        // devices and a device's own side stay.
         if matches!(
             command,
             Command::SetRemotePlay { on: true }
                 | Command::SetRemotePin { .. }
                 | Command::AddRemoteDevice { .. }
-        ) && let Err(e) = self.check_capability(super::sessions::Capability::Sessions)
+        ) && let Err(e) = self.check_capability(super::sessions::Capability::HomePc)
         {
             let _ = reply.send(Err(e));
             return;

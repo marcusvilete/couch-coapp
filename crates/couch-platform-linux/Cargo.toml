@@ -1,6 +1,6 @@
 [package]
 name = "couch-platform-linux"
-description = "All Linux-specific code (M16, ADR 0011 and 0012): the clock, guests' virtual controllers, the desktop's portals."
+description = "All Linux-specific code (M16, ADR 0011 and 0012): the clock, guests' virtual controllers, the desktop's portals, PipeWire."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +16,7 @@ couch-media.workspace = true
 ashpd.workspace = true
 evdev.workspace = true
 futures-util.workspace = true
+pipewire.workspace = true
 tokio.workspace = true
 rustix = { workspace = true, features = ["time", "stdio", "event"] }
 tracing.workspace = true
