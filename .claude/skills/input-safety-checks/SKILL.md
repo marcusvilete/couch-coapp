@@ -103,6 +103,7 @@ Ctrl+C and closing the host's console run the same code path as Ctrl+Break. Ctrl
 
   Their sum sets each limit above. Change a limit only with the user's agreement.
 - **Error before acting:** usually leftovers, or the seat never went active (a slow ViGEm plug can take seconds).
+  - **Every scenario "the seat never went active":** time SDL's start, `Measure-Command { .\target\release\couch-viewer.exe --probe }`. Over a second means the PC, not the code: SDL waits on a paired Bluetooth controller that's off or away (turn it on, or remove the pairing), or on a HID device in an error state (the author's QuadCast microphone once; reconnect it). It took 10 to 15 s in M16b, 0.1 s once fixed.
 
 ## What `input-sink` and `lifecycle-check` do
 

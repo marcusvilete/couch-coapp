@@ -146,7 +146,16 @@ A review agent found no way for the relay token to leak and nothing against CLAU
 - **Docs:** the self-hosting steps in order, with `npm ci` and the clone's own folder; the skill's copy command.
 
 **Found while checking**
-- **The stream window crashes at its end in WSL when NVDEC decodes** (a segfault after FFmpeg's "cuCtxDestroy failed"), whether packaged or not; in software it ends cleanly. Its decode thread drops the decoder, and with it CUDA's context, while the process is already exiting. Not fixed here: the stream window's teardown is input-safety ground, so it gets its own change, and a check on bare-metal NVIDIA.
+- **The stream window crashed at its end in WSL when NVDEC decoded** (a segfault after FFmpeg's "cuCtxDestroy failed"), whether packaged or not; in software it ended cleanly. Its decode thread dropped the decoder, and with it CUDA's context, while the process was already exiting. Fixed in 0.24.1, below.
+
+## 0.24.1: the stream window ends cleanly with NVDEC
+
+- **The window now stops its decoder before it ends** (`DecoderStop`): it tells the decode thread to stop as soon as its loop ends, alongside releasing input and the GPU's last work, then waits for it, at most a second, before the GPU goes and before returning; on an error or a panic too, as the guard drops. The decode thread, waiting for video, looks every 100 ms (`next_message`), so a pipe that stays open can't hold it. On Windows the decoder, and a decoded frame still waiting, now also go before the GPU device they may hold.
+- **The review** found nothing of substance; its three small points are in: the stop starts early, so the two one-second waits (the GPU's and the decoder's) overlap rather than add up against the main process's 2 s for a closing window; the guard covers the early exits; the waiting frame goes before the GPU.
+- **Checked:**
+  - **In WSL with NVDEC:** a stream window ended by a signal exits cleanly 3 times of 3 (status 0, was 139), in about 180 ms, and in 50 to 110 ms once the stop starts early; in software too. Watching the Windows host: 60.1 fps, no decode errors, and a clean end.
+  - **On Windows:** the stream window's tests and clippy; the session scenarios (78); `release-check` 5 of 5 (the window closed: gone after 207 ms, 166 ms after the review's change), `lifecycle-check` 6 of 6, `input-sink`, before and after the review's change.
+- **Found while checking:** SDL took 10 to 15 s to start on this PC, which failed every `release-check` scenario before it acted ("the seat never went active"). The DualSense was paired but not yet connected, and the author's QuadCast microphone (a HID device too) may have been in an error state. Once the controller was on, SDL started in 0.1 s. `couch-viewer --probe`, timed, tells this apart from a real failure.
 
 ## Still to come
 

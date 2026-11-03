@@ -239,12 +239,17 @@ pub fn run(options: WindowOptions) -> Result<()> {
     // Set by the render thread when it can't bring a decoded frame in: the
     // decoder then goes back to frames through memory.
     let gpu_frames_failed = Arc::new(AtomicBool::new(false));
+    // Set when the window closes; the decode thread then lets its decoder
+    // go and says so (`DecoderStop`).
+    let decode_stop = Arc::new(AtomicBool::new(false));
+    let (decode_done_tx, decode_done) = mpsc::channel::<()>();
     {
         let decoded = decoded.clone();
         let out_tx = out_tx.clone();
         let decoder_name = decoder_name.clone();
         let behind = behind.clone();
         let gpu_frames_failed = gpu_frames_failed.clone();
+        let decode_stop = decode_stop.clone();
         #[cfg(windows)]
         let device = gpu.decoder_device();
         #[cfg(not(windows))]
@@ -259,10 +264,19 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     &decoder_name,
                     &behind,
                     &gpu_frames_failed,
+                    &decode_stop,
                     device,
-                )
+                );
+                // The decoder has gone with the loop's locals.
+                let _ = decode_done_tx.send(());
             })?;
     }
+    // Declared after `gpu`, so on any way out of here, an error or a panic
+    // included, it waits for the decoder before the GPU goes.
+    let decoder_stop = DecoderStop {
+        stop: decode_stop,
+        done: decode_done,
+    };
     // Frames on the GPU: brought into the video pass, given back to the
     // decoder once drawn, and their barcode corner read back for latency.
     #[cfg(windows)]
@@ -738,6 +752,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
         }
     }
 
+    // The decoder starts stopping now, alongside everything below.
+    decoder_stop.signal();
     // Let go of anything still held, then stop the writer once it has sent
     // that. Waiting for the channel to close would hang: the decode thread
     // holds a sender while it waits for more video.
@@ -757,6 +773,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
         });
         drop(importer);
     }
+    // The decoder, then a decoded frame still waiting (on Windows it may
+    // hold the decoder's GPU resources), go before the GPU.
+    drop(decoder_stop);
+    drop(decoded);
     drop(gpu);
     if let Some(writer) = writer {
         let _ = writer.join();
@@ -1040,6 +1060,10 @@ fn decoder_label(decoder: &FfmpegDecoder) -> String {
         reason = "the device is Infallible off Windows; a COM handle on it"
     )
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the thread's shared state, each its own; a struct would only rename them"
+)]
 fn decode_loop(
     rx: mpsc::Receiver<Incoming>,
     decoded: &Mailbox<Decoded>,
@@ -1047,6 +1071,7 @@ fn decode_loop(
     decoder_name: &std::sync::Mutex<String>,
     skipped: &AtomicU64,
     gpu_frames_failed: &AtomicBool,
+    stop: &AtomicBool,
     device: Option<DecoderDevice>,
 ) {
     // H.264 until the stream says otherwise: the first frame's codec
@@ -1084,9 +1109,9 @@ fn decode_loop(
     loop {
         let message = match queued.take() {
             Some(message) => message,
-            None => match rx.recv() {
-                Ok(message) => message,
-                Err(_) => break,
+            None => match next_message(&rx, stop) {
+                Some(message) => message,
+                None => break,
             },
         };
         let (header, data) = match message {
@@ -1237,6 +1262,54 @@ fn decode_loop(
 /// Decode errors in a row after which a D3D12 decoder is given up for one
 /// decoding through memory: it decodes, but not this stream.
 const D3D12_ERRORS: u32 = 3;
+
+/// How often a decoder waiting for video looks whether the window is
+/// closing, and how long the window waits for it to stop.
+const STOP_CHECK: Duration = Duration::from_millis(100);
+const DECODER_STOP: Duration = Duration::from_secs(1);
+
+/// The decode thread's way out. The decoder goes before the GPU it may
+/// decode on, and before the process exits: left to the exit, NVDEC's CUDA
+/// context was torn down while the process was ending, and the stream
+/// window crashed at every end (Linux, M16b). Dropping this stops the
+/// thread and waits for it; a decoder that doesn't stop within a second is
+/// left behind rather than holding the window open past the main
+/// process's patience.
+struct DecoderStop {
+    stop: Arc<AtomicBool>,
+    done: mpsc::Receiver<()>,
+}
+
+impl DecoderStop {
+    /// Starts the stop without waiting for it.
+    fn signal(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for DecoderStop {
+    fn drop(&mut self) {
+        self.signal();
+        if let Err(mpsc::RecvTimeoutError::Timeout) = self.done.recv_timeout(DECODER_STOP) {
+            tracing::warn!("the decoder didn't stop within {DECODER_STOP:?}");
+        }
+    }
+}
+
+/// The decoder's next message; none once the pipe has closed or the window
+/// is closing (`stop`), which it looks at even while no video comes.
+fn next_message(rx: &mpsc::Receiver<Incoming>, stop: &AtomicBool) -> Option<Incoming> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        match rx.recv_timeout(STOP_CHECK) {
+            Ok(message) => return Some(message),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
 
 /// Replaces `decoder` with one decoding through memory (D3D11VA, or
 /// software). `false` if there is none.
