@@ -75,10 +75,12 @@ The warning that they're stored unencrypted goes. A keyring can come later, as a
 
 One file that runs on any distribution and on SteamOS's read-only system, without root, and that Steam can add as a non-Steam game. It carries:
 - the app and `couch-viewer`;
-- FFmpeg's and SDL3's libraries;
+- FFmpeg's libraries (SDL3 is built into both binaries);
 - the licence notices, with FFmpeg's source beside it, as every Windows installer does (ADR 0008, M10b).
 
 A release build carries the relay and invite page from `release.toml`, as Windows' do (ADR 0007). `.deb` and `.rpm` packages aren't made for now.
+
+How it's built (M16b part 2): Tauri's bundler (linuxdeploy, with its GTK plugin) copies WebKitGTK, GTK, GLib and what they need from the build machine, so it is built on Ubuntu 24.04, and runs where glibc is 2.39 or newer. Its runtime is the static one (no libfuse2 needed). The notices name each system library's Ubuntu source package and version, the LGPL's offer of their source, and the runtime's own parts (libfuse among them).
 
 ### Testing
 

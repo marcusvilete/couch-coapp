@@ -2,7 +2,8 @@
 #
 # The real file is NOT kept in the repository. `cargo xtask release-config` creates it at
 # %USERPROFILE%\.couch-coapp\release.toml with a fresh token (COUCH_RELEASE_CONFIG points
-# elsewhere), and scripts\build-installer.ps1 refuses one inside the repository.
+# elsewhere), and scripts\build-installer.ps1 and scripts/build-appimage.sh (which read it)
+# refuse one inside the repository.
 #
 # What is in it isn't a secret the way a password is: the token ships inside every
 # installer, where anyone determined can find it. It keeps other apps off our relay; the
@@ -26,5 +27,6 @@ invite_page = "https://example.github.io/couch-coapp/j/"
 
 # true only for a copy used to test on your LAN: it allows http:// in relay_url and
 # invite_page (such as http://192.168.1.10:3340 for scripts\relay.ps1 -Lan), lets the app
-# take plain http relays at private addresses in Settings, and names the installer "-test".
+# take plain http relays at private addresses in Settings, and names the installer (and the
+# AppImage) "-test".
 test = false

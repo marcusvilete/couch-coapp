@@ -6,6 +6,7 @@ There are no official downloads ([ADR 0009](adr/0009-source-only-releases.md)). 
 
 - **An installer** (`Couch-Co-App_<version>_<commit>-setup.exe`) that your friends run. It's unsigned, so Windows SmartScreen warns once: "More info", then "Run anyway".
 - **A relay** on a server you control, which only your installers can use. The app connects your friends' PCs directly when it can, and through your relay when it can't.
+- **If you like, an AppImage** (`Couch-Co-App_<version>_<commit>.AppImage`) for friends on Linux or a Steam Deck, who watch and play sessions hosted on Windows ([step 4](#4-an-appimage-for-friends-on-linux)).
 
 ## 1. Prepare your Windows PC (once)
 
@@ -101,6 +102,34 @@ The first session someone hosts on a PC can take a while to get its controllers 
 |---|---|
 | ![The installer asking whether to install ViGEmBus](images/installer-vigembus.png) | ![The installer asking whether to install HidHide](images/installer-hidhide.png) |
 
+## 4. An AppImage for friends on Linux
+
+Optional. A Linux PC or a Steam Deck **watches and plays** sessions hosted on Windows, and runs a PC of yours from afar (remote play), but **can't host** yet. One file, the AppImage, carries WebKitGTK and GTK with it, and runs on a system whose glibc is 2.39 or newer (`ldd --version` says): Ubuntu 24.04 and Fedora 40 are. A Steam Deck should be, on a current SteamOS; it hasn't been tried yet.
+
+**Build it on Ubuntu 24.04.** WSL on your Windows PC works: `wsl --install -d Ubuntu-24.04`, then everything below inside it.
+1. **Prepare it, once:**
+   - **a clone of the code, on Linux's own disk** (in WSL never under `/mnt/c`): `git clone <this repository's address> ~/couch-release`, then `cd ~/couch-release`;
+   - the system packages: `sudo bash scripts/linux-deps.sh`;
+   - Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`), Node.js 24 (from NodeSource: Ubuntu's own is too old), and `cargo install --locked cargo-about --features cli`;
+   - the front end's packages: `cd apps/desktop && npm ci && cd ../..` (`npm ci` leaves the tree clean, which a release build needs).
+2. **Your release settings:** the same `release.toml` as on Windows. On Ubuntu put it at `~/.couch-coapp/release.toml`; in WSL, point at Windows' own instead of copying it:
+   ```bash
+   export COUCH_RELEASE_CONFIG=/mnt/c/Users/<you>/.couch-coapp/release.toml
+   ```
+3. **Build**, from the clone, at the same commit as your Windows installer (`git pull`):
+   ```bash
+   bash scripts/build-appimage.sh
+   ```
+   It takes the same options as `build-installer.ps1`, spelled the Linux way: `--test-relay`, `--config <file>`, `--invite-page <address>`, `--no-invite-page`. The first build takes a while.
+4. **Hand out everything in `target/appimage/`:** the AppImage, `THIRD-PARTY-NOTICES.txt`, FFmpeg's two source archives and `SOURCES.txt`. The notices also name the source of every system library the AppImage carries, as the licences ask.
+
+**What your friends do with it:**
+- **Make it executable,** then open it: in the file manager, Properties → "Executable as program" (or `chmod +x Couch-Co-App_*.AppImage`).
+- **It needs FUSE,** which desktops normally have. Without it, start it with `--appimage-extract-and-run`.
+- **On a Steam Deck:** in Desktop Mode, download it, make it executable, and open it. For Game Mode, add it to Steam as a non-Steam game.
+- **Invite links** open it once it has started once. Moved to another folder, it needs one start there.
+- **Its data and log** are in `~/.local/share/CouchCoApp/profiles/default/` (`desktop.log`).
+
 ## How to know it worked
 
 - **Settings → Network** shows "Couch Co-App relay (<your relay's name>)", and "Connected through" it.
@@ -137,5 +166,5 @@ Otherwise your friends would be pointed at code that isn't what they're running.
 ## When something goes wrong
 
 - **"Not connected to a relay yet" in Settings → Network:** check `https://<your relay's name>/` in a browser. If it doesn't load, see the relay guide's "Running it" section; a stopped VM is the usual cause.
-- **The build stops with an error:** run `cargo xtask doctor`. It checks every tool and dependency.
+- **The build stops with an error:** run `cargo xtask doctor` (on Linux, after `. scripts/dev.sh`). It checks every tool and dependency.
 - **More detail:** [deploy/relay/README.md](../deploy/relay/README.md) for the server, [development.md](development.md) for the build.

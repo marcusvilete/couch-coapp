@@ -5,8 +5,8 @@
 ADR 0011's second part: a Linux PC or a Steam Deck joins rooms, watches and plays a Windows host, and runs a PC of yours from afar (M25, the device side). A Linux PC still can't host (M16c).
 
 M16b comes in two parts:
-- **part 1, here (version 0.24.0):** the viewer works on Linux;
-- **part 2:** the AppImage that carries it to friends.
+- **part 1 (version 0.24.0):** the viewer works on Linux;
+- **part 2 ([below](#part-2-the-appimage)):** the AppImage that carries it to friends. Packaging alone: it carries 0.24.0.
 
 No wire change: 0.24.0 talks to 0.23.x.
 
@@ -103,11 +103,54 @@ A review agent found no way to start hosting on a system that can't, and the dev
 - **WSL can't reach a Windows host directly** (its network address translation, and the firewall). Through a relay it connects, then goes direct.
 - **Screenshots of WSLg windows:** `PrintWindow` on WSLg's `msrdc` window, never the whole screen while the author is using the PC.
 
+## Part 2: the AppImage
+
+**How it's built**
+- **`bash scripts/build-appimage.sh`** on Ubuntu 24.04 (WSL's included), from a git clone, runs `cargo xtask appimage`: `build-installer.ps1`'s twin, in Rust so the relay's token never passes through a shell, and its parsing has tests.
+  - **The same checks and options:** `release.toml` (`COUCH_RELEASE_CONFIG` reaches Windows' own from WSL), refused inside the repository, the addresses checked; a clean tree for a release build; a warning for an unpushed commit; the same version in the three files. `--test-relay`, `--config`, `--invite-page`, `--no-invite-page`.
+  - **The build's values** are set for Tauri's build alone, as on Windows.
+- **Tauri's own AppImage bundler** (linuxdeploy, with its GTK plugin), from `tauri.appimage.conf.json`: `couch-viewer`, Lucide's font, `LICENSE` and the notices go into `usr/bin`, beside the app, where the app finds them. Two things it needed:
+  - **FFmpeg's libraries on `LD_LIBRARY_PATH`:** linuxdeploy doesn't follow our `$ORIGIN` rpath. It then copies them into `usr/lib` and sets both binaries' runpath to `$ORIGIN/../lib`.
+  - **Our binaries stripped** for it (`CARGO_PROFILE_RELEASE_STRIP=debuginfo`): the release profile's line tables made them 210 MB and 97 MB, and the AppImage 175 MiB. Now it's 132 MB.
+- **It bundles twice:** the notices list what the bundler copied, known only after it has, and must be inside. The second bundle is checked to carry them, with the same runtime.
+- **Into `target/appimage/`:** `Couch-Co-App_<version>_<commit>.AppImage`, the notices, FFmpeg's two source archives and `SOURCES.txt`.
+
+**What it carries**
+- **280 files from Ubuntu 24.04, out of 98 source packages:** WebKitGTK, GTK, GLib, GStreamer's core (WebKitGTK links it), ICU, and their kin, with the GTK plugin's loaders, input methods, schemas and typelibs.
+- **The system's own:** glibc, libstdc++, the GPU's drivers (GL, EGL, Vulkan, DRM), X11 and xcb, fontconfig, freetype and harfbuzz stay the system's, as AppImages do. It needs glibc 2.39 or newer.
+- **Its runtime is the static type2-runtime,** which needs no libfuse2: it ran in WSL without extracting.
+
+**The notices on Linux** (`cargo xtask notices`; in an AppImage, `notices/system_libraries.rs`)
+- **Each system's own crates:** cargo-about runs for the system being packaged (`--target`), so Linux's notices list GTK's and WebKitGTK's bindings and not Windows' (546 crates there, 475 on Windows).
+- **SDL3 with the hidapi, yuv2rgb and fdlibm code built into it,** from `sdl3-src`'s sources, on both systems: Windows' SDL3.dll carries them too, and its notices lacked them. `sdl3-src` must stay at Windows' pinned SDL3 version, checked.
+- **Lucide's font** (ISC).
+- **The AppImage's own parts:** the runtime (MIT), with musl, libfuse (LGPL-2.1, with the runtime's source at its commit), squashfuse, zstd and zlib built into it, `AppRun.wrapped` (AppImageKit, MIT), linuxdeploy's `AppRun` script and the GTK plugin's start-up hook (both MIT). Their texts are pinned in `xtask/licences/appimage/`, and the build fails if the runtime names other parts.
+- **Every system file traced to its package:** `dpkg -S` by name, the path sharing most of the file's path winning (the bundler moves libraries into `usr/lib`). Per source package: its version, its address on Launchpad, the binary packages and files, and the package's copyright file. A file no package installed fails the build. 2.1 MB of notices in all.
+
+**Checked**
+- **In WSL, from a clone:** a test AppImage built end to end; `ldd` finds every library inside it or among the system's own; the app starts from it, goes online through the relay, and draws its first screen in the app's look; the stream window from it draws its bar with Lucide's icons.
+- **The AppImage's stream window watching this PC's Windows host:** its `couch-viewer` and libraries, started by `couch-cli view` (the engine's own way of starting it) through iroh's public relay, then direct. For 15 s: 60.1 fps, 854 frames, no decode errors or lost packets, arrival to on-screen 7.4 ms median and 9.1 ms at the 95th percentile, no sound underruns; decoded with NVDEC (copied), FFmpeg loaded from inside the AppImage. Not yet: the AppImage's app itself in a room, which needs someone at its window.
+- **The notices' sections,** and Windows' notices with the new SDL3 parts.
+- **xtask's new tests** (options, `release.toml`'s reading as the PowerShell script reads it, the addresses, the path matching), on both systems.
+
+**The review (part 2)**
+
+A review agent found no way for the relay token to leak and nothing against CLAUDE.md's rules. Its findings, all fixed:
+- **Addresses the app can't read passed the check** (a bad port, a space): `check_address` now parses with the `url` crate, the parser the app's `RelayUrl` uses, so a release can't quietly fall back to iroh's relays.
+- **Only `usr/lib` and `usr/share` were traced:** the whole AppImage is now, with an explicit list of our own files and its tooling's; anything else must come from a package, or the build fails.
+- **The final checks read the folder, not the AppImage,** and an older bundle's file could have been taken: the bundle folder is cleared before each bundle, the notices are unpacked from the final AppImage itself, the two bundles must hold the same files, and a build that changes tracked files (`Cargo.lock`) fails a release.
+- **SDL3's own maths functions** (Sun's fdlibm, in Windows' SDL3.dll, which links no C library) ask to keep their notice: now in, on both systems.
+- **"Ubuntu 24.04" was said but not checked:** the build now requires it (`VERSION_ID`), as the notices, `SOURCES.txt` and the glibc 2.39 promise assume.
+- **AppRun was misnamed:** it is linuxdeploy's script (MIT, now in), and AppImageKit's binary is `AppRun.wrapped`.
+- **Hardening:** dpkg's diversion lines can't be taken for packages; a library moved into `usr/lib` must be the one the system's loader finds by that name (`ldconfig -p`); `release.toml` is refused inside any git work tree (WSL reaches Windows' checkout), a key set twice is refused, a byte-order mark read, errors name a line by number rather than echo it, and the configuration's debug form hides the token; a relative `--config` is the caller's; `CARGO_TARGET_DIR` elsewhere is refused; an xtask test keeps `sdl3-src` at Windows' SDL3 pin.
+- **Docs:** the self-hosting steps in order, with `npm ci` and the clone's own folder; the skill's copy command.
+
+**Found while checking**
+- **The stream window crashes at its end in WSL when NVDEC decodes** (a segfault after FFmpeg's "cuCtxDestroy failed"), whether packaged or not; in software it ends cleanly. Its decode thread drops the decoder, and with it CUDA's context, while the process is already exiting. Not fixed here: the stream window's teardown is input-safety ground, so it gets its own change, and a check on bare-metal NVIDIA.
+
 ## Still to come
 
-- **M16b part 2:**
-  - the AppImage and its notices, including the bundled system libraries' source packages;
-  - the Linux section of the self-hosting guide.
+- **Handing the AppImage out**, with the Windows installer of the same commit, and seeing it run on another Linux PC.
 - **The author's tests:**
   - a VM (software decoding);
   - bare metal (VAAPI or NVDEC, latency, the GPU's Vulkan);

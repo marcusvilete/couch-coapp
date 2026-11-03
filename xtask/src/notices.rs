@@ -5,10 +5,14 @@
 //! - The Rust crates linked into the two binaries, from cargo-about
 //!   (`about.toml`), each licence text once with the crates under it.
 //! - The front end's runtime npm packages, from `npm ls`.
-//! - What isn't a crate or a package: FFmpeg, SDL3, the drivers.
+//! - What isn't a crate or a package: FFmpeg, SDL3 (with the hidapi and
+//!   yuv2rgb code built into it), and on Windows the drivers; on Linux
+//!   (M16b) Lucide's font, and the system libraries the AppImage carries,
+//!   each with its Ubuntu package's copyright file and source package.
 //!
 //! It fails rather than leave anything out: a crate cargo-about lists
-//! without a licence text, or a package without a licence file.
+//! without a licence text, a package without a licence file, or a file in
+//! the AppImage that no Ubuntu package installed.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,12 +26,24 @@ use serde::Deserialize;
 
 use crate::deps;
 
+mod system_libraries;
+
+pub use system_libraries::{Bundle, runtime_version};
+
 pub const FILE_NAME: &str = "THIRD-PARTY-NOTICES.txt";
 
 /// Where `notices` writes; `stage-dlls` copies it next to the built app.
 pub fn output(root: &Path) -> PathBuf {
     deps::target_dir(root).join(FILE_NAME)
 }
+
+/// The system whose package this is: cargo-about lists only the crates
+/// linked there (Linux's GTK and WebKitGTK bindings, Windows' `windows`).
+const TARGET: &str = if cfg!(windows) {
+    "x86_64-pc-windows-msvc"
+} else {
+    "x86_64-unknown-linux-gnu"
+};
 
 /// The binaries that ship, whose dependencies the notices cover.
 const SHIPPED: &[&str] = &[
@@ -84,16 +100,25 @@ struct Group {
     users: BTreeSet<String>,
 }
 
-pub fn generate(root: &Path) -> anyhow::Result<()> {
-    // The bundled components below are Windows' (SDL3's DLL, the drivers);
-    // Linux's package and its notices come with M16b (ADR 0011).
-    if !cfg!(windows) {
-        anyhow::bail!("the notices are Windows' only until the Linux package (M16b)");
-    }
+/// What the app is handed out as: the notices and SOURCES.txt say so.
+pub const PACKAGE: &str = if cfg!(windows) {
+    "installer"
+} else {
+    "AppImage"
+};
+
+/// `bundle`, on Linux: the AppImage as Tauri's bundler left it, whose
+/// runtime and system libraries the notices then list (`cargo xtask
+/// appimage`). Without it (a build for this PC alone) they say none is
+/// bundled.
+pub fn generate(root: &Path, bundle: Option<&Bundle>) -> anyhow::Result<()> {
     let crates = crate_licences(root)?;
     let packages = npm_licences(root)?;
     let mut out = header(root)?;
     out.push_str(&components(root)?);
+    if !cfg!(windows) {
+        out.push_str(&system_libraries::sections(root, bundle)?);
+    }
     section(&mut out, "The front end's packages (npm)");
     for group in &packages {
         push_group(&mut out, group);
@@ -127,15 +152,25 @@ fn header(root: &Path) -> anyhow::Result<String> {
     let source = match workspace_field(root, "repository")? {
         Some(repo) if !dirty => format!("{repo}/tree/{commit}"),
         Some(repo) => format!(
-            "{repo} (this build had uncommitted changes: ask whoever gave you\n  this installer for its exact source)"
+            "{repo} (this build had uncommitted changes: ask whoever gave you\n  this {PACKAGE} for its exact source)"
         ),
-        None => "ask whoever gave you this installer: they must provide it".to_string(),
+        None => format!("ask whoever gave you this {PACKAGE}: they must provide it"),
     };
     let sources = deps::SOURCES
         .iter()
         .map(|s| format!("  - {}: {}\n    ({})", s.file, s.name, s.url))
         .collect::<Vec<_>>()
         .join("\n");
+    let (first, system) = if cfg!(windows) {
+        ("FFmpeg, SDL3 and the drivers", "")
+    } else {
+        (
+            "FFmpeg, SDL3, Lucide's font and the system libraries",
+            "\nThe system libraries in the AppImage are Ubuntu 24.04's: each one's\n\
+             section below names its source package, which Ubuntu publishes at\n\
+             https://launchpad.net/ubuntu/+source/<package>/<version>.\n",
+        )
+    };
     Ok(format!(
         "Couch Co-App {version}, built from commit {short}{dirty}
 Copyright (C) 2026 the Couch Co-App contributors
@@ -149,12 +184,12 @@ Its source code:
   {source}
 
 FFmpeg's source code and the scripts that built the copy included here
-come with the installer, as files beside it (see SOURCES.txt there):
+come with the {PACKAGE}, as files beside it (see SOURCES.txt there):
 {sources}
-
+{system}
 The rest of this file lists the licences of everything bundled with it:
-FFmpeg, SDL3 and the drivers first, then the front end's packages, then the
-Rust crates.
+{first} first,
+then the front end's packages, then the Rust crates.
 ",
         short = &commit[..10.min(commit.len())],
         dirty = if dirty {
@@ -176,15 +211,29 @@ fn components(root: &Path) -> anyhow::Result<String> {
         .iter()
         .find(|d| d.dir == "ffmpeg")
         .expect("FFmpeg is pinned");
+    let (where_ffmpeg, replace) = if cfg!(windows) {
+        (
+            "the libav* DLLs beside the app",
+            "You may replace these DLLs with your own build of the same FFmpeg\n\
+             version: the app loads them dynamically.",
+        )
+    } else {
+        (
+            "the libav* libraries in the AppImage's usr/lib",
+            "You may replace these libraries with your own build of the same\n\
+             FFmpeg version: the app loads them dynamically. Unpack the AppImage\n\
+             (--appimage-extract), replace them in squashfs-root/usr/lib, and run\n\
+             squashfs-root/AppRun.",
+        )
+    };
     push_group(
         &mut out,
         &Group {
             title: format!(
-                "FFmpeg: the libav* DLLs beside the app ({})\n\
+                "FFmpeg: {where_ffmpeg} ({})\n\
                  Built by BtbN/FFmpeg-Builds: {}\n\
                  Its configuration, which names the libraries built into it:\n{}\n\
-                 You may replace these DLLs with your own build of the same FFmpeg\n\
-                 version: the app loads them dynamically.",
+                 {replace}",
                 ffmpeg_dep.name,
                 ffmpeg_dep.url,
                 wrap(&configuration, 76)
@@ -194,20 +243,85 @@ fn components(root: &Path) -> anyhow::Result<String> {
         },
     );
 
-    let sdl = deps::DEPS
-        .iter()
-        .find(|d| d.dir == "sdl3")
-        .expect("SDL3 is pinned");
+    // Windows takes SDL's own build of the version `sdl3-src` carries, which
+    // Linux builds into the binaries: the licences are the same.
+    let sdl = sdl_source(root)?;
+    let (sdl_title, sdl_licence) = if cfg!(windows) {
+        let dep = deps::DEPS
+            .iter()
+            .find(|d| d.dir == "sdl3")
+            .expect("SDL3 is pinned");
+        if !dep.name.contains(&format!(" {} ", sdl.version)) {
+            bail!(
+                "SDL3 is pinned as {} but sdl3-src is {}: keep them the same version",
+                dep.name,
+                sdl.version
+            );
+        }
+        (
+            format!("SDL3: SDL3.dll beside the app ({})", dep.name),
+            third.join("sdl3").join("LICENSE.txt"),
+        )
+    } else {
+        (
+            format!(
+                "SDL3 {}: built into the app and the stream window (sdl3-src)",
+                sdl.version
+            ),
+            sdl.dir.join("LICENSE.txt"),
+        )
+    };
+    for (title, text) in [
+        (sdl_title, sdl_licence),
+        (
+            "hidapi, built into SDL3 (under the BSD-style licence, one of the three it offers)"
+                .to_string(),
+            sdl.dir.join("src/hidapi/LICENSE-bsd.txt"),
+        ),
+        (
+            "yuv2rgb, built into SDL3".to_string(),
+            sdl.dir.join("src/video/yuv2rgb/LICENSE"),
+        ),
+    ] {
+        push_group(
+            &mut out,
+            &Group {
+                title,
+                text: read(&text)?,
+                users: BTreeSet::new(),
+            },
+        );
+    }
     push_group(
         &mut out,
         &Group {
-            title: format!("SDL3: SDL3.dll beside the app ({})", sdl.name),
-            text: read(&third.join("sdl3").join("LICENSE.txt"))?,
+            title: "fdlibm, SDL3's own maths functions (src/libm), built into SDL3 where it\n\
+                    doesn't use the system's C library (Windows' SDL3.dll)"
+                .to_string(),
+            text: fdlibm_notices(&sdl.dir.join("src/libm"))?,
             users: BTreeSet::new(),
         },
     );
 
-    for driver in deps::DRIVERS {
+    if !cfg!(windows) {
+        let lucide = deps::DEPS
+            .iter()
+            .find(|d| d.dir == "lucide")
+            .expect("Lucide is pinned");
+        push_group(
+            &mut out,
+            &Group {
+                title: format!(
+                    "{}: lucide.ttf, the stream window's icons ({})",
+                    lucide.name, lucide.url
+                ),
+                text: read(&third.join("lucide").join("LICENSE"))?,
+                users: BTreeSet::new(),
+            },
+        );
+    }
+
+    for driver in deps::DRIVERS.iter().filter(|_| cfg!(windows)) {
         push_group(
             &mut out,
             &Group {
@@ -241,7 +355,7 @@ fn crate_licences(root: &Path) -> anyhow::Result<Vec<Group>> {
             .args([
                 "about", "generate", "--format", "json", "--fail", "--locked",
             ])
-            .args(["-c", "about.toml", "-m", manifest, "-o"])
+            .args(["-c", "about.toml", "--target", TARGET, "-m", manifest, "-o"])
             .arg(&json)
             .status()
             .context(
@@ -371,8 +485,72 @@ fn collect_npm(node: &serde_json::Value, found: &mut BTreeMap<String, String>) {
     }
 }
 
+/// SDL3's source as the `sdl3-src` crate carries it (Cargo.lock's
+/// version, which Windows' pinned build matches): its `SDL` folder.
+struct SdlSource {
+    version: String,
+    dir: PathBuf,
+}
+
+fn sdl_source(root: &Path) -> anyhow::Result<SdlSource> {
+    let output = Command::new("cargo")
+        .current_dir(root)
+        .args(["metadata", "--format-version", "1", "--locked"])
+        .output()
+        .context("could not run cargo metadata")?;
+    if !output.status.success() {
+        bail!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let package = metadata["packages"]
+        .as_array()
+        .and_then(|packages| packages.iter().find(|p| p["name"] == "sdl3-src"))
+        .context("no sdl3-src in Cargo.lock")?;
+    let manifest = package["manifest_path"]
+        .as_str()
+        .context("sdl3-src has no manifest path")?;
+    Ok(SdlSource {
+        version: package["version"].as_str().unwrap_or_default().to_string(),
+        dir: Path::new(manifest)
+            .parent()
+            .context("a manifest has a folder")?
+            .join("SDL"),
+    })
+}
+
+/// The notices fdlibm's sources ask to keep: each file's block between its
+/// two `====` lines, each distinct one once.
+fn fdlibm_notices(dir: &Path) -> anyhow::Result<String> {
+    let mut notices = BTreeSet::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("c") {
+            continue;
+        }
+        let text = read(&path)?;
+        let mut rules = text.match_indices(" * ====").map(|(i, _)| i);
+        if let (Some(start), Some(end)) = (rules.next(), rules.next()) {
+            let block: Vec<&str> = text[start..end]
+                .lines()
+                .skip(1)
+                .map(|l| l.trim_start().trim_start_matches('*').trim())
+                .collect();
+            notices.insert(block.join("\n").trim().to_string());
+        }
+    }
+    if notices.is_empty() {
+        bail!("no notices found in {}", dir.display());
+    }
+    Ok(notices.into_iter().collect::<Vec<_>>().join("\n\n"))
+}
+
 fn ffmpeg_configuration(ffmpeg: &Path) -> anyhow::Result<String> {
-    let exe = ffmpeg.join("bin").join("ffmpeg.exe");
+    let exe = ffmpeg
+        .join("bin")
+        .join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX));
     let output = Command::new(&exe)
         .args(["-hide_banner", "-version"])
         .output()
@@ -455,4 +633,30 @@ fn read(path: &Path) -> anyhow::Result<String> {
     // Some licence files aren't valid UTF-8 (Latin-1 names); keep them readable.
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(String::from_utf8_lossy(&bytes).replace("\r\n", "\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows' SDL3.dll and Linux's built-in SDL3 are one version, so one
+    /// set of licences covers both: a `cargo update` moving `sdl3-src`
+    /// fails here, on either system.
+    #[test]
+    fn sdl3_src_is_windows_pinned_sdl3() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let lock = read(&root.join("Cargo.lock")).unwrap();
+        let version = lock
+            .split("[[package]]")
+            .find(|p| p.contains("name = \"sdl3-src\""))
+            .and_then(|p| p.lines().find_map(|l| l.strip_prefix("version = \"")))
+            .and_then(|v| v.strip_suffix('"'))
+            .expect("sdl3-src in Cargo.lock");
+        let pinned = deps::WINDOWS_DEPS.iter().find(|d| d.dir == "sdl3").unwrap();
+        assert!(
+            pinned.name.contains(&format!(" {version} ")),
+            "sdl3-src is {version}, Windows' SDL3 is {}",
+            pinned.name
+        );
+    }
 }

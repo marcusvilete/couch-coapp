@@ -1,6 +1,6 @@
 ---
 name: release-installer
-description: Build and hand out a Couch Co-App Windows installer with `scripts\build-installer.ps1`: when a version bump is needed (the wire revision, the three version files), building from a merged, clean, pushed main, release versus test builds, checking which relay and invite page it carries without printing the relay's token, serving the files, and what to tell the people who install it and record afterwards. Use when asked for an installer, a new version to hand out, a test build for another PC, or before a run with other people.
+description: Build and hand out a Couch Co-App Windows installer with `scripts\build-installer.ps1`, and the Linux AppImage with `scripts/build-appimage.sh` in WSL: when a version bump is needed (the wire revision, the three version files), building from a merged, clean, pushed main, release versus test builds, checking which relay and invite page it carries without printing the relay's token, serving the files, and what to tell the people who install it and record afterwards. Use when asked for an installer or an AppImage, a new version to hand out, a test build for another PC, or before a run with other people.
 ---
 
 # A release installer
@@ -56,6 +56,25 @@ From its output, leaving out any line containing "token":
   - Everyone in a session must update: an older build is refused.
   - If something goes wrong, the log is `%LOCALAPPDATA%\CouchCoApp\profiles\default\desktop.log`.
 - The host's own log names each viewer's encoder (`encoding WxH with hevc_nvenc …`), which answers questions like "which codec did they get?" afterwards.
+
+## The AppImage, for friends on Linux (M16b)
+
+A Linux PC or a Steam Deck watches and plays, and is a remote-play device; it can't host. `cargo xtask appimage` (run by `scripts/build-appimage.sh`) is `build-installer.ps1`'s twin, with the same checks and options spelled `--test-relay`, `--config <file>`, `--invite-page <address>`, `--no-invite-page`.
+
+- **Same commit as the installer:** build both from the same merged main, so one version goes out.
+- **In WSL, from its own git clone, `~/couch-release`** (`git clone https://github.com/marcusvilete/couch-coapp ~/couch-release`, then `git -C ~/couch-release pull --ff-only`). Never the `sync.sh` copy, which has no `.git`, and never sync into the clone for a release: Windows' CRLF files make every file differ, so the tree is dirty. The `linux-checks` skill has the WSL basics; first time in the clone, `(cd apps/desktop && npm ci)` and `cargo install --locked cargo-about --features cli`.
+- **Run it from a command file with `wsl.exe -d Ubuntu-24.04 -- bash <file>`** (not `run.sh`, which goes to the copy), in the background, with a `timeout`:
+  ```bash
+  cd ~/couch-release
+  export COUCH_RELEASE_CONFIG=/mnt/c/Users/<user>/.couch-coapp/release.toml
+  timeout 3500 bash scripts/build-appimage.sh > ~/runs/build-appimage.log 2>&1; echo "exit $?"
+  ```
+  Never print or open that file. It builds, bundles once, writes the notices from what the bundle carries (the AppImage's runtime and AppRun, and every system file traced to its Ubuntu package with `dpkg -S`), and bundles again with them inside.
+- **Check its output** as for the installer (leave out lines with "token"): `Our relay: …`, `Invites link to …`, `The AppImage carries N system file(s) from M Ubuntu source package(s)`, and `Built Couch-Co-App_<version>_<commit>.AppImage (… MB) in …/target/appimage`.
+- **It fails rather than leave anything out:** a file in the AppImage no package installed, or a runtime that names other parts than the texts pinned in `xtask/licences/appimage/` (then fetch and pin the new ones).
+- **Try it once in WSLg** before handing it out: `COUCH_PROFILE=appimagecheck target/appimage/Couch-Co-App_*.AppImage`; Settings → About shows the version, the commit and the notices.
+- **Hand out all of `target/appimage/`** (the AppImage, the notices, FFmpeg's archives, `SOURCES.txt`): copy it to Windows (`rm -rf /mnt/c/dev/couch-coapp/target/appimage && cp -r ~/couch-release/target/appimage /mnt/c/dev/couch-coapp/target/`) and serve it like the installer.
+- **What to tell them:** make it executable (Properties, or `chmod +x`), then open it; without FUSE, `--appimage-extract-and-run`; on a Steam Deck, Desktop Mode, and for Game Mode add it as a non-Steam game; it needs glibc 2.39 or newer; invite links work once it has started once; the log is `~/.local/share/CouchCoApp/profiles/default/desktop.log`.
 
 ## 6. Afterwards
 

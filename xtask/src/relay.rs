@@ -2,7 +2,8 @@
 //! itself for running on this PC.
 //!
 //! - `release-config` creates `release.toml`, outside the repository, with
-//!   a fresh access token. `scripts/build-installer.ps1` reads it.
+//!   a fresh access token. `scripts/build-installer.ps1` and `cargo xtask
+//!   appimage` read it.
 //! - `relay-tool` builds the official `iroh-relay` binary, the version our
 //!   iroh pin names, into `target/tools`. `scripts/relay.ps1` runs it.
 
@@ -54,7 +55,8 @@ pub fn release_config(root: &Path) -> anyhow::Result<()> {
     }
     let token = new_token()?;
     let text = format!(
-        r#"# Couch Co-App's release configuration. Read by scripts/build-installer.ps1.
+        r#"# Couch Co-App's release configuration. Read by scripts/build-installer.ps1
+# and scripts/build-appimage.sh.
 # Private: it lives outside the repository on purpose. Back it up in a
 # password manager. The layout is explained in deploy/release.example.toml.
 

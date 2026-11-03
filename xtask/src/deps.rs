@@ -422,7 +422,7 @@ pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
 
 /// Puts `LICENSE` and the notices (`cargo xtask notices`) next to the built
 /// app, where the installer and Settings → About find them.
-fn stage_notices(root: &Path, target: &Path) -> anyhow::Result<()> {
+pub fn stage_notices(root: &Path, target: &Path) -> anyhow::Result<()> {
     let notices = crate::notices::output(root);
     for profile in ["debug", "release"] {
         let dir = target.join(profile);

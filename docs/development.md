@@ -1,6 +1,6 @@
 # Developing Couch Co-App
 
-How to set up a Windows PC to build, run and test the app, and Linux to build and test it. If you only want an installer and a relay for your friends, [self-hosting.md](self-hosting.md) is the shorter path. [CLAUDE.md](../CLAUDE.md) has the full command list and the rules that aren't obvious from the code; [architecture.md](architecture.md) explains how the pieces fit.
+How to set up a Windows PC to build, run and test the app, and Linux to build, test and watch with it. If you only want an installer and a relay for your friends, [self-hosting.md](self-hosting.md) is the shorter path. [CLAUDE.md](../CLAUDE.md) has the full command list and the rules that aren't obvious from the code; [architecture.md](architecture.md) explains how the pieces fit.
 
 ## Setup (Windows 11)
 
@@ -35,7 +35,7 @@ The app's Settings → Drivers installs either.
 
 ## Setup (Linux)
 
-Linux builds and passes the tests (M16a, [ADR 0011](adr/0011-linux.md)), but nothing streams there yet: the Linux viewer is M16b. Ubuntu 24.04, also in WSL:
+Linux builds, passes the tests, and watches and plays a Windows host's sessions (M16a and M16b, [ADR 0011](adr/0011-linux.md)); it can't host yet. Ubuntu 24.04, also in WSL:
 
 1. **The system packages,** once: `sudo bash scripts/linux-deps.sh`.
 2. **Rust:** `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then the repository's `rust-toolchain.toml` picks the version. **Node.js 24** (Ubuntu's own is too old for Vite), e.g. from NodeSource.
@@ -44,14 +44,15 @@ Linux builds and passes the tests (M16a, [ADR 0011](adr/0011-linux.md)), but not
    ```bash
    . scripts/dev.sh
    ```
-5. **Fetch and stage FFmpeg** (SDL3 is built from source on Linux, at the same version):
+5. **Fetch and stage FFmpeg and the stream window's icon font** (SDL3 is built from source on Linux, at the same version), and install the front end's packages:
    ```bash
    cargo xtask fetch-deps
    cargo xtask stage-dlls
+   (cd apps/desktop && npm install)
    ```
 6. **Build and test** with the same commands as on Windows (below). Only `probe`, `host` and `view` exist in `couch-cli` there.
 
-A workflow (`.github/workflows/linux.yml`) runs clippy, the tests and the front end's checks on Linux for every pull request.
+A workflow (`.github/workflows/linux.yml`) runs clippy, the tests and the front end's checks on Linux for every pull request. The AppImage for other Linux PCs: [self-hosting.md](self-hosting.md#4-an-appimage-for-friends-on-linux).
 
 ## Running each part
 
