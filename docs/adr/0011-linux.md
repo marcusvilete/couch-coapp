@@ -43,7 +43,7 @@ That last point is what one of our safety rules (keyboard and mouse only while t
 
 - **M16a, builds and tests on Linux:** the workspace builds, passes clippy and its tests on Ubuntu 24.04, in WSL and in a CI workflow on every pull request. Nothing streams yet. It finds the Windows assumptions hidden in the build and the tests.
 - **M16b, the Linux viewer:** a Linux PC or a Steam Deck joins rooms, watches a Windows host, plays with its controllers, keyboard and mouse, and can be a remote-play device (M25, the device's side). Packaged as an AppImage.
-- **M16c, the Linux host:** later, with its own design step first (below). Not decided here.
+- **M16c, the Linux host:** later, with its own design step first (below). Not decided here: designed in [ADR 0012](0012-linux-host.md).
 
 ### Wayland, on KDE or GNOME
 
