@@ -66,6 +66,7 @@ function sessionEndText(reason: SessionEnd): string | null {
       return "Your session stopped after an error.";
     case "gameExited":
     case "sourceLost":
+    case "nothingShared":
     case "hostStopped":
     case "hostLeftRoom":
     case "hostShutdown":
@@ -82,6 +83,8 @@ function streamEndText(reason: SessionEnd): string | null {
       return "The window or screen you were streaming went away, so the stream stopped. The session goes on.";
     case "error":
       return "The stream stopped after an error. The session goes on.";
+    case "nothingShared":
+      return "Nothing was chosen in the screen-sharing dialog, so the stream stopped. The session goes on.";
     case "hostStopped":
     case "hostLeftRoom":
     case "hostShutdown":

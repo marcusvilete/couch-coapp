@@ -210,6 +210,9 @@ pub struct StreamOptions {
     /// A CSV of every captured frame and what pacing did with it
     /// (`couch-cli host --pacing-trace`, M9e).
     pub pacing_trace: Option<PathBuf>,
+    /// Started from afar (remote play, M16c): nobody may be at the PC to
+    /// answer a dialog the capture brings up ([`CaptureRequest::unattended`]).
+    pub unattended: bool,
 }
 
 /// The host's own controllers, read on this PC and each played through a
@@ -286,8 +289,13 @@ pub enum HostEvent {
         window: NativeId,
         at: Micros,
     },
-    /// The capture failed: the stream can't go on.
-    CaptureFailed { stream: u32, error: String },
+    /// The capture failed: the stream can't go on. `nothing_shared`: nobody
+    /// chose what to share in the desktop's dialog (M16c).
+    CaptureFailed {
+        stream: u32,
+        error: String,
+        nothing_shared: bool,
+    },
     /// Something worth a line in a log.
     Note(String),
     /// The sound guests hear, after the host's level (P7), four times a
@@ -1376,6 +1384,7 @@ fn start_capture(shared: &Arc<Shared>, stream: &Arc<Stream>) -> Running {
         Err(e) => shared.event(HostEvent::CaptureFailed {
             stream: stream.number,
             error: e.to_string(),
+            nothing_shared: false,
         }),
     }
     if stream.options.audio != AudioChoice::Off {
@@ -1429,6 +1438,7 @@ fn capture_loop(shared: &Shared, stream: &Arc<Stream>, stop: &AtomicBool) {
             fps: options.fps,
             in_memory: in_memory(stream, paced),
             paced,
+            unattended: stream.options.unattended,
         };
         let mut started = shared.backend.capture(&source, request);
         if started.is_err() && restarting {
@@ -1441,6 +1451,7 @@ fn capture_loop(shared: &Shared, stream: &Arc<Stream>, stop: &AtomicBool) {
             Err(e) => {
                 shared.event(HostEvent::CaptureFailed {
                     stream: stream.number,
+                    nothing_shared: matches!(e, MediaError::NothingShared(_)),
                     error: e.to_string(),
                 });
                 return;
@@ -1565,6 +1576,7 @@ fn pace_frames(
             Err(e) => {
                 shared.event(HostEvent::CaptureFailed {
                     stream: stream.number,
+                    nothing_shared: matches!(e, MediaError::NothingShared(_)),
                     error: e.to_string(),
                 });
                 return Next::Stop;

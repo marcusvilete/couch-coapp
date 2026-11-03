@@ -87,7 +87,7 @@ export function RemotePanel(props: {
 
   return (
     <Callout
-      // Windows locked there (M25c): said in the same place, so nothing
+      // Locked there (M25c): said in the same place, so nothing
       // moves.
       tone={remote.locked ? "warn" : "info"}
       icon={remote.locked ? <MonitorX /> : <Router />}

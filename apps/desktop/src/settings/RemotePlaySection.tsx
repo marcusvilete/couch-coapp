@@ -22,9 +22,11 @@ const MIN_PIN = 6;
 type Send = (command: Parameters<typeof request>[0]) => Promise<boolean>;
 
 /** `canHost`: where this PC can't be a home PC (`EngineInfo.homePc`: a system
- * that can't host, M16b, or a Linux host until it keeps itself awake, M16c),
- * only "This device": it runs a PC of yours, never is one. */
-export function RemotePlaySection(props: { canHost: boolean }) {
+ * that can't host, M16b), only "This device": it runs a PC of yours, never is
+ * one. `linux`: a Linux home PC (M16c) has no notification area icon, starts
+ * at sign-in as an AppImage, and streams from afar only what its desktop's
+ * sharing dialog remembers. */
+export function RemotePlaySection(props: { canHost: boolean; linux: boolean }) {
   const [view, setView] = useState<RemotePlayView | null>(null);
   // The notification area icon (M25c): the app's own, beside remote play's.
   const [tray, setTray] = useState(false);
@@ -35,10 +37,13 @@ export function RemotePlaySection(props: { canHost: boolean }) {
     request({ type: "getRemotePlay" }, "remotePlay")
       .then(setView)
       .catch((e) => setError(errorText(e)));
-    request({ type: "getTray" }, "tray")
-      .then((t) => setTray(t.on))
-      .catch((e) => setError(errorText(e)));
-  }, []);
+    // No icon on Linux (M16b): closing the window quits.
+    if (!props.linux) {
+      request({ type: "getTray" }, "tray")
+        .then((t) => setTray(t.on))
+        .catch((e) => setError(errorText(e)));
+    }
+  }, [props.linux]);
 
   const sendTray = async (on: boolean) => {
     setWorking(true);
@@ -81,14 +86,14 @@ export function RemotePlaySection(props: { canHost: boolean }) {
           <p className="settings-lead">
             Play this PC from a laptop of yours when you're away: a device you add here can start sessions on this
             PC, pick what it streams and hand out its seats, once it gives the PIN. Leave Couch Co-App running, and
-            this PC signed in and unlocked: Windows lets nothing in on its lock screen.
+            this PC signed in and unlocked: {props.linux ? "nothing gets past its lock screen." : "Windows lets nothing in on its lock screen."}
           </p>
-          <HomePc view={view} tray={tray} working={working} send={send} sendTray={sendTray} />
+          <HomePc view={view} tray={tray} linux={props.linux} working={working} send={send} sendTray={sendTray} />
         </>
       ) : (
         <p className="settings-lead">
-          Run a Windows PC of yours from here: add this device in that PC's Remote play settings, accept the PC here
-          when it offers itself, then give its PIN to start sessions on it.
+          Run a PC of yours from here: add this device in that PC's Remote play settings, accept the PC here when it
+          offers itself, then give its PIN to start sessions on it.
         </p>
       )}
 
@@ -137,11 +142,12 @@ export function RemotePlaySection(props: { canHost: boolean }) {
 function HomePc(props: {
   view: RemotePlayView;
   tray: boolean;
+  linux: boolean;
   working: boolean;
   send: Send;
   sendTray: (on: boolean) => Promise<void>;
 }) {
-  const { view, tray, working, send, sendTray } = props;
+  const { view, tray, linux, working, send, sendTray } = props;
   return (
     <>
       <Callout tone="warn" icon={<ShieldAlert />} title="Only your own devices">
@@ -184,29 +190,47 @@ function HomePc(props: {
           checked={view.startAtSignIn === true}
           disabled={working || view.startAtSignIn == null}
           onChange={(on) => void send({ type: "setStartAtSignIn", on })}
-          label="Start Couch Co-App when I sign in to Windows"
+          label={linux ? "Start Couch Co-App when I sign in" : "Start Couch Co-App when I sign in to Windows"}
           detail={
             view.startAtSignIn == null
-              ? "Only an installed Couch Co-App can, for its main profile."
+              ? linux
+                ? "Only the Couch Co-App AppImage can, for its main profile."
+                : "Only an installed Couch Co-App can, for its main profile."
               : tray
                 ? "It starts in the notification area, without opening its window."
                 : "It starts with its window open."
           }
         />
-        <Switch
-          checked={tray}
-          disabled={working}
-          onChange={(on) => void sendTray(on)}
-          label="Keep Couch Co-App in the notification area"
-          detail="Closing the window hides it there; Quit in the icon's menu ends the app. Off, closing the window quits."
-        />
+        {!linux && (
+          <Switch
+            checked={tray}
+            disabled={working}
+            onChange={(on) => void sendTray(on)}
+            label="Keep Couch Co-App in the notification area"
+            detail="Closing the window hides it there; Quit in the icon's menu ends the app. Off, closing the window quits."
+          />
+        )}
         <p className="settings-note">
           {view.on
-            ? "While remote play is on, this PC doesn't fall asleep on its own (choosing Sleep, or closing a laptop's lid, still works), and while a device of yours is unlocked, its screen stays on too."
+            ? linux
+              ? "While remote play is on, this PC doesn't fall asleep on its own, and while a device of yours is unlocked, its screen stays on too."
+              : "While remote play is on, this PC doesn't fall asleep on its own (choosing Sleep, or closing a laptop's lid, still works), and while a device of yours is unlocked, its screen stays on too."
             : "With remote play on, this PC doesn't fall asleep on its own."}
           {view.on && !tray && " Closing the window now quits Couch Co-App, and your devices can't reach this PC until it runs again."}
-          {view.on && view.startAtSignIn === false && " After a restart, start Couch Co-App yourself, or turn on Start with Windows."}
+          {view.on &&
+            view.startAtSignIn === false &&
+            (linux
+              ? " After a restart, start Couch Co-App yourself, or turn on starting at sign-in."
+              : " After a restart, start Couch Co-App yourself, or turn on Start with Windows.")}
         </p>
+        {linux && (
+          <p className="settings-note">
+            Your desktop asks what to share in its own dialog, which nobody can answer while you're away. Share a
+            screen here once and let the desktop remember it: streams started from your devices then share it
+            again. Without a remembered choice they are refused, and a dialog that comes up anyway closes after 30
+            seconds.
+          </p>
+        )}
       </div>
 
       <h3 className="settings-subtitle">My devices</h3>

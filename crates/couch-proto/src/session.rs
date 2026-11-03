@@ -205,6 +205,9 @@ pub enum EndReason {
     HostLeftRoom,
     HostShutdown,
     Error,
+    /// Nothing was chosen in the host's screen-sharing dialog (a Linux host,
+    /// M16c): dismissed, or left unanswered when started from afar.
+    NothingShared,
 }
 
 /// Host to each connected member, optional: the session is over.

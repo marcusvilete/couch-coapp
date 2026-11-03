@@ -24,13 +24,14 @@ The wire protocol between room members, and the pipe between the main process an
 - M25b adds desktop control for that device: the `DESKTOP` permission bit, `RemoteOp::Desktop` and `BringToFront`, and the console state's desktop holder and window focus (wire revision 11).
 - M25c tells the device when Windows is locked at its home PC: `RemoteState.locked` (wire revision 12).
 - M16c tells the device what its home PC can host (a Linux PC: controller seats, no keyboard seat or desktop control yet): `RemoteState.capabilities` (wire revision 13).
+- M16c's Linux home PC ends a stream whose screen-sharing dialog got no answer, or was dismissed, with `EndReason::NothingShared` (wire revision 14, viewer IPC v15).
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 13, for what a home PC can host in M16c). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 14, for M16c's `EndReason::NothingShared`). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -415,7 +416,7 @@ A session is a member sharing games with others in the same room, over the room'
 **The directory** (optional messages: a peer that doesn't know sessions only misses them).
 - Starting a session, the host sends `SessionAnnounce` and `SessionStatus` to every member it is connected to, and again to every member whose connection to it becomes current. Titles follow the name rules.
 - `SessionStatus` follows every change of viewers, controller, the control pause or the stream. It may list as many viewers as the room has members; the host's own limit is its business.
-- `SessionEnded` ends it, with the reason: the host ended it, left the room or shut down. Since M19 the game exiting and its window or screen going end only the stream (`SessionStatus.stream`).
+- `SessionEnded` ends it, with the reason: the host ended it, left the room or shut down. Since M19 the game exiting and its window or screen going end only the stream (`SessionStatus.stream`). A Linux host's stream also ends as `NothingShared` when nothing was chosen in its desktop's screen-sharing dialog (M16c): dismissed, or unanswered for 30 s when started from afar.
 - A member forgets a session when its connection to the host goes; the next connection brings the announcement again.
 
 **Watching.**
@@ -553,6 +554,12 @@ M25c: nothing on the wire but `RemoteState.locked`. The rest is the home PC's ow
 - **Awake:** while remote play is on, the home PC holds a power request that keeps the system from sleeping, and while a device is unlocked, the display on too. A display that turns off stops the capture, and Windows may lock then.
 - **Sign-in and the notification area:** two switches of the user's own. An installed app's default profile may start at sign-in. With the notification area icon on, closing the window keeps the app running there (Quit in its menu ends it), and a start at sign-in stays there; off, closing quits, and a start at sign-in opens the window.
 
+**A Linux home PC** (M16c-1 part 5, ADR 0012), the same on the wire:
+- **Locked** is logind's `LockedHint` for the user's graphical session (the user's `Display`, found by user id), which GNOME's and KDE's lock screens set; read off the actor, every 2 s.
+- **Awake:** a logind inhibitor (`sleep`, with `idle` while a device is unlocked) and the desktop's inhibit portal (suspend, with idle), each enough where it is honoured.
+- **Sign-in:** an XDG autostart entry naming the AppImage, for its default profile only; one an older AppImage left, naming a file that's gone, follows the newer one. No notification-area icon: closing the window quits.
+- **Streams from afar** need a choice the desktop remembers (the screen-sharing portal's restore token), since nobody is at the PC to answer its dialog: without one, `RemoteOp::StartStream` is refused, and a dialog that comes up anyway is closed after 30 s, the stream ending as `EndReason::NothingShared`.
+
 ## Close and reset codes
 
 **Connection close** (`couch_proto::control::close_code`):
@@ -605,7 +612,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x87` | viewer to main | Window state (postcard `WindowState`, P11): `{fullscreen, bar, stats}`, at once and whenever any changes, however (its shortcuts, its bar, a `0x0B`). The main process keeps the bar and stats for a window started again after a crash |
 | `0x88` | viewer to main | Controller names (postcard `ControllerNames`, P12): `{controllers: [{slot, name}]}`, every connected controller, just before each `ControllerSlots` input, so a new one reaches the host by name at once. The main process's forwarder keeps each name until its controller goes and tells the host (`ViewerControllers`) |
 
-`IPC_VERSION` (now 14: a request's controller, P13; 13 was P12's controllers' names) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 15: `EndReason::NothingShared` in the HUD's state, M16c; 14 was a request's controller, P13) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the host-keys hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;

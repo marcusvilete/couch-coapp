@@ -173,6 +173,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         upload_bps: args.upload_mbps.map(mbps),
         audio: args.audio,
         pacing_trace: args.pacing_trace.clone(),
+        unattended: false,
     };
     stream.set_sound_level(args.audio_level);
     let mut current = stream.start_stream(stream_options.clone()).await;
@@ -369,7 +370,7 @@ fn on_event(
             println!("{secs:8.3}s  the game opened a new window; capturing that one");
             event_line("followed", at.0);
         }
-        HostEvent::CaptureFailed { stream, error } if stream == current => {
+        HostEvent::CaptureFailed { stream, error, .. } if stream == current => {
             return Some(Err(anyhow::anyhow!("capture failed: {error}")));
         }
         HostEvent::SourceClosed { .. }

@@ -30,6 +30,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 use couch_input::{
@@ -115,7 +116,15 @@ pub struct CaptureRequest {
     /// in memory still captures on the GPU, paced, and reads back only the
     /// frames sent.)
     pub paced: bool,
+    /// Nobody may be at the PC (a stream started from afar): a dialog the
+    /// capture brings up is given up after [`UNANSWERED_AFTER`] (M16c).
+    pub unattended: bool,
 }
+
+/// How long a capture started from afar waits for its dialog to be
+/// answered at the PC (the screen-sharing portal's, M16c) before nothing
+/// counts as shared.
+pub const UNANSWERED_AFTER: Duration = Duration::from_secs(30);
 
 /// Which sound a host streams (`couch-cli host --audio`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -321,8 +330,8 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Whether this PC can be a home PC that one of the user's devices runs
     /// from afar (M25): kept awake, its lock screen read, and a stream
-    /// started without anyone at it. Windows; Linux once it does those
-    /// (M16c-1's fifth part).
+    /// started without anyone at it. Windows, and Linux since M16c-1's
+    /// fifth part.
     fn home_pc(&self) -> bool {
         false
     }
@@ -334,6 +343,13 @@ pub trait Backend: Send + Sync + 'static {
     /// stream, not over the game when a guest arrives.
     fn captures_without_viewers(&self) -> bool {
         false
+    }
+
+    /// Whether a capture of `source` can start with nobody at the PC: on
+    /// Linux only a remembered choice skips the screen-sharing dialog
+    /// (M16c), so a stream started from afar needs one.
+    fn shares_unattended(&self, _source: &Source) -> bool {
+        true
     }
 
     /// Whether the host picks its stream's sound by program (Linux, M16c:
@@ -388,8 +404,8 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
-    /// Whether Windows shows the lock screen (or a UAC prompt) rather than
-    /// the user's desktop (M25c).
+    /// Whether the lock screen (on Windows, or a UAC prompt) shows rather
+    /// than the user's desktop (M25c). Returns at once.
     fn screen_locked(&self) -> bool {
         false
     }
@@ -403,6 +419,11 @@ pub trait Backend: Send + Sync + 'static {
     fn set_start_at_sign_in(&self, _on: bool) -> Result<(), String> {
         Err("not on this system".into())
     }
+
+    /// At start, where this app may start at sign-in: keeps a start at
+    /// sign-in the user turned on pointing at this app (Linux: a newer
+    /// AppImage replacing the one named, M16c).
+    fn keep_start_at_sign_in(&self) {}
 
     /// At start, before any input: lets go of keys and buttons a host on
     /// this machine left held when it crashed or was killed, shows games any
@@ -457,9 +478,12 @@ pub trait Backend: Send + Sync + 'static {
     /// physical presses count, never injected ones; Linux's portal can't
     /// tell them apart, safe only without a keyboard seat (ADR 0012).
     /// `on_event` runs on the hook's own thread and must return at once.
+    /// `unattended` (a session started from afar): a dialog binding them
+    /// brings up is given up after [`UNANSWERED_AFTER`], the keys lost.
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
+        unattended: bool,
         on_event: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError>;
 }
@@ -565,6 +589,7 @@ impl Backend for ViewerOnly {
     fn host_keys(
         &self,
         _: &[(HidUsage, Shortcut)],
+        _: bool,
         _: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError> {
         Err(unsupported())

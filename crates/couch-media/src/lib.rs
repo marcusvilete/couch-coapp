@@ -25,4 +25,8 @@ pub enum MediaError {
     Backend(String),
     #[error("closed")]
     Closed,
+    /// Nothing was chosen to capture: the desktop's dialog was dismissed, or
+    /// nobody answered it in time (a Linux host, M16c).
+    #[error("{0}")]
+    NothingShared(String),
 }

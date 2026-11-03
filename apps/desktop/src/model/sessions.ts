@@ -102,6 +102,8 @@ export function idleText(host: string, stream: StreamStateView): string | null {
           return "The window or screen being streamed went away; nothing is streamed now.";
         case "error":
           return "The stream stopped after an error; nothing is streamed now.";
+        case "nothingShared":
+          return "Nothing was chosen to share; nothing is streamed now.";
         default:
           return `${host} stopped streaming for now.`;
       }
@@ -119,6 +121,8 @@ export function hostIdleText(stream: StreamStateView): string {
           return "The window or screen you were streaming went away, so the stream stopped.";
         case "error":
           return "The stream stopped after an error.";
+        case "nothingShared":
+          return "Nothing was chosen in the PC's screen-sharing dialog, so the stream stopped. Started from afar, a stream shares only what the desktop remembers: share a screen at the PC once.";
         default:
           return "Nothing is streamed now.";
       }

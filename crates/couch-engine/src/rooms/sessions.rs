@@ -69,6 +69,9 @@ struct Hosting {
     /// `None` until the session has started: plugging in the pads takes a
     /// while, and nobody hears of the session before.
     pipeline: Option<HostPipeline>,
+    /// Started by a device of ours (remote play): nobody may be at this PC
+    /// to answer a dialog binding the host's keys brings up (M16c).
+    from_afar: bool,
     /// The stream running in the session, if any (M19), or `Starting`.
     stream: Option<OurStream>,
     /// Stream starts asked for so far, to tell their answers apart.
@@ -224,6 +227,8 @@ pub(super) struct StartSession {
     pub max_viewers: u8,
     pub input: InputSetup,
     pub controllers: Vec<HostController>,
+    /// A device of ours asked (remote play): nobody may be at this PC.
+    pub from_afar: bool,
 }
 
 /// [`Command::StartStream`]'s fields.
@@ -234,6 +239,8 @@ pub(super) struct StartStream {
     pub max_mbps: u32,
     pub upload_mbps: Option<u32>,
     pub program: Option<String>,
+    /// A device of ours asked (remote play): nobody may be at this PC.
+    pub from_afar: bool,
 }
 
 /// The longest stream name the host's panel shows.
@@ -249,6 +256,7 @@ fn end_reason(reason: EndReason) -> SessionEnd {
         EndReason::HostLeftRoom => SessionEnd::HostLeftRoom,
         EndReason::HostShutdown => SessionEnd::HostShutdown,
         EndReason::Error => SessionEnd::Error,
+        EndReason::NothingShared => SessionEnd::NothingShared,
     }
 }
 
@@ -1147,6 +1155,7 @@ impl Actor {
         let seats = start.input.seats();
         // Our controllers play through seats only on seats with a pad, one
         // each: any beyond those stay out.
+        let from_afar = start.from_afar;
         let mut controllers = start.controllers;
         controllers.truncate(seats.iter().filter(|s| s.has_pad()).count());
         let config = SessionConfig {
@@ -1178,6 +1187,7 @@ impl Actor {
             room,
             session: host_session,
             pipeline: None,
+            from_afar,
             stream: None,
             stream_requests: 0,
             early_ends: Vec::new(),
@@ -1260,10 +1270,11 @@ impl Actor {
             .map(|&s| (shortcuts.binding(s).key, s))
             .collect();
         let on_press = std::sync::Arc::new(on_press);
+        let unattended = h.from_afar;
         let hook = |keys: &[(HidUsage, Shortcut)]| {
             let on_press = on_press.clone();
             self.backend
-                .host_keys(keys, Box::new(move |key| on_press(key)))
+                .host_keys(keys, unattended, Box::new(move |key| on_press(key)))
         };
         let panic = shortcuts.binding(Shortcut::Panic);
         // A session nobody plays (M24) has nothing to take back or answer:
@@ -1450,6 +1461,14 @@ impl Actor {
             }
             SourceChoice::Screen { id } => Source::Screen(id.parse().map_err(|_| gone)?),
         };
+        // From afar, a dialog at this PC would wait on nobody (M16c).
+        if start.from_afar && !self.backend.shares_unattended(&source) {
+            return Err(EngineError::Refused(
+                "your PC asks what to share in its own dialog, and nobody is there to \
+                 answer: share once at the PC (a screen is remembered best), then stream \
+                 from here",
+            ));
+        }
         let audio = match start.program.as_deref().map(str::trim) {
             None => AudioChoice::Auto,
             Some(_) if !self.backend.picks_sound() => {
@@ -1497,6 +1516,7 @@ impl Actor {
             upload_bps: start.upload_mbps.map(mbps),
             audio,
             pacing_trace: None,
+            unattended: start.from_afar,
         };
         let mut name = start.name.trim().to_string();
         if name.len() > MAX_STREAM_NAME {
@@ -1797,9 +1817,19 @@ impl Actor {
             HostEvent::SourceFollowed { .. } => {
                 tracing::info!("the game opened a new window; streaming that one");
             }
-            HostEvent::CaptureFailed { stream, error } => {
-                tracing::error!("capture failed: {error}");
-                self.end_stream_on_its_own(stream, EndReason::Error, now);
+            HostEvent::CaptureFailed {
+                stream,
+                error,
+                nothing_shared,
+            } => {
+                let reason = if nothing_shared {
+                    tracing::info!("nothing shared: {error}");
+                    EndReason::NothingShared
+                } else {
+                    tracing::error!("capture failed: {error}");
+                    EndReason::Error
+                };
+                self.end_stream_on_its_own(stream, reason, now);
             }
             HostEvent::PadsSettingUp { seats, since } => {
                 if let Some(h) = self.hosting_mut() {

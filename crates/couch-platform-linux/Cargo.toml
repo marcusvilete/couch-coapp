@@ -18,7 +18,7 @@ evdev.workspace = true
 futures-util.workspace = true
 pipewire.workspace = true
 tokio.workspace = true
-rustix = { workspace = true, features = ["time", "stdio", "event"] }
+rustix = { workspace = true, features = ["time", "stdio", "event", "process"] }
 tracing.workspace = true
 
 [lints]

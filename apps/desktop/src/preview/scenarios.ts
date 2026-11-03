@@ -693,6 +693,28 @@ export const SCENARIOS: Record<string, Scenario> = {
         },
       }),
   },
+  "linux-home-pc": {
+    title: "Linux: remote play at the home PC, an AppImage starting at sign-in (M16c)",
+    world: () => {
+      const laptop = member(LAPTOP, "Ana's laptop", "relay");
+      const world = base([sofa({ members: [you(true), laptop, bia, caio] })], {
+        info: {
+          ...base([]).info,
+          platform: "linux",
+          capabilities: { sessions: true, keyboardSeat: false, desktopControl: false },
+          homePc: true,
+          dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+        },
+      });
+      Object.assign(world.remotePlay, {
+        on: true,
+        pinSet: true,
+        devices: [{ id: LAPTOP, name: "Ana's laptop", code: "7B31 E05C", online: true }],
+        startAtSignIn: true,
+      });
+      return world;
+    },
+  },
   "release-build": {
     title: "A release build (restarts itself)",
     release: true,

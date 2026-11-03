@@ -90,11 +90,11 @@ export function desktopBlocked(session: SessionView): string | null {
   return null;
 }
 
-/** What we say of one of our PCs, unlocked, whose Windows shows its lock
- * screen (M25c), under a title naming it: nothing gets in until someone
- * unlocks it there. */
+/** What we say of one of our PCs, unlocked, that shows its lock screen
+ * (M25c; Windows or Linux, M16c), under a title naming it: nothing gets in
+ * until someone unlocks it there. */
 export function lockedText(): string {
-  return "Windows there lets nothing in until someone unlocks it at the PC, so what you see may be black or frozen. A UAC prompt there looks the same.";
+  return "Its lock screen lets nothing in until someone unlocks it at the PC, so what you see may be black or frozen. On Windows, a UAC prompt there looks the same.";
 }
 
 /** "45 s", "3 min": how long until a PIN may be tried. */
