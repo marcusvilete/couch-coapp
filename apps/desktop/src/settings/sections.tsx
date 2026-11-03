@@ -49,7 +49,8 @@ export function AppearanceSection(props: { theme: ThemeChoice; onTheme: (theme: 
 
 // ---- Overlay ----
 
-export function OverlaySection() {
+/** `linux`: notifications stand in for the overlay there (M16c). */
+export function OverlaySection(props: { linux: boolean }) {
   const [settings, setSettings] = useState<OverlaySettings>(overlaySettings);
   const change = (next: OverlaySettings) => {
     setSettings(next);
@@ -58,15 +59,15 @@ export function OverlaySection() {
   return (
     <div className="settings-section">
       <p className="settings-lead">
-        While you stream, requests for a seat and what happens in the session show in a corner over your game. You
-        answer the oldest request with its keys (Shortcuts), without leaving the game. The overlay never takes the
-        focus, clicks go through it, and it never shows in your stream.
+        {props.linux
+          ? "While you stream, requests for a seat and what happens in the session show as your desktop's notifications, which never take the focus from your game. You answer the oldest request with its keys (Shortcuts), or in the app."
+          : "While you stream, requests for a seat and what happens in the session show in a corner over your game. You answer the oldest request with its keys (Shortcuts), without leaving the game. The overlay never takes the focus, clicks go through it, and it never shows in your stream."}
       </p>
       <div className="settings-card">
         <Switch
           checked={settings.show}
           onChange={(show) => change({ ...settings, show })}
-          label="Show requests and events over the game"
+          label={props.linux ? "Show requests and events as notifications" : "Show requests and events over the game"}
         />
         <Switch
           checked={settings.sound}
@@ -75,9 +76,9 @@ export function OverlaySection() {
         />
       </div>
       <p className="settings-note">
-        Games in true exclusive full screen draw over everything, so the overlay can't show there; the sound and the
-        keys still work. While a game running as administrator is in front, the keys don't reach Couch Co-App: answer
-        in the app.
+        {props.linux
+          ? "Guests never hear the sound: Couch Co-App's own sounds are left out of your stream. Your desktop may hide notifications while a game is in full screen, or while Do Not Disturb is on; the sound and the keys still work. When you share a whole screen, guests see the notifications too."
+          : "Games in true exclusive full screen draw over everything, so the overlay can't show there; the sound and the keys still work. While a game running as administrator is in front, the keys don't reach Couch Co-App: answer in the app."}
       </p>
     </div>
   );

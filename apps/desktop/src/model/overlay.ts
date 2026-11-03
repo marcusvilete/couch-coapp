@@ -2,6 +2,7 @@
 // short notes about the session, worked out by comparing one view of the
 // host's session with the next. Sent from the main window to the overlay.
 
+import type { NoticeView } from "../bindings/NoticeView";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { nameOf, seatPhrase } from "./sessions";
@@ -22,6 +23,32 @@ export type Toast =
   /** Desktop control (M25b): stays while it lasts, whatever the overlay
    * setting, so whoever is at this PC sees it. */
   | { kind: "banner"; id: string; text: string; panic: string | null };
+
+/** The toasts as desktop notifications, where they stand in for the overlay
+ * (a Linux host, M16c): requests and the banner stay until they go, notes
+ * go by themselves. The same words as the overlay's. */
+export function noticesOf(toasts: Toast[]): NoticeView[] {
+  return toasts.map((t): NoticeView => {
+    switch (t.kind) {
+      case "request":
+        return {
+          id: t.id,
+          title: t.text,
+          body:
+            t.first && t.accept && t.decline
+              ? `${t.accept} accepts · ${t.decline} declines`
+              : t.first
+                ? "Answer in Couch Co-App"
+                : "Waiting",
+          lasting: true,
+        };
+      case "banner":
+        return { id: t.id, title: t.text, body: t.panic ? `${t.panic} ends it` : "End it in the app", lasting: true };
+      case "event":
+        return { id: t.id, title: t.text, body: "", lasting: false };
+    }
+  });
+}
 
 /** The banner while a device of ours controls this PC's desktop. */
 export function desktopBanner(room: RoomView, s: SessionView): Toast[] {

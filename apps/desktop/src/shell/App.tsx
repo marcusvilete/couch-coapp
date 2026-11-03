@@ -72,11 +72,10 @@ export default function App() {
   const drawerMode = useNarrow(1180);
   const members = useRun(lobby.notify, lobby.putRoom);
   // A Linux host (M16c): the desktop shares the picture through its dialog,
-  // and no window of ours goes over the game (desktop notifications come
-  // later).
+  // and no window of ours goes over the game: desktop notifications instead.
   const linux = lobby.info?.platform === "linux";
   // While we stream: requests and session notes over the game.
-  useOverlay(rooms, !linux);
+  useOverlay(rooms, linux ? "notices" : "overlay");
 
   useEffect(() => {
     if (room) writeStored(KEYS.selectedRoom, room.id);
@@ -413,7 +412,6 @@ export default function App() {
               ? (dialogRoom.members.find((m) => m.id === dialog.remote)?.remote?.capabilities?.keyboardSeat ?? true)
               : (lobby.info?.capabilities.keyboardSeat ?? true)
           }
-          chime={dialog.remote != null || !linux}
           onClose={close}
           onStarted={(started) => {
             lobby.putRoom(started);

@@ -8,8 +8,16 @@ import type { SessionView } from "../bindings/SessionView";
 import type { SourceList } from "../bindings/SourceList";
 import { errorText, request } from "../engine";
 import { viaRemote, type RemoteTarget } from "../model/remote";
-import { allowsKbm, FRAME_RATES, QUALITIES, uploadLimit, uploadLimitOk } from "../model/sessions";
-import { KEYS, storedNumber, writeStored } from "../state/storage";
+import {
+  allowsKbm,
+  EVERYTHING,
+  FRAME_RATES,
+  QUALITIES,
+  soundChoices,
+  uploadLimit,
+  uploadLimitOk,
+} from "../model/sessions";
+import { KEYS, readStored, storedNumber, writeStored } from "../state/storage";
 import { Button, IconButton } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { Segmented, Select, TabPanel, Tabs } from "../ui/Controls";
@@ -51,12 +59,26 @@ export function StreamPicker(props: {
   const [limitUpload, setLimitUpload] = useState(false);
   const [upload, setUpload] = useState("50");
   const [error, setError] = useState<string | null>(null);
+  // A Linux host's sound (M16c): `""` for everything but us, or a program.
+  const [sound, setSound] = useState(() => readStored(KEYS.streamSound) ?? "");
+  const [programs, setPrograms] = useState<string[] | null>(null);
+  const [programsError, setProgramsError] = useState<string | null>(null);
 
+  const loadPrograms = () => {
+    setProgramsError(null);
+    request({ type: "listSoundSources" }, "soundSources")
+      .then((r) => setPrograms(r.programs))
+      .catch((e) => {
+        setPrograms([]);
+        setProgramsError(errorText(e));
+      });
+  };
   const load = () => {
     setLoadError(null);
     request(viaRemote(props.remote, { type: "listSources" }), "sources")
       .then(setSources)
       .catch((e) => setLoadError(errorText(e)));
+    if (props.shared) loadPrograms();
   };
   useEffect(load, []);
   // Its one source, picked at once.
@@ -99,6 +121,7 @@ export function StreamPicker(props: {
     setError(null);
     writeStored(KEYS.streamFps, String(fps));
     writeStored(KEYS.streamQuality, String(quality));
+    if (props.shared) writeStored(KEYS.streamSound, sound);
     rememberStream(picked.title, pickedElevated);
     const started = await run("stream", {
       type: "startStream",
@@ -107,6 +130,7 @@ export function StreamPicker(props: {
       fps,
       max_mbps: quality,
       upload_mbps: uploadMbps,
+      program: props.shared && sound !== "" ? sound : null,
     });
     if (started) props.onClose();
   }
@@ -116,7 +140,11 @@ export function StreamPicker(props: {
   return (
     <Dialog
       title={live ? "Stream something else" : "What to stream"}
-      description="A window is best: only the game is shown, and only its sound is sent."
+      description={
+        props.shared
+          ? "Your desktop asks which window or screen; pick here the sound guests hear."
+          : "A window is best: only the game is shown, and only its sound is sent."
+      }
       onClose={props.onClose}
       busy={busy != null}
       size="l"
@@ -187,7 +215,29 @@ export function StreamPicker(props: {
                   </label>
                 </div>
               )}
-              <p className="picker-note">Guests hear everything your PC plays.</p>
+              <Field label="Sound guests hear">
+                {(id) => (
+                  <div className="picker-sound">
+                    <Select
+                      id={id}
+                      value={sound === "" ? EVERYTHING : sound}
+                      onChange={(v) => setSound(v === EVERYTHING ? "" : v)}
+                      options={soundChoices(programs, sound)}
+                      disabled={programs == null}
+                    />
+                    <IconButton label="Refresh what plays" onClick={loadPrograms} variant="secondary">
+                      <RefreshCw />
+                    </IconButton>
+                  </div>
+                )}
+              </Field>
+              {/* Reserved, so nothing below moves when it comes. */}
+              <p className="picker-note selectable">
+                {programsError ??
+                  (sound === ""
+                    ? "Everything your PC plays, except Couch Co-App's own sounds. For one program's alone, start it, then refresh."
+                    : `Only ${sound}'s sound, whenever it plays.`)}
+              </p>
             </div>
           ) : (
             <Tabs

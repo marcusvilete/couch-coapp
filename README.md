@@ -28,7 +28,7 @@ I believe no one wants to contribute to a "vibecoded" repository, but feel free 
 
 ---
 
-**Status:** in development. Windows hosts and watches; Linux (built from source for now) watches and plays a Windows host, and can't host yet.
+**Status:** in development. Windows hosts and watches. Linux watches and plays, and hosts sessions with controller seats on KDE or GNOME (no keyboard-and-mouse seat yet); friends there get an AppImage you build ([self-hosting](docs/self-hosting.md#4-an-appimage-for-friends-on-linux)).
 
 <table align="center">
   <tr>

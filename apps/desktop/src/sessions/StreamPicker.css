@@ -16,6 +16,16 @@
   }
 }
 
+.picker-sound {
+  display: flex;
+  gap: var(--s2);
+
+  & .select {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 .picker-tools {
   display: flex;
   gap: var(--s2);

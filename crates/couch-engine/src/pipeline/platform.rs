@@ -2,7 +2,11 @@
 //! loopback, `SendInput`, ViGEm pads, the host's controller through SDL3 and
 //! HidHide, the panic-key hook, and `couch-viewer` as a child process.
 
-use std::{any::Any, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use couch_codec_ffmpeg::{FfmpegEncoder, encoder::gpu_input_encoder};
 use couch_input::{
@@ -196,7 +200,7 @@ impl Backend for WindowsBackend {
         Ok(Box::new(FfmpegEncoder::open_best(config)?))
     }
 
-    fn audio(&self, kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
+    fn audio(&self, kind: AudioKind, _: &AtomicBool) -> Result<Box<dyn AudioSource>, MediaError> {
         Ok(match kind {
             AudioKind::Game(window) => {
                 let pid = foreground::window_process(WindowId(window))
@@ -211,6 +215,12 @@ impl Backend for WindowsBackend {
                 ))?)
             }
             AudioKind::Tone => Box::new(ToneSource::new(Arc::new(QpcClock))),
+            // The window's own sound instead (`picks_sound`).
+            AudioKind::Program(_) => {
+                return Err(MediaError::Unsupported(
+                    "a program's sound by name on Windows".into(),
+                ));
+            }
         })
     }
 

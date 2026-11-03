@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { desktopBanner, sessionEvents } from "./overlay";
+import { desktopBanner, noticesOf, sessionEvents } from "./overlay";
 
 const names: Record<string, string> = { a: "Ana", b: "Bia" };
 const name = (m: string) => names[m] ?? "someone";
@@ -105,5 +105,27 @@ describe("the desktop control banner (M25b)", () => {
         panic: "Ctrl+Alt+Shift+Backspace",
       },
     ]);
+  });
+});
+
+describe("noticesOf (a Linux host's notifications, M16c)", () => {
+  it("keeps requests and the banner up, and lets notes go", () => {
+    const notices = noticesOf([
+      { kind: "request", id: "request:b:1", text: "Bia asks for Controller 2", accept: "F11", decline: "F12", first: true },
+      { kind: "request", id: "request:a:0", text: "Ana asks for Controller 1", accept: "F11", decline: "F12", first: false },
+      { kind: "event", id: "event:1", text: "Ana started watching" },
+      { kind: "banner", id: "desktop:a", text: "Ana is controlling this PC", panic: null },
+    ]);
+    expect(notices).toEqual([
+      { id: "request:b:1", title: "Bia asks for Controller 2", body: "F11 accepts · F12 declines", lasting: true },
+      { id: "request:a:0", title: "Ana asks for Controller 1", body: "Waiting", lasting: true },
+      { id: "event:1", title: "Ana started watching", body: "", lasting: false },
+      { id: "desktop:a", title: "Ana is controlling this PC", body: "End it in the app", lasting: true },
+    ]);
+  });
+
+  it("sends to the app when no keys answer", () => {
+    const [n] = noticesOf([{ kind: "request", id: "r", text: "Bia asks", accept: null, decline: null, first: true }]);
+    expect(n.body).toBe("Answer in Couch Co-App");
   });
 });

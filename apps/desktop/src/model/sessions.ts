@@ -149,6 +149,30 @@ export function uploadLimitOk(mbps: number | null): boolean {
   return mbps == null || (mbps >= 2 && mbps <= 10000);
 }
 
+/** The choice of everything but the app, among program names: a menu's
+ * values can't be empty, and no program's name holds a NUL. */
+export const EVERYTHING = "\u0000";
+
+/** A Linux host's sound choices (M16c): everything but the app
+ * (`EVERYTHING`), or one program playing now (`programs`, `null` while
+ * unknown). The program picked before (`remembered`, `""` for everything)
+ * stays a choice while it isn't playing, so it can be kept. */
+export function soundChoices(
+  programs: string[] | null,
+  remembered: string,
+): { value: string; label: string; detail?: string }[] {
+  const choices: { value: string; label: string; detail?: string }[] = [
+    { value: EVERYTHING, label: "Everything but Couch Co-App" },
+  ];
+  for (const p of programs ?? []) {
+    if (p !== "" && p !== EVERYTHING) choices.push({ value: p, label: p });
+  }
+  if (remembered !== "" && !choices.some((c) => c.value === remembered)) {
+    choices.push({ value: remembered, label: remembered, detail: programs ? "not playing now" : undefined });
+  }
+  return choices;
+}
+
 // ---- The host's own controllers (M22, M23) ----
 
 /** A controller's model: its ids, and for a remapper's pad (M22), which has

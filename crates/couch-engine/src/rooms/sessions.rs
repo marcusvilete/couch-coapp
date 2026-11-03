@@ -233,10 +233,13 @@ pub(super) struct StartStream {
     pub fps: u32,
     pub max_mbps: u32,
     pub upload_mbps: Option<u32>,
+    pub program: Option<String>,
 }
 
 /// The longest stream name the host's panel shows.
 const MAX_STREAM_NAME: usize = 200;
+/// The longest program name a stream's sound is picked by (M16c).
+const MAX_PROGRAM_NAME: usize = 200;
 
 fn end_reason(reason: EndReason) -> SessionEnd {
     match reason {
@@ -1447,6 +1450,18 @@ impl Actor {
             }
             SourceChoice::Screen { id } => Source::Screen(id.parse().map_err(|_| gone)?),
         };
+        let audio = match start.program.as_deref().map(str::trim) {
+            None => AudioChoice::Auto,
+            Some(_) if !self.backend.picks_sound() => {
+                return Err(EngineError::Refused(
+                    "this PC sends the streamed window's own sound",
+                ));
+            }
+            Some(name) if name.is_empty() || name.len() > MAX_PROGRAM_NAME => {
+                return Err(EngineError::Refused("no such program"));
+            }
+            Some(name) => AudioChoice::Program(name.to_string()),
+        };
         let overlay_area = self.backend.overlay_area(&source);
         // A device of ours runs this session (M25b): a screen with the
         // keyboard seat is for its desktop control. The router gives a
@@ -1480,7 +1495,7 @@ impl Actor {
                 ..defaults
             },
             upload_bps: start.upload_mbps.map(mbps),
-            audio: AudioChoice::Auto,
+            audio,
             pacing_trace: None,
         };
         let mut name = start.name.trim().to_string();

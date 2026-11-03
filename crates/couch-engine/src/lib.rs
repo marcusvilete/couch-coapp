@@ -240,6 +240,21 @@ pub enum Command {
         max_mbps: u32,
         /// This PC's upload cap, split between viewers, Mbit/s.
         upload_mbps: Option<u32>,
+        /// One program's sound alone, by its name from
+        /// [`Command::ListSoundSources`], where the host picks the sound
+        /// (Linux, M16c). `None`: a window's own sound on Windows, and
+        /// everything but this app for a screen, or on Linux.
+        #[serde(default)]
+        program: Option<String>,
+    },
+    /// What plays sound on this PC now, for [`Command::StartStream`]'s
+    /// `program`; refused where the sound follows the window (Windows).
+    ListSoundSources,
+    /// The host's notices that should be up as desktop notifications, where
+    /// they stand in for the overlay (Linux, M16c): each new one shown, each
+    /// changed one replaced, the rest closed. Refused elsewhere.
+    ShowNotices {
+        notices: Vec<NoticeView>,
     },
     /// In our session: stops streaming; viewers stay, and keep their seats.
     StopStream,
@@ -678,6 +693,34 @@ pub struct NetworkView {
 pub enum SourceChoice {
     Window { id: String },
     Screen { id: String },
+}
+
+/// One of the host's notices, for [`Command::ShowNotices`] (M16c).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NoticeView {
+    /// Stable while it is up: the same id with new text replaces it.
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    /// Stays until closed (a request waiting for an answer).
+    pub lasting: bool,
+}
+
+/// The most notices up at once, and the longest text of one, in bytes.
+const MAX_NOTICES: usize = 16;
+const MAX_NOTICE_TEXT: usize = 500;
+
+/// Cuts `text` to at most `max` bytes, at a character's edge.
+fn clip(text: &mut String, max: usize) {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -1171,6 +1214,10 @@ pub enum Response {
         link: Option<String>,
     },
     Sources(SourceList),
+    /// The programs playing sound now, by name (M16c), sorted.
+    SoundSources {
+        programs: Vec<String>,
+    },
     Shortcuts {
         shortcuts: Vec<ShortcutView>,
     },
@@ -1326,6 +1373,11 @@ impl fmt::Debug for Command {
                 .field("driver", driver)
                 .finish(),
             Self::ListSources => f.write_str("ListSources"),
+            Self::ListSoundSources => f.write_str("ListSoundSources"),
+            Self::ShowNotices { notices } => f
+                .debug_struct("ShowNotices")
+                .field("notices", &notices.len())
+                .finish(),
             Self::StartSession {
                 room,
                 max_viewers,
@@ -1480,6 +1532,10 @@ impl fmt::Debug for Response {
                 .field("windows", &list.windows.len())
                 .field("screens", &list.screens.len())
                 .finish(),
+            Self::SoundSources { programs } => f
+                .debug_struct("SoundSources")
+                .field("programs", &programs.len())
+                .finish(),
             Self::Shortcuts { shortcuts } => f
                 .debug_struct("Shortcuts")
                 .field("shortcuts", &shortcuts.len())
@@ -1533,9 +1589,9 @@ pub struct EngineInfo {
 }
 
 /// What a system can host (M16c, ADR 0012): Windows everything; Linux
-/// nothing until M16c-1 turns on sessions, then controller seats without a
-/// keyboard-and-mouse seat or desktop control; elsewhere nothing. Each is
-/// refused before anything is set up or announced, whatever the UI shows.
+/// sessions since M16c-1, with controller seats only (no keyboard-and-mouse
+/// seat, no desktop control); elsewhere nothing. Each is refused before
+/// anything is set up or announced, whatever the UI shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -2513,6 +2569,36 @@ impl Engine {
                     virtual_pads,
                 }))
             }
+            Command::ListSoundSources => {
+                if !self.backend.picks_sound() {
+                    return Err(EngineError::Refused(
+                        "this PC sends the streamed window's own sound",
+                    ));
+                }
+                let backend = self.backend.clone();
+                let programs = tokio::task::spawn_blocking(move || backend.sound_programs())
+                    .await
+                    .map_err(|_| EngineError::Stopped)?
+                    .map_err(|e| EngineError::Media(e.to_string()))?;
+                Ok(Response::SoundSources { programs })
+            }
+            Command::ShowNotices { mut notices } => {
+                // Cut, never refused: a refusal would leave up what's
+                // already answered. The first are the requests. Each id
+                // once, and whole: two notices on one id would leave one
+                // that can't be closed.
+                let mut ids = std::collections::HashSet::new();
+                notices.retain(|n| n.id.len() <= MAX_NOTICE_TEXT && ids.insert(n.id.clone()));
+                notices.truncate(MAX_NOTICES);
+                for n in &mut notices {
+                    clip(&mut n.title, MAX_NOTICE_TEXT);
+                    clip(&mut n.body, MAX_NOTICE_TEXT);
+                }
+                self.backend
+                    .show_notices(notices)
+                    .map_err(|e| EngineError::Media(e.to_string()))?;
+                Ok(Response::Done)
+            }
             Command::GetDrivers => self.drivers().await,
             Command::ExportProfile { passphrase } => self.export_profile(passphrase).await,
             Command::RestoreProfile { passphrase } => self.restore_profile(passphrase).await,
@@ -2562,6 +2648,9 @@ impl Engine {
         if self.actor.send(rooms::Input::Shutdown(done)).await.is_ok() {
             let _ = finished.await;
         }
+        // A request's notification would outlive the session (M16c).
+        let backend = self.backend.clone();
+        let _ = tokio::task::spawn_blocking(move || backend.close_notices()).await;
     }
 
     /// For tests: per member of `room`, whether a connection is up and
@@ -2625,6 +2714,15 @@ mod tests {
     }
 
     #[test]
+    fn notices_are_cut_at_a_characters_edge() {
+        let mut text = "ação".to_string();
+        clip(&mut text, 2);
+        assert_eq!(text, "a");
+        clip(&mut text, 10);
+        assert_eq!(text, "a");
+    }
+
+    #[test]
     fn window_titles_stay_out_of_debug() {
         let shown = format!(
             "{:?}",
@@ -2634,6 +2732,7 @@ mod tests {
                 fps: 60,
                 max_mbps: 20,
                 upload_mbps: None,
+                program: Some("Bank of Somewhere".into()),
             }
         );
         assert!(!shown.contains("Bank"), "{shown}");

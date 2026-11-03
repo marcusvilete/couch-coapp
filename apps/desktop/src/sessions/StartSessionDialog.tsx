@@ -7,7 +7,7 @@ import type { InputSetup } from "../bindings/InputSetup";
 import type { KeyboardMouseSeat } from "../bindings/KeyboardMouseSeat";
 import type { RoomView } from "../bindings/RoomView";
 import type { SourceList } from "../bindings/SourceList";
-import { dropChime, prepareChime } from "../chime";
+import { prepareChime } from "../chime";
 import { errorText, request } from "../engine";
 import { viaRemote, type RemoteTarget } from "../model/remote";
 import { nameOf, numbered, padKeys, padName, padsAdded, togglePad } from "../model/sessions";
@@ -33,10 +33,6 @@ export function StartSessionDialog(props: {
   /** The host (this PC, or the one run from here) offers a keyboard seat:
    * a Linux host has controller seats alone (M16c). */
   keyboardSeat: boolean;
-  /** This PC may play the request chime: not while it hosts on Linux, where
-   * guests would hear it in the stream until the app's own sounds are left
-   * out of it (M16c). */
-  chime: boolean;
 }) {
   const remote = props.remote;
   const pcName = remote ? nameOf(props.room, remote.member) : null;
@@ -95,10 +91,7 @@ export function StartSessionDialog(props: {
   async function submit(e: FormEvent) {
     e.preventDefault();
     // A click: the webview lets the request chime play from now on.
-    // (Not on a Linux host: one made for a session run from here before
-    // would play into this one's stream.)
-    if (props.chime) prepareChime();
-    else dropChime();
+    prepareChime();
     const problem =
       (title.trim() === "" ? "Give the session a title." : null) ??
       (new TextEncoder().encode(title.trim()).length > MAX_NAME_BYTES ? "That title is too long." : null);

@@ -2,21 +2,31 @@
 // from the rooms it already follows, opens the overlay over the game when
 // there is something to show, sends it the list, and closes it when the list
 // empties. The window itself (never focused, closed rather than hidden) is
-// the platform's (`platform/tauri.ts`).
+// the platform's (`platform/tauri.ts`). On a Linux host the same list goes
+// to the desktop's notifications instead (M16c): no window of ours can stay
+// over the game there without taking the focus.
 
 import { useEffect, useRef, useState } from "react";
+import type { NoticeView } from "../bindings/NoticeView";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { desktopBanner, hosted, requestToasts, sessionEvents, type Toast } from "../model/overlay";
+import { desktopBanner, hosted, noticesOf, requestToasts, sessionEvents, type Toast } from "../model/overlay";
 import { platform } from "../platform";
 import { overlaySettings } from "../state/overlaySettings";
 
 /** How long a note stays. */
 const EVENT_MS = 4500;
 
-/** `enabled`: false on a Linux host (M16c), where no window of ours can stay
- * over the game without taking the focus. */
-export function useOverlay(rooms: RoomView[], enabled = true) {
+/** Only a convenience: the console shows the same. */
+function showNotices(notices: NoticeView[]) {
+  void platform()
+    .command({ type: "showNotices", notices })
+    .catch(() => {});
+}
+
+/** `notices`: as desktop notifications, not the overlay (a Linux host,
+ * M16c). Known once the engine's info has come. */
+export function useOverlay(rooms: RoomView[], shown: "overlay" | "notices" = "overlay") {
   const host = hosted(rooms);
   const [events, setEvents] = useState<Toast[]>([]);
   const previous = useRef<SessionView | null>(null);
@@ -71,25 +81,26 @@ export function useOverlay(rooms: RoomView[], enabled = true) {
   // app too: whoever is at this PC must see it.
   const banner = host ? desktopBanner(host.room, host.session) : [];
   const toasts: Toast[] = host ? [...banner, ...requestToasts(host.room, host.session), ...events] : [];
-  const show =
-    enabled &&
-    host != null &&
-    toasts.length > 0 &&
-    (banner.length > 0 || (!appInFront && overlaySettings().show));
+  const show = host != null && toasts.length > 0 && (banner.length > 0 || (!appInFront && overlaySettings().show));
   const area = host?.session.overlayArea ?? null;
 
   // The overlay page asks for the list when it has loaded.
   const latest = useRef(toasts);
   latest.current = toasts;
   useEffect(() => {
+    if (shown === "notices") return;
     const unlisten = platform().overlay.onReady(() => platform().overlay.send(latest.current));
     return () => {
       void unlisten.then((f) => f());
     };
-  }, []);
+  }, [shown]);
 
   const key = JSON.stringify(toasts);
   useEffect(() => {
+    if (shown === "notices") {
+      showNotices(show ? noticesOf(latest.current) : []);
+      return;
+    }
     void platform()
       .overlay.set(show, area)
       .then(() => {
@@ -97,8 +108,16 @@ export function useOverlay(rooms: RoomView[], enabled = true) {
       });
     // `key` stands for the toasts' contents.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [show, key]);
+  }, [show, key, shown]);
 
   // Gone with the app's window, or when this unmounts.
-  useEffect(() => () => void platform().overlay.set(false, null), []);
+  const mode = useRef(shown);
+  mode.current = shown;
+  useEffect(
+    () => () => {
+      if (mode.current === "notices") showNotices([]);
+      else void platform().overlay.set(false, null);
+    },
+    [],
+  );
 }

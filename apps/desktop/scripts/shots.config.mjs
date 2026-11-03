@@ -173,6 +173,25 @@ export const SHOTS = [
     },
   ],
   ["settings-overlay", "lobby", settings("Overlay and sounds")],
+  ["settings-overlay-linux", "linux-host", settings("Overlay and sounds")],
+  // M16c: a Linux host picks the sound, everything but us or one program.
+  [
+    "stream-picker-linux-sound",
+    "linux-host",
+    async (page) => {
+      await click("Start streaming…")(page);
+      await page.getByRole("combobox", { name: "Sound guests hear" }).click();
+    },
+  ],
+  [
+    "stream-picker-linux-program",
+    "linux-host",
+    async (page) => {
+      await click("Start streaming…")(page);
+      await page.getByRole("combobox", { name: "Sound guests hear" }).click();
+      await page.getByRole("option", { name: "Hollow Knight" }).click();
+    },
+  ],
   ["settings-stream-window", "lobby", settings("Stream window")],
   // M25: the home PC's remote play, a laptop trusted; and one set up anew.
   ["settings-remote-home", "remote-home", settings("Remote play")],
@@ -235,7 +254,17 @@ export const STABLE = [
     ],
   ],
   // M16c: a Linux host's picker, its one source, in the same dialog.
-  ["stream picker on Linux", "linux-host", [".dialog"], [["open", click("Start streaming…")]]],
+  [
+    "stream picker on Linux",
+    "linux-host",
+    [".dialog"],
+    [
+      ["open", click("Start streaming…")],
+      // M16c-1's fourth part: one program's sound.
+      ["sound", async (page) => page.getByRole("combobox", { name: "Sound guests hear" }).click()],
+      ["program", async (page) => page.getByRole("option", { name: "Hollow Knight" }).click()],
+    ],
+  ],
   [
     "start dialog",
     "owner-alone",

@@ -1452,6 +1452,8 @@ fn command_for(room: RoomId, op: RemoteOp) -> Option<Command> {
             fps,
             max_mbps,
             upload_mbps,
+            // The home PC's default sound: a device picks none (M16c).
+            program: None,
         },
         RemoteOp::StopStream => Command::StopStream,
         RemoteOp::SetStreamLevel { percent } => Command::SetStreamLevel { percent },
