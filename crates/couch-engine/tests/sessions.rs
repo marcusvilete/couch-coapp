@@ -19,8 +19,8 @@ use couch_engine::{
     RemoteAccessView, RemoteAction, Response, RoomView, SessionEnd, SessionRole, SessionView,
     SourceChoice, StreamStateView, StreamWindowRequest, StreamWindowSettingsView, WatchEnd,
     pipeline::{
-        AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, Source, Sources,
-        ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
+        AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, HostKeyEvent, NativeId,
+        Source, Sources, ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
         virtual_hiding::CHECK_EVERY,
     },
     secrets::Unprotected,
@@ -712,7 +712,7 @@ impl Backend for Fake {
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
-        on_press: Box<dyn Fn(Shortcut) + Send>,
+        on_press: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn std::any::Any + Send>, MediaError> {
         if keys.len() > 1 && self.answer_keys_fail.load(Ordering::SeqCst) {
             return Err(MediaError::Backend("an answer key has no scancode".into()));
@@ -727,7 +727,7 @@ impl Backend for Fake {
     }
 }
 
-type PanicHook = Arc<Mutex<Option<Box<dyn Fn(Shortcut) + Send>>>>;
+type PanicHook = Arc<Mutex<Option<Box<dyn Fn(HostKeyEvent) + Send>>>>;
 
 /// Removes the fake panic-key hook when the engine drops it.
 struct Unhook(PanicHook);
@@ -747,9 +747,15 @@ impl Fake {
 
     /// The host presses one of its keys (the hook reports which).
     fn press_host_key(&self, key: Shortcut) -> bool {
+        self.host_keys_say(HostKeyEvent::Pressed(key))
+    }
+
+    /// The hook reports something (as Linux's portal does after binding);
+    /// `false` if no hook was in place.
+    fn host_keys_say(&self, event: HostKeyEvent) -> bool {
         match &*self.panic_key.lock().unwrap() {
-            Some(on_press) => {
-                on_press(key);
+            Some(on_event) => {
+                on_event(event);
                 true
             }
             None => false,
@@ -1710,6 +1716,51 @@ async fn the_panic_key_never_waits_on_the_answer_keys() {
         s.is_some_and(|s| s.control_paused)
     })
     .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// Keys the desktop binds after the session starts (Linux's portal, M16c):
+/// the console shows the keys the desktop names, and none once the desktop
+/// drops them, with the hook gone; the panic key unbound takes the answer
+/// keys with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_the_desktop_binds_or_drops_reach_the_console() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    assert!(a.fake.host_keys_say(HostKeyEvent::Bound(vec![
+        (Shortcut::Panic, "Ctrl+Alt+Shift+P".into()),
+        (Shortcut::AcceptRequest, "Meta+Y".into()),
+        (Shortcut::DeclineRequest, "Meta+N".into()),
+    ])));
+    a.wait_session(&room, &a, "the desktop's keys", |s| {
+        s.is_some_and(|s| s.panic_key.as_deref() == Some("Ctrl+Alt+Shift+P"))
+    })
+    .await;
+    let view = a.session(&room, &a).await.unwrap();
+    let answer = view.answer_keys.expect("both answer keys bound");
+    assert_eq!(
+        (answer.accept.as_str(), answer.decline.as_str()),
+        ("Meta+Y", "Meta+N")
+    );
+    // Decline left unbound: no answer keys, the panic key stays.
+    assert!(a.fake.host_keys_say(HostKeyEvent::Bound(vec![
+        (Shortcut::Panic, "Ctrl+Alt+Shift+P".into()),
+        (Shortcut::AcceptRequest, "Meta+Y".into()),
+    ])));
+    a.wait_session(&room, &a, "no answer keys", |s| {
+        s.is_some_and(|s| s.answer_keys.is_none() && s.panic_key.is_some())
+    })
+    .await;
+    // The desktop went away: no keys, and the hook dropped.
+    assert!(
+        a.fake
+            .host_keys_say(HostKeyEvent::Lost("the portal went away".into()))
+    );
+    a.wait_session(&room, &a, "no panic key", |s| {
+        s.is_some_and(|s| s.panic_key.is_none() && s.answer_keys.is_none())
+    })
+    .await;
+    assert!(!a.fake.panic_key_hooked());
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

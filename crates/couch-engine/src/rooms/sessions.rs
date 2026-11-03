@@ -35,7 +35,7 @@ use crate::{
     ScreenArea, SeatView, SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView,
     StreamView, StreamWindowView, WatchEnd,
     pipeline::{
-        AudioChoice, Source, ViewerOptions,
+        AudioChoice, HostKeyEvent, Source, ViewerOptions,
         host::{HostOptions, LocalSeat, Rates, StreamControl, StreamOptions},
         watch::{Watch, WatchOptions},
     },
@@ -1211,22 +1211,27 @@ impl Actor {
         *self.panic.lock().unwrap_or_else(PoisonError::into_inner) = Some(stream.panic_handle());
         // The panic key releases straight through the input task, from the
         // hook's own thread, before the actor hears of it. Accept and
-        // Decline go to the actor.
+        // Decline, and what the desktop says of the keys (Linux), go to the
+        // actor.
         let on_press = {
             let handle = stream.panic_handle();
             let inbox = self.inbox.clone();
             let runtime = tokio::runtime::Handle::current();
-            move |key: Shortcut| {
-                let input = match key {
-                    Shortcut::Panic => {
+            move |event: HostKeyEvent| {
+                let input = match event {
+                    HostKeyEvent::Pressed(Shortcut::Panic) => {
                         handle.panic();
                         Input::Panic(Some(session))
                     }
-                    Shortcut::AcceptRequest | Shortcut::DeclineRequest => Input::AnswerFirst {
+                    HostKeyEvent::Pressed(
+                        key @ (Shortcut::AcceptRequest | Shortcut::DeclineRequest),
+                    ) => Input::AnswerFirst {
                         session,
                         accept: key == Shortcut::AcceptRequest,
                     },
-                    _ => return,
+                    HostKeyEvent::Pressed(_) => return,
+                    HostKeyEvent::Bound(keys) => Input::HostKeysBound { session, keys },
+                    HostKeyEvent::Lost(error) => Input::HostKeysLost { session, error },
                 };
                 let inbox = inbox.clone();
                 runtime.spawn(async move {
@@ -1963,6 +1968,63 @@ impl Actor {
         self.apply_session(room, fx, now);
         // Whoever is at the PC stops our devices too: the PIN again (M25).
         self.remote_lock_all(couch_proto::remote::LockReason::Panic, now);
+    }
+
+    /// The desktop bound the host's keys (Linux's portal), as it names them:
+    /// the console shows those. A panic key it didn't bind takes the others
+    /// with it, and the console says there's none.
+    pub(super) fn host_keys_bound(
+        &mut self,
+        session: SessionId,
+        keys: Vec<(Shortcut, String)>,
+        now: Instant,
+    ) {
+        let Some(h) = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| h.session.id() == session && h.panic_key.is_some())
+        else {
+            return;
+        };
+        let named = |shortcut| {
+            keys.iter()
+                .find(|(s, named)| *s == shortcut && !named.trim().is_empty())
+                .map(|(_, named)| named.clone())
+        };
+        match (named(Shortcut::Panic), &mut h.panic_key) {
+            (Some(named), Some((_, shown))) => *shown = named,
+            _ => {
+                tracing::error!("the desktop didn't bind the panic key: none while streaming");
+                h.panic_key = None;
+            }
+        }
+        if h.panic_key.is_none() {
+            h.answer_keys = None;
+        } else if h.answer_keys.is_some() {
+            h.answer_keys = named(Shortcut::AcceptRequest).zip(named(Shortcut::DeclineRequest));
+        }
+        let room = h.room;
+        self.announce(room, now);
+    }
+
+    /// The host's keys don't work after all, or stopped (Linux's portal
+    /// refused them or went away): the console says so, and Take back does
+    /// the panic key's work.
+    pub(super) fn host_keys_lost(&mut self, session: SessionId, error: String, now: Instant) {
+        let Some(h) = self
+            .sessions
+            .hosting
+            .as_mut()
+            .filter(|h| h.session.id() == session && h.panic_key.is_some())
+        else {
+            return;
+        };
+        tracing::error!("no panic key while streaming: {error}");
+        h.panic_key = None;
+        h.answer_keys = None;
+        let room = h.room;
+        self.announce(room, now);
     }
 
     /// The host's Accept or Decline key: answers the oldest request, once

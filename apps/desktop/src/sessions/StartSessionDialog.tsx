@@ -306,8 +306,8 @@ export function StartSessionDialog(props: {
 
         {remote && padSeat && sources && !sources.virtualPads && (
           <Callout tone="warn" compact>
-            ViGEmBus, which makes the virtual controllers, isn't installed on {pcName}: guests' controllers won't reach
-            the game. It can be installed there only, in Settings → Drivers.
+            {pcName} can't make virtual controllers yet (ViGEmBus on Windows): guests' controllers won't reach the
+            game. It's set up there only, in Settings → Drivers.
           </Callout>
         )}
         {padSeat && !remote && (
@@ -387,8 +387,10 @@ export function StartSessionDialog(props: {
             )}
             {sources && !sources.virtualPads && (
               <Callout tone="warn" compact>
-                Guests' controllers won't reach the game: ViGEmBus, which makes the virtual controllers, isn't
-                installed. Install it in Settings → Drivers. Watching, and a keyboard-and-mouse seat, still work.
+                Guests' controllers won't reach the game: virtual controllers aren't set up on this PC (ViGEmBus on
+                Windows). Set them up in Settings → Drivers. Watching
+                {props.keyboardSeat ? ", and a keyboard-and-mouse seat," : ""} still work
+                {props.keyboardSeat ? "" : "s"}.
               </Callout>
             )}
           </section>

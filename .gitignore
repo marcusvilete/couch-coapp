@@ -4,6 +4,7 @@
 /third_party/*
 !/third_party/README.md
 !/third_party/vigem-rust/
+!/third_party/evdev/
 
 # Per-developer editor settings
 .vscode/*

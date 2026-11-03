@@ -1048,6 +1048,9 @@ pub enum DriverName {
     Vigembus,
     /// Hides the host's own controller from games, so it can play a seat.
     Hidhide,
+    /// On Linux (M16c): this user may make input devices (`/dev/uinput`), for
+    /// guests' virtual controllers. Not a driver: one udev rule.
+    Uinput,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
