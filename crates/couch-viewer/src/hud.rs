@@ -1438,6 +1438,7 @@ fn centre_message(s: &HudState, waiting: bool) -> Option<(String, Option<&'stati
             "The window or screen being streamed went away".into()
         }
         StreamState::Stopped(EndReason::Error) => "The stream failed".into(),
+        StreamState::Stopped(EndReason::NothingShared) => "Nothing was chosen to share".into(),
         StreamState::Stopped(_) => format!("{} stopped streaming", s.host),
     };
     let more = (s.stream != StreamState::Live).then_some(wait);

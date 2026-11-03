@@ -412,7 +412,7 @@ function remoteCommand(cmd: RemoteCommand): Response {
       rp.on = cmd.on;
       return reply();
     case "setStartAtSignIn":
-      if (rp.startAtSignIn == null) throw "only an installed Couch Co-App can start with Windows";
+      if (rp.startAtSignIn == null) throw "only an installed Couch Co-App (an AppImage on Linux) starts at sign-in";
       rp.startAtSignIn = cmd.on;
       return reply();
     case "setRemotePin":

@@ -419,6 +419,9 @@ pub(crate) async fn start(
     let (inbox, inbox_rx) = mpsc::channel(INBOX);
     let now = Instant::now();
     let can_host = options.backend.capabilities().sessions && options.backend.home_pc();
+    if options.start_at_sign_in {
+        options.backend.keep_start_at_sign_in();
+    }
     let mut actor = Actor {
         addr: addr::peer_addr(&endpoint.addr()),
         endpoint: endpoint.clone(),
@@ -742,6 +745,12 @@ impl Actor {
     }
 
     fn command(&mut self, command: Command, reply: Reply, now: Instant) {
+        self.command_from(command, reply, false, now);
+    }
+
+    /// [`Self::command`], `from_afar` when a device of ours sent it (remote
+    /// play): nobody may be at this PC to answer what it brings up.
+    fn command_from(&mut self, command: Command, reply: Reply, from_afar: bool, now: Instant) {
         // After a restore, this run still has the old identity: nothing new
         // under it (the restored rooms and name would be overwritten).
         if self.restored
@@ -837,6 +846,7 @@ impl Actor {
                     max_viewers,
                     input,
                     controllers,
+                    from_afar,
                 };
                 // Answers later, once the pads are plugged in.
                 if let Err(e) = self.start_session(start, reply, now) {
@@ -859,6 +869,7 @@ impl Actor {
                     max_mbps,
                     upload_mbps,
                     program,
+                    from_afar,
                 };
                 // Answers later, once the stream has started.
                 if let Err(e) = self.start_stream(start, reply, now) {

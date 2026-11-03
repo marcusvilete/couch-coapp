@@ -366,9 +366,9 @@ pub enum Command {
     SetRemotePlay {
         on: bool,
     },
-    /// This app starts when the user signs in to Windows, to the
-    /// notification area (M25c), or stops doing so. Only where
-    /// [`RemotePlayView::start_at_sign_in`] offers it.
+    /// This app starts when the user signs in (M25c: on Windows to the
+    /// notification area; on Linux an AppImage, M16c), or stops doing so.
+    /// Only where [`RemotePlayView::start_at_sign_in`] offers it.
     SetStartAtSignIn {
         on: bool,
     },
@@ -1173,6 +1173,8 @@ pub enum SessionEnd {
     HostLeftRoom,
     HostShutdown,
     Error,
+    /// Nothing was chosen in the host's screen-sharing dialog (M16c).
+    NothingShared,
 }
 
 /// Why watching ended.
@@ -1261,7 +1263,7 @@ pub struct RemotePlayView {
     /// The device controlling this PC's desktop now, by name (M25b): adding
     /// a device and changing the PIN wait until it ends.
     pub desktop: Option<String>,
-    /// Whether this app starts when the user signs in to Windows (M25c);
+    /// Whether this app starts when the user signs in (M25c; Linux: an AppImage);
     /// `None` where it isn't offered (a development build, another profile).
     pub start_at_sign_in: Option<bool>,
 }
@@ -1290,7 +1292,7 @@ pub struct RemoteAccessView {
     pub code: String,
     /// Wrong PINs make the next try wait this long, in seconds.
     pub wait_secs: Option<u32>,
-    /// Unlocked, and Windows is locked at that PC (M25c): nothing gets in
+    /// Unlocked, and that PC shows its lock screen (M25c): nothing gets in
     /// until someone unlocks it there.
     pub locked: bool,
     /// Unlocked: what that PC can host, as it said (M16c). The console hides
@@ -2035,13 +2037,27 @@ impl EngineOptions {
             relays,
             // An installed app's default profile only (M25c): a development
             // build would start the debug exe, which needs the dev server,
-            // and a Run entry can't name another profile.
-            // Windows' Run value only: elsewhere the switch isn't offered (M16b).
-            start_at_sign_in: cfg!(windows) && !cfg!(debug_assertions) && profile.is_default(),
+            // and a Run entry can't name another profile. On Linux, an
+            // AppImage's (M16c): its autostart entry names the AppImage.
+            start_at_sign_in: installed_for_sign_in()
+                && !cfg!(debug_assertions)
+                && profile.is_default(),
             backend: pipeline::profile_backend(profile.data_dir()),
             ..Self::development()
         }
     }
+}
+
+/// Whether this app is installed as something that can start at sign-in:
+/// any exe on Windows, an AppImage on Linux.
+#[cfg(target_os = "linux")]
+fn installed_for_sign_in() -> bool {
+    couch_platform_linux::autostart::own_appimage().is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn installed_for_sign_in() -> bool {
+    cfg!(windows)
 }
 
 /// What a running endpoint uses, as a setting. The built-in relay is told

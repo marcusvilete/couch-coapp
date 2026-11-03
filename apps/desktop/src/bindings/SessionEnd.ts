@@ -3,4 +3,4 @@
 /**
  * Why a session ended.
  */
-export type SessionEnd = "hostStopped" | "gameExited" | "sourceLost" | "hostLeftRoom" | "hostShutdown" | "error";
+export type SessionEnd = "hostStopped" | "gameExited" | "sourceLost" | "hostLeftRoom" | "hostShutdown" | "error" | "nothingShared";

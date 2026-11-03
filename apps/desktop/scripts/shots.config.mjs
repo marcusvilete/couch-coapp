@@ -200,6 +200,8 @@ export const SHOTS = [
   ["settings-remote-desktop", "remote-home-desktop", settings("Remote play")],
   // M25c: the home PC's card for while you're away.
   ["settings-remote-away", "remote-away", settings("Remote play")],
+  // M16c: a Linux home PC's: no notification area icon, the sharing dialog's note.
+  ["settings-remote-linux", "linux-home-pc", settings("Remote play")],
   ["remote-unlock", "remote-locked", async (page) => page.getByRole("button", { name: "Unlock…" }).click()],
   ["settings-network", "lobby", settings("Network")],
   ["settings-network-release", "release-build", settings("Network")],

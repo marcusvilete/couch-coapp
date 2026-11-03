@@ -99,6 +99,7 @@ No window can stay above the game unfocused on GNOME, so a Linux host shows requ
 
 - **The remote console works** (M25a): unlocking with the PIN, starting sessions, passing seats, from the operator's device. Desktop control (M25b) waits for M16c-2.
 - **The unattended PC** (M25c), the Linux way: kept awake with a logind inhibitor (sleep), and the screen too while a device is unlocked; start at sign-in as an XDG autostart entry, for an AppImage's default profile, naming its own `$APPIMAGE`; "Windows is locked" becomes logind's `LockedHint`. No notification-area icon (GNOME shows none without an extension): closing the window quits.
+- **Added in M16c-1's fifth part:** the desktop's inhibit portal beside logind's inhibitor (GNOME and KDE suspend and blank the screen themselves, and polkit refuses logind's sleep inhibitor to a process in no session, as an app a desktop starts may be); and, nobody being at the PC to answer the screen-sharing dialog, a stream started from afar only with a choice the portal remembers, a dialog that comes anyway closed after 30 s and told to the device (`EndReason::NothingShared`, wire revision 14). An AppImage's autostart entry follows a newer AppImage when the one it names is gone.
 
 ### Where the code goes
 

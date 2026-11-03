@@ -60,6 +60,10 @@ pub struct Options {
     pub restore_token: Option<String>,
     /// Called with the next token once the user has chosen (never logged).
     pub on_token: Box<dyn FnOnce(String) + Send>,
+    /// How long the dialog may wait for an answer before nothing counts as
+    /// shared and it is closed: `Some` when nobody may be at the PC (a
+    /// stream started from afar, M16c); `None` waits on the user.
+    pub answer_within: Option<Duration>,
 }
 
 /// A capture through the portal, until dropped.
@@ -100,6 +104,7 @@ impl Capturer for PortalCapture {
             match state.end.take() {
                 Some(End::Closed) => return Ok(Some(CaptureEvent::SourceClosed)),
                 Some(End::Failed(e)) => return Err(MediaError::Backend(e)),
+                Some(End::NothingShared(e)) => return Err(MediaError::NothingShared(e)),
                 None => {}
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -132,6 +137,8 @@ enum End {
     /// The shared window or screen went, or the user stopped sharing.
     Closed,
     Failed(String),
+    /// The dialog was dismissed, or not answered in time.
+    NothingShared(String),
 }
 
 /// What the capture's threads hand the pipeline: the newest frame, and how
@@ -179,6 +186,7 @@ async fn share(options: Options, inbox: &Arc<Inbox>, mut stop: tokio::sync::ones
         fps,
         restore_token,
         on_token,
+        answer_within,
     } = options;
     let opened = tokio::time::timeout(OPEN_WAIT, async {
         let proxy = Screencast::new().await?;
@@ -210,7 +218,13 @@ async fn share(options: Options, inbox: &Arc<Inbox>, mut stop: tokio::sync::ones
         return;
     }
     // The dialog, unless the token still names a choice: nothing to wait on
-    // but the user, or Stop.
+    // but the user, or Stop, or the time to answer in.
+    let unanswered = async {
+        match answer_within {
+            Some(wait) => tokio::time::sleep(wait).await,
+            None => std::future::pending().await,
+        }
+    };
     let chosen = async {
         let cursor = if proxy
             .available_cursor_modes()
@@ -235,7 +249,10 @@ async fn share(options: Options, inbox: &Arc<Inbox>, mut stop: tokio::sync::ones
         let fd = proxy.open_pipe_wire_remote(&session).await?;
         Ok::<_, ashpd::Error>((streams, fd))
     };
+    // In this order: a choice made as the time runs out still counts (and
+    // its token is kept).
     let (streams, fd) = tokio::select! {
+        biased;
         _ = &mut stop => {
             let _ = session.close().await;
             return;
@@ -243,16 +260,24 @@ async fn share(options: Options, inbox: &Arc<Inbox>, mut stop: tokio::sync::ones
         chosen = chosen => match chosen {
             Ok(chosen) => chosen,
             Err(e) => {
-                inbox.end(End::Failed(match e {
+                inbox.end(match e {
                     ashpd::Error::Response(ResponseError::Cancelled) => {
-                        "nothing was chosen to share".to_string()
+                        End::NothingShared("nothing was chosen to share".into())
                     }
-                    e => format!("the desktop didn't share a window or screen: {e}"),
-                }));
+                    e => End::Failed(format!("the desktop didn't share a window or screen: {e}")),
+                });
                 let _ = session.close().await;
                 return;
             }
         },
+        // Closing the session closes its dialog.
+        () = unanswered => {
+            inbox.end(End::NothingShared(
+                "nobody answered the screen-sharing dialog at this PC".into(),
+            ));
+            let _ = session.close().await;
+            return;
+        }
     };
     if let Some(token) = streams.restore_token() {
         on_token(token.to_owned());

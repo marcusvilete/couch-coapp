@@ -403,6 +403,7 @@ impl Backend for WindowsBackend {
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
+        _unattended: bool,
         on_event: Box<dyn Fn(super::HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError> {
         let usages: Vec<u16> = keys.iter().map(|(key, _)| key.0).collect();

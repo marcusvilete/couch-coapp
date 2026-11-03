@@ -64,14 +64,20 @@ impl Drop for GlobalKeys {
 /// the portals' runtime (it must return at once). Returns at once: opening
 /// the portal's session may take a moment, and binding may wait on a dialog
 /// of the desktop's, so whether the keys work comes later, as `Bound` or
-/// `Failed`.
-pub fn bind(keys: Vec<Key>, on_event: Box<dyn Fn(Event<'_>) + Send>) -> Result<GlobalKeys, String> {
+/// `Failed`. With `answer_within` (nobody may be at the PC: a session
+/// started from afar, M16c), a dialog not answered by then is closed and the
+/// keys fail.
+pub fn bind(
+    keys: Vec<Key>,
+    answer_within: Option<Duration>,
+    on_event: Box<dyn Fn(Event<'_>) + Send>,
+) -> Result<GlobalKeys, String> {
     let runtime = crate::portal::runtime()?;
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let (done_tx, done_rx) = mpsc::channel::<()>();
     runtime.spawn(async move {
         let _done = done_tx;
-        run(keys, on_event, stop_rx).await;
+        run(keys, answer_within, on_event, stop_rx).await;
     });
     Ok(GlobalKeys {
         stop: Some(stop_tx),
@@ -81,6 +87,7 @@ pub fn bind(keys: Vec<Key>, on_event: Box<dyn Fn(Event<'_>) + Send>) -> Result<G
 
 async fn run(
     keys: Vec<Key>,
+    answer_within: Option<Duration>,
     on_event: Box<dyn Fn(Event<'_>) + Send>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -117,7 +124,14 @@ async fn run(
             .await?
             .response()
     };
+    let unanswered = async {
+        match answer_within {
+            Some(wait) => tokio::time::sleep(wait).await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
+        biased;
         _ = &mut stop => {
             let _ = session.close().await;
             return;
@@ -130,6 +144,14 @@ async fn run(
                 return;
             }
         },
+        // Closing the session closes its dialog.
+        () = unanswered => {
+            on_event(Event::Failed(
+                "nobody answered the desktop's shortcuts dialog at this PC".into(),
+            ));
+            let _ = session.close().await;
+            return;
+        }
     }
     // The portal sends a session's signals to its owner alone, and only one
     // task of this process reads them at a time: each stops reading when its
@@ -238,6 +260,7 @@ mod tests {
                     description: "test",
                     trigger: "CTRL+ALT+SHIFT+BackSpace".into(),
                 }],
+                None,
                 Box::new(move |event| {
                     if let Event::Failed(e) = event {
                         let _ = tx.send(e);

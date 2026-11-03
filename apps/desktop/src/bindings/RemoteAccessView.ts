@@ -18,7 +18,7 @@ code: string,
  */
 waitSecs: number | null, 
 /**
- * Unlocked, and Windows is locked at that PC (M25c): nothing gets in
+ * Unlocked, and that PC shows its lock screen (M25c): nothing gets in
  * until someone unlocks it there.
  */
 locked: boolean, 

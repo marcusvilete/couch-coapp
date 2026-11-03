@@ -113,9 +113,17 @@ struct Fake {
     picks_sound: AtomicBool,
     /// Every sound the pipeline asked for, in order.
     audio_kinds: Mutex<Vec<AudioKind>>,
-    /// Hosts, but can't be a home PC run from afar (Linux until M16c-1's
-    /// fifth part).
+    /// Hosts, but can't be a home PC run from afar (as Linux couldn't until
+    /// M16c-1's fifth part).
     not_a_home_pc: AtomicBool,
+    /// Asks what to share in a dialog, with no choice remembered (Linux's
+    /// portal, M16c): nobody away can start a capture.
+    asks_what_to_share: AtomicBool,
+    /// Captures fail as nothing shared (the dialog dismissed, or nobody
+    /// answering it in time).
+    nothing_shared: AtomicBool,
+    /// The host's keys were last hooked for a session started from afar.
+    host_keys_unattended: AtomicBool,
     clock: Arc<ProcessClock>,
     /// The panic key's handler while the engine has it hooked.
     panic_key: PanicHook,
@@ -536,6 +544,9 @@ impl Backend for Fake {
         if self.capture_fails.load(Ordering::SeqCst) {
             return Err(MediaError::Backend("no capture here".into()));
         }
+        if self.nothing_shared.load(Ordering::SeqCst) {
+            return Err(MediaError::NothingShared("nobody answered".into()));
+        }
         if self.capture_slow.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(300));
         }
@@ -593,6 +604,10 @@ impl Backend for Fake {
 
     fn captures_without_viewers(&self) -> bool {
         self.captures_unwatched.load(Ordering::SeqCst)
+    }
+
+    fn shares_unattended(&self, _: &Source) -> bool {
+        !self.asks_what_to_share.load(Ordering::SeqCst)
     }
 
     fn picks_sound(&self) -> bool {
@@ -738,8 +753,11 @@ impl Backend for Fake {
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
+        unattended: bool,
         on_press: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn std::any::Any + Send>, MediaError> {
+        self.host_keys_unattended
+            .store(unattended, Ordering::SeqCst);
         if keys.len() > 1 && self.answer_keys_fail.load(Ordering::SeqCst) {
             return Err(MediaError::Backend("an answer key has no scancode".into()));
         }
@@ -2965,6 +2983,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             upload_bps: None,
             audio: couch_engine::pipeline::AudioChoice::Off,
             pacing_trace: None,
+            unattended: false,
         })
         .await;
     let guest = MemberId([9; 32]);
@@ -5672,6 +5691,81 @@ async fn a_locked_home_pc_is_reported() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M16c-1 part 5: a Linux home PC asks what to share in its desktop's
+/// dialog. From afar a stream starts only with a choice remembered (at the PC
+/// itself it always may), its capture told nobody may answer; a dialog left
+/// unanswered ends the stream as nothing shared, which the device hears. A
+/// session from afar binds the host's keys the same way, unattended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_from_afar_needs_a_choice_the_pc_remembers() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.captures_unwatched.store(true, Ordering::SeqCst);
+    a.fake.asks_what_to_share.store(true, Ordering::SeqCst);
+    trusted(&room, &a, &b).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+    let start = b
+        .handle(remote(
+            &room,
+            &a,
+            RemoteAction::StartSession {
+                title: "From afar".into(),
+                max_viewers: 4,
+                input: setup(1, KeyboardMouseSeat::None),
+            },
+        ))
+        .await;
+    assert!(matches!(start, Ok(Response::Room(_))), "{start:?}");
+    // Its keys too: a dialog binding them gives up on nobody (Linux).
+    assert!(a.fake.host_keys_unattended.load(Ordering::SeqCst));
+    let from_afar = || {
+        remote(
+            &room,
+            &a,
+            RemoteAction::StartStream {
+                source: SourceChoice::Window {
+                    id: WINDOW.to_string(),
+                },
+                name: "Celeste".into(),
+                fps: 30,
+                max_mbps: 20,
+                upload_mbps: None,
+            },
+        )
+    };
+    let captures = || a.fake.captures.lock().unwrap().clone();
+
+    // Nothing remembered: refused before any capture.
+    let refused = b.handle(from_afar()).await;
+    assert!(refused_remotely(&refused, "nobody is there"), "{refused:?}");
+    assert!(captures().is_empty(), "no capture tried");
+    // At the PC, someone answers the dialog.
+    a.ok(stream_window()).await;
+    wait("a capture at the PC", || captures().len() == 1).await;
+    assert!(!captures()[0].unattended);
+
+    // A choice remembered: from afar too, the capture told nobody may answer.
+    a.fake.asks_what_to_share.store(false, Ordering::SeqCst);
+    b.ok(from_afar()).await;
+    wait("a capture from afar", || {
+        captures().iter().any(|r| r.unattended)
+    })
+    .await;
+
+    // The dialog came anyway, and nobody answered it: the device hears why.
+    a.fake.nothing_shared.store(true, Ordering::SeqCst);
+    let _ = b.handle(from_afar()).await;
+    let nothing = StreamStateView::Stopped(SessionEnd::NothingShared);
+    b.wait_session(&room, &a, "nothing shared, on the device", |s| {
+        s.is_some_and(|s| s.stream == nothing)
+    })
+    .await;
+    a.wait_session(&room, &a, "nothing shared, at the PC", |s| {
+        s.is_some_and(|s| s.stream == nothing)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 /// M16b: a system that watches but can't host (Linux's): every hosting
 /// command and the home PC's side of remote play are refused before anything
 /// reaches the room, while watching and remote play's device side work.
@@ -5710,9 +5804,10 @@ async fn a_viewer_only_platform_refuses_to_host_and_still_watches() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
-/// M16c-1: a PC that hosts but isn't a home PC yet (Linux's, until it keeps
-/// itself awake and reads its lock screen): the home PC's side of remote
-/// play is refused, and it hosts and runs another PC from afar as before.
+/// M16c-1: a PC that hosts but isn't a home PC (as Linux's wasn't until it
+/// kept itself awake and read its lock screen, part 5): the home PC's side
+/// of remote play is refused, and it hosts and runs another PC from afar as
+/// before.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_host_that_isnt_a_home_pc_refuses_remote_play_and_still_hosts() {
     let (mut a, mut b, mut c, room) = three().await;

@@ -23,8 +23,9 @@ use couch_media::{
     clock::Clock, testpattern::TestPattern,
 };
 use couch_platform_linux::{
+    autostart, awake,
     clock::MonotonicClock,
-    global_keys, notices, pads, screencast,
+    global_keys, notices, pads, screencast, session_lock,
     sound::{Sounds, SystemSound},
 };
 
@@ -38,6 +39,9 @@ use crate::{DriverName, DriverState, HostCapabilities, NoticeView};
 /// desktop's dialog, a window or a screen. A screen to the pipeline (no
 /// window to keep in front, the PC's sound).
 pub const SHARED: NativeId = 1;
+
+/// Why a Linux app may not start at sign-in.
+const NOT_AN_APPIMAGE: &str = "only the AppImage starts at sign-in";
 
 /// The profile's file for the screen-sharing portal's restore token.
 const PORTAL_FILE: &str = "portal.json";
@@ -67,33 +71,45 @@ impl LinuxBackend {
     }
 
     /// A capture of what the user shares: the dialog, or the last choice
-    /// again.
-    fn share(&self, fps: u32) -> Result<Box<dyn Capturer>, MediaError> {
+    /// again. `unattended`, a dialog nobody answers is given up.
+    fn share(&self, fps: u32, unattended: bool) -> Result<Box<dyn Capturer>, MediaError> {
         let restore_token = self
             .restore_token
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        // Spent by this start, in the file too: a start that fails before
+        // the next one comes leaves nothing remembered, rather than a token
+        // that would let a start from afar bring up the dialog again after
+        // a restart.
+        if restore_token.is_some() {
+            save_token(self.portal_file.as_deref(), None);
+        }
         let (kept, file) = (self.restore_token.clone(), self.portal_file.clone());
         let on_token = Box::new(move |token: String| {
-            if let Some(file) = &file {
-                let saved = PortalFile {
-                    restore_token: Some(token.clone()),
-                };
-                let bytes = serde_json::to_vec(&saved).expect("a token serializes");
-                if let Err(e) = crate::store::write_atomic(file, &bytes) {
-                    tracing::warn!("the shared window or screen won't be remembered: {e}");
-                }
-            }
+            save_token(file.as_deref(), Some(&token));
             *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(token);
         });
         let capture = screencast::start(screencast::Options {
             fps,
             restore_token,
             on_token,
+            answer_within: unattended.then_some(super::UNANSWERED_AFTER),
         })
         .map_err(MediaError::Backend)?;
         Ok(Box::new(capture))
+    }
+}
+
+/// Keeps `token` in `portal.json` (or none), where there is a file.
+fn save_token(file: Option<&std::path::Path>, token: Option<&str>) {
+    let Some(file) = file else { return };
+    let saved = PortalFile {
+        restore_token: token.map(str::to_owned),
+    };
+    let bytes = serde_json::to_vec(&saved).expect("a token serializes");
+    if let Err(e) = crate::store::write_atomic(file, &bytes) {
+        tracing::warn!("the shared window or screen won't be remembered: {e}");
     }
 }
 
@@ -122,6 +138,13 @@ impl Backend for LinuxBackend {
             keyboard_seat: false,
             desktop_control: false,
         }
+    }
+
+    /// Kept awake through logind and the inhibit portal, its lock screen
+    /// read from logind, and a stream from afar only with a remembered
+    /// choice (M16c-1's fifth part).
+    fn home_pc(&self) -> bool {
+        true
     }
 
     /// One source: what the user shares in the desktop's dialog when the
@@ -157,7 +180,7 @@ impl Backend for LinuxBackend {
             )),
             // `couch-cli host --source monitor` shares through the dialog too.
             Source::Screen(SHARED) | Source::PrimaryScreen => {
-                Ok((self.share(request.fps.max(1))?, None))
+                Ok((self.share(request.fps.max(1), request.unattended)?, None))
             }
             Source::Screen(_) => Err(MediaError::Unsupported(
                 "that screen: a Linux host shares what its desktop's dialog offers".into(),
@@ -249,6 +272,18 @@ impl Backend for LinuxBackend {
         viewer_process::launch(options)
     }
 
+    /// Only a remembered choice skips the screen-sharing dialog.
+    fn shares_unattended(&self, source: &Source) -> bool {
+        match source {
+            Source::Screen(SHARED) | Source::PrimaryScreen => self
+                .restore_token
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_some(),
+            _ => true,
+        }
+    }
+
     /// The desktop's dialog comes when the host starts the stream, once:
     /// never over the game when a guest arrives, nor again each time
     /// someone comes back.
@@ -283,6 +318,45 @@ impl Backend for LinuxBackend {
         notices::close_all(Duration::from_millis(500));
     }
 
+    fn keep_awake(&self, display: bool) -> Option<Box<dyn Any + Send>> {
+        match awake::keep("Couch Co-App: remote play is on", display) {
+            Ok(awake) => Some(Box::new(awake)),
+            Err(e) => {
+                tracing::warn!("this PC can't be kept awake: {e}");
+                None
+            }
+        }
+    }
+
+    fn screen_locked(&self) -> bool {
+        session_lock::locked()
+    }
+
+    /// An AppImage's own autostart entry: nothing else on Linux starts at
+    /// sign-in.
+    fn start_at_sign_in(&self) -> Result<bool, String> {
+        let appimage = autostart::own_appimage().ok_or(NOT_AN_APPIMAGE)?;
+        autostart::is_set(&appimage).map_err(|e| e.to_string())
+    }
+
+    fn set_start_at_sign_in(&self, on: bool) -> Result<(), String> {
+        let appimage = autostart::own_appimage().ok_or(NOT_AN_APPIMAGE)?;
+        autostart::set(&appimage, on).map_err(|e| e.to_string())
+    }
+
+    /// A newer AppImage (its name carries the version) takes over the entry
+    /// an older one left, naming a file that's gone.
+    fn keep_start_at_sign_in(&self) {
+        let Some(appimage) = autostart::own_appimage() else {
+            return;
+        };
+        match autostart::follow(&appimage) {
+            Ok(true) => tracing::info!("starting at sign-in: now this AppImage"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("the autostart entry couldn't follow this AppImage: {e}"),
+        }
+    }
+
     /// Through the desktop's global-shortcuts portal, each key with Ctrl,
     /// Alt and Shift as the preferred trigger (the desktop may let the user
     /// change it). No guest has keys to inject on a Linux host (no keyboard
@@ -291,6 +365,7 @@ impl Backend for LinuxBackend {
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
+        unattended: bool,
         on_event: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError> {
         let offered: Vec<global_keys::Key> = keys
@@ -324,7 +399,8 @@ impl Backend for LinuxBackend {
             )),
             global_keys::Event::Failed(e) => on_event(HostKeyEvent::Lost(e)),
         };
-        global_keys::bind(offered, Box::new(reported))
+        let answer_within = unattended.then_some(super::UNANSWERED_AFTER);
+        global_keys::bind(offered, answer_within, Box::new(reported))
             .map(|keys| Box::new(keys) as Box<dyn Any + Send>)
             .map_err(MediaError::Unsupported)
     }

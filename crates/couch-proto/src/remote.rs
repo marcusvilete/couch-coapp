@@ -324,7 +324,7 @@ pub fn cut(text: &mut String) {
 pub struct RemoteState {
     /// The home PC's session, if it has one.
     pub session: Option<RemoteSession>,
-    /// Windows is locked at the home PC (M25c): nothing gets in until
+    /// The home PC shows its lock screen (M25c): nothing gets in until
     /// someone unlocks it there, and a capture shows black or freezes.
     pub locked: bool,
     /// What the home PC can offer (M16c): the device hides the rest.

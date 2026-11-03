@@ -36,7 +36,7 @@ hosts: Array<RemoteDeviceView>,
  */
 desktop: string | null, 
 /**
- * Whether this app starts when the user signs in to Windows (M25c);
+ * Whether this app starts when the user signs in (M25c; Linux: an AppImage);
  * `None` where it isn't offered (a development build, another profile).
  */
 startAtSignIn: boolean | null, };

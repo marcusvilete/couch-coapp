@@ -103,7 +103,8 @@ fn own_appimage() -> Option<PathBuf> {
     let appimage = PathBuf::from(std::env::var_os("APPIMAGE")?);
     let appdir = PathBuf::from(std::env::var_os("APPDIR")?);
     let exe = std::env::current_exe().ok()?;
-    exe.starts_with(&appdir).then_some(appimage)
+    // As `couch_platform_linux::autostart::own_appimage` decides it.
+    (appimage.is_absolute() && exe.starts_with(&appdir)).then_some(appimage)
 }
 
 pub fn run() {

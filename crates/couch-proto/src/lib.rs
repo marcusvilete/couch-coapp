@@ -65,7 +65,8 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// and `BringToFront`, and the console state's desktop and window fields.
 /// 12: the unattended PC (M25c): `RemoteState.locked`.
 /// 13: what a host can offer (M16c): `RemoteState.capabilities`.
-pub const PROTOCOL_MINOR: u16 = 13;
+/// 14: a Linux home PC (M16c): `EndReason::NothingShared`.
+pub const PROTOCOL_MINOR: u16 = 14;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -86,6 +87,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (11, "0.22"),
     (12, "0.23"),
     (13, "0.25"),
+    (14, "0.26"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

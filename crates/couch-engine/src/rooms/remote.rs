@@ -61,7 +61,7 @@ pub(super) struct Remote {
     /// Keeping this PC awake (M25c): whether the display too, and the
     /// backend's guard (none where it can't).
     awake: Option<(bool, Option<Box<dyn std::any::Any + Send>>)>,
-    /// Windows is locked here, as last looked at while a device is
+    /// The lock screen is up here, as last looked at while a device is
     /// unlocked, and when to look again.
     locked: bool,
     next_lock_check: Option<Instant>,
@@ -85,7 +85,7 @@ struct Link {
     unlocked: bool,
     /// Its session as its host console shows it, while unlocked.
     session: Option<RemoteSession>,
-    /// Windows is locked there, as it last said (M25c).
+    /// The lock screen is up there, as it last said (M25c).
     locked: bool,
     /// What it can host, as it last said (M16c); none before its first state.
     capabilities: Option<crate::HostCapabilities>,
@@ -129,8 +129,8 @@ impl Remote {
     }
 }
 
-/// How often a home PC with a device unlocked looks whether Windows is
-/// locked (M25c).
+/// How often a home PC with a device unlocked looks whether its lock screen
+/// is up (M25c).
 const LOCK_CHECK_EVERY: Duration = Duration::from_secs(2);
 
 fn message(item: ControlMessage) -> Outgoing {
@@ -220,7 +220,7 @@ impl Actor {
 
     /// Keeps this PC awake while remote play is on, and its display on too
     /// while a device of ours is unlocked: a display that turns off stops
-    /// the capture, and Windows may lock the PC then (M25c). Call after
+    /// the capture, and the PC may lock itself then (M25c). Call after
     /// either changes.
     pub(super) fn sync_awake(&mut self) {
         let want = self
@@ -242,7 +242,7 @@ impl Actor {
         }
     }
 
-    /// While a device of ours is unlocked: whether Windows is locked here,
+    /// While a device of ours is unlocked: whether the lock screen is up here,
     /// looked at every [`LOCK_CHECK_EVERY`], and told when it changes (M25c).
     pub(super) fn remote_tick(&mut self, now: Instant) {
         if self.remote.operators.is_empty() {
@@ -257,7 +257,7 @@ impl Actor {
         let locked = self.backend.screen_locked();
         if locked != self.remote.locked {
             self.remote.locked = locked;
-            tracing::info!(locked, "remote play: Windows' lock screen here");
+            tracing::info!(locked, "remote play: the lock screen here");
             self.remote_push();
         }
     }
@@ -461,7 +461,7 @@ impl Actor {
         }
         if unlocked {
             // The display stays on now, and the device hears at once
-            // whether Windows is locked here (M25c).
+            // whether the lock screen is up here (M25c).
             self.sync_awake();
             self.remote.locked = self.backend.screen_locked();
             self.remote.next_lock_check = Some(now + LOCK_CHECK_EVERY);
@@ -550,7 +550,7 @@ impl Actor {
             return;
         };
         let (tx, rx) = oneshot::channel();
-        self.command(command, tx, now);
+        self.command_from(command, tx, true, now);
         tokio::spawn(async move {
             let result = match rx.await {
                 Ok(Ok(_)) => RemoteResult::Done,
@@ -757,7 +757,7 @@ impl Actor {
     fn set_start_at_sign_in(&mut self, on: bool) -> Result<(), EngineError> {
         if !self.remote.startup_offered {
             return Err(EngineError::Refused(
-                "only an installed Couch Co-App can start with Windows",
+                "only an installed Couch Co-App (an AppImage on Linux) starts at sign-in",
             ));
         }
         self.backend
