@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.25.0"
+version = "0.25.1"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -45,8 +45,14 @@ sdl3 = "=0.20.0"
 windows = "0.62"
 windows-core = "0.62"
 vigem-rust = "0.2"
-# Linux system calls (M16): the clock for now.
+# Linux system calls (M16): the clock, the viewer's stdout, polling a pad.
 rustix = { version = "1", default-features = false, features = ["std"] }
+# Linux input devices (M16c): guests' virtual controllers through `uinput`.
+evdev = "0.13"
+# Linux desktop portals (M16c): the host's keys (global shortcuts), later
+# capture.
+ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
 
 # Viewer rendering
 egui = "0.36"
@@ -119,5 +125,8 @@ debug = false
 # vigem-rust with two changes: pads plugged from serial 1, so Windows sets up
 # each virtual controller device once, and a pad Windows is still setting up
 # kept rather than unplugged (third_party/vigem-rust/PATCHED.md).
+# evdev with its UI_SET_PHYS fixed, which a Linux host's virtual controllers
+# name themselves with (third_party/evdev/PATCHED.md).
 [patch.crates-io]
 vigem-rust = { path = "third_party/vigem-rust" }
+evdev = { path = "third_party/evdev" }

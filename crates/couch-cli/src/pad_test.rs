@@ -1,14 +1,18 @@
 //! `couch-cli pad-test`: plugs virtual Xbox 360 pads (one by default) and
 //! moves them for a while, printing any rumble a game sends. Watch them in
 //! `joy.cpl` (Game Controllers), `scripts\xinput-watch.ps1` or any gamepad
-//! tester: pad N presses its buttons N steps ahead of the first, so each
-//! slot shows which pad it is. Also prints how many game controllers
-//! Windows lists (`couch_platform_win::controllers`), before and after.
+//! tester on Windows; `evtest` or any gamepad tester on Linux, where they
+//! are `uinput` devices (M16c): pad N presses its buttons N steps ahead of
+//! the first, so each slot shows which pad it is. On Windows it also prints
+//! how many game controllers Windows lists (`couch_platform_win::controllers`),
+//! before and after.
 
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use anyhow::Context;
 use couch_input::{DEV_PAD_IDS, PadButtons, PadState, VirtualPadFactory};
+#[cfg(windows)]
 use couch_platform_win::{controllers, vigem::VigemPadFactory};
 
 /// Each button in turn, the Guide button left out.
@@ -30,26 +34,44 @@ const BUTTONS: [PadButtons; 14] = [
 ];
 
 pub fn run(secs: u64, real_ids: bool, count: u8) -> anyhow::Result<()> {
+    #[cfg(windows)]
     let before = controllers::count_all();
-    let ids = (!real_ids).then_some(DEV_PAD_IDS);
-    let factory = VigemPadFactory::connect(ids).context("connecting to ViGEmBus")?;
+    #[cfg(windows)]
+    let factory = VigemPadFactory::connect((!real_ids).then_some(DEV_PAD_IDS))
+        .context("connecting to ViGEmBus")?;
+    #[cfg(target_os = "linux")]
+    let factory = couch_platform_linux::pads::UinputPads::new(if real_ids {
+        couch_input::XBOX_360_IDS
+    } else {
+        DEV_PAD_IDS
+    });
     let mut pads = (0..count.max(1))
-        .map(|_| factory.plug().context("plugging a virtual pad"))
+        .map(|_| {
+            factory
+                .plug()
+                .map_err(|e| anyhow::anyhow!("plugging a virtual pad: {e}"))
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
     // Windows lists a new pad shortly after it is plugged in.
     std::thread::sleep(Duration::from_secs(1));
+    #[cfg(windows)]
     println!(
         "game controllers Windows lists: {before} before, {} with ours ({} not counting ours, as the app's warning does)",
         controllers::count_all(),
         controllers::count()
     );
     println!(
-        "{} virtual Xbox 360 pad(s) plugged in{}; open joy.cpl to watch. Running {secs} s.",
+        "{} virtual Xbox 360 pad(s) plugged in{}; {}. Running {secs} s.",
         pads.len(),
         if real_ids {
             String::new()
         } else {
             format!(" as {:04x}:{:04x}", DEV_PAD_IDS.0, DEV_PAD_IDS.1)
+        },
+        if cfg!(windows) {
+            "open joy.cpl to watch"
+        } else {
+            "watch with evtest (its name: Microsoft X-Box 360 pad)"
         }
     );
 

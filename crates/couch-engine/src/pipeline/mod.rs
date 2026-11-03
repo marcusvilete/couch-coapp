@@ -394,14 +394,31 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Hooks the host's keys, Ctrl+Alt+Shift plus each key (the host rows
     /// of the user's `couch_input::shortcuts::Shortcuts`: the panic key,
-    /// Accept and Decline), until the returned guard drops. Only physical
-    /// presses count, never injected ones. `on_press` runs on the hook's own
-    /// thread and must return at once.
+    /// Accept and Decline), until the returned guard drops. On Windows only
+    /// physical presses count, never injected ones; Linux's portal can't
+    /// tell them apart, safe only without a keyboard seat (ADR 0012).
+    /// `on_event` runs on the hook's own thread and must return at once.
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
-        on_press: Box<dyn Fn(Shortcut) + Send>,
+        on_event: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError>;
+}
+
+/// What the host's keys report (`Backend::host_keys`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostKeyEvent {
+    /// One was pressed.
+    Pressed(Shortcut),
+    /// The desktop bound them after the hook was made, each with its keys as
+    /// the desktop names them (Linux's portal, which may ask the user and
+    /// let them change the keys; again whenever they change). A host key
+    /// missing here isn't in force. Windows' hook is in force at once and
+    /// never sends this.
+    Bound(Vec<(Shortcut, String)>),
+    /// They don't work, or stopped working (the desktop refused them, or
+    /// its portal went away): the console says so.
+    Lost(String),
 }
 
 /// This machine's backend: Windows' own, Linux's (M16c), or elsewhere one that
@@ -474,7 +491,7 @@ impl Backend for ViewerOnly {
     fn host_keys(
         &self,
         _: &[(HidUsage, Shortcut)],
-        _: Box<dyn Fn(Shortcut) + Send>,
+        _: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError> {
         Err(unsupported())
     }

@@ -605,7 +605,19 @@ fn host_check(path: Option<&str>, ids: (u16, u16)) -> HostCheck {
     }
 }
 
-#[cfg(not(windows))]
+/// Linux (M16c): a host's pads name themselves (`phys` `couch-coapp/…`,
+/// `couch_platform_linux::pads`), so a pad is proven ours or not by its
+/// event node; one that can't be read is treated as before a host existed.
+#[cfg(target_os = "linux")]
+fn host_check(path: Option<&str>, _ids: (u16, u16)) -> HostCheck {
+    match path.and_then(couch_platform_linux::pads::is_ours) {
+        Some(true) => HostCheck::MaybeAHosts,
+        Some(false) => HostCheck::NotAHosts,
+        None => HostCheck::NoHostHere,
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn host_check(_path: Option<&str>, _ids: (u16, u16)) -> HostCheck {
     HostCheck::NoHostHere
 }

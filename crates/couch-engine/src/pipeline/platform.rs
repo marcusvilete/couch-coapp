@@ -33,10 +33,12 @@ use super::{
 };
 use crate::{DriverName, DriverState, ScreenArea};
 
-fn platform_driver(name: DriverName) -> drivers::Driver {
+/// Windows' drivers; `None` for Linux's uinput access.
+fn platform_driver(name: DriverName) -> Option<drivers::Driver> {
     match name {
-        DriverName::Vigembus => drivers::Driver::ViGEmBus,
-        DriverName::Hidhide => drivers::Driver::HidHide,
+        DriverName::Vigembus => Some(drivers::Driver::ViGEmBus),
+        DriverName::Hidhide => Some(drivers::Driver::HidHide),
+        DriverName::Uinput => None,
     }
 }
 
@@ -338,8 +340,8 @@ impl Backend for WindowsBackend {
     fn drivers(&self) -> Vec<(DriverName, DriverState, bool)> {
         [DriverName::Vigembus, DriverName::Hidhide]
             .into_iter()
-            .map(|name| {
-                let driver = platform_driver(name);
+            .filter_map(|name| Some((name, platform_driver(name)?)))
+            .map(|(name, driver)| {
                 let state = match drivers::state(driver) {
                     drivers::State::Ready => DriverState::Ready,
                     drivers::State::NeedsRestart => DriverState::NeedsRestart,
@@ -356,7 +358,7 @@ impl Backend for WindowsBackend {
     }
 
     fn install_driver(&self, driver: DriverName) -> Result<(), String> {
-        drivers::install(platform_driver(driver))
+        drivers::install(platform_driver(driver).ok_or("not on Windows")?)
     }
 
     fn overlay_area(&self, source: &Source) -> Option<ScreenArea> {
@@ -387,13 +389,13 @@ impl Backend for WindowsBackend {
     fn host_keys(
         &self,
         keys: &[(HidUsage, Shortcut)],
-        on_press: Box<dyn Fn(Shortcut) + Send>,
+        on_event: Box<dyn Fn(super::HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError> {
         let usages: Vec<u16> = keys.iter().map(|(key, _)| key.0).collect();
         let shortcuts: Vec<Shortcut> = keys.iter().map(|&(_, s)| s).collect();
         let hook = HostKeys::install(&usages, move |i| {
             if let Some(&shortcut) = shortcuts.get(i) {
-                on_press(shortcut);
+                on_event(super::HostKeyEvent::Pressed(shortcut));
             }
         })
         .map_err(|e| MediaError::Backend(format!("the host-keys hook: {e}")))?;

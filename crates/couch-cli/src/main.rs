@@ -35,7 +35,7 @@ mod lifecycle_check;
 mod net_args;
 #[cfg(windows)]
 mod pad_origins;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod pad_test;
 mod probe;
 #[cfg(windows)]
@@ -316,8 +316,9 @@ enum Cmd {
         #[arg(long, value_enum, default_value = "media")]
         congestion: CongestionArg,
     },
-    /// Plug a virtual Xbox 360 pad and move it; watch it in joy.cpl.
-    #[cfg(windows)]
+    /// Plug a virtual Xbox 360 pad and move it; watch it in joy.cpl (on
+    /// Linux, evtest: a uinput device).
+    #[cfg(any(windows, target_os = "linux"))]
     PadTest {
         #[arg(long, default_value_t = 30)]
         secs: u64,
@@ -618,7 +619,7 @@ async fn main() -> ExitCode {
             })
             .await
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         Cmd::PadTest {
             secs,
             real_pad_ids,

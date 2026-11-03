@@ -143,7 +143,16 @@ const DRIVERS: Record<DriverName, { title: string; why: string }> = {
     title: "HidHide: hides your controller",
     why: "Hides your own controller from games while you stream, so it plays through a seat and never takes a guest's place in co-op games. Without it you play outside the seats.",
   },
+  uinput: {
+    title: "Virtual controllers",
+    why: "Guests' controllers reach the games you host as virtual Xbox 360 controllers. Setting it up lets the programs you run make input devices, as Steam's controller support does. Without it, guests can watch only.",
+  },
 };
+
+/** The Linux setup by hand, as Set up does it (`couch_platform_linux::pads`,
+ * whose test checks this is its `set_up_by_hand`). */
+const UINPUT_BY_HAND =
+  "sudo modprobe uinput; echo 'KERNEL==\"uinput\", SUBSYSTEM==\"misc\", OPTIONS+=\"static_node=uinput\", TAG+=\"uaccess\"' | sudo tee /etc/udev/rules.d/60-couch-coapp-uinput.rules && sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput";
 
 const STATES: Record<DriverState, { text: string; tone: "ok" | "warn" | "neutral" }> = {
   ready: { text: "Installed", tone: "ok" },
@@ -152,7 +161,9 @@ const STATES: Record<DriverState, { text: string; tone: "ok" | "warn" | "neutral
   missing: { text: "Not installed", tone: "neutral" },
 };
 
-export function DriversSection() {
+/** `linux`: one setting there, not drivers (M16c): Set up asks for the
+ * administrator's password and installs one udev rule. */
+export function DriversSection(props: { linux: boolean }) {
   const [drivers, setDrivers] = useState<DriverView[] | null>(null);
   const [installing, setInstalling] = useState<DriverName | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -178,8 +189,9 @@ export function DriversSection() {
   return (
     <div className="settings-section">
       <p className="settings-lead">
-        Two drivers make the most of Couch Co-App. Both are optional, free and open source; each installs with its own
-        setup and Windows asks for administrator rights.
+        {props.linux
+          ? "One setting lets guests' controllers reach the games you host. It is set up once, with your administrator password."
+          : "Two drivers make the most of Couch Co-App. Both are optional, free and open source; each installs with its own setup and Windows asks for administrator rights."}
       </p>
       {!drivers && !error && <Skeleton lines={4} height={16} />}
       {drivers?.map((d) => (
@@ -196,10 +208,16 @@ export function DriversSection() {
                   variant="primary"
                   size="sm"
                   disabled={installing != null}
-                  labels={["Install", "Installing…"]}
+                  labels={d.driver === "uinput" ? ["Set up", "Setting up…"] : ["Install", "Installing…"]}
                   onClick={() => void install(d.driver)}
                 >
-                  {installing === d.driver ? "Installing…" : "Install"}
+                  {d.driver === "uinput"
+                    ? installing === d.driver
+                      ? "Setting up…"
+                      : "Set up"
+                    : installing === d.driver
+                      ? "Installing…"
+                      : "Install"}
                 </Button>
               ) : (
                 <span className="settings-note">Its installer isn't in this build (cargo xtask stage-dlls).</span>
@@ -209,8 +227,15 @@ export function DriversSection() {
       ))}
       {installing && (
         <Callout tone="info" compact>
-          Its setup is open: follow it, and accept Windows' administrator prompt.
+          {props.linux
+            ? "Your system asks for the administrator password."
+            : "Its setup is open: follow it, and accept Windows' administrator prompt."}
         </Callout>
+      )}
+      {props.linux && drivers?.some((d) => d.driver === "uinput" && d.state === "missing") && (
+        <p className="settings-note">
+          Or in a terminal: <code className="selectable">{UINPUT_BY_HAND}</code>
+        </p>
       )}
       {error && (
         <p className="field-error selectable" role="alert">

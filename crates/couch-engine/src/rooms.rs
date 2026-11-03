@@ -184,6 +184,17 @@ pub(crate) enum Input {
         session: SessionId,
         accept: bool,
     },
+    /// The desktop bound the host's keys for this session, as it names them
+    /// (Linux's portal).
+    HostKeysBound {
+        session: SessionId,
+        keys: Vec<(couch_input::shortcuts::Shortcut, String)>,
+    },
+    /// The host's keys for this session don't work, or stopped.
+    HostKeysLost {
+        session: SessionId,
+        error: String,
+    },
     /// Remote play (M25): a device's PIN, checked off this thread.
     RemotePinChecked {
         conn: ConnId,
@@ -696,6 +707,8 @@ impl Actor {
             }
             Input::Panic(session) => self.panic_key(session, now),
             Input::AnswerFirst { session, accept } => self.answer_first(session, accept, now),
+            Input::HostKeysBound { session, keys } => self.host_keys_bound(session, keys, now),
+            Input::HostKeysLost { session, error } => self.host_keys_lost(session, error, now),
             Input::RemotePinChecked {
                 conn,
                 peer,

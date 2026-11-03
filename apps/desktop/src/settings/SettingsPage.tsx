@@ -134,7 +134,7 @@ export function SettingsPage(props: {
             {section.id === "streamWindow" && <StreamWindowSection />}
             {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
             {section.id === "remotePlay" && <RemotePlaySection canHost={canHost} />}
-            {section.id === "drivers" && <DriversSection />}
+            {section.id === "drivers" && <DriversSection linux={props.info?.platform === "linux"} />}
             {section.id === "backup" && (
               <BackupSection
                 busy={props.busy}
