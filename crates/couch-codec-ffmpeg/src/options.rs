@@ -271,6 +271,31 @@ const MEDIA_FOUNDATION: &[OptionSet] = &[OptionSet {
     ],
 }];
 
+/// VAAPI on Linux (M16c): AMD's and Intel's GPUs through Mesa or Intel's
+/// driver. CBR, one frame in flight; `low_power` first, the fixed-function
+/// encoder Intel's newer GPUs have (AMD's Mesa refuses it). A requested
+/// keyframe becomes an IDR by itself (`pict_type` I). The last set is the
+/// plainest, as every list's last must be.
+const VAAPI: &[OptionSet] = &[
+    OptionSet {
+        label: "cbr+low_power",
+        options: &[
+            (c"profile", c"high"),
+            (c"rc_mode", c"CBR"),
+            (c"async_depth", c"1"),
+            (c"low_power", c"1"),
+        ],
+    },
+    OptionSet {
+        label: "cbr",
+        options: &[
+            (c"profile", c"high"),
+            (c"rc_mode", c"CBR"),
+            (c"async_depth", c"1"),
+        ],
+    },
+];
+
 const SOFTWARE: &[OptionSet] = &[OptionSet {
     label: "no skipped frames",
     options: &[(c"allow_skip_frames", c"0")],
@@ -284,6 +309,7 @@ pub fn option_sets(name: &str) -> &'static [OptionSet] {
         "h264_amf" => AMF,
         "h264_qsv" => QSV,
         "h264_mf" => MEDIA_FOUNDATION,
+        "h264_vaapi" => VAAPI,
         _ => SOFTWARE,
     }
 }
@@ -312,6 +338,12 @@ mod tests {
                 (c"async_depth", c"1"),
                 (c"low_delay_brc", c"1"),
                 (c"forced_idr", c"1"),
+            ],
+            // Newer than M9a (M16c): its plainest set stands in for it.
+            "h264_vaapi" => &[
+                (c"profile", c"high"),
+                (c"rc_mode", c"CBR"),
+                (c"async_depth", c"1"),
             ],
             other => {
                 let sets = option_sets(other);

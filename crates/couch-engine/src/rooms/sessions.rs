@@ -45,6 +45,14 @@ use crate::{
 /// Decline key answers it: long enough to have been seen on the overlay.
 const ANSWER_AFTER: Duration = Duration::from_secs(1);
 
+/// What hosting may need of the system (`Backend::capabilities`, M16c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Capability {
+    Sessions,
+    KeyboardSeat,
+    DesktopControl,
+}
+
 #[derive(Default)]
 pub(super) struct Sessions {
     hosting: Option<Hosting>,
@@ -155,8 +163,11 @@ enum WatchState {
     Controlling,
     /// The connection to the host went: the window stays open while the
     /// room redials, and watching resumes when the host announces the same
-    /// session on the new connection.
-    Reconnecting,
+    /// session on the new connection. A watch asked for and not yet
+    /// answered keeps its reply, answered when it resumes or gives up: two
+    /// connections dialed at once may close one before the other is here
+    /// (seen on Linux, M16c).
+    Reconnecting(Option<Reply>),
 }
 
 impl Watching {
@@ -355,7 +366,7 @@ impl Actor {
         };
         // Only a connection we can ask on (`ask_again` needs it): otherwise
         // the usual reconnecting below, which times out.
-        if !matches!(w.state, WatchState::Reconnecting)
+        if !matches!(w.state, WatchState::Reconnecting(_))
             && w.watch.is_some()
             && let Some(conn) = self
                 .current_conn(w.room, w.host)
@@ -382,28 +393,21 @@ impl Actor {
             self.announce(room, now);
             return;
         }
-        match w.state {
-            WatchState::Reconnecting => return,
-            // Asked to watch, not watching yet: the waiting command hears.
-            WatchState::Joining(Some(_)) => {
-                self.end_watch_refused(
-                    WatchEnd::ConnectionLost,
-                    "lost the connection to the host",
-                    now,
-                );
-                return;
-            }
-            // A resumed join: wait again, within the same budget.
-            WatchState::Joining(None)
-            | WatchState::Watching
-            | WatchState::Asking(_)
-            | WatchState::Controlling => {}
+        if matches!(w.state, WatchState::Reconnecting(_)) {
+            return;
         }
         let (room, host, session) = (w.room, w.host, w.session);
         let note = format!("Reconnecting to {}…", self.member_name(room, host));
         let wait = self.reconnect_wait;
         let w = self.sessions.watching.as_mut().expect("checked above");
-        w.state = WatchState::Reconnecting;
+        // Asked to watch, not answered yet: the waiting command keeps
+        // waiting, within the same budget, rather than hearing a refusal
+        // for a connection that may be replaced in a moment.
+        let reply = match std::mem::replace(&mut w.state, WatchState::Reconnecting(None)) {
+            WatchState::Joining(reply) => reply,
+            _ => None,
+        };
+        w.state = WatchState::Reconnecting(reply);
         // The seats went with the connection.
         w.holding.clear();
         w.note = note;
@@ -422,14 +426,22 @@ impl Actor {
     }
 
     pub(super) fn reconnect_timeout(&mut self, session: SessionId, attempt: u32, now: Instant) {
-        let waiting = self.sessions.watching.as_ref().is_some_and(|w| {
+        let Some(w) = self.sessions.watching.as_mut().filter(|w| {
             w.session == session
                 && w.attempt == attempt
-                && matches!(w.state, WatchState::Reconnecting)
-        });
-        if waiting {
-            self.end_watch(WatchEnd::ConnectionLost, true, now);
+                && matches!(w.state, WatchState::Reconnecting(_))
+        }) else {
+            return;
+        };
+        // A watch never answered: its command hears, the UI needs no event.
+        if let WatchState::Reconnecting(reply) = &mut w.state
+            && let Some(reply) = reply.take()
+        {
+            let _ = reply.send(Err(EngineError::Refused("lost the connection to the host")));
+            self.end_watch(WatchEnd::ConnectionLost, false, now);
+            return;
         }
+        self.end_watch(WatchEnd::ConnectionLost, true, now);
     }
 
     /// Drops listings of hosts we have no connection to (kept while we
@@ -466,7 +478,12 @@ impl Actor {
             return;
         }
         let w = self.sessions.watching.as_mut().expect("checked above");
-        w.state = WatchState::Joining(None);
+        // A command still waiting goes on waiting, for this join's answer.
+        let reply = match std::mem::replace(&mut w.state, WatchState::Joining(None)) {
+            WatchState::Reconnecting(reply) => reply,
+            _ => None,
+        };
+        w.state = WatchState::Joining(reply);
         w.note = String::new();
         tracing::info!(room = ?room, "the host is back; joining its stream again");
         self.send_hud();
@@ -635,7 +652,9 @@ impl Actor {
                     .or_default()
                     .insert(peer, listing);
                 let resuming = self.sessions.watching.as_ref().is_some_and(|w| {
-                    w.room == room && w.host == peer && matches!(w.state, WatchState::Reconnecting)
+                    w.room == room
+                        && w.host == peer
+                        && matches!(w.state, WatchState::Reconnecting(_))
                 });
                 if resuming {
                     self.resume_watching(room, conn, session, now);
@@ -788,7 +807,10 @@ impl Actor {
                 };
                 if w.room != room
                     || w.host != peer
-                    || matches!(w.state, WatchState::Joining(_) | WatchState::Reconnecting)
+                    || matches!(
+                        w.state,
+                        WatchState::Joining(_) | WatchState::Reconnecting(_)
+                    )
                 {
                     return;
                 }
@@ -1058,16 +1080,30 @@ impl Actor {
         }
     }
 
-    /// Hosting needs a system that can host (`Backend::can_host`; a Linux PC
-    /// watches only, M16b): refused before anything is set up or announced.
-    pub(super) fn check_can_host(&self) -> Result<(), EngineError> {
-        if self.backend.can_host() {
-            Ok(())
-        } else {
-            Err(EngineError::Refused(
+    /// Hosting needs a system that can host what's asked
+    /// (`Backend::capabilities`, M16c): refused before anything is set up or
+    /// announced.
+    pub(super) fn check_capability(&self, capability: Capability) -> Result<(), EngineError> {
+        let can = self.backend.capabilities();
+        let (has, refusal) = match capability {
+            Capability::Sessions => (
+                can.sessions,
                 "this system can't host sessions yet: it watches and plays them, and runs a \
                  PC of yours from afar",
-            ))
+            ),
+            Capability::KeyboardSeat => (
+                can.keyboard_seat,
+                "this system can't offer guests keyboard and mouse yet: controllers only",
+            ),
+            Capability::DesktopControl => (
+                can.desktop_control,
+                "this PC can't be controlled as a desktop from afar yet",
+            ),
+        };
+        if has {
+            Ok(())
+        } else {
+            Err(EngineError::Refused(refusal))
         }
     }
 
@@ -1076,7 +1112,17 @@ impl Actor {
         start: StartSession,
         _now: Instant,
     ) -> Result<(SessionId, HostOptions), EngineError> {
-        self.check_can_host()?;
+        self.check_capability(Capability::Sessions)?;
+        if start.input.keyboard_mouse() {
+            self.check_capability(Capability::KeyboardSeat)?;
+        }
+        // The host's own controllers play through seats only where the
+        // system reads them (Windows; not a Linux host yet, ADR 0012).
+        if !start.controllers.is_empty() && self.backend.local_pads().is_none() {
+            return Err(EngineError::Refused(
+                "this system can't put its own controllers on seats yet",
+            ));
+        }
         let (room, _) = self.entry_mut(&start.room)?;
         if self.sessions.hosting.is_some() {
             return Err(EngineError::Refused("you have a session already"));
@@ -1283,6 +1329,9 @@ impl Actor {
         member: Option<MemberId>,
         now: Instant,
     ) -> Result<(), EngineError> {
+        if member.is_some() {
+            self.check_capability(Capability::DesktopControl)?;
+        }
         let h = self
             .sessions
             .hosting
@@ -1371,7 +1420,7 @@ impl Actor {
         start: StartStream,
         now: Instant,
     ) -> Result<(SessionId, u32, StreamControl, StreamOptions), EngineError> {
-        self.check_can_host()?;
+        self.check_capability(Capability::Sessions)?;
         let gone = EngineError::Refused("that window or screen is gone");
         let source = match &start.source {
             SourceChoice::Window { id } => {
@@ -2106,7 +2155,7 @@ impl Actor {
             let leave = ControlMessage::SessionLeave(SessionLeave { session: w.session });
             self.send(w.conn, Outgoing::Message(leave));
         }
-        if let WatchState::Joining(Some(reply)) =
+        if let WatchState::Joining(Some(reply)) | WatchState::Reconnecting(Some(reply)) =
             std::mem::replace(&mut w.state, WatchState::Watching)
         {
             let _ = reply.send(Err(EngineError::Refused("stopped watching")));
@@ -2157,7 +2206,7 @@ impl Actor {
             .ok_or(EngineError::NotWatching)?;
         match w.state {
             WatchState::Joining(_) => return Err(EngineError::Refused("not watching yet")),
-            WatchState::Reconnecting => {
+            WatchState::Reconnecting(_) => {
                 return Err(EngineError::Refused("reconnecting to the host"));
             }
             // The host keeps a request as first asked, controller included.
@@ -2211,7 +2260,7 @@ impl Actor {
             WatchState::Controlling => {
                 self.send(conn, Outgoing::Message(cancel(Cancel::Seat(None))));
             }
-            WatchState::Joining(_) | WatchState::Watching | WatchState::Reconnecting => {}
+            WatchState::Joining(_) | WatchState::Watching | WatchState::Reconnecting(_) => {}
         }
         Ok(Response::Done)
     }
@@ -2420,7 +2469,7 @@ impl Actor {
             title: listing.announce.title.clone(),
             host: self.member_name(w.room, w.host),
             role: match w.state {
-                WatchState::Joining(_) | WatchState::Watching | WatchState::Reconnecting => {
+                WatchState::Joining(_) | WatchState::Watching | WatchState::Reconnecting(_) => {
                     HudRole::Watching
                 }
                 WatchState::Asking(_) => HudRole::Asking,
@@ -2748,7 +2797,7 @@ impl Actor {
                         SessionRole::Asking
                     }
                     WatchState::Controlling => SessionRole::Controlling,
-                    WatchState::Reconnecting => SessionRole::Reconnecting,
+                    WatchState::Reconnecting(_) => SessionRole::Reconnecting,
                 },
                 _ => SessionRole::None,
             };

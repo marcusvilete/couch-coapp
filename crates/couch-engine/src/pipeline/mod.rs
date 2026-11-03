@@ -16,6 +16,8 @@
 
 pub mod host;
 pub mod ipc;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 pub mod platform;
 pub mod source;
@@ -375,12 +377,13 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
-    /// Whether this system can host sessions: capture, encode, and inject a
-    /// guest's input (Windows; a Linux PC watches, plays, and runs a PC of
-    /// yours from afar, M16b). Without it, every hosting command and the home
-    /// PC's side of remote play are refused before anything is announced.
-    fn can_host(&self) -> bool {
-        false
+    /// What this system can host (M16c, ADR 0012): sessions (capture,
+    /// encode, guests' controllers), a keyboard-and-mouse seat, desktop
+    /// control. Windows has them all; Linux none until M16c-1 turns on
+    /// sessions, then controller seats alone; elsewhere nothing. What's missing is refused before anything is set
+    /// up or announced, and with `sessions` the home PC's side of remote play.
+    fn capabilities(&self) -> crate::HostCapabilities {
+        crate::HostCapabilities::default()
     }
 
     /// The codecs this PC decodes in hardware, as `couch_proto::codec` bits,
@@ -401,8 +404,9 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Box<dyn Any + Send>, MediaError>;
 }
 
-/// This machine's backend: Windows' own, or elsewhere one that watches but can't
-/// host (M16b): it starts the stream window and refuses everything hosting needs.
+/// This machine's backend: Windows' own, Linux's (M16c), or elsewhere one that
+/// watches but can't host (M16b): it starts the stream window and refuses
+/// everything hosting needs.
 pub fn platform_backend() -> Arc<dyn Backend> {
     #[cfg(windows)]
     {
@@ -412,28 +416,25 @@ pub fn platform_backend() -> Arc<dyn Backend> {
         std::thread::spawn(couch_platform_win::video_caps::hevc_decode);
         Arc::new(platform::WindowsBackend)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(linux::LinuxBackend)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Arc::new(ViewerOnly)
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 struct ViewerOnly;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl Backend for ViewerOnly {
     /// The stream window's clock (`couch-viewer`'s `now_us`), so times from
     /// it compare with ours.
     fn clock(&self) -> Arc<dyn Clock> {
-        #[cfg(target_os = "linux")]
-        {
-            Arc::new(couch_platform_linux::clock::MonotonicClock)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Arc::new(couch_media::clock::ProcessClock::new())
-        }
+        Arc::new(couch_media::clock::ProcessClock::new())
     }
     fn sources(&self) -> Result<Sources, MediaError> {
         Ok(Sources::default())
@@ -479,7 +480,7 @@ impl Backend for ViewerOnly {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn unsupported() -> MediaError {
     MediaError::Unsupported("streaming on this platform".into())
 }

@@ -10,6 +10,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod options;
 pub mod probe;
+mod vaapi;
 
 pub use decoder::{DecoderKind, FfmpegDecoder};
 pub use encoder::FfmpegEncoder;

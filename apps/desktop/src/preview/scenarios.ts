@@ -26,7 +26,15 @@ const HOME_PC = "90ce0000000000000000000000000002";
 const LAPTOP = "1a970000000000000000000000000003";
 const homePc = (state: Partial<RemoteAccessView>): MemberView =>
   member(HOME_PC, "Ana's PC", "relay", {
-    remote: { accepted: true, unlocked: false, code: "4F2A 9C1B", waitSecs: null, locked: false, ...state },
+    remote: {
+      accepted: true,
+      unlocked: false,
+      code: "4F2A 9C1B",
+      waitSecs: null,
+      locked: false,
+      capabilities: state.unlocked ? { sessions: true, keyboardSeat: true, desktopControl: true } : null,
+      ...state,
+    },
   });
 
 function room(id: string, name: string, over: Partial<FakeRoom> = {}): FakeRoom {
@@ -103,7 +111,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       profile: "default",
       dataDir: "C:\\Users\\ana\\AppData\\Local\\CouchCoApp\\profiles\\default",
       platform: "windows",
-      canHost: true,
+      capabilities: { sessions: true, keyboardSeat: true, desktopControl: true },
     },
     profile: { displayName: "Ana", memberId: ME },
     rooms,
@@ -327,6 +335,26 @@ export const SCENARIOS: Record<string, Scenario> = {
       s.streamWindow = ourWindow({});
       s.gameInFront = true;
       return base([sofa({ members: [you(false), homePc({ unlocked: true }), bia, caio], sessions: [s] })]);
+    },
+  },
+  "remote-console-linux": {
+    title: "Remote play: running a Linux PC's session (controllers only, no desktop control, M16c)",
+    world: () => {
+      const s = hostSession(HOME_PC, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []);
+      Object.assign(s, { role: "watching", operator: true, panicKey: null, answerKeys: null });
+      s.viewers = [ME, bia.id];
+      s.viewerControllers = [1, 1];
+      s.viewerPads = [[{ slot: 0, name: "Xbox Wireless Controller" }], [{ slot: 0, name: "DualSense Wireless Controller" }]];
+      s.seats[0].holder = ME;
+      s.seats[0].guestController = 0;
+      s.stream = { state: "live" };
+      s.streaming = { name: "Hades II", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
+      s.streamWindow = ourWindow({});
+      const pc = homePc({
+        unlocked: true,
+        capabilities: { sessions: true, keyboardSeat: false, desktopControl: false },
+      });
+      return base([sofa({ members: [you(false), pc, bia, caio], sessions: [s] })]);
     },
   },
   "remote-home": {
@@ -627,7 +655,7 @@ export const SCENARIOS: Record<string, Scenario> = {
         info: {
           ...base([]).info,
           platform: "linux",
-          canHost: false,
+          capabilities: { sessions: false, keyboardSeat: false, desktopControl: false },
           dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
         },
       }),

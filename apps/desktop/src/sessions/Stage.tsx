@@ -18,7 +18,7 @@ import "./Stage.css";
 export function Stage(props: {
   room: RoomView;
   busy: Busy;
-  /** This system can start sessions (`EngineInfo.canHost`; Linux can't, M16b). */
+  /** This system can start sessions (`EngineInfo.capabilities.sessions`; Linux can't yet, M16c). */
   canHost: boolean;
   onStartSession: () => void;
   onStream: () => void;

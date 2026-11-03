@@ -87,6 +87,8 @@ struct Link {
     session: Option<RemoteSession>,
     /// Windows is locked there, as it last said (M25c).
     locked: bool,
+    /// What it can host, as it last said (M16c); none before its first state.
+    capabilities: Option<crate::HostCapabilities>,
     /// An unlock on its way: its id (for its timeout), who waits (none for
     /// one made by itself after a reconnect), and the PIN, remembered if
     /// right.
@@ -327,6 +329,7 @@ impl Actor {
                     Some(state) => {
                         link.session = state.session;
                         link.locked = state.locked;
+                        link.capabilities = Some(state.capabilities.into());
                     }
                     None => tracing::warn!("remote play: a malformed state from the home PC"),
                 }
@@ -595,6 +598,7 @@ impl Actor {
             let state = RemoteState {
                 session: session.clone().filter(|_| here),
                 locked: self.remote.locked,
+                capabilities: self.backend.capabilities().into(),
             };
             if sent.get(conn) != Some(&state) {
                 self.send(
@@ -680,7 +684,7 @@ impl Actor {
             Command::SetRemotePlay { on: true }
                 | Command::SetRemotePin { .. }
                 | Command::AddRemoteDevice { .. }
-        ) && let Err(e) = self.check_can_host()
+        ) && let Err(e) = self.check_capability(super::sessions::Capability::Sessions)
         {
             let _ = reply.send(Err(e));
             return;
@@ -966,6 +970,7 @@ impl Actor {
             unlocked: false,
             session: None,
             locked: false,
+            capabilities: None,
             unlocking: None,
             pending: BTreeMap::new(),
         });
@@ -978,6 +983,7 @@ impl Actor {
                     unlocked: false,
                     session: None,
                     locked: false,
+                    capabilities: None,
                     unlocking: None,
                     pending: BTreeMap::new(),
                 },
@@ -1357,6 +1363,7 @@ impl Actor {
             code: remote::device_code(member),
             wait_secs: link.wait_secs,
             locked: link.unlocked && link.locked,
+            capabilities: link.capabilities.filter(|_| link.unlocked),
         })
     }
 

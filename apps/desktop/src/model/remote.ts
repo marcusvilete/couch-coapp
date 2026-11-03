@@ -73,6 +73,12 @@ export function desktopCommand(target: RemoteTarget, on: boolean): Command {
   return { type: "remote", room: target.room, member: target.member, action: { type: "desktop", on } };
 }
 
+/** Whether the PC run from here offers desktop control at all (M16c: a
+ * Linux PC doesn't yet), as it said once unlocked; assumed until it says. */
+export function desktopOffered(room: RoomView, target: RemoteTarget): boolean {
+  return room.members.find((m) => m.id === target.member)?.remote?.capabilities?.desktopControl ?? true;
+}
+
 /** Why desktop control can't start in `session` now, or `null` if it can:
  * it has a keyboard-and-mouse seat, we watch it, and something is
  * streamed. */

@@ -14,10 +14,10 @@ use std::{
 };
 
 use couch_engine::{
-    Command, Engine, EngineError, EngineOptions, Event, HidingView, HostController,
-    HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile, RemoteAccessView,
-    RemoteAction, Response, RoomView, SessionEnd, SessionRole, SessionView, SourceChoice,
-    StreamStateView, StreamWindowRequest, StreamWindowSettingsView, WatchEnd,
+    Command, Engine, EngineError, EngineOptions, Event, HidingView, HostCapabilities,
+    HostController, HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile,
+    RemoteAccessView, RemoteAction, Response, RoomView, SessionEnd, SessionRole, SessionView,
+    SourceChoice, StreamStateView, StreamWindowRequest, StreamWindowSettingsView, WatchEnd,
     pipeline::{
         AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, NativeId, Source, Sources,
         ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
@@ -130,8 +130,11 @@ struct Fake {
     locked: AtomicBool,
     /// The app starts at sign-in (M25c).
     starts_at_sign_in: AtomicBool,
-    /// A system that watches but can't host, as Linux's (M16b).
+    /// A system that watches but can't host, as Linux's was (M16b).
     cannot_host: AtomicBool,
+    /// A host with controller seats alone, as Linux's (M16c): no keyboard
+    /// seat, no desktop control, and the host's own controllers not read.
+    controllers_only: AtomicBool,
     /// The host's own controller.
     local: FakeLocal,
     /// How many of the host's controllers are hidden from games now.
@@ -485,8 +488,17 @@ impl Backend for Fake {
         self.clock.clone()
     }
 
-    fn can_host(&self) -> bool {
-        !self.cannot_host.load(Ordering::SeqCst)
+    fn capabilities(&self) -> HostCapabilities {
+        if self.cannot_host.load(Ordering::SeqCst) {
+            HostCapabilities::default()
+        } else if self.controllers_only.load(Ordering::SeqCst) {
+            HostCapabilities {
+                sessions: true,
+                ..HostCapabilities::default()
+            }
+        } else {
+            HostCapabilities::ALL
+        }
     }
 
     fn sources(&self) -> Result<Sources, MediaError> {
@@ -594,7 +606,7 @@ impl Backend for Fake {
     }
 
     fn local_pads(&self) -> Option<&dyn LocalPads> {
-        Some(&self.local)
+        (!self.controllers_only.load(Ordering::SeqCst)).then_some(&self.local as &dyn LocalPads)
     }
 
     fn hiding(&self) -> Hiding {
@@ -5511,7 +5523,7 @@ async fn a_viewer_only_platform_refuses_to_host_and_still_watches() {
     let Ok(Response::Info(info)) = b.handle(Command::GetInfo).await else {
         panic!("info");
     };
-    assert!(!info.can_host);
+    assert!(!info.capabilities.sessions);
     let refused = |reply: Result<Response, EngineError>| {
         assert!(
             matches!(&reply, Err(EngineError::Refused(why)) if why.contains("can't host")),
@@ -5536,6 +5548,106 @@ async fn a_viewer_only_platform_refuses_to_host_and_still_watches() {
     a.go_live(&room, 4).await;
     let window = watching(&room, &a, &b).await;
     assert!(window.frames() > 0);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M16c: a host with controller seats alone (Linux's): it hosts with pads,
+/// but refuses a keyboard seat, its own controllers on seats and desktop
+/// control, from its window and from afar, before anything reaches the
+/// room; and its device hears what it can offer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_controllers_only_host_refuses_keyboard_and_desktop() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.controllers_only.store(true, Ordering::SeqCst);
+    let Ok(Response::Info(info)) = a.handle(Command::GetInfo).await else {
+        panic!("info");
+    };
+    assert_eq!(
+        info.capabilities,
+        HostCapabilities {
+            sessions: true,
+            ..HostCapabilities::default()
+        }
+    );
+    let refused = |reply: Result<Response, EngineError>, words: &str| {
+        assert!(
+            matches!(&reply, Err(EngineError::Refused(why)) if why.contains(words)),
+            "{reply:?}"
+        );
+    };
+    refused(
+        a.handle(go_live_with(&room, 4, setup(1, KeyboardMouseSeat::OwnSeat)))
+            .await,
+        "keyboard and mouse",
+    );
+    refused(
+        a.handle(go_live_playing(
+            &room,
+            4,
+            setup(2, KeyboardMouseSeat::None),
+            vec![dualsense()],
+        ))
+        .await,
+        "its own controllers",
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(b.session(&room, &a).await.is_none(), "nothing announced");
+
+    // B, A's own device, sees what A can offer, and A refuses the rest.
+    trusted(&room, &a, &b).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+    wait_remote(&b, &room, &a, "A's capabilities", |r| {
+        r.and_then(|r| r.capabilities)
+            .is_some_and(|c| c.sessions && !c.keyboard_seat && !c.desktop_control)
+    })
+    .await;
+    let kbm = b
+        .handle(remote(
+            &room,
+            &a,
+            RemoteAction::StartSession {
+                title: "Celeste".into(),
+                max_viewers: 4,
+                input: setup(1, KeyboardMouseSeat::OwnSeat),
+            },
+        ))
+        .await;
+    assert!(refused_remotely(&kbm, "keyboard and mouse"), "{kbm:?}");
+
+    // Controllers alone: a session, a stream, a guest playing.
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::StartSession {
+            title: "Celeste".into(),
+            max_viewers: 4,
+            input: setup(2, KeyboardMouseSeat::None),
+        },
+    ))
+    .await;
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::StartStream {
+            source: SourceChoice::Window {
+                id: WINDOW.to_string(),
+            },
+            name: "Celeste".into(),
+            fps: 30,
+            max_mbps: 20,
+            upload_mbps: None,
+        },
+    ))
+    .await;
+    let window = watching(&room, &a, &b).await;
+    assert!(window.frames() > 0);
+    let desktop = b
+        .handle(remote(&room, &a, RemoteAction::Desktop { on: true }))
+        .await;
+    assert!(refused_remotely(&desktop, "as a desktop"), "{desktop:?}");
+    // Turning it off is never refused.
+    b.ok(remote(&room, &a, RemoteAction::Desktop { on: false }))
+        .await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

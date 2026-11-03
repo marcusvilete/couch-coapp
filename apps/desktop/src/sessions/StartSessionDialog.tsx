@@ -30,6 +30,9 @@ export function StartSessionDialog(props: {
   /** On one of our own PCs, run from here (M25): its windows, its virtual
    * controllers, and none of its own controllers (nobody is there). */
   remote?: RemoteTarget;
+  /** The host (this PC, or the one run from here) offers a keyboard seat:
+   * a Linux host has controller seats alone (M16c). */
+  keyboardSeat: boolean;
 }) {
   const remote = props.remote;
   const pcName = remote ? nameOf(props.room, remote.member) : null;
@@ -41,7 +44,8 @@ export function StartSessionDialog(props: {
   const [controllers, setControllers] = useState(() => storedSetup().controllers);
   // From afar the keyboard seat is also desktop control's (M25b): on by
   // default there.
-  const [kbm, setKbm] = useState<KeyboardMouseSeat>(() => (remote ? "ownSeat" : storedSetup().keyboardMouse));
+  const [chosenKbm, setKbm] = useState<KeyboardMouseSeat>(() => (remote ? "ownSeat" : storedSetup().keyboardMouse));
+  const kbm: KeyboardMouseSeat = props.keyboardSeat ? chosenKbm : "none";
   // Our controllers to play through seats, as `padKeys` (M23), in the
   // order listed: each takes the next seat with a pad. None plays outside.
   const [myPads, setMyPads] = useState<string[]>([]);
@@ -109,7 +113,9 @@ export function StartSessionDialog(props: {
         }),
         "room",
       );
-      writeStored(KEYS.sessionSetup, JSON.stringify(input));
+      // The choice made, not one forced by a host without a keyboard seat.
+      const remembered: InputSetup = { controllers, keyboardMouse: chosenKbm };
+      writeStored(KEYS.sessionSetup, JSON.stringify(remembered));
       writeStored(KEYS.sessionTitle, title.trim());
       if (remote) {
         // Run from afar, it is watched from here: the stream window opens
@@ -232,19 +238,25 @@ export function StartSessionDialog(props: {
                 <Plus />
               </IconButton>
             </div>
-            <Field label="Keyboard and mouse">
-              {() => (
-                <Segmented
-                  label="Keyboard and mouse"
-                  value={kbm}
-                  onChange={setKbm}
-                  options={[
-                    { value: "none", label: "Not for guests" },
-                    { value: "ownSeat", label: "A seat of their own", title: "One player can hold it beside a controller" },
-                  ]}
-                />
-              )}
-            </Field>
+            {props.keyboardSeat && (
+              <Field label="Keyboard and mouse">
+                {() => (
+                  <Segmented
+                    label="Keyboard and mouse"
+                    value={kbm}
+                    onChange={setKbm}
+                    options={[
+                      { value: "none", label: "Not for guests" },
+                      {
+                        value: "ownSeat",
+                        label: "A seat of their own",
+                        title: "One player can hold it beside a controller",
+                      },
+                    ]}
+                  />
+                )}
+              </Field>
+            )}
           </div>
           <ul className="seat-preview" aria-label="The seats">
             {watchOnly ? (
@@ -283,8 +295,12 @@ export function StartSessionDialog(props: {
             <p className="start-note">
               No virtual controller is plugged in and nothing of yours is hidden: you play as you would alone.
             </p>
-          ) : (
+          ) : props.keyboardSeat ? (
             <p className="start-note">Guests play with their gamepad only.</p>
+          ) : (
+            <p className="start-note">
+              Guests play with their gamepad only: {pcName ?? "this PC"} offers no keyboard seat yet (Linux).
+            </p>
           )}
         </section>
 
