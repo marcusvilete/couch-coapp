@@ -24,7 +24,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { desktopBlocked, desktopCommand, type RemoteTarget } from "../model/remote";
+import { desktopBlocked, desktopCommand, desktopOffered, type RemoteTarget } from "../model/remote";
 import { hostIdleText, isLive, listed, nameOf, seatPhrase } from "../model/sessions";
 import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
@@ -251,7 +251,9 @@ export function HostConsole(props: {
           />
         </section>
       )}
-      {remote && pcName && <DesktopPanel room={room} session={s} remote={remote} pc={pcName} busy={busy} run={run} />}
+      {remote && pcName && desktopOffered(room, remote) && (
+        <DesktopPanel room={room} session={s} remote={remote} pc={pcName} busy={busy} run={run} />
+      )}
     </section>
   );
 }

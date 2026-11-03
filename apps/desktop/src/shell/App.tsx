@@ -298,7 +298,7 @@ export default function App() {
                     <Stage
                       room={room}
                       busy={busy}
-                      canHost={lobby.info?.canHost ?? true}
+                      canHost={lobby.info?.capabilities.sessions ?? true}
                       onStartSession={() => setDialog({ kind: "startSession", room: room.id })}
                       onStream={() => setDialog({ kind: "streamPicker", room: room.id })}
                       onInvite={actions.invite}
@@ -404,6 +404,11 @@ export default function App() {
         <StartSessionDialog
           room={dialogRoom}
           remote={dialog.remote ? { room: dialogRoom.id, member: dialog.remote } : undefined}
+          keyboardSeat={
+            dialog.remote
+              ? (dialogRoom.members.find((m) => m.id === dialog.remote)?.remote?.capabilities?.keyboardSeat ?? true)
+              : (lobby.info?.capabilities.keyboardSeat ?? true)
+          }
           onClose={close}
           onStarted={(started) => {
             lobby.putRoom(started);

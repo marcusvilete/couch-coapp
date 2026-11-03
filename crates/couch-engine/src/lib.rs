@@ -1243,6 +1243,9 @@ pub struct RemoteAccessView {
     /// Unlocked, and Windows is locked at that PC (M25c): nothing gets in
     /// until someone unlocks it there.
     pub locked: bool,
+    /// Unlocked: what that PC can host, as it said (M16c). The console hides
+    /// the keyboard seat and desktop control where they're missing.
+    pub capabilities: Option<HostCapabilities>,
 }
 
 impl fmt::Debug for Command {
@@ -1515,10 +1518,55 @@ pub struct EngineInfo {
     pub data_dir: String,
     /// The system this build runs on.
     pub platform: Platform,
-    /// Whether this system can host sessions (`Backend::can_host`): the UI
-    /// hides Start a session and the home PC's side of remote play without
-    /// it (M16b).
-    pub can_host: bool,
+    /// What this system can host (`Backend::capabilities`): the UI hides
+    /// Start a session and the home PC's side of remote play without
+    /// `sessions` (M16b), and the keyboard seat and desktop control without
+    /// theirs (M16c).
+    pub capabilities: HostCapabilities,
+}
+
+/// What a system can host (M16c, ADR 0012): Windows everything; Linux
+/// nothing until M16c-1 turns on sessions, then controller seats without a
+/// keyboard-and-mouse seat or desktop control; elsewhere nothing. Each is
+/// refused before anything is set up or announced, whatever the UI shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct HostCapabilities {
+    /// Sessions at all, and the home PC's side of remote play.
+    pub sessions: bool,
+    /// A keyboard-and-mouse seat for guests.
+    pub keyboard_seat: bool,
+    /// Desktop control for a device of ours (M25b).
+    pub desktop_control: bool,
+}
+
+impl HostCapabilities {
+    pub const ALL: Self = Self {
+        sessions: true,
+        keyboard_seat: true,
+        desktop_control: true,
+    };
+}
+
+impl From<HostCapabilities> for couch_proto::remote::HostCapabilities {
+    fn from(c: HostCapabilities) -> Self {
+        Self {
+            sessions: c.sessions,
+            keyboard_seat: c.keyboard_seat,
+            desktop_control: c.desktop_control,
+        }
+    }
+}
+
+impl From<couch_proto::remote::HostCapabilities> for HostCapabilities {
+    fn from(c: couch_proto::remote::HostCapabilities) -> Self {
+        Self {
+            sessions: c.sessions,
+            keyboard_seat: c.keyboard_seat,
+            desktop_control: c.desktop_control,
+        }
+    }
 }
 
 /// The system this build runs on (M16b). `SystemPlatform` in TypeScript,
@@ -2312,7 +2360,7 @@ impl Engine {
                 profile: self.profile.name().to_string(),
                 data_dir: self.profile.data_dir().display().to_string(),
                 platform: Platform::current(),
-                can_host: self.backend.can_host(),
+                capabilities: self.backend.capabilities(),
             })),
             Command::Ping { nonce } => {
                 // No subscribers is fine: the UI may not be listening yet.

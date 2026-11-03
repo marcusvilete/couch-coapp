@@ -49,7 +49,7 @@ export type SettingsSection =
   | "backup"
   | "about";
 
-/** `hostOnly`: only where this system can host (`EngineInfo.canHost`, M16b). */
+/** `hostOnly`: only where this system can host (`EngineInfo.capabilities.sessions`, M16b). */
 const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode; hostOnly?: true }[] = [
   { id: "profile", label: "Profile", icon: <UserRound /> },
   { id: "appearance", label: "Appearance", icon: <Palette /> },
@@ -83,7 +83,7 @@ export function SettingsPage(props: {
   restoredDev: boolean;
   onRestoredDev: () => void;
 }) {
-  const canHost = props.info?.canHost ?? true;
+  const canHost = props.info?.capabilities.sessions ?? true;
   const sections = SECTIONS.filter((s) => canHost || !s.hostOnly);
   const section = sections.find((s) => s.id === props.section) ?? sections[0];
   return (

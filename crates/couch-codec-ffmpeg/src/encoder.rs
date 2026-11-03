@@ -21,6 +21,7 @@ use crate::{
     d3d11::D3d11Frames,
     options::{self, OptionSet, option_sets},
     probe::{H264_ENCODERS, HEVC_ENCODERS},
+    vaapi::VaapiFrames,
 };
 
 /// The one encoder of each codec that takes GPU frames (M9b): NVENC reads
@@ -72,6 +73,8 @@ enum Input {
     },
     /// D3D11 textures on the capture's device.
     Gpu(D3d11Frames),
+    /// Frames in memory uploaded into VAAPI surfaces (`h264_vaapi`, M16c).
+    Vaapi(VaapiFrames),
 }
 
 // The codec context is only ever used from the thread that owns the encoder;
@@ -90,7 +93,13 @@ impl FfmpegEncoder {
                 frame.width, frame.height, config.width, config.height
             )));
         }
-        Self::open_from(gpu_input_encoder(config.codec), config, 0, Some(frame))
+        Self::open_from(
+            gpu_input_encoder(config.codec),
+            config,
+            0,
+            Some(frame),
+            None,
+        )
     }
 
     /// Opens the best encoder of `config.codec` that works on this machine,
@@ -114,21 +123,23 @@ impl FfmpegEncoder {
     /// (`options::option_sets`; the last is always the settings from before
     /// M9a).
     pub fn open(name: &str, config: EncoderConfig) -> Result<Self, MediaError> {
-        Self::open_from(name, config, 0, None)
+        Self::open_from(name, config, 0, None, None)
     }
 
     /// Like [`Self::open`], trying the option sets from `first` on, for GPU
-    /// frames like `gpu` if given.
+    /// frames like `gpu` if given; for VAAPI on `vaapi`'s device and
+    /// surfaces if given (a reopen at a new bitrate).
     fn open_from(
         name: &str,
         config: EncoderConfig,
         first: usize,
         gpu: Option<&GpuFrame>,
+        vaapi: Option<&VaapiFrames>,
     ) -> Result<Self, MediaError> {
         let sets = option_sets(name);
         let mut errors = Vec::new();
         for (index, set) in sets.iter().enumerate().skip(first) {
-            match Self::open_with(name, config, index, set, gpu) {
+            match Self::open_with(name, config, index, set, gpu, vaapi) {
                 Ok(encoder) => {
                     if !errors.is_empty() {
                         tracing::info!(
@@ -139,7 +150,8 @@ impl FfmpegEncoder {
                     }
                     return Ok(encoder);
                 }
-                // Not in this FFmpeg build: no set will help.
+                // Not in this FFmpeg build, or no device for it here: no
+                // set will help.
                 Err(e @ MediaError::Unsupported(_)) => return Err(e),
                 Err(e) => errors.push(format!("\"{}\": {e}", set.label)),
             }
@@ -156,6 +168,7 @@ impl FfmpegEncoder {
         index: usize,
         set: &OptionSet,
         gpu: Option<&GpuFrame>,
+        reuse: Option<&VaapiFrames>,
     ) -> Result<Self, MediaError> {
         if !encoders(config.codec).contains(&name) {
             return Err(MediaError::Unsupported(format!(
@@ -169,17 +182,33 @@ impl FfmpegEncoder {
         })?;
         let backend = |e: String| MediaError::Backend(format!("{name}: {e}"));
         let gpu = gpu.map(D3d11Frames::new).transpose().map_err(backend)?;
-        let pix_fmt = match gpu {
-            Some(_) => ffi::AV_PIX_FMT_D3D11,
-            None => input_format(&codec)?,
+        // VAAPI takes only its surfaces: frames in memory are uploaded. No
+        // device here (WSL, NVIDIA's decode-only driver) is no option set's
+        // fault: unsupported, so none is retried.
+        let vaapi = (name == "h264_vaapi")
+            .then(|| match reuse {
+                Some(frames) => frames.share(config),
+                None => VaapiFrames::new(config),
+            })
+            .transpose()
+            .map_err(|e| MediaError::Unsupported(format!("{name}: {e}")))?;
+        let pix_fmt = match (&gpu, &vaapi) {
+            (Some(_), _) => ffi::AV_PIX_FMT_D3D11,
+            (None, Some(_)) => ffi::AV_PIX_FMT_VAAPI,
+            (None, None) => input_format(&codec)?,
         };
 
         let mut ctx = AVCodecContext::new(&codec);
         ctx.set_width(config.width as i32);
         ctx.set_height(config.height as i32);
         ctx.set_pix_fmt(pix_fmt);
-        if let Some(frames) = &gpu {
-            let frames = frames.frames_ref().map_err(backend)?;
+        let hw_frames = match (&gpu, &vaapi) {
+            (Some(frames), _) => Some(frames.frames_ref()),
+            (None, Some(frames)) => Some(frames.frames_ref()),
+            (None, None) => None,
+        };
+        if let Some(frames) = hw_frames {
+            let frames = frames.map_err(backend)?;
             // SAFETY: the context takes the new reference and frees it.
             unsafe { (*ctx.as_mut_ptr()).hw_frames_ctx = frames };
         }
@@ -218,9 +247,10 @@ impl FfmpegEncoder {
             tracing::warn!("{name} ignored options {unused:?} (\"{}\")", set.label);
         }
 
-        let input = match gpu {
-            Some(frames) => Input::Gpu(frames),
-            None => {
+        let input = match (gpu, vaapi) {
+            (Some(frames), _) => Input::Gpu(frames),
+            (None, Some(frames)) => Input::Vaapi(frames),
+            (None, None) => {
                 let mut frame = AVFrame::new();
                 frame.set_width(config.width as i32);
                 frame.set_height(config.height as i32);
@@ -265,7 +295,7 @@ impl FfmpegEncoder {
 }
 
 /// Copies `src` into `frame`, converting if the encoder doesn't take BGRA.
-fn fill_frame(
+pub(crate) fn fill_frame(
     frame: &mut AVFrame,
     scaler: &mut Option<SwsContext>,
     src: &BgraFrame,
@@ -337,7 +367,11 @@ impl VideoEncoder for FfmpegEncoder {
                 // with a keyframe, the same price NVENC pays. (Only NVENC
                 // takes GPU input, so this one reads frames from memory.)
                 let name = self.caps.name.clone();
-                *self = Self::open_from(
+                let vaapi = match &self.input {
+                    Input::Vaapi(frames) => Some(frames),
+                    _ => None,
+                };
+                let reopened = Self::open_from(
                     &name,
                     EncoderConfig {
                         bitrate_bps: bps,
@@ -345,7 +379,9 @@ impl VideoEncoder for FfmpegEncoder {
                     },
                     self.option_set,
                     None,
+                    vaapi,
                 )?;
+                *self = reopened;
             }
         }
 
@@ -370,7 +406,15 @@ impl VideoEncoder for FfmpegEncoder {
                 frame.set_pict_type(pict_type);
                 self.ctx.send_frame(Some(&frame))
             }
-            (Input::Cpu { .. }, _) => {
+            // A requested keyframe (`pict_type` I) starts an IDR in VAAPI's
+            // encoder, as a new epoch needs.
+            (Input::Vaapi(frames), EncoderInput::Cpu(src)) => {
+                let mut frame = frames.upload(src).map_err(MediaError::Backend)?;
+                frame.set_pts(pts);
+                frame.set_pict_type(pict_type);
+                self.ctx.send_frame(Some(&frame))
+            }
+            (Input::Cpu { .. } | Input::Vaapi(_), _) => {
                 return Err(MediaError::Unsupported(
                     "a GPU frame for an encoder opened for frames in memory".into(),
                 ));
@@ -414,7 +458,10 @@ impl VideoEncoder for FfmpegEncoder {
 /// BGRA to the encoder's YUV format. swscale converts with BT.601 unless told
 /// otherwise; the stream is tagged BT.709 limited range, and the viewer
 /// decodes it that way.
-fn bgra_converter(config: EncoderConfig, pix_fmt: i32) -> Result<SwsContext, MediaError> {
+pub(crate) fn bgra_converter(
+    config: EncoderConfig,
+    pix_fmt: i32,
+) -> Result<SwsContext, MediaError> {
     let mut scaler = SwsContext::get_context(
         config.width as i32,
         config.height as i32,

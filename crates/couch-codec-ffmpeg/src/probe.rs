@@ -5,19 +5,27 @@ use rsmpeg::ffi;
 
 use crate::encoder::FfmpegEncoder;
 
-/// H.264 encoders worth trying, best first. Only the ones present in the
-/// FFmpeg build and supported by this machine's GPU will open.
-pub const H264_ENCODERS: &[&str] = &[
-    "h264_nvenc",
-    "h264_amf",
-    "h264_qsv",
-    "h264_mf",
-    "libopenh264",
-];
+/// H.264 encoders worth trying on this system, best first. Only the ones
+/// present in the FFmpeg build and supported by this machine's GPU will open.
+pub const H264_ENCODERS: &[&str] = if cfg!(windows) {
+    &[
+        "h264_nvenc",
+        "h264_amf",
+        "h264_qsv",
+        "h264_mf",
+        "libopenh264",
+    ]
+} else {
+    // Linux (M16c): VAAPI for AMD and Intel (and the Steam Deck), which on
+    // NVIDIA fails to open (its VAAPI driver only decodes) and leaves NVENC;
+    // then software.
+    &["h264_vaapi", "h264_nvenc", "libopenh264"]
+};
 
-/// HEVC encoders worth trying (M12c): NVIDIA's only, for now. AMD's and
-/// Intel's (`hevc_amf`, `hevc_qsv`) wait for testing on their hardware.
-pub const HEVC_ENCODERS: &[&str] = &["hevc_nvenc"];
+/// HEVC encoders worth trying (M12c): NVIDIA's only, taking frames on the
+/// GPU, for now. AMD's and Intel's (`hevc_amf`, `hevc_qsv`) wait for testing
+/// on their hardware; Linux hosts stream H.264 (ADR 0012).
+pub const HEVC_ENCODERS: &[&str] = if cfg!(windows) { &["hevc_nvenc"] } else { &[] };
 
 #[derive(Debug, Clone)]
 pub struct EncoderProbe {

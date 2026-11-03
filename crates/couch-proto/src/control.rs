@@ -751,6 +751,10 @@ mod tests {
                     in_front: Some(false),
                 }),
                 locked: true,
+                capabilities: crate::remote::HostCapabilities {
+                    sessions: true,
+                    ..Default::default()
+                },
             })),
             ControlMessage::RemoteCommand(RemoteCommand {
                 id: 9,
@@ -832,6 +836,7 @@ mod tests {
                 in_front: Some(true),
             }),
             locked: true,
+            capabilities: crate::remote::HostCapabilities::ALL,
         };
         let sources = RemoteSources {
             windows: (0..MAX_REMOTE_WINDOWS)

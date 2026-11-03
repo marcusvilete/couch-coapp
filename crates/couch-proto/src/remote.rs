@@ -327,6 +327,29 @@ pub struct RemoteState {
     /// Windows is locked at the home PC (M25c): nothing gets in until
     /// someone unlocks it there, and a capture shows black or freezes.
     pub locked: bool,
+    /// What the home PC can offer (M16c): the device hides the rest.
+    pub capabilities: HostCapabilities,
+}
+
+/// What a host can offer (M16c, ADR 0012): a Linux host has controller
+/// seats, but no keyboard-and-mouse seat or desktop control yet. The host
+/// refuses what it lacks whatever is asked; this only lets a device hide it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostCapabilities {
+    /// Sessions at all.
+    pub sessions: bool,
+    /// A keyboard-and-mouse seat for guests.
+    pub keyboard_seat: bool,
+    /// Desktop control for a device of the host's own (M25b).
+    pub desktop_control: bool,
+}
+
+impl HostCapabilities {
+    pub const ALL: Self = Self {
+        sessions: true,
+        keyboard_seat: true,
+        desktop_control: true,
+    };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,6 +587,7 @@ mod tests {
                 in_front: None,
             }),
             locked: false,
+            capabilities: HostCapabilities::ALL,
         };
         assert!(state(vec![guest(0)]).checked().is_some());
         // Seat 0 driven by a controller the guest doesn't have.
@@ -571,7 +595,8 @@ mod tests {
         assert!(
             RemoteState {
                 session: None,
-                locked: true
+                locked: true,
+                capabilities: HostCapabilities::default(),
             }
             .checked()
             .is_some()

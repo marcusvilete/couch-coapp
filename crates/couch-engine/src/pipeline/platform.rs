@@ -80,8 +80,8 @@ impl Backend for WindowsBackend {
     fn clock(&self) -> Arc<dyn Clock> {
         Arc::new(QpcClock)
     }
-    fn can_host(&self) -> bool {
-        true
+    fn capabilities(&self) -> crate::HostCapabilities {
+        crate::HostCapabilities::ALL
     }
 
     fn sources(&self) -> Result<Sources, MediaError> {
