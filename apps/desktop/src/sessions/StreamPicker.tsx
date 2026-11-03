@@ -1,7 +1,7 @@
 // Choosing what to stream, and how (M19): a window (best: only the game is
 // shown, only its sound sent) or a whole screen, the frame rate and the
 // quality, and an upload limit for those who need one.
-import { AppWindow, Monitor, RefreshCw, Search, ShieldAlert } from "lucide-react";
+import { AppWindow, Monitor, RefreshCw, ScreenShare, Search, ShieldAlert } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
@@ -29,6 +29,9 @@ export function StreamPicker(props: {
   notify: Notify;
   /** One of our PCs run from here (M25): its windows and screens. */
   remote?: RemoteTarget;
+  /** This PC shares what its desktop's dialog offers (Linux, M16c): one
+   * choice, made in that dialog when the stream starts. */
+  shared?: boolean;
 }) {
   const s = props.session;
   const { busy, run } = useRun(props.notify, props.onRoom, props.remote);
@@ -56,6 +59,13 @@ export function StreamPicker(props: {
       .catch((e) => setLoadError(errorText(e)));
   };
   useEffect(load, []);
+  // Its one source, picked at once.
+  const sharedSource = props.shared ? (sources?.screens[0] ?? null) : null;
+  useEffect(() => {
+    if (sharedSource) setPicked({ kind: "screen", id: sharedSource.id, title: "Shared window or screen" });
+    // Only a new source matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sharedSource?.id]);
 
   const live = s.stream.state === "live";
   const kbmSeats = allowsKbm(s);
@@ -157,96 +167,124 @@ export function StreamPicker(props: {
     >
       <form id="stream-picker" className="picker" onSubmit={start}>
         <div className="picker-sources">
-          <Tabs
-            label="Sources"
-            value={tab}
-            onChange={setTab}
-            tabs={[
-              { value: "windows", label: `Windows${sources ? ` (${sources.windows.length})` : ""}` },
-              { value: "screens", label: `Screens${sources ? ` (${sources.screens.length})` : ""}` },
-            ]}
-          >
-            <div className="picker-tools">
-              <span className="picker-search">
-                <Search aria-hidden="true" />
-                <TextInput
-                  placeholder="Find a window"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  aria-label="Find a window"
-                  disabled={tab !== "windows"}
-                />
-              </span>
-              <IconButton label="Refresh the list" onClick={load} variant="secondary">
-                <RefreshCw />
-              </IconButton>
-            </div>
-            <TabPanel value="windows" className="picker-list">
+          {props.shared ? (
+            <div className="picker-list">
               {loadError && <p className="field-error selectable">{loadError}</p>}
-              {sources == null && !loadError && <SourceSkeletons />}
-              {sources && windows.length === 0 && (
-                <p className="picker-empty">
-                  {sources.windows.length === 0 ? "No windows found. Start the game, then refresh." : "No window matches."}
-                </p>
-              )}
-              <div role="radiogroup" aria-label="Windows">
-                {windows.map((w) => (
-                  <label key={w.id} className={`source${isPicked("window", w.id) ? " picked" : ""}`}>
-                    <input
-                      type="radio"
-                      name="source"
-                      checked={isPicked("window", w.id)}
-                      onChange={() => setPicked({ kind: "window", id: w.id, title: w.title })}
-                    />
+              {sources == null && !loadError && <SourceSkeletons rows={1} />}
+              {sharedSource && (
+                <div role="radiogroup" aria-label="What to share">
+                  <label className="source picked">
+                    <input type="radio" name="source" checked readOnly />
                     <span className="source-icon" aria-hidden="true">
-                      <AppWindow />
+                      <ScreenShare />
                     </span>
                     <span className="source-text">
-                      <span className="source-title">{w.title}</span>
-                      <span className="source-detail">{w.app}</span>
-                    </span>
-                    {w.elevated && (
-                      <span title="Runs as administrator">
-                        <Badge tone="warn">admin</Badge>
-                      </span>
-                    )}
-                  </label>
-                ))}
-              </div>
-            </TabPanel>
-            <TabPanel value="screens" className="picker-list">
-              {sources == null && !loadError && <SourceSkeletons />}
-              <div role="radiogroup" aria-label="Screens">
-                {sources?.screens.map((sc, i) => (
-                  <label key={sc.id} className={`source${isPicked("screen", sc.id) ? " picked" : ""}`}>
-                    <input
-                      type="radio"
-                      name="source"
-                      checked={isPicked("screen", sc.id)}
-                      onChange={() => setPicked({ kind: "screen", id: sc.id, title: `Screen ${i + 1}` })}
-                    />
-                    <span className="source-icon" aria-hidden="true">
-                      <Monitor />
-                    </span>
-                    <span className="source-text">
-                      <span className="source-title">
-                        Whole screen {i + 1}
-                        {sc.primary && " (main)"}
-                      </span>
+                      <span className="source-title">A window or a screen</span>
                       <span className="source-detail">
-                        {sc.name} · {sc.width}×{sc.height}
-                        {sc.refreshHz != null && `, ${sc.refreshHz} Hz`}
+                        Your desktop asks which when the stream starts, then remembers it for the next.
                       </span>
                     </span>
                   </label>
-                ))}
+                </div>
+              )}
+              <p className="picker-note">Guests hear everything your PC plays.</p>
+            </div>
+          ) : (
+            <Tabs
+              label="Sources"
+              value={tab}
+              onChange={setTab}
+              tabs={[
+                { value: "windows", label: `Windows${sources ? ` (${sources.windows.length})` : ""}` },
+                { value: "screens", label: `Screens${sources ? ` (${sources.screens.length})` : ""}` },
+              ]}
+            >
+              <div className="picker-tools">
+                <span className="picker-search">
+                  <Search aria-hidden="true" />
+                  <TextInput
+                    placeholder="Find a window"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    aria-label="Find a window"
+                    disabled={tab !== "windows"}
+                  />
+                </span>
+                <IconButton label="Refresh the list" onClick={load} variant="secondary">
+                  <RefreshCw />
+                </IconButton>
               </div>
-              <p className="picker-note">
-                For a screen, guests hear everything your PC plays, except Couch Co-App.
-                {kbmSeats && " A keyboard-and-mouse seat needs a window."}
-              </p>
-            </TabPanel>
-          </Tabs>
+              <TabPanel value="windows" className="picker-list">
+                {loadError && <p className="field-error selectable">{loadError}</p>}
+                {sources == null && !loadError && <SourceSkeletons />}
+                {sources && windows.length === 0 && (
+                  <p className="picker-empty">
+                    {sources.windows.length === 0
+                      ? "No windows found. Start the game, then refresh."
+                      : "No window matches."}
+                  </p>
+                )}
+                <div role="radiogroup" aria-label="Windows">
+                  {windows.map((w) => (
+                    <label key={w.id} className={`source${isPicked("window", w.id) ? " picked" : ""}`}>
+                      <input
+                        type="radio"
+                        name="source"
+                        checked={isPicked("window", w.id)}
+                        onChange={() => setPicked({ kind: "window", id: w.id, title: w.title })}
+                      />
+                      <span className="source-icon" aria-hidden="true">
+                        <AppWindow />
+                      </span>
+                      <span className="source-text">
+                        <span className="source-title">{w.title}</span>
+                        <span className="source-detail">{w.app}</span>
+                      </span>
+                      {w.elevated && (
+                        <span title="Runs as administrator">
+                          <Badge tone="warn">admin</Badge>
+                        </span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              </TabPanel>
+              <TabPanel value="screens" className="picker-list">
+                {sources == null && !loadError && <SourceSkeletons />}
+                <div role="radiogroup" aria-label="Screens">
+                  {sources?.screens.map((sc, i) => (
+                    <label key={sc.id} className={`source${isPicked("screen", sc.id) ? " picked" : ""}`}>
+                      <input
+                        type="radio"
+                        name="source"
+                        checked={isPicked("screen", sc.id)}
+                        onChange={() => setPicked({ kind: "screen", id: sc.id, title: `Screen ${i + 1}` })}
+                      />
+                      <span className="source-icon" aria-hidden="true">
+                        <Monitor />
+                      </span>
+                      <span className="source-text">
+                        <span className="source-title">
+                          Whole screen {i + 1}
+                          {sc.primary && " (main)"}
+                        </span>
+                        <span className="source-detail">
+                          {sc.name}
+                          {/* A Linux home PC's one source has no size (M16c). */}
+                          {sc.width > 0 && sc.height > 0 && ` · ${sc.width}×${sc.height}`}
+                          {sc.refreshHz != null && `, ${sc.refreshHz} Hz`}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <p className="picker-note">
+                  For a screen, guests hear everything your PC plays, except Couch Co-App.
+                  {kbmSeats && " A keyboard-and-mouse seat needs a window."}
+                </p>
+              </TabPanel>
+            </Tabs>
+          )}
         </div>
 
         <div className="picker-settings">
@@ -297,10 +335,12 @@ export function StreamPicker(props: {
   );
 }
 
-function SourceSkeletons() {
+/** `rows`: as many as will come (one for a Linux host's shared source), so
+ * nothing below moves when they do. */
+function SourceSkeletons(props: { rows?: number }) {
   return (
     <div className="source-skeletons">
-      {[0, 1, 2, 3].map((i) => (
+      {Array.from({ length: props.rows ?? 4 }, (_, i) => (
         <div key={i} className="source">
           <span className="source-icon" />
           <span className="source-text">

@@ -1,12 +1,16 @@
-//! The Linux backend (M16c, ADR 0012): it watches (M16b), and hosts with
-//! controller seats as M16c-1's parts arrive. So far: FFmpeg's Linux
-//! encoders (VAAPI, NVENC, software), the test pattern and the tone, and
-//! guests' virtual controllers through `uinput` (with its access set up from
-//! Settings → Drivers), and the host's keys through the global-shortcuts
-//! portal. Capture through the portal and sound from PipeWire come next, and
-//! only then does it say it can host (`capabilities`).
+//! The Linux backend (M16c, ADR 0012): it watches (M16b), and hosts sessions
+//! with controller seats (M16c-1): FFmpeg's Linux encoders (VAAPI, NVENC,
+//! software); a window or screen the user shares through the desktop's
+//! screen-sharing portal, and what the PC plays from PipeWire; guests'
+//! virtual controllers through `uinput` (with its access set up from
+//! Settings → Drivers); and the host's keys through the global-shortcuts
+//! portal. No keyboard seat or desktop control yet (M16c-2).
 
-use std::{any::Any, sync::Arc};
+use std::{
+    any::Any,
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use couch_codec_ffmpeg::FfmpegEncoder;
 use couch_input::{
@@ -17,15 +21,87 @@ use couch_media::{
     AudioSource, Capturer, EncoderConfig, GpuFrame, MediaError, VideoEncoder, audio::ToneSource,
     clock::Clock, testpattern::TestPattern,
 };
-use couch_platform_linux::{clock::MonotonicClock, global_keys, pads};
+use couch_platform_linux::{
+    clock::MonotonicClock, global_keys, pads, screencast, sound::SystemSound,
+};
 
 use super::{
-    AudioKind, Backend, CaptureRequest, Focus, HostKeyEvent, NativeId, NoKbm, Source, Sources,
-    ViewerOptions, ViewerProcess, viewer_process,
+    AudioKind, Backend, CaptureRequest, Focus, HostKeyEvent, NativeId, NoKbm, ScreenSource, Source,
+    Sources, ViewerOptions, ViewerProcess, viewer_process,
 };
-use crate::{DriverName, DriverState};
+use crate::{DriverName, DriverState, HostCapabilities};
 
-pub(super) struct LinuxBackend;
+/// The one source a Linux host lists: whatever the user shares through the
+/// desktop's dialog, a window or a screen. A screen to the pipeline (no
+/// window to keep in front, the PC's sound).
+pub const SHARED: NativeId = 1;
+
+/// The profile's file for the screen-sharing portal's restore token.
+const PORTAL_FILE: &str = "portal.json";
+
+pub(super) struct LinuxBackend {
+    /// Where the portal's restore token is kept (the app's profile), so a
+    /// choice is remembered across runs; `None` keeps it for this run only
+    /// (`couch-cli`).
+    portal_file: Option<PathBuf>,
+    /// The token for the last choice. Each is good for one start, and each
+    /// start gives the next.
+    restore_token: Arc<Mutex<Option<String>>>,
+}
+
+impl LinuxBackend {
+    pub(super) fn new(profile: Option<PathBuf>) -> Self {
+        let portal_file = profile.map(|dir| dir.join(PORTAL_FILE));
+        let restore_token = portal_file.as_deref().and_then(|file| {
+            let bytes = std::fs::read(file).ok()?;
+            let saved: PortalFile = serde_json::from_slice(&bytes).ok()?;
+            saved.restore_token
+        });
+        Self {
+            portal_file,
+            restore_token: Arc::new(Mutex::new(restore_token)),
+        }
+    }
+
+    /// A capture of what the user shares: the dialog, or the last choice
+    /// again.
+    fn share(&self, fps: u32) -> Result<Box<dyn Capturer>, MediaError> {
+        let restore_token = self
+            .restore_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let (kept, file) = (self.restore_token.clone(), self.portal_file.clone());
+        let on_token = Box::new(move |token: String| {
+            if let Some(file) = &file {
+                let saved = PortalFile {
+                    restore_token: Some(token.clone()),
+                };
+                let bytes = serde_json::to_vec(&saved).expect("a token serializes");
+                if let Err(e) = crate::store::write_atomic(file, &bytes) {
+                    tracing::warn!("the shared window or screen won't be remembered: {e}");
+                }
+            }
+            *kept.lock().unwrap_or_else(PoisonError::into_inner) = Some(token);
+        });
+        let capture = screencast::start(screencast::Options {
+            fps,
+            restore_token,
+            on_token,
+        })
+        .map_err(MediaError::Backend)?;
+        Ok(Box::new(capture))
+    }
+}
+
+/// `portal.json`. This PC's own: never backed up (`store::BACKED_UP_FILES`
+/// doesn't name it), nor logged.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortalFile {
+    #[serde(default)]
+    restore_token: Option<String>,
+}
 
 impl Backend for LinuxBackend {
     /// The stream window's clock (`couch-viewer`'s `now_us`), so times from
@@ -34,8 +110,31 @@ impl Backend for LinuxBackend {
         Arc::new(MonotonicClock)
     }
 
+    /// Sessions with controller seats (M16c-1); no keyboard seat (the
+    /// desktop can't say which window is in front, nor tell the host's keys
+    /// from injected ones) nor desktop control until M16c-2.
+    fn capabilities(&self) -> HostCapabilities {
+        HostCapabilities {
+            sessions: true,
+            keyboard_seat: false,
+            desktop_control: false,
+        }
+    }
+
+    /// One source: what the user shares in the desktop's dialog when the
+    /// stream starts.
     fn sources(&self) -> Result<Sources, MediaError> {
-        Ok(Sources::default())
+        Ok(Sources {
+            windows: Vec::new(),
+            screens: vec![ScreenSource {
+                id: SHARED,
+                name: "A window or screen, chosen in your desktop's dialog".into(),
+                width: 0,
+                height: 0,
+                primary: true,
+                refresh_hz: None,
+            }],
+        })
     }
 
     fn capture(
@@ -53,8 +152,15 @@ impl Backend for LinuxBackend {
                 )),
                 None,
             )),
-            _ => Err(MediaError::Unsupported(
-                "capturing windows and screens on Linux (M16c)".into(),
+            // `couch-cli host --source monitor` shares through the dialog too.
+            Source::Screen(SHARED) | Source::PrimaryScreen => {
+                Ok((self.share(request.fps.max(1))?, None))
+            }
+            Source::Screen(_) => Err(MediaError::Unsupported(
+                "that screen: a Linux host shares what its desktop's dialog offers".into(),
+            )),
+            Source::Window(_) | Source::WindowTitle(_) => Err(MediaError::Unsupported(
+                "a window by name: a Linux host shares what its desktop's dialog offers".into(),
             )),
         }
     }
@@ -80,8 +186,11 @@ impl Backend for LinuxBackend {
     fn audio(&self, kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
         match kind {
             AudioKind::Tone => Ok(Box::new(ToneSource::new(Arc::new(MonotonicClock)))),
-            _ => Err(MediaError::Unsupported(
-                "sound capture on Linux (M16c)".into(),
+            // What the PC plays (this app included, until M16c-1's fourth
+            // part leaves it out).
+            AudioKind::System => Ok(Box::new(SystemSound::start()?)),
+            AudioKind::Game(_) => Err(MediaError::Unsupported(
+                "a window's own sound on Linux".into(),
             )),
         }
     }
@@ -129,6 +238,13 @@ impl Backend for LinuxBackend {
 
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
         viewer_process::launch(options)
+    }
+
+    /// The desktop's dialog comes when the host starts the stream, once:
+    /// never over the game when a guest arrives, nor again each time
+    /// someone comes back.
+    fn captures_without_viewers(&self) -> bool {
+        true
     }
 
     /// Through the desktop's global-shortcuts portal, each key with Ctrl,

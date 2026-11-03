@@ -234,6 +234,8 @@ export const STABLE = [
       ["pick", async (page) => page.getByText("Task Manager").click()],
     ],
   ],
+  // M16c: a Linux host's picker, its one source, in the same dialog.
+  ["stream picker on Linux", "linux-host", [".dialog"], [["open", click("Start streaming…")]]],
   [
     "start dialog",
     "owner-alone",

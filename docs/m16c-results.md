@@ -4,10 +4,12 @@
 
 [ADR 0012](adr/0012-linux-host.md)'s first part, M16c-1: a Linux PC (KDE or GNOME on Wayland) hosts sessions with controller seats only, every safety rule unchanged on any desktop. Keyboard and mouse, desktop control and the "game in front" check are M16c-2.
 
-M16c-1 comes in three PRs:
-- **part 1, here (version 0.25.0, wire revision 13):** what a system can host, and Linux's encoders;
-- **part 2:** guests' controllers through `uinput`, and the host's keys through the global-shortcuts portal;
-- **part 3:** capture through the screen-sharing portal, sound from PipeWire, notifications, remote play's home PC, and turning hosting on.
+M16c-1 comes in five PRs (the third was split in three, the author's choice of 2026-11-03):
+- **part 1 (version 0.25.0, wire revision 13):** what a system can host, and Linux's encoders;
+- **part 2 (0.25.1):** guests' controllers through `uinput`, and the host's keys through the global-shortcuts portal;
+- **part 3 (0.25.2):** capture through the screen-sharing portal and PipeWire, the PC's sound, and hosting turned on;
+- **part 4:** the app's own sounds left out of the stream, or one program's sound alone, and requests as desktop notifications;
+- **part 5:** remote play's home PC on Linux (kept awake, the lock screen, start at sign-in).
 
 **The author's choices** (ADR 0012, 2026-11-02; and 2026-11-03):
 - controllers first, keyboard later;
@@ -89,8 +91,45 @@ Left: the portal's session isn't checked on each activation (`ashpd` keeps a ses
 - **Linux (WSL):** fmt, clippy, the workspace's tests, the session scenarios eight times in a row; `couch-platform-linux`'s tests (binding twice without a portal fails at once both times); as root, the real pad: made, found ours by `phys`, B read back, a game's rumble uploaded, played (`0x80`/`0x40`) and stopped; `pad-test` seen by `evtest` exactly as `xpad`'s controller (`045e:028e` v`0x114`, its buttons).
 - **Not in WSL:** the global-shortcuts portal (no desktop session there), for the VM.
 
+## Part 3: capture, sound, and hosting on (0.25.2)
+
+**What the desktop shares** (`couch_platform_linux::screencast`)
+- **One source:** a Linux host's picker offers "A window or a screen"; the desktop's own dialog (the screen-sharing portal) asks which when the stream starts. To the pipeline it is a screen (`pipeline::linux::SHARED`): no window to keep in front, the PC's sound.
+- **The dialog comes at Start streaming,** watched or not: a Linux stream captures from its start, and goes on while nobody watches (`Backend::captures_without_viewers`), never asking again when a guest arrives.
+- **Starting returns at once,** the dialog running inside the capture: Stop streaming never waits on it, and dropping the capture closes the portal's session, which ends a dialog still open. A dismissed dialog fails the stream with "nothing was chosen to share".
+- **The choice is remembered:** the portal's restore token (one start each, every start giving the next) is kept in the profile's `portal.json`, never backed up nor logged, so the next stream, this run or the next, starts without the dialog until the user revokes it in the desktop's settings.
+- **Frames over PipeWire in memory:** BGRx, BGRA, RGBx or RGBA, up to the stream's rate, each copied out packed as BGRA (red and blue swapped where needed), stamped on `CLOCK_MONOTONIC`. The newest frame waits for the pipeline; one not yet taken is replaced.
+- **The shared window closing, or the user stopping the share** from the desktop's own indicator, ends the stream as its source lost; the session goes on.
+- `couch-cli host --source monitor` shares through the dialog too.
+
+**What the PC plays** (`couch_platform_linux::sound`): the default output's monitor through PipeWire, which converts it to 48 kHz stereo float, in 10 ms quanta. It includes this app's own sounds, so for now a Linux host plays none: no request chime, and no overlay (no window can stay over a game on GNOME without taking the focus); Settings hides Overlay and sounds there. Part 4 leaves the app's sounds out and brings notifications.
+
+**Hosting on:** the Linux backend's `capabilities` now say sessions (no keyboard seat, no desktop control). The UI shows Start a session, Drivers and the host's shortcuts; the start dialog offers controller seats alone, as part 1 made it. Being a home PC run from afar waits for part 5 (`Backend::home_pc`): Settings → Remote play offers a Linux PC only "This device".
+
+**The AppImage never carries `libpipewire`:** it must match the PipeWire the desktop runs. The bundler is told to leave it out (`LINUXDEPLOY_EXCLUDED_LIBRARIES`), and `xtask appimage` fails if it is inside anyway.
+
+**The review** found no memory-safety problem or panic in PipeWire's callbacks, the safety rules intact, and the framer content with PipeWire's stamps. What it found, all taken:
+- **Remote play's home PC came on with sessions:** a device could start a stream on an unattended Linux PC, whose dialog nobody would answer, and the PC would sleep and say it was unlocked when locked. Being a home PC is now its own question (`Backend::home_pc`, `EngineInfo.home_pc`), Windows only until part 5; a scenario has a host that isn't one refuse remote play's home side and still host.
+- **The dialog came with the first viewer,** not at Start streaming: over the game when a friend arrived, and again whenever everyone left and someone came back. A Linux stream now captures from its start, watched or not (`Backend::captures_without_viewers`); a scenario checks one capture all along, through a viewer leaving and coming back.
+- **The sound's callback ran on PipeWire's realtime thread,** sharing its state with the main loop's: it runs on the main loop now.
+- **A chime made for a session run from afar** could still play into a later Linux stream: a Linux host's Go live drops it.
+- **A session opened while Stop came** was left open: the open finishes, then the session is closed.
+- **The picker's one source** loads in one placeholder row, so nothing below it moves.
+- **The AppImage now needs the system's `libpipewire`** to start at all: said in the self-hosting guide and the release skill. The bundler's exclusion setting is recent (linuxdeploy, August 2025), so the check after bundling is what holds.
+
+Left: a restore token is used up by a start that fails before the portal answers, so the dialog comes back once.
+
+**Checked**
+- **Linux (WSL), PipeWire's half, without a portal** (PipeWire, WirePlumber and GStreamer's PipeWire plugin installed in WSL for the checks): a red 640×480 RGBx test source came out as BGRA frames, packed, and quitting ended the thread at once; a sine played into a null output was captured from its monitor in the stream's format.
+- **A Linux host's sound end to end:** `couch-cli host --source testpattern --audio system` in WSL, the sine playing, watched from Windows' `couch-cli view` through iroh's relay: 60 fps, the audio buffer at 17 ms (its target 15), nothing concealed, no underruns.
+- **Linux (WSL):** fmt, clippy, the workspace's tests, the session scenarios (82, with `a_backend_capturing_unwatched_captures_once_from_the_streams_start` and `a_host_that_isnt_a_home_pc_refuses_remote_play_and_still_hosts`) and the rooms scenarios three times each.
+- **Windows:** clippy, the engine's tests (the same 82 and 27), xtask's (`pipewire_is_never_bundled`), `cargo deny` (the new crates: pipewire, libspa), tsc, vitest, and `npm run shots` with the new `linux-host` scenario and its picker: no problems.
+- **Not in WSL:** the screen-sharing portal (no desktop session there), for the VM.
+- **Found on the way:** C: filled up during the checks (`target\debug` at 80 GB); `cargo clean --profile dev` freed it, and WSL's debug build, damaged meanwhile, was rebuilt clean.
+
 ## Still to come
 
-- **Part 3** (above).
+- **Parts 4 and 5** (above).
+- **In the VM, for part 3:** the portal's dialog on GNOME and KDE, the choice remembered across streams and runs, a window shared and closed (the stream ends, the session goes on), a share stopped from the desktop's indicator, Stop streaming with the dialog open, a Windows guest watching and playing with a controller, the PC's sound.
 - **In the VM:** the portal's keys on KDE and GNOME (GNOME may want the app registered with the portal, as a sandboxed app is), over two Go lives in a row, with the console showing the desktop's names for them (whether a desktop gives an empty name for a key it bound, which counts as unbound, and how KDE takes Shift with a digit or symbol); a guest's pad driving a game and its rumble; Set up.
 - **VAAPI on real hardware:** the Steam Deck (AMD).

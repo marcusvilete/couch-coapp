@@ -112,6 +112,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       dataDir: "C:\\Users\\ana\\AppData\\Local\\CouchCoApp\\profiles\\default",
       platform: "windows",
       capabilities: { sessions: true, keyboardSeat: true, desktopControl: true },
+      homePc: true,
     },
     profile: { displayName: "Ana", memberId: ME },
     rooms,
@@ -656,7 +657,38 @@ export const SCENARIOS: Record<string, Scenario> = {
           ...base([]).info,
           platform: "linux",
           capabilities: { sessions: false, keyboardSeat: false, desktopControl: false },
+          homePc: false,
           dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+        },
+      }),
+  },
+  "linux-host": {
+    title: "Linux: hosting with controller seats, the desktop's dialog to share (M16c)",
+    world: () =>
+      base([sofa({ sessions: [hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, [])] })], {
+        info: {
+          ...base([]).info,
+          platform: "linux",
+          capabilities: { sessions: true, keyboardSeat: false, desktopControl: false },
+          homePc: false,
+          dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+        },
+        drivers: [{ driver: "uinput", state: "missing", installer: true }],
+        sources: {
+          ...base([]).sources,
+          windows: [],
+          screens: [
+            {
+              id: "1",
+              name: "A window or screen, chosen in your desktop's dialog",
+              width: 0,
+              height: 0,
+              primary: true,
+              refreshHz: null,
+            },
+          ],
+          controllers: 0,
+          hostControllers: [],
         },
       }),
   },

@@ -21,8 +21,9 @@ const MIN_PIN = 6;
 
 type Send = (command: Parameters<typeof request>[0]) => Promise<boolean>;
 
-/** `canHost`: where this system can't host (M16b), only "This device": it runs
- * a PC of yours, never is one. */
+/** `canHost`: where this PC can't be a home PC (`EngineInfo.homePc`: a system
+ * that can't host, M16b, or a Linux host until it keeps itself awake, M16c),
+ * only "This device": it runs a PC of yours, never is one. */
 export function RemotePlaySection(props: { canHost: boolean }) {
   const [view, setView] = useState<RemotePlayView | null>(null);
   // The notification area icon (M25c): the app's own, beside remote play's.

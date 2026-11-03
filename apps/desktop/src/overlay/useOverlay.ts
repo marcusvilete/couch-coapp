@@ -14,7 +14,9 @@ import { overlaySettings } from "../state/overlaySettings";
 /** How long a note stays. */
 const EVENT_MS = 4500;
 
-export function useOverlay(rooms: RoomView[]) {
+/** `enabled`: false on a Linux host (M16c), where no window of ours can stay
+ * over the game without taking the focus. */
+export function useOverlay(rooms: RoomView[], enabled = true) {
   const host = hosted(rooms);
   const [events, setEvents] = useState<Toast[]>([]);
   const previous = useRef<SessionView | null>(null);
@@ -70,7 +72,10 @@ export function useOverlay(rooms: RoomView[]) {
   const banner = host ? desktopBanner(host.room, host.session) : [];
   const toasts: Toast[] = host ? [...banner, ...requestToasts(host.room, host.session), ...events] : [];
   const show =
-    host != null && toasts.length > 0 && (banner.length > 0 || (!appInFront && overlaySettings().show));
+    enabled &&
+    host != null &&
+    toasts.length > 0 &&
+    (banner.length > 0 || (!appInFront && overlaySettings().show));
   const area = host?.session.overlayArea ?? null;
 
   // The overlay page asks for the list when it has loaded.

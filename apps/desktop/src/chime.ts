@@ -20,6 +20,14 @@ export function prepareChime() {
   }
 }
 
+/** No chime from now on, until the next `prepareChime`: a Linux host's
+ * stream carries everything the PC plays, this app included (M16c). */
+export function dropChime() {
+  const ctx = context;
+  context = null;
+  void ctx?.close().catch(() => {});
+}
+
 /** Two rising tones, about 0.35 s, unless turned off in Settings. */
 export function playChime() {
   if (!context || !overlaySettings().sound) return;

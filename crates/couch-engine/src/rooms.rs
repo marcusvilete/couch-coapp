@@ -418,7 +418,7 @@ pub(crate) async fn start(
 
     let (inbox, inbox_rx) = mpsc::channel(INBOX);
     let now = Instant::now();
-    let can_host = options.backend.capabilities().sessions;
+    let can_host = options.backend.capabilities().sessions && options.backend.home_pc();
     let mut actor = Actor {
         addr: addr::peer_addr(&endpoint.addr()),
         endpoint: endpoint.clone(),

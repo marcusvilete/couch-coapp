@@ -59,7 +59,7 @@ From its output, leaving out any line containing "token":
 
 ## The AppImage, for friends on Linux (M16b)
 
-A Linux PC or a Steam Deck watches and plays, and is a remote-play device; it can't host. `cargo xtask appimage` (run by `scripts/build-appimage.sh`) is `build-installer.ps1`'s twin, with the same checks and options spelled `--test-relay`, `--config <file>`, `--invite-page <address>`, `--no-invite-page`.
+A Linux PC or a Steam Deck watches and plays, and is a remote-play device; since M16c-1 a Linux PC also hosts with controller seats, on the system's own PipeWire (the build fails if `libpipewire` ends up inside). So the AppImage needs `libpipewire-0.3` on the system to start at all, even to watch: tell friends on a minimal system. `cargo xtask appimage` (run by `scripts/build-appimage.sh`) is `build-installer.ps1`'s twin, with the same checks and options spelled `--test-relay`, `--config <file>`, `--invite-page <address>`, `--no-invite-page`.
 
 - **Same commit as the installer:** build both from the same merged main, so one version goes out.
 - **In WSL, from its own git clone, `~/couch-release`** (`git clone https://github.com/marcusvilete/couch-coapp ~/couch-release`, then `git -C ~/couch-release pull --ff-only`). Never the `sync.sh` copy, which has no `.git`, and never sync into the clone for a release: Windows' CRLF files make every file differ, so the tree is dirty. The `linux-checks` skill has the WSL basics; first time in the clone, `(cd apps/desktop && npm ci)` and `cargo install --locked cargo-about --features cli`.

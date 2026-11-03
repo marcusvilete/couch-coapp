@@ -35,7 +35,7 @@ The app's Settings → Drivers installs either.
 
 ## Setup (Linux)
 
-Linux builds, passes the tests, and watches and plays a Windows host's sessions (M16a and M16b, [ADR 0011](adr/0011-linux.md)); it can't host yet. Ubuntu 24.04, also in WSL:
+Linux builds, passes the tests, and watches and plays a Windows host's sessions (M16a and M16b, [ADR 0011](adr/0011-linux.md)); since M16c-1 it hosts with controller seats on a KDE or GNOME desktop ([ADR 0012](adr/0012-linux-host.md)). Ubuntu 24.04, also in WSL:
 
 1. **The system packages,** once: `sudo bash scripts/linux-deps.sh`.
 2. **Rust:** `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`, then the repository's `rust-toolchain.toml` picks the version. **Node.js 24** (Ubuntu's own is too old for Vite), e.g. from NodeSource.

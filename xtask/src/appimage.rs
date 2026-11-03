@@ -314,6 +314,12 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     tauri_build(root, &build)?;
     let runtime = notices::runtime_version(&built)?;
     let first = files_in(&appdir)?;
+    if let Some(carried) = first.iter().find(|file| never_bundled(file)) {
+        bail!(
+            "the AppImage carries {}: the system's own must be used (it must match the PipeWire the desktop runs)",
+            carried.display()
+        );
+    }
     notices::generate(
         root,
         Some(&notices::Bundle {
@@ -470,6 +476,9 @@ fn tauri_build(root: &Path, build: &BTreeMap<&str, Option<String>>) -> anyhow::R
             "src-tauri/tauri.appimage.conf.json",
         ])
         .env("LD_LIBRARY_PATH", library_path)
+        // Never PipeWire's client library (M16c): it must match the
+        // PipeWire the user's desktop runs. Checked after bundling too.
+        .env("LINUXDEPLOY_EXCLUDED_LIBRARIES", NEVER_BUNDLED.join(";"))
         // The release profile keeps line tables for latency profiles; in
         // the AppImage they would make the two binaries 300 MB.
         .env("CARGO_PROFILE_RELEASE_STRIP", "debuginfo");
@@ -484,6 +493,22 @@ fn tauri_build(root: &Path, build: &BTreeMap<&str, Option<String>>) -> anyhow::R
         bail!("tauri build failed with {status}");
     }
     Ok(())
+}
+
+/// Libraries the AppImage never carries, as linuxdeploy's patterns:
+/// PipeWire's client library talks to the user's PipeWire, and must be the
+/// system's own, of that version (M16c).
+const NEVER_BUNDLED: &[&str] = &["libpipewire-0.3.so*"];
+
+/// Whether `file` (a path in the AppImage) is one of [`NEVER_BUNDLED`].
+fn never_bundled(file: &Path) -> bool {
+    file.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            NEVER_BUNDLED
+                .iter()
+                .any(|pattern| name.starts_with(pattern.trim_end_matches('*')))
+        })
 }
 
 /// Every file in the AppImage's folder, by its path there.
@@ -554,6 +579,16 @@ fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipewire_is_never_bundled() {
+        assert!(never_bundled(Path::new("usr/lib/libpipewire-0.3.so.0")));
+        assert!(never_bundled(Path::new(
+            "usr/lib/libpipewire-0.3.so.0.1005.0"
+        )));
+        assert!(!never_bundled(Path::new("usr/lib/libwebkit2gtk-4.1.so.0")));
+        assert!(!never_bundled(Path::new("usr/lib/libpipewire")));
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

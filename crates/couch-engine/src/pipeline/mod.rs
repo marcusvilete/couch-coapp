@@ -305,6 +305,23 @@ pub trait Backend: Send + Sync + 'static {
 
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError>;
 
+    /// Whether this PC can be a home PC that one of the user's devices runs
+    /// from afar (M25): kept awake, its lock screen read, and a stream
+    /// started without anyone at it. Windows; Linux once it does those
+    /// (M16c-1's fifth part).
+    fn home_pc(&self) -> bool {
+        false
+    }
+
+    /// Whether a stream captures from its start, watched or not, and goes on
+    /// while nobody watches. Elsewhere capture runs only while someone
+    /// watches; on Linux starting a capture may ask the user in the
+    /// desktop's dialog (M16c), which must come when the host starts the
+    /// stream, not over the game when a guest arrives.
+    fn captures_without_viewers(&self) -> bool {
+        false
+    }
+
     /// Lets the viewer process `pid` bring its window to the front next
     /// (P11: the app's Show window). Windows refuses a background process
     /// otherwise; the app is in front when its button is clicked.
@@ -435,11 +452,26 @@ pub fn platform_backend() -> Arc<dyn Backend> {
     }
     #[cfg(target_os = "linux")]
     {
-        Arc::new(linux::LinuxBackend)
+        Arc::new(linux::LinuxBackend::new(None))
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
         Arc::new(ViewerOnly)
+    }
+}
+
+/// [`platform_backend`] for the app's profile in `dir`: on Linux it keeps
+/// the screen-sharing portal's last choice there (`portal.json`), so the
+/// next run shares it again without the dialog.
+pub fn profile_backend(dir: &std::path::Path) -> Arc<dyn Backend> {
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(linux::LinuxBackend::new(Some(dir.to_path_buf())))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dir;
+        platform_backend()
     }
 }
 

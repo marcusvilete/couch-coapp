@@ -86,6 +86,10 @@ impl Backend for WindowsBackend {
         crate::HostCapabilities::ALL
     }
 
+    fn home_pc(&self) -> bool {
+        true
+    }
+
     fn sources(&self) -> Result<Sources, MediaError> {
         let mut elevated = std::collections::HashMap::new();
         let windows = capture::list_windows()?

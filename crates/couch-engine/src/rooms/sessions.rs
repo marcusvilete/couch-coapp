@@ -51,6 +51,8 @@ pub(super) enum Capability {
     Sessions,
     KeyboardSeat,
     DesktopControl,
+    /// Being a home PC, run from afar (M25; `Backend::home_pc`).
+    HomePc,
 }
 
 #[derive(Default)]
@@ -1098,6 +1100,14 @@ impl Actor {
             Capability::DesktopControl => (
                 can.desktop_control,
                 "this PC can't be controlled as a desktop from afar yet",
+            ),
+            // A system that can't host at all says so.
+            Capability::HomePc if !can.sessions => {
+                return self.check_capability(Capability::Sessions);
+            }
+            Capability::HomePc => (
+                self.backend.home_pc(),
+                "this PC can't be run from afar yet: from here you run PCs of yours",
             ),
         };
         if has {
