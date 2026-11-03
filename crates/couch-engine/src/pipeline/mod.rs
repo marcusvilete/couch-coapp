@@ -25,7 +25,12 @@ mod viewer_process;
 pub mod virtual_hiding;
 pub mod watch;
 
-use std::{any::Any, path::PathBuf, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use couch_input::{
     HidUsage, InputError, KbmInjector, Plugged,
@@ -113,7 +118,7 @@ pub struct CaptureRequest {
 }
 
 /// Which sound a host streams (`couch-cli host --audio`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AudioChoice {
     /// The game for a window, everything but us for a screen, test clicks
     /// for the test pattern.
@@ -123,17 +128,22 @@ pub enum AudioChoice {
     Game,
     /// Everything this PC plays, except this app and its viewers.
     System,
+    /// One program's sound, by its name ([`Backend::sound_programs`]).
+    Program(String),
     /// The click track.
     Tone,
     Off,
 }
 
 /// A sound source, once the choice is resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioKind {
     /// The process behind this window, and its children.
     Game(NativeId),
     System,
+    /// One program's, by name, where the backend [picks
+    /// sound](Backend::picks_sound).
+    Program(String),
     Tone,
 }
 
@@ -237,7 +247,11 @@ pub trait Backend: Send + Sync + 'static {
         gpu: Option<&GpuFrame>,
     ) -> Result<Box<dyn VideoEncoder>, MediaError>;
 
-    fn audio(&self, kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError>;
+    /// The sound `kind` names. `stop` is the stream's: a source that waits
+    /// before it starts (Linux's, for the last capture to end) gives up,
+    /// `MediaError::Closed`, once it is set.
+    fn audio(&self, kind: AudioKind, stop: &AtomicBool)
+    -> Result<Box<dyn AudioSource>, MediaError>;
 
     /// Plugs in a virtual pad. Blocks for a few seconds at most: a pad that
     /// isn't taking input by then comes back pending, Windows still setting
@@ -321,6 +335,34 @@ pub trait Backend: Send + Sync + 'static {
     fn captures_without_viewers(&self) -> bool {
         false
     }
+
+    /// Whether the host picks its stream's sound by program (Linux, M16c:
+    /// the portal doesn't say whose the shared window is), from
+    /// [`Backend::sound_programs`]. Elsewhere a window's own sound follows
+    /// it.
+    fn picks_sound(&self) -> bool {
+        false
+    }
+
+    /// The programs playing sound now, by name, this app left out. Blocks
+    /// briefly.
+    fn sound_programs(&self) -> Result<Vec<String>, MediaError> {
+        Err(MediaError::Unsupported(
+            "picking a program's sound on this platform".into(),
+        ))
+    }
+
+    /// Makes `notices` the host's desktop notifications up now, where they
+    /// stand in for the overlay (Linux, M16c). Returns at once.
+    fn show_notices(&self, _notices: Vec<crate::NoticeView>) -> Result<(), MediaError> {
+        Err(MediaError::Unsupported(
+            "notifications: this PC has the overlay".into(),
+        ))
+    }
+
+    /// Closes the notices up, at the engine's end: none is left for a
+    /// session that has gone. Blocks briefly.
+    fn close_notices(&self) {}
 
     /// Lets the viewer process `pid` bring its window to the front next
     /// (P11: the app's Show window). Windows refuses a background process
@@ -502,7 +544,7 @@ impl Backend for ViewerOnly {
     ) -> Result<Box<dyn VideoEncoder>, MediaError> {
         Err(unsupported())
     }
-    fn audio(&self, _: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
+    fn audio(&self, _: AudioKind, _: &AtomicBool) -> Result<Box<dyn AudioSource>, MediaError> {
         Err(unsupported())
     }
     fn plug_pad(&self, _: bool) -> Result<Plugged, InputError> {

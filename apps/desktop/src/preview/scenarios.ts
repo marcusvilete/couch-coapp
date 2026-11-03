@@ -145,6 +145,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       hiding: "ready",
       virtualPads: true,
     },
+    soundPrograms: ["Firefox", "Hollow Knight", "Steam"],
     notices: "Couch Co-App's third-party notices\n\nThe crates it links (Rust)\n…\n",
     openedInvite: null,
     invites: {

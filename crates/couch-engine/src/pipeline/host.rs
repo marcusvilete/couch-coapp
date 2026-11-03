@@ -1662,9 +1662,13 @@ fn follow_game(shared: &Shared, stream: &Stream, stop: &AtomicBool) -> Option<Na
 
 fn audio_loop(shared: &Shared, stream: &Stream, stop: &AtomicBool) {
     let result = audio_kind(stream, stop)
-        .and_then(|kind| shared.backend.audio(kind))
+        .and_then(|kind| shared.backend.audio(kind, stop))
         .and_then(|source| send_sound(source, shared, stop));
-    if let Err(e) = result {
+    // Closed: the stream stopped first, nothing to tell.
+    if let Err(e) = result.or_else(|e| match e {
+        MediaError::Closed => Ok(()),
+        e => Err(e),
+    }) {
         shared.note(format!("audio stopped: {e}"));
     }
 }
@@ -1672,7 +1676,8 @@ fn audio_loop(shared: &Shared, stream: &Stream, stop: &AtomicBool) {
 /// Which sound `--audio` and the source mean.
 fn audio_kind(stream: &Stream, stop: &AtomicBool) -> Result<AudioKind, MediaError> {
     let source = &stream.options.source;
-    Ok(match stream.options.audio {
+    Ok(match &stream.options.audio {
+        AudioChoice::Program(name) => AudioKind::Program(name.clone()),
         AudioChoice::Game => AudioKind::Game(wait_for_window(stream, stop)?),
         AudioChoice::Auto if source.is_window() => AudioKind::Game(wait_for_window(stream, stop)?),
         AudioChoice::Auto if matches!(source, Source::TestPattern { .. }) => AudioKind::Tone,

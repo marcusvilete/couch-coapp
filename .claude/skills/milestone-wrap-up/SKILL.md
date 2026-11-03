@@ -20,7 +20,8 @@ Every change: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
 | Sound | the `audio-checks` skill |
 | Performance claims | the `performance-checks` skill |
 | Unsafe Windows, COM, D3D, SDL | the `windows-ffi-pitfalls` skill |
-| The UI | `npx tsc --noEmit`, `npx vitest run`, `npm run shots` (no problems, nothing jumps); a new state gets a preview scenario |
+| The UI | `npx tsc --noEmit`, `npx vitest run`, `npm run shots` (no problems, nothing jumps); a new state gets a preview scenario; the `front-end-change` skill |
+| The Linux host on a real desktop (portals, notifications, sound, pads) | the `linux-host-vm-run` skill, **optional**: ask first, and if there's no VM or Linux PC, what isn't tried stays in "Still to come" |
 | Anything the author will try | the `app-manual-run` skill: what to ask them to do, and what one PC can't show |
 
 A scenario that fails once in ten runs is a race to understand, not noise.

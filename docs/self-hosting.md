@@ -6,7 +6,7 @@ There are no official downloads ([ADR 0009](adr/0009-source-only-releases.md)). 
 
 - **An installer** (`Couch-Co-App_<version>_<commit>-setup.exe`) that your friends run. It's unsigned, so Windows SmartScreen warns once: "More info", then "Run anyway".
 - **A relay** on a server you control, which only your installers can use. The app connects your friends' PCs directly when it can, and through your relay when it can't.
-- **If you like, an AppImage** (`Couch-Co-App_<version>_<commit>.AppImage`) for friends on Linux or a Steam Deck, who watch and play sessions hosted on Windows ([step 4](#4-an-appimage-for-friends-on-linux)).
+- **If you like, an AppImage** (`Couch-Co-App_<version>_<commit>.AppImage`) for friends on Linux or a Steam Deck, who watch and play sessions, and on a Linux desktop host them too, with controller seats ([step 4](#4-an-appimage-for-friends-on-linux)).
 
 ## 1. Prepare your Windows PC (once)
 

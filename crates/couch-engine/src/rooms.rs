@@ -821,7 +821,9 @@ impl Actor {
             | Command::ExportProfile { .. }
             | Command::RestoreProfile { .. }
             | Command::InstallDriver { .. }
-            | Command::ListSources => Err(EngineError::Stopped),
+            | Command::ListSources
+            | Command::ListSoundSources
+            | Command::ShowNotices { .. } => Err(EngineError::Stopped),
             Command::StartSession {
                 room,
                 title,
@@ -848,6 +850,7 @@ impl Actor {
                 fps,
                 max_mbps,
                 upload_mbps,
+                program,
             } => {
                 let start = sessions::StartStream {
                     source,
@@ -855,6 +858,7 @@ impl Actor {
                     fps,
                     max_mbps,
                     upload_mbps,
+                    program,
                 };
                 // Answers later, once the stream has started.
                 if let Err(e) = self.start_stream(start, reply, now) {

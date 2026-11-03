@@ -1,6 +1,6 @@
 ---
 name: audio-checks
-description: Verify Couch Co-App's game audio after a change, with `couch-cli latency-probe --audio` (gate A1, click to playback, loss) and the audio unit tests, and know what to ask the user to listen for. Use after changing couch_media::audio (framer, jitter buffer, click track), couch-codec-opus, couch_platform_win::audio (WASAPI loopback), couch_net::audio, the sound in couch_engine::pipeline (host, watch), couch-viewer's audio.rs, pipe.rs or clock.rs, the audio datagram or IPC payloads, or QUIC/datagram settings; and before reporting or committing such a change.
+description: Verify Couch Co-App's game audio after a change, with `couch-cli latency-probe --audio` (gate A1, click to playback, loss) and the audio unit tests, and know what to ask the user to listen for. Use after changing couch_media::audio (framer, jitter buffer, click track), couch-codec-opus, couch_platform_win::audio (WASAPI loopback), couch_platform_linux::sound (a Linux host's PipeWire capture), couch_net::audio, the sound in couch_engine::pipeline (host, watch), couch-viewer's audio.rs, pipe.rs or clock.rs, the audio datagram or IPC payloads, or QUIC/datagram settings; and before reporting or committing such a change.
 ---
 
 # Audio checks
@@ -52,6 +52,11 @@ The probe prints:
 - **`underruns` climbing without a network stall:** the host's capture stalled, or packets stopped. Process loopback normally delivers silence continuously, even from a silent process.
 - **The HUD's buffer stuck well above target:** the playback ratio isn't reaching SDL (`SDL_SetAudioStreamFrequencyRatio` in the viewer's callback).
 - **0 clicks:** the clock didn't get `--clicks`, it has no audio device, or a stale `couch-cli.exe` ran (see Run).
+
+**A Linux host** (M16c, `couch_platform_linux::sound`): every program's PipeWire stream but this app's, or one program's, linked into our own capture node. Its checks run in WSL (the `linux-checks` skill has the setup: a null output, `pw-play`, pipewire-pulse for `paplay`):
+- `cargo test -p couch-platform-linux` and its ignored sound tests, each alone: `what_plays_is_captured`, `ours_is_left_out_and_one_program_is_taken` (our child left out, another heard, one program by name, a restart as the pipeline does it, the programs' own output intact), `a_program_opening_its_stream_again_is_heard_again`, `a_pulse_client_of_ours_is_left_out` (the chime's path);
+- end to end: `couch-cli host --source testpattern --audio system --relay n0` in WSL with a sine playing, `couch-cli view <ticket> --relay n0 --measure-secs 20` on Windows: the buffer near its target, a few concealed at most, no underruns;
+- **never relink a program within `COOLDOWN` of our links to it going:** PipeWire 1.0.5 froze the program, its own output too. If a test fails half the time at a capture's start, look there first, and check the output's monitor (`output_peak` in the tests) for whether the program itself went silent.
 
 **Capture-to-device figures need one machine.** They subtract the host's clock from the viewer's. Across two PCs only the jitter-buffer and concealment counts mean anything.
 

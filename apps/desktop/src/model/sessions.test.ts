@@ -11,6 +11,8 @@ import {
   playersOf,
   seatPhrase,
   seatsOf,
+  EVERYTHING,
+  soundChoices,
   togglePad,
   uploadLimit,
   uploadLimitOk,
@@ -142,5 +144,22 @@ describe("the upload limit", () => {
     expect(uploadLimitOk(uploadLimit(true, "10000"))).toBe(true);
     expect(uploadLimitOk(uploadLimit(true, "50abc"))).toBe(false);
     expect(uploadLimitOk(null)).toBe(true);
+  });
+});
+
+describe("soundChoices (a Linux host's sound, M16c)", () => {
+  it("offers everything but us, then each program playing", () => {
+    expect(soundChoices(["Firefox", "Steam"], "").map((c) => c.value)).toEqual([EVERYTHING, "Firefox", "Steam"]);
+  });
+
+  it("keeps the program picked before while it isn't playing", () => {
+    expect(soundChoices(["Firefox"], "Hollow Knight")[2]).toEqual({
+      value: "Hollow Knight",
+      label: "Hollow Knight",
+      detail: "not playing now",
+    });
+    expect(soundChoices(["Hollow Knight"], "Hollow Knight")).toHaveLength(2);
+    // Not yet known: not said to be silent.
+    expect(soundChoices(null, "Hollow Knight")[1].detail).toBeUndefined();
   });
 });

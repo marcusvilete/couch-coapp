@@ -9,7 +9,8 @@
 use std::{
     any::Any,
     path::PathBuf,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError, atomic::AtomicBool},
+    time::Duration,
 };
 
 use couch_codec_ffmpeg::FfmpegEncoder;
@@ -22,14 +23,16 @@ use couch_media::{
     clock::Clock, testpattern::TestPattern,
 };
 use couch_platform_linux::{
-    clock::MonotonicClock, global_keys, pads, screencast, sound::SystemSound,
+    clock::MonotonicClock,
+    global_keys, notices, pads, screencast,
+    sound::{Sounds, SystemSound},
 };
 
 use super::{
     AudioKind, Backend, CaptureRequest, Focus, HostKeyEvent, NativeId, NoKbm, ScreenSource, Source,
     Sources, ViewerOptions, ViewerProcess, viewer_process,
 };
-use crate::{DriverName, DriverState, HostCapabilities};
+use crate::{DriverName, DriverState, HostCapabilities, NoticeView};
 
 /// The one source a Linux host lists: whatever the user shares through the
 /// desktop's dialog, a window or a screen. A screen to the pipeline (no
@@ -183,12 +186,18 @@ impl Backend for LinuxBackend {
         Ok(Box::new(FfmpegEncoder::open_best(config)?))
     }
 
-    fn audio(&self, kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
+    fn audio(
+        &self,
+        kind: AudioKind,
+        stop: &AtomicBool,
+    ) -> Result<Box<dyn AudioSource>, MediaError> {
         match kind {
             AudioKind::Tone => Ok(Box::new(ToneSource::new(Arc::new(MonotonicClock)))),
-            // What the PC plays (this app included, until M16c-1's fourth
-            // part leaves it out).
-            AudioKind::System => Ok(Box::new(SystemSound::start()?)),
+            // What the PC plays, this app left out.
+            AudioKind::System => Ok(Box::new(SystemSound::start(Sounds::AllButOurs, stop)?)),
+            AudioKind::Program(name) => {
+                Ok(Box::new(SystemSound::start(Sounds::Program(name), stop)?))
+            }
             AudioKind::Game(_) => Err(MediaError::Unsupported(
                 "a window's own sound on Linux".into(),
             )),
@@ -245,6 +254,33 @@ impl Backend for LinuxBackend {
     /// someone comes back.
     fn captures_without_viewers(&self) -> bool {
         true
+    }
+
+    /// The portal doesn't say whose the shared window is: the host picks a
+    /// program, or sends everything but this app.
+    fn picks_sound(&self) -> bool {
+        true
+    }
+
+    fn sound_programs(&self) -> Result<Vec<String>, MediaError> {
+        couch_platform_linux::sound::programs()
+    }
+
+    fn show_notices(&self, list: Vec<NoticeView>) -> Result<(), MediaError> {
+        let list = list
+            .into_iter()
+            .map(|n| notices::Notice {
+                id: n.id,
+                title: n.title,
+                body: n.body,
+                lasting: n.lasting,
+            })
+            .collect();
+        notices::show(list).map_err(MediaError::Backend)
+    }
+
+    fn close_notices(&self) {
+        notices::close_all(Duration::from_millis(500));
     }
 
     /// Through the desktop's global-shortcuts portal, each key with Ctrl,

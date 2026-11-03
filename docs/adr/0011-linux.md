@@ -5,11 +5,11 @@
 - Wayland, on KDE or GNOME;
 - tested over time in WSL, a VM, on bare metal and on a Steam Deck.
 
-M16a built ([results](../m16a-results.md), 0.23.2), M16b part 1 built ([results](../m16b-results.md), 0.24.0). Settled while building M16b (the author's, 2026-10-28):
+M16a built ([results](../m16a-results.md), 0.23.2), M16b built ([results](../m16b-results.md): part 1, 0.24.0, the viewer; part 2, the AppImage). The host is [ADR 0012](0012-linux-host.md)'s. Settled while building M16b (the author's, 2026-10-28):
 - **the AppImage bundles WebKitGTK and GTK,** so it runs anywhere, the Steam Deck included; its notices list those libraries with their source packages;
 - **the stream window's bar draws Lucide's icon font** on Linux (ISC; the app's own icons), its text in the system's fonts;
 - **H.264 only on Linux for now,** decoded by VAAPI or NVDEC where the GPU allows, else in software. HEVC waits for tests on the Deck and bare metal;
-- **a system that can't host says so** (`EngineInfo.can_host`): the engine refuses hosting and the home PC's side of remote play before anything reaches the room, and the UI hides them.
+- **a system that can't host says so** (`EngineInfo.can_host`): the engine refuses hosting and the home PC's side of remote play before anything reaches the room, and the UI hides them. (M16c split it into what a system can host, `EngineInfo.capabilities`, and whether it can be a home PC, `EngineInfo.home_pc`: ADR 0012.)
 
 ## Context
 

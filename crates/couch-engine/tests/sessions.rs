@@ -109,6 +109,10 @@ struct Fake {
     capture_closed: Mutex<Arc<AtomicBool>>,
     /// Captures from a stream's start, watched or not (as Linux does).
     captures_unwatched: AtomicBool,
+    /// The host picks its stream's sound by program (as Linux does).
+    picks_sound: AtomicBool,
+    /// Every sound the pipeline asked for, in order.
+    audio_kinds: Mutex<Vec<AudioKind>>,
     /// Hosts, but can't be a home PC run from afar (Linux until M16c-1's
     /// fifth part).
     not_a_home_pc: AtomicBool,
@@ -582,12 +586,21 @@ impl Backend for Fake {
         }))
     }
 
-    fn audio(&self, _kind: AudioKind) -> Result<Box<dyn AudioSource>, MediaError> {
+    fn audio(&self, kind: AudioKind, _: &AtomicBool) -> Result<Box<dyn AudioSource>, MediaError> {
+        self.audio_kinds.lock().unwrap().push(kind);
         Ok(Box::new(ToneSource::new(self.clock.clone())))
     }
 
     fn captures_without_viewers(&self) -> bool {
         self.captures_unwatched.load(Ordering::SeqCst)
+    }
+
+    fn picks_sound(&self) -> bool {
+        self.picks_sound.load(Ordering::SeqCst)
+    }
+
+    fn sound_programs(&self) -> Result<Vec<String>, MediaError> {
+        Ok(vec!["Celeste".into(), "Firefox".into()])
     }
 
     fn decodes(&self) -> u8 {
@@ -1307,6 +1320,7 @@ fn stream_window() -> Command {
         fps: 30,
         max_mbps: 20,
         upload_mbps: None,
+        program: None,
     }
 }
 
@@ -1584,6 +1598,7 @@ async fn a_full_session_turns_one_away_and_one_stream_at_a_time() {
         fps: 30,
         max_mbps: 20,
         upload_mbps: None,
+        program: None,
     };
     assert!(refused_because(&c.handle(screen).await, "need a window"));
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
@@ -2478,6 +2493,57 @@ async fn a_backend_capturing_unwatched_captures_once_from_the_streams_start() {
         a.fake.captures.lock().unwrap().len(),
         1,
         "one capture all along"
+    );
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// A backend where the host picks the sound by program (Linux, M16c): what
+/// plays is listed, and a stream with a program asks for that program's
+/// sound; one without, the default. Elsewhere both are refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_picking_its_sound_streams_the_program_picked() {
+    let (mut a, mut b, mut c, room) = three().await;
+    assert!(refused_because(
+        &a.handle(Command::ListSoundSources).await,
+        "own sound"
+    ));
+    a.ok(go_live(&room, 4)).await;
+    let with = |program: &str| {
+        let mut start = stream_window();
+        if let Command::StartStream { program: p, .. } = &mut start {
+            *p = Some(program.into());
+        }
+        start
+    };
+    assert!(refused_because(
+        &a.handle(with("Celeste")).await,
+        "own sound"
+    ));
+
+    a.fake.picks_sound.store(true, Ordering::SeqCst);
+    a.fake.captures_unwatched.store(true, Ordering::SeqCst);
+    let listed = a.handle(Command::ListSoundSources).await;
+    assert!(
+        matches!(&listed, Ok(Response::SoundSources { programs }) if programs == &["Celeste", "Firefox"]),
+        "{listed:?}"
+    );
+    assert!(refused_because(
+        &a.handle(with("  ")).await,
+        "no such program"
+    ));
+    a.ok(with(" Celeste ")).await;
+    wait("the program's sound", || {
+        a.fake.audio_kinds.lock().unwrap().last() == Some(&AudioKind::Program("Celeste".into()))
+    })
+    .await;
+    a.ok(stream_window()).await;
+    wait("the default sound", || {
+        a.fake.audio_kinds.lock().unwrap().len() >= 2
+    })
+    .await;
+    assert_ne!(
+        a.fake.audio_kinds.lock().unwrap().last(),
+        Some(&AudioKind::Program("Celeste".into()))
     );
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

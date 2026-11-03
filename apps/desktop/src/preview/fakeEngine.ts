@@ -39,6 +39,8 @@ export type World = {
   network: NetworkView;
   drivers: DriverView[];
   sources: SourceList;
+  /** What plays sound now, on a host that picks it by program (Linux, M16c). */
+  soundPrograms: string[];
   notices: string;
   /** An invite link the app was "opened with", taken once. */
   openedInvite: string | null;
@@ -783,6 +785,12 @@ function handle(cmd: Command): Response | Promise<Response> {
       );
     case "getNotices":
       return { type: "notices", text: world.notices };
+    case "listSoundSources":
+      if (world.info.platform !== "linux") throw "this PC sends the streamed window's own sound";
+      return { type: "soundSources", programs: [...world.soundPrograms] };
+    case "showNotices":
+      if (world.info.platform !== "linux") throw "notifications: this PC has the overlay";
+      return { type: "done" };
     case "exportProfile":
       if ([...cmd.passphrase.trim().normalize("NFKC")].length < 12) throw "the passphrase must be at least 12 characters";
       return { type: "backup", path: world.backupPath };

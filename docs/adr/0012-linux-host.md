@@ -10,6 +10,14 @@
 
 And for testing: a general Linux desktop is the target, not the Steam Deck (its Game Mode is out of scope); built and checked in WSL and CI, run in a VM, then on the Deck (AMD) and a dual boot of the author's PC (NVIDIA) for encoding and speed.
 
+M16c-1 built so far ([results](../m16c-results.md)): part 1, 0.25.0 (capabilities, Linux's encoders); part 2, 0.25.1 (`uinput` controllers, the host's keys); part 3, 0.25.2 (the portal's capture, PipeWire, hosting on); part 4, 0.25.3 (our own sounds out, one program's, notifications). Settled while building it:
+- **`can_host` split three ways and a fourth:** `HostCapabilities { sessions, keyboard_seat, desktop_control }`, each refused before anything is set up, told to a remote-play device too (wire revision 13, the author's choice); being a home PC run from afar is its own question (`Backend::home_pc`), Linux's from part 5;
+- **a Linux stream captures from its start,** watched or not (`Backend::captures_without_viewers`), so the portal's dialog comes at Start streaming, never over the game when a guest arrives;
+- **every portal request runs on one runtime for the process:** `ashpd`'s one D-Bus connection dies with the runtime that made it;
+- **the AppImage never carries `libpipewire`,** which must match the desktop's;
+- **our sound is every program's stream but ours, linked into our own node,** ours decided from each client's and stream's own info (a PulseAudio client's process isn't in the registry's snapshot), loopbacks and filters left out; one capture at a time, 1.5 s apart, since PipeWire 1.0.5 froze a program relinked faster;
+- **notifications without answer buttons:** answering stays the host's keys and the console; they ask the server for no sound, which would be in the stream.
+
 ## Context
 
 ADR 0011 made a Linux PC a viewer (M16a, M16b) and left the host for its own design, because a host needs what Wayland changes most:

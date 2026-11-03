@@ -2,9 +2,9 @@
 
 /**
  * What a system can host (M16c, ADR 0012): Windows everything; Linux
- * nothing until M16c-1 turns on sessions, then controller seats without a
- * keyboard-and-mouse seat or desktop control; elsewhere nothing. Each is
- * refused before anything is set up or announced, whatever the UI shows.
+ * sessions since M16c-1, with controller seats only (no keyboard-and-mouse
+ * seat, no desktop control); elsewhere nothing. Each is refused before
+ * anything is set up or announced, whatever the UI shows.
  */
 export type HostCapabilities = { 
 /**

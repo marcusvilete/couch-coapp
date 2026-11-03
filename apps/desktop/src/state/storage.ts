@@ -19,6 +19,8 @@ export const KEYS = {
   sessionTitle: "couch.session.title",
   streamFps: "couch.stream.fps",
   streamQuality: "couch.stream.quality",
+  /** A Linux host's sound: one program's name, or everything but us (M16c). */
+  streamSound: "couch.stream.sound",
   /** Settings → Overlay. */
   overlay: "overlay",
   /** Settings → Appearance (M21). */
