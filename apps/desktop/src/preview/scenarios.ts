@@ -146,6 +146,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       virtualPads: true,
     },
     soundPrograms: ["Firefox", "Hollow Knight", "Steam"],
+    sharedRemembered: false,
     notices: "Couch Co-App's third-party notices\n\nThe crates it links (Rust)\n…\n",
     openedInvite: null,
     invites: {
@@ -675,6 +676,8 @@ export const SCENARIOS: Record<string, Scenario> = {
           dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
         },
         drivers: [{ driver: "uinput", state: "missing", installer: true }],
+        // The stream picker offers Choose again.
+        sharedRemembered: true,
         sources: {
           ...base([]).sources,
           windows: [],

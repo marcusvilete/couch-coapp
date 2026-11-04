@@ -399,7 +399,7 @@ The layouts are pinned by `couch_proto::invite`'s `the_layout_is_pinned` and `th
   Invites and member records carry each member's own relay, and iroh dials a relay outside its own list (iroh's own `endpoint_relay_map_change` test covers that). With any choice, iroh tries a direct path first; the relay starts the connection and carries it when no direct path is found.
 - **Our relay asks for a token** (M7): the relay URL and token are built into release builds. iroh sends the token only to relays in its own list, and **invites and member records never carry it**. A member whose setting is another relay can still dial ours, but ours refuses them. Without a direct path they don't connect, which is why Settings asks everyone in a room to use the same choice.
 - **Parsing** accepts the bare payload or anything ending in `#<payload>`, in any case, with whitespace ignored, up to 4096 characters.
-- **Joining needs the owner online.** Nobody else admits newcomers, so a join while the owner's app is closed fails with "the room's owner isn't online".
+- **Joining needs the owner online.** Nobody else admits newcomers, so a join while the owner's app is closed fails with "couldn't reach the room's owner" (as does one whose connection to a running owner times out).
 - **Opening a link only fills in the join screen.** Any web page can open a `couchco://` link, so the app previews the invite (the room's name, which only the invite claims, and whether it expired) and sends nothing until the user types the password and clicks Join. Links open in the default profile, since Windows runs one command per link scheme.
 - **Changing the password** (the owner) replaces the owner's password key. Members stay; invites already sent keep working with the new password.
 

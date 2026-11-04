@@ -41,6 +41,8 @@ export type World = {
   sources: SourceList;
   /** What plays sound now, on a host that picks it by program (Linux, M16c). */
   soundPrograms: string[];
+  /** Whether the desktop's screen-sharing choice is remembered (Linux). */
+  sharedRemembered: boolean;
   notices: string;
   /** An invite link the app was "opened with", taken once. */
   openedInvite: string | null;
@@ -586,7 +588,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (p.status === "expired") throw "the owner has closed this room";
       if (cmd.password.trim() === "") throw "passwords can't be empty";
       if (cmd.password === "wrong") throw "wrong password";
-      if (cmd.password === "offline") throw "the room's owner isn't online; invites work while the owner's Couch Co-App is running";
+      if (cmd.password === "offline") throw "couldn't reach the room's owner: invites work while the owner's Couch Co-App is running (try again in a moment if it is)";
       const room: FakeRoom = {
         id: p.room,
         name: p.name,
@@ -785,6 +787,11 @@ function handle(cmd: Command): Response | Promise<Response> {
       );
     case "getNotices":
       return { type: "notices", text: world.notices };
+    case "playChime":
+      return { type: "done" };
+    case "sharedChoice":
+      if (cmd.forget) world.sharedRemembered = false;
+      return { type: "sharedChoice", remembered: world.info.platform === "linux" && world.sharedRemembered };
     case "listSoundSources":
       if (world.info.platform !== "linux") throw "this PC sends the streamed window's own sound";
       return { type: "soundSources", programs: [...world.soundPrograms] };

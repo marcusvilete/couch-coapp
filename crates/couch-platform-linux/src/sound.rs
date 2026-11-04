@@ -40,8 +40,8 @@ use pw::{
 };
 
 /// The stream's format, which PipeWire converts to.
-const RATE: u32 = 48_000;
-const CHANNELS: u16 = 2;
+pub(crate) const RATE: u32 = 48_000;
+pub(crate) const CHANNELS: u16 = 2;
 /// How long starting, or listing what plays, may take: PipeWire answers at
 /// once where it runs.
 const READY_WAIT: Duration = Duration::from_secs(3);
@@ -844,7 +844,7 @@ fn parent(pid: u32) -> Option<u32> {
 }
 
 /// 48 kHz stereo, 32-bit float: PipeWire converts whatever plays to it.
-fn format() -> Vec<u8> {
+pub(crate) fn format() -> Vec<u8> {
     let mut info = AudioInfoRaw::new();
     info.set_format(AudioFormat::F32LE);
     info.set_rate(RATE);

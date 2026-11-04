@@ -91,6 +91,7 @@ async fn run(
     on_event: Box<dyn Fn(Event<'_>) + Send>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
+    crate::portal::ready().await;
     let opened = tokio::time::timeout(OPEN_WAIT, async {
         let portal = GlobalShortcuts::new().await?;
         let session = portal.create_session().await?;
@@ -176,12 +177,67 @@ async fn run(
 fn triggers(shortcuts: &[Shortcut]) -> Vec<(String, String)> {
     let bound: Vec<(String, String)> = shortcuts
         .iter()
-        .map(|s| (s.id().to_owned(), s.trigger_description().to_owned()))
+        .map(|s| (s.id().to_owned(), readable(s.trigger_description())))
         .collect();
     for (id, trigger) in &bound {
         tracing::info!("the host's key {id}: {trigger}");
     }
     bound
+}
+
+/// A trigger in GTK's accelerator syntax, as GNOME 50 described them after
+/// binding without its dialog ("Press <Shift><Control><Alt>y"), the way
+/// people write it ("Ctrl+Alt+Shift+Y"); any other description as it is.
+fn readable(description: &str) -> String {
+    let text = description.trim();
+    let mut rest = text.strip_prefix("Press ").unwrap_or(text);
+    let (mut ctrl, mut alt, mut shift, mut sup) = (false, false, false, false);
+    while let Some(after) = rest.strip_prefix('<') {
+        let Some((name, after)) = after.split_once('>') else {
+            return description.to_owned();
+        };
+        match name.to_ascii_lowercase().as_str() {
+            "control" | "ctrl" | "primary" => ctrl = true,
+            "alt" | "mod1" => alt = true,
+            "shift" => shift = true,
+            "super" | "meta" | "mod4" => sup = true,
+            _ => return description.to_owned(),
+        }
+        rest = after;
+    }
+    let none = !(ctrl || alt || shift || sup);
+    if none || rest.is_empty() || rest.contains(char::is_whitespace) {
+        return description.to_owned();
+    }
+    let key = match rest {
+        "BackSpace" => "Backspace".to_owned(),
+        "minus" => "-".to_owned(),
+        "equal" => "=".to_owned(),
+        "bracketleft" => "[".to_owned(),
+        "bracketright" => "]".to_owned(),
+        "backslash" => "\\".to_owned(),
+        "semicolon" => ";".to_owned(),
+        "apostrophe" => "'".to_owned(),
+        "grave" => "`".to_owned(),
+        "comma" => ",".to_owned(),
+        "period" => ".".to_owned(),
+        "slash" => "/".to_owned(),
+        key if key.chars().count() == 1 => key.to_uppercase(),
+        key => key.to_owned(),
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for (on, name) in [
+        (ctrl, "Ctrl"),
+        (alt, "Alt"),
+        (shift, "Shift"),
+        (sup, "Super"),
+    ] {
+        if on {
+            parts.push(name);
+        }
+    }
+    parts.push(&key);
+    parts.join("+")
 }
 
 /// The XDG shortcuts name of the key with this HID usage, among those a
@@ -231,6 +287,29 @@ pub fn chord(usage: u16) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gtk_accelerators_read_as_people_write_them() {
+        assert_eq!(readable("Press <Shift><Control><Alt>y"), "Ctrl+Alt+Shift+Y");
+        assert_eq!(
+            readable("Press <Shift><Control><Alt>BackSpace"),
+            "Ctrl+Alt+Shift+Backspace"
+        );
+        assert_eq!(readable("<Primary><Alt>F12"), "Ctrl+Alt+F12");
+        assert_eq!(
+            readable("<Control><Alt><Shift>bracketleft"),
+            "Ctrl+Alt+Shift+["
+        );
+        // Anything else is the desktop's own words.
+        assert_eq!(readable("Ctrl+Alt+Shift+Y"), "Ctrl+Alt+Shift+Y");
+        assert_eq!(readable("Press y"), "Press y");
+        assert_eq!(readable("Press <Hyper>y"), "Press <Hyper>y");
+        assert_eq!(
+            readable("Press <Control>y or <Alt>y"),
+            "Press <Control>y or <Alt>y"
+        );
+        assert_eq!(readable(""), "");
+    }
 
     #[test]
     fn every_shortcut_key_has_a_name() {

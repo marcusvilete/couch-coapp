@@ -16,5 +16,13 @@ fn main() {
             unsafe { std::env::remove_var(key) };
         }
     }
+    // WebKitGTK's DMA-BUF renderer left the window blank on a virtual
+    // machine's GPU: off there, unless the user chose themselves.
+    if couch_engine::webview_needs_plain_renderer()
+        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+    {
+        // SAFETY: as above, before any other thread exists.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
     couch_desktop_lib::run()
 }

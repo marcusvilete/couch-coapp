@@ -24,11 +24,18 @@ const MODIFIERS = new Set([
   "MetaRight",
 ]);
 
+const DESKTOP_HOLDS = "Your desktop holds this key: change it in its settings";
+
 export function ShortcutsSection(props: {
   onCapturing: (capturing: boolean) => void;
   /** Where this system can't host (M16b), the host's keys don't apply. */
   canHost: boolean;
+  /** Linux (M16c): the desktop binds the host's keys, offered these as
+   * Ctrl+Alt+Shift chords, and keeps what it bound: changed here, they
+   * wouldn't reach it. */
+  linux: boolean;
 }) {
+  const desktopHolds = (s: ShortcutView) => props.linux && s.scope === "host";
   const [shortcuts, setShortcuts] = useState<ShortcutView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** The row waiting for its new key. */
@@ -82,13 +89,27 @@ export function ShortcutsSection(props: {
       .then((r) => setShortcuts(r.shortcuts))
       .catch((e) => setError(errorText(e)));
   };
+  // The rows Reset all may change: on Linux not the ones the desktop holds.
+  const resettable = (shortcuts ?? []).filter((s) => !desktopHolds(s) && !s.isDefault);
+  const resetAll = async () => {
+    if (!props.linux) return reset(null);
+    setRefused(null);
+    try {
+      let latest: ShortcutView[] | null = null;
+      for (const s of resettable) latest = (await request({ type: "resetShortcuts", id: s.id }, "shortcuts")).shortcuts;
+      if (latest) setShortcuts(latest);
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
 
   const groups: ShortcutView["scope"][] = props.canHost ? ["host", "viewer"] : ["viewer"];
   return (
     <div className="settings-section">
       <p className="settings-lead">
-        Shortcuts are never sent to the game. A new panic key works from your next session; the stream window's keys
-        from the next one you open.
+        {props.linux
+          ? "Shortcuts are never sent to the game. A new key for the stream window works from the next one you open."
+          : "Shortcuts are never sent to the game. A new panic key works from your next session; the stream window's keys from the next one you open."}
       </p>
       {error && <p className="field-error selectable">{error}</p>}
       {!shortcuts && !error && <Skeleton lines={6} height={18} />}
@@ -127,7 +148,8 @@ export function ShortcutsSection(props: {
                     <span className="shortcut-actions">
                       <Button
                         size="sm"
-                        disabled={waiting != null}
+                        disabled={waiting != null || desktopHolds(s)}
+                        reason={desktopHolds(s) ? DESKTOP_HOLDS : null}
                         onClick={() => {
                           setRefused(null);
                           setWaiting(s.id);
@@ -138,7 +160,7 @@ export function ShortcutsSection(props: {
                       <Button
                         size="sm"
                         variant="ghost"
-                        disabled={waiting != null || s.isDefault}
+                        disabled={waiting != null || s.isDefault || desktopHolds(s)}
                         title="Back to its default key"
                         onClick={() => reset(s.id)}
                         icon={<RotateCcw />}
@@ -148,10 +170,17 @@ export function ShortcutsSection(props: {
                   </li>
                 ))}
             </ul>
+            {scope === "host" && props.linux && (
+              <p className="settings-note">
+                Your desktop binds these the first time you go live, offered as shown, and keeps them from then on: change
+                them in its own settings (on KDE, System Settings → Keyboard → Shortcuts → Couch Co-App). The host console
+                shows the keys it bound.
+              </p>
+            )}
           </section>
         ))}
       <div className="settings-row">
-        <Button onClick={() => reset(null)} disabled={waiting != null || (shortcuts?.every((s) => s.isDefault) ?? true)}>
+        <Button onClick={() => void resetAll()} disabled={waiting != null || resettable.length === 0}>
           Reset all
         </Button>
       </div>

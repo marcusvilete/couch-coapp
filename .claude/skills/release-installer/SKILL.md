@@ -74,7 +74,7 @@ A Linux PC or a Steam Deck watches and plays, and is a remote-play device; since
 - **It fails rather than leave anything out:** a file in the AppImage no package installed, or a runtime that names other parts than the texts pinned in `xtask/licences/appimage/` (then fetch and pin the new ones).
 - **Try it once in WSLg** before handing it out: `COUCH_PROFILE=appimagecheck target/appimage/Couch-Co-App_*.AppImage`; Settings → About shows the version, the commit and the notices.
 - **Hand out all of `target/appimage/`** (the AppImage, the notices, FFmpeg's archives, `SOURCES.txt`): copy it to Windows (`rm -rf /mnt/c/dev/couch-coapp/target/appimage && cp -r ~/couch-release/target/appimage /mnt/c/dev/couch-coapp/target/`) and serve it like the installer.
-- **What to tell them:** make it executable (Properties, or `chmod +x`), then open it; without FUSE, `--appimage-extract-and-run`; on a Steam Deck, Desktop Mode, and for Game Mode add it as a non-Steam game; it needs glibc 2.39 or newer; invite links work once it has started once; the log is `~/.local/share/CouchCoApp/profiles/default/desktop.log`.
+- **What to tell them:** make it executable (Properties, or `chmod +x`), then open it; without FUSE, `--appimage-extract-and-run`; on a Steam Deck, Desktop Mode, and for Game Mode add it as a non-Steam game; it needs glibc 2.39 or newer; it adds itself to the app menu at start (the panic key needs that entry); invite links work once it has started once; the log is `~/.local/share/CouchCoApp/profiles/default/desktop.log`.
 
 ## 6. Afterwards
 

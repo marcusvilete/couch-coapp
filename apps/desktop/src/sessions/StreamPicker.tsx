@@ -63,6 +63,13 @@ export function StreamPicker(props: {
   const [sound, setSound] = useState(() => readStored(KEYS.streamSound) ?? "");
   const [programs, setPrograms] = useState<string[] | null>(null);
   const [programsError, setProgramsError] = useState<string | null>(null);
+  // Whether the desktop shares its last choice again without asking (Linux):
+  // the desktops offer no way to undo that for this app, so it's undone here.
+  const [remembered, setRemembered] = useState(false);
+  const sharedChoice = (forget: boolean) =>
+    request({ type: "sharedChoice", forget }, "sharedChoice")
+      .then((r) => setRemembered(r.remembered))
+      .catch(() => {});
 
   const loadPrograms = () => {
     setProgramsError(null);
@@ -78,7 +85,10 @@ export function StreamPicker(props: {
     request(viaRemote(props.remote, { type: "listSources" }), "sources")
       .then(setSources)
       .catch((e) => setLoadError(errorText(e)));
-    if (props.shared) loadPrograms();
+    if (props.shared) {
+      loadPrograms();
+      void sharedChoice(false);
+    }
   };
   useEffect(load, []);
   // Its one source, picked at once.
@@ -209,9 +219,16 @@ export function StreamPicker(props: {
                     <span className="source-text">
                       <span className="source-title">A window or a screen</span>
                       <span className="source-detail">
-                        Your desktop asks which when the stream starts, then remembers it for the next.
+                        {remembered
+                          ? "Your last choice, shared without asking."
+                          : "Your desktop asks which when the stream starts."}
                       </span>
                     </span>
+                    {remembered && (
+                      <Button size="sm" disabled={busy != null} onClick={() => void sharedChoice(true)}>
+                        Choose again
+                      </Button>
+                    )}
                   </label>
                 </div>
               )}
