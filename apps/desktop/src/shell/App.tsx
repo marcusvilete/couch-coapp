@@ -27,7 +27,7 @@ import { roomMenu } from "../rooms/menus";
 import { viewerEntries } from "../sessions/hostMenus";
 import { SessionBar } from "../sessions/SessionBar";
 import { Stage } from "../sessions/Stage";
-import { operatedSession } from "../model/remote";
+import { operatedSession, remoteKeyboardSeat } from "../model/remote";
 import { UnlockRemoteDialog } from "../sessions/RemotePanel";
 import { StartSessionDialog } from "../sessions/StartSessionDialog";
 import { StreamPicker } from "../sessions/StreamPicker";
@@ -408,6 +408,11 @@ export default function App() {
           room={dialogRoom}
           remote={dialog.remote ? { room: dialogRoom.id, member: dialog.remote } : undefined}
           keyboardSeat={
+            dialog.remote
+              ? remoteKeyboardSeat(dialogRoom.members.find((m) => m.id === dialog.remote)?.remote?.capabilities)
+              : (lobby.info?.capabilities.keyboardSeat ?? true)
+          }
+          guestsKeyboard={
             dialog.remote
               ? (dialogRoom.members.find((m) => m.id === dialog.remote)?.remote?.capabilities?.keyboardSeat ?? true)
               : (lobby.info?.capabilities.keyboardSeat ?? true)

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
-import { desktopBlocked, desktopCommand, lockedText, viaRemote, waitText } from "./remote";
+import { desktopBlocked, desktopCommand, lockedText, remoteKeyboardSeat, viaRemote, waitText } from "./remote";
 
 const target = { room: "r1", member: "pc" };
 
@@ -101,5 +101,16 @@ describe("when desktop control can start (M25b)", () => {
     expect(desktopBlocked(session({ role: "none" }))).toMatch(/Watch/);
     expect(desktopBlocked(session({ streaming: null }))).toMatch(/Stream/);
     expect(desktopBlocked(session({ controlPaused: true }))).toMatch(/paused/);
+  });
+});
+
+describe("a keyboard seat in a session started from afar (M16c-2)", () => {
+  it("is offered for guests' keyboards or for desktop control alone", () => {
+    expect(remoteKeyboardSeat({ sessions: true, keyboardSeat: true, desktopControl: true })).toBe(true);
+    // A Linux PC: guests play with controllers, the seat is desktop control's.
+    expect(remoteKeyboardSeat({ sessions: true, keyboardSeat: false, desktopControl: true })).toBe(true);
+    // A Linux PC that can't make input devices yet.
+    expect(remoteKeyboardSeat({ sessions: true, keyboardSeat: false, desktopControl: false })).toBe(false);
+    expect(remoteKeyboardSeat(null)).toBe(true);
   });
 });

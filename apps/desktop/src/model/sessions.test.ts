@@ -67,6 +67,7 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     operator: false,
     operatedBy: [],
     desktop: null,
+    guestsKeyboard: true,
   };
 }
 

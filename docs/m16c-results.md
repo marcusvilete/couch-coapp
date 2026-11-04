@@ -2,7 +2,7 @@
 
 ## Why
 
-[ADR 0012](adr/0012-linux-host.md)'s first part, M16c-1: a Linux PC (KDE or GNOME on Wayland) hosts sessions with controller seats only, every safety rule unchanged on any desktop. Keyboard and mouse, desktop control and the "game in front" check are M16c-2.
+[ADR 0012](adr/0012-linux-host.md)'s first part, M16c-1: a Linux PC (KDE or GNOME on Wayland) hosts sessions with controller seats only, every safety rule unchanged on any desktop. Keyboard and mouse, desktop control and the "game in front" check are M16c-2 (its first part, desktop control, is at the end of this page).
 
 M16c-1 comes in five PRs (the third was split in three, the author's choice of 2026-11-03):
 - **part 1 (version 0.25.0, wire revision 13):** what a system can host, and Linux's encoders;
@@ -227,6 +227,37 @@ The `linux-host-vm-run` checklist, 2026-11-03 and 04, on the VirtualBox VM `couc
 - **Left:** the chime's last few milliseconds may be cut on a large quantum (the loop quits once the last samples are queued; it sounded whole in the VM), its `Notification` role might duck other sound under some WirePlumber policies (not seen), and the retry matches the portal's error text.
 
 **Seen, not ours:** SuperTuxKart's road drawn invisible (VirtualBox's SVGA3D with Mesa); the DualSense asleep when a stream window opened, so it had no controller (`Couldn't find mapping for device`). **The app's icon** showed on KDE (from the window) but not on GNOME, which finds it through an installed entry matching the window's class (`couch-desktop`): the menu entry above carries `StartupWMClass=couch-desktop` and the icon. **Left:** in the VM, `libopenh264` reopens about every 2 s as the bitrate moves (every encoder but NVENC reopens on a new bitrate).
+
+## M16c-2 part 1: desktop control of a Linux PC (0.27.0)
+
+The plan (2026-11-04, the author's choices; ADR 0012's status names them): `uinput` for keys and the mouse; the game's window confirmed by the host once per stream, preselected by the shared stream's size; a KWin script and a GNOME extension that only report which window is in front; desktop control first, guests' keyboard seat second. This part needs no "in front" check: a `DESKTOP` holder skips it (M25b), and on Linux the shared source is a screen, whose keyboard seat M25b already kept for an unlocked device.
+
+**Built:**
+- **`couch_platform_linux::kbm`:** a `uinput` keyboard and a relative mouse, named ours by `phys` like the pads. Keys go by position through the kernel's HID table (the same keys `SendInput` gets on Windows), never `KEY_SYSRQ` (the kernel's magic SysRq listens to every keyboard with Alt; Print Screen is that key), no power or media keys, no autorepeat on the device. The wheel sends the high-resolution axes as they come and whole notches as they gather. Made at a session's first grant of keyboard or mouse (`NoKbm` until then, on every system).
+- **Linux's capabilities:** desktop control once `/dev/uinput` is writable, read at each check; still no keyboard seat for guests. A session may carry the keyboard seat there when a device of the user's starts it from afar, and the seat goes to nobody but the device given desktop control (`keyboard_for`: passing, accepting in the console and the Accept key refused). The start dialog from afar offers it as "For desktop control"; the console offers it to no guest (`SessionView::guests_keyboard`: no pass entry, a refused drop, Accept disabled with the reason).
+- **The host's keys, which hear injected keys on Linux** (`Backend::host_keys_hear_injected`): Accept and Decline answer nothing while anyone else has the keyboard (`HostSession::keyboard_elsewhere`); the router refuses guests the host's Ctrl+Alt+Shift chords (`filter::host_chord`, `HostOptions::host_chords`). The panic key stays on.
+- **Blocked for guests on every host:** Ctrl+Alt+F1 to F12, Ctrl+Alt+Backspace, Ctrl+Alt+Delete (`couch_input::filter`); `input-sink` now checks them held back too.
+
+**Checked:**
+
+| Where | What | Result |
+|---|---|---|
+| Windows | clippy; `cargo test --workspace`; the new scenarios `a_linux_like_host_keeps_the_keyboard_for_desktop_control` and `a_guest_cant_press_the_hosts_chords_where_they_would_count`; the router's, filter's and session machine's new tests | pass |
+| WSL | fmt, clippy, `kbm`'s tests; as root, the ignored `the_devices_appear_type_and_go` (both devices under our names and `phys`, no SysRq in the keyboard's key set, W read back down, both gone with the injector) | pass |
+| Windows, input safety | `input-sink` (118 keys, 5 buttons, 4 moves, 3 wheel turns; 9 blocked combinations held back, the 3 new among them); `release-check` (every scenario within its target: 247, 81, 190, 367 and 1 ms); `lifecycle-check` (all six, the key left down by a killed host released 0 ms after the next start) | pass |
+| WSL | `cargo test --workspace` | pass |
+| Front end | `tsc`, vitest (`remoteKeyboardSeat`) | pass |
+
+**The review** (a fresh agent over the diff): nothing high. It traced every grant path and found none that injects a guest's keys on a Linux host, checked the key map entry by entry against the kernel's table, and the release at teardown. Fixed:
+- **`couch-cli host --allow-kbm` injected nothing** (medium): it grants keyboard and mouse on a pad seat, and the injector was made only for sessions with a keyboard seat. It is now made at the first grant carrying either, whatever the seat.
+- **The console still offered a Linux host's keyboard seat to guests** (medium; the engine refused each): `SessionView::guests_keyboard` (from the backend's capabilities when hosting, from the home PC's when run from afar; no wire change) takes it off the pass menus, refuses the patch bay's drop, and disables Accept on such a request with the reason. Test in `PatchBay.test.ts`.
+- **The panic key from a guest was understated** (low): through a key the user rebound, a guest could also lock the user's devices out on a home PC; said so in CLAUDE.md and the ADR.
+- **A keyboard seat allowed when a device was merely unlocked in the room** (low): reachable from no UI, it would have kept a seat nobody may hold once the device went; now only a session the device starts from afar.
+- **The wheel's leftover** now resets when the turn reverses, as the kernel's counter does (low).
+- **A Windows guest's AltGr with F1 to F12, Backspace or Delete** is dropped now too (it arrives as Ctrl and right Alt): said in `docs/protocol.md` (low).
+- **Left:** a keyboard and mouse that can't be made (`/dev/uinput` access lost after the capability check) is only logged, and desktop control then types nowhere (low; the capability is read at each check).
+
+**Left for the VM** (the `linux-host-vm-run` skill's new rows): desktop control typing, clicking and scrolling into a real desktop on GNOME and KDE; Print Screen doing nothing; a key held at a kill not stuck.
 
 ## Still to come
 

@@ -3,6 +3,7 @@
 // dialog send their commands through `viaRemote`, which turns the host's own
 // into commands for the home PC; anything else stays ours.
 import type { Command } from "../bindings/Command";
+import type { HostCapabilities } from "../bindings/HostCapabilities";
 import type { MemberView } from "../bindings/MemberView";
 import type { RemoteAction } from "../bindings/RemoteAction";
 import type { RoomView } from "../bindings/RoomView";
@@ -73,8 +74,18 @@ export function desktopCommand(target: RemoteTarget, on: boolean): Command {
   return { type: "remote", room: target.room, member: target.member, action: { type: "desktop", on } };
 }
 
+/** Whether a session started on a PC run from here may have a
+ * keyboard-and-mouse seat: one guests can have, or one for desktop control
+ * alone (a Linux PC, M16c-2, where guests play with controllers). Assumed
+ * until the PC says, once unlocked. */
+export function remoteKeyboardSeat(capabilities: HostCapabilities | null | undefined): boolean {
+  if (capabilities == null) return true;
+  return capabilities.keyboardSeat || capabilities.desktopControl;
+}
+
 /** Whether the PC run from here offers desktop control at all (M16c: a
- * Linux PC doesn't yet), as it said once unlocked; assumed until it says. */
+ * Linux PC does once it may make input devices), as it said once unlocked;
+ * assumed until it says. */
 export function desktopOffered(room: RoomView, target: RemoteTarget): boolean {
   return room.members.find((m) => m.id === target.member)?.remote?.capabilities?.desktopControl ?? true;
 }

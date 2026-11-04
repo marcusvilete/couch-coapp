@@ -1110,7 +1110,8 @@ impl Actor {
             ),
             Capability::DesktopControl => (
                 can.desktop_control,
-                "this PC can't be controlled as a desktop from afar yet",
+                "this PC can't be controlled as a desktop from afar: on Linux, its virtual \
+                 devices aren't set up yet (Settings → Drivers there)",
             ),
             // A system that can't host at all says so.
             Capability::HomePc if !can.sessions => {
@@ -1134,9 +1135,6 @@ impl Actor {
         _now: Instant,
     ) -> Result<(SessionId, HostOptions), EngineError> {
         self.check_capability(Capability::Sessions)?;
-        if start.input.keyboard_mouse() {
-            self.check_capability(Capability::KeyboardSeat)?;
-        }
         // The host's own controllers play through seats only where the
         // system reads them (Windows; not a Linux host yet, ADR 0012).
         if !start.controllers.is_empty() && self.backend.local_pads().is_none() {
@@ -1145,6 +1143,16 @@ impl Actor {
             ));
         }
         let (room, _) = self.entry_mut(&start.room)?;
+        // Where guests can't have the keyboard (Linux, M16c-2), a keyboard
+        // seat is for a device of ours alone: desktop control, in a session
+        // that device starts from afar (one started here would keep a seat
+        // nobody may hold once the device goes). Nobody else is ever passed
+        // it (`keyboard_for`).
+        if start.input.keyboard_mouse()
+            && !(self.backend.capabilities().desktop_control && start.from_afar)
+        {
+            self.check_capability(Capability::KeyboardSeat)?;
+        }
         if self.sessions.hosting.is_some() {
             return Err(EngineError::Refused("you have a session already"));
         }
@@ -1182,6 +1190,18 @@ impl Actor {
                 controllers: controllers.iter().map(HostController::choice).collect(),
                 hide: true,
             }),
+            // The keys the host's hook offers (read again at Go live, the
+            // same file): where it'd fire for a guest's key too, no guest
+            // may press them.
+            host_chords: if self.backend.host_keys_hear_injected() {
+                let shortcuts = crate::store::shortcuts(&self.data_dir);
+                Shortcut::HOST
+                    .iter()
+                    .map(|&s| shortcuts.binding(s).key)
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
         self.sessions.hosting = Some(Hosting {
             room,
@@ -1909,6 +1929,36 @@ impl Actor {
         Ok(Response::Done)
     }
 
+    /// Whether `member` may be given `seat`: where guests can't have the
+    /// keyboard (Linux, M16c-2), the keyboard-and-mouse seat goes only to
+    /// the device given desktop control, so it never looks granted to
+    /// anyone whose keys would reach nothing.
+    fn keyboard_for(&self, member: MemberId, seat: SeatId) -> Result<(), EngineError> {
+        let Some(h) = self.sessions.hosting.as_ref() else {
+            return Ok(());
+        };
+        if h.session.keyboard_seat() == Some(seat)
+            && h.session.desktop() != Some(member)
+            && !self.backend.capabilities().keyboard_seat
+        {
+            return Err(EngineError::Refused(
+                "this system gives keyboard and mouse only to a device of yours controlling \
+                 the desktop: guests play with controllers",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The seat `member` asks for, if they ask.
+    fn asked_for(&self, member: MemberId) -> Option<SeatId> {
+        let h = self.sessions.hosting.as_ref()?;
+        h.session
+            .requests()
+            .iter()
+            .find(|(m, _)| *m == member)
+            .map(|&(_, seat)| seat)
+    }
+
     pub(super) fn answer_control(
         &mut self,
         member: &str,
@@ -1916,6 +1966,9 @@ impl Actor {
         now: Instant,
     ) -> Result<Response, EngineError> {
         let member = MemberId::from_hex(member).ok_or(EngineError::UnknownMember)?;
+        if accept && let Some(seat) = self.asked_for(member) {
+            self.keyboard_for(member, seat)?;
+        }
         self.our_session(|s| Ok(s.answer(member, accept, now)?), now)
     }
 
@@ -1927,6 +1980,7 @@ impl Actor {
         now: Instant,
     ) -> Result<Response, EngineError> {
         let member = MemberId::from_hex(member).ok_or(EngineError::UnknownMember)?;
+        self.keyboard_for(member, seat)?;
         // One of their controllers, as they last said (P12); any other is
         // no choice. The viewer follows it only while it is connected.
         let controller = self.sessions.hosting.as_ref().and_then(|h| {
@@ -2095,6 +2149,15 @@ impl Actor {
         else {
             return;
         };
+        // Linux's portal fires for a guest's injected key too (M16c-2): while
+        // anyone else has the keyboard, only the console answers.
+        if self.backend.host_keys_hear_injected() && h.session.keyboard_elsewhere() {
+            tracing::info!(
+                "an answer key was pressed while someone else has the keyboard, which could \
+                 press it too; ignored: answer in the console"
+            );
+            return;
+        }
         let Some(&(member, seat)) = h.session.requests().first() else {
             tracing::info!("an answer key was pressed, but nobody asks");
             return;
@@ -2105,6 +2168,10 @@ impl Actor {
         });
         if !seen {
             tracing::info!(member = ?member, "an answer key was pressed for a request too new at the front to have been seen; ignored");
+            return;
+        }
+        if accept && let Err(e) = self.keyboard_for(member, seat) {
+            tracing::info!("the host's Accept key: {e}");
             return;
         }
         tracing::info!(member = ?member, ?seat, accept, "answering with the host's key");
@@ -2894,6 +2961,7 @@ impl Actor {
                 operator: false,
                 operated_by: self.operated_by(),
                 desktop: s.desktop_holder().map(|m| m.to_hex()),
+                guests_keyboard: self.backend.capabilities().keyboard_seat,
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -3067,6 +3135,11 @@ impl Actor {
                 operator,
                 operated_by: Vec::new(),
                 desktop: console.and_then(|c| c.desktop).map(|m| m.to_hex()),
+                // A PC of ours says what it can host once unlocked (M16c).
+                guests_keyboard: self
+                    .remote_access(room, *host)
+                    .and_then(|r| r.capabilities)
+                    .is_none_or(|c| c.keyboard_seat),
             });
         }
         views

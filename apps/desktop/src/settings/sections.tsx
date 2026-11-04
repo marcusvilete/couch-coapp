@@ -146,7 +146,7 @@ const DRIVERS: Record<DriverName, { title: string; why: string }> = {
   },
   uinput: {
     title: "Virtual controllers",
-    why: "Guests' controllers reach the games you host as virtual Xbox 360 controllers. Setting it up lets the programs you run make input devices, as Steam's controller support does. Without it, guests can watch only.",
+    why: "Guests' controllers reach the games you host as virtual Xbox 360 controllers, and a device of yours run from afar controls the desktop through a virtual keyboard and mouse. Setting it up lets the programs you run make input devices, as Steam's controller support does. Without it, guests can watch only.",
   },
 };
 

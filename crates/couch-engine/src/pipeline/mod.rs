@@ -472,9 +472,10 @@ pub trait Backend: Send + Sync + 'static {
 
     /// What this system can host (M16c, ADR 0012): sessions (capture,
     /// encode, guests' controllers), a keyboard-and-mouse seat, desktop
-    /// control. Windows has them all; Linux none until M16c-1 turns on
-    /// sessions, then controller seats alone; elsewhere nothing. What's missing is refused before anything is set
-    /// up or announced, and with `sessions` the home PC's side of remote play.
+    /// control. Windows has them all; Linux sessions with controller seats
+    /// (M16c-1) and desktop control (M16c-2's first part); elsewhere nothing.
+    /// What's missing is refused before anything is set up or announced, and
+    /// with `sessions` the home PC's side of remote play.
     fn capabilities(&self) -> crate::HostCapabilities {
         crate::HostCapabilities::default()
     }
@@ -489,7 +490,7 @@ pub trait Backend: Send + Sync + 'static {
     /// of the user's `couch_input::shortcuts::Shortcuts`: the panic key,
     /// Accept and Decline), until the returned guard drops. On Windows only
     /// physical presses count, never injected ones; Linux's portal can't
-    /// tell them apart, safe only without a keyboard seat (ADR 0012).
+    /// tell them apart ([`Backend::host_keys_hear_injected`], ADR 0012).
     /// `on_event` runs on the hook's own thread and must return at once.
     /// `unattended` (a session started from afar): a dialog binding them
     /// brings up is given up after [`UNANSWERED_AFTER`], the keys lost.
@@ -499,6 +500,15 @@ pub trait Backend: Send + Sync + 'static {
         unattended: bool,
         on_event: Box<dyn Fn(HostKeyEvent) + Send>,
     ) -> Result<Box<dyn Any + Send>, MediaError>;
+
+    /// Whether the host's keys also fire for keys injected into this PC
+    /// (Linux's portal: a `uinput` key looks real to the desktop). Then
+    /// Accept and Decline answer nothing while anyone but the host holds
+    /// the keyboard seat, and guests can't press the host's chords (M16c-2,
+    /// ADR 0012). Windows' hook ignores injected keys.
+    fn host_keys_hear_injected(&self) -> bool {
+        false
+    }
 }
 
 /// What the host's keys report (`Backend::host_keys`).
@@ -614,10 +624,11 @@ fn unsupported() -> MediaError {
     MediaError::Unsupported("streaming on this platform".into())
 }
 
-#[cfg(not(windows))]
-struct NoKbm;
+/// Keyboard and mouse that go nowhere: a session's until its first grant of
+/// either (nothing is made before: on Linux, no keyboard appears to the
+/// desktop), or a system without them.
+pub(super) struct NoKbm;
 
-#[cfg(not(windows))]
 impl KbmInjector for NoKbm {
     fn key(&mut self, _: couch_input::HidUsage, _: bool) -> Result<(), InputError> {
         Ok(())

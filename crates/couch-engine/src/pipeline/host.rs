@@ -44,8 +44,8 @@ use std::{
 
 use couch_codec_opus::OpusEncoder;
 use couch_input::{
-    Bounds, KbmInjector, MemberId, PadState, PendingPad, Permissions, Plugged, Rumble, SeatEpoch,
-    SeatId, VirtualPad,
+    Bounds, HidUsage, KbmInjector, MemberId, PadState, PendingPad, Permissions, Plugged, Rumble,
+    SeatEpoch, SeatId, VirtualPad,
     local::{ControllerChoice, ControllerIds, ControllerKind, LocalController, LocalPad},
     router::{self, Effect, Input, SeatRouter, SeatStatus},
 };
@@ -196,6 +196,10 @@ pub struct HostOptions {
     /// they're given up (P10: [`couch_input::PAD_SETUP_LIMIT`]; shorter in
     /// tests).
     pub pad_setup_limit: Duration,
+    /// The host's keys whose Ctrl+Alt+Shift chords no guest may press,
+    /// where the host's keys would fire for injected keys too
+    /// (`Backend::host_keys_hear_injected`, M16c-2); empty elsewhere.
+    pub host_chords: Vec<HidUsage>,
 }
 
 /// One stream inside a session (M19): what to capture, and how.
@@ -2337,6 +2341,8 @@ struct Inputs {
     shared: Arc<Shared>,
     router: SeatRouter,
     kbm: Box<dyn KbmInjector>,
+    /// Whether `kbm` is the backend's yet ([`Inputs::make_kbm`]).
+    kbm_made: bool,
     /// By seat; `None` for a seat without a pad.
     pads: Vec<Option<Box<dyn VirtualPad>>>,
     /// Each viewer's forwarding task, and its connection (for rumble).
@@ -2386,6 +2392,18 @@ struct FocusReport {
 }
 
 impl Inputs {
+    /// Makes the backend's keyboard and mouse before the first grant that
+    /// carries either (a keyboard seat's, desktop control's, or
+    /// `couch-cli host --allow-kbm`'s on a pad seat), once a session. Until
+    /// then nothing could reach them anyway: the router gives keys and the
+    /// mouse to no one else.
+    fn make_kbm(&mut self, permissions: Permissions) {
+        if !self.kbm_made && permissions.intersects(Permissions::KEYBOARD | Permissions::MOUSE) {
+            self.kbm = self.shared.backend.kbm();
+            self.kbm_made = true;
+        }
+    }
+
     fn seats(&self) -> impl Iterator<Item = SeatId> + use<> {
         (0..self.shared.options.seats.len()).map(|i| SeatId(i as u8))
     }
@@ -2678,8 +2696,15 @@ async fn input_loop(
     let seats = shared.options.seats.len();
     let start = Instant::now();
     let mut st = Inputs {
-        kbm: shared.backend.kbm(),
-        router: SeatRouter::starting_at(seats as u8, shared.options.first_epoch),
+        // Made at the first grant with keyboard or mouse (`make_kbm`): on
+        // Linux, no keyboard appears to the desktop before anyone may type.
+        kbm: Box::new(super::NoKbm),
+        kbm_made: false,
+        router: {
+            let mut router = SeatRouter::starting_at(seats as u8, shared.options.first_epoch);
+            router.block_host_chords(shared.options.host_chords.clone());
+            router
+        },
         pads,
         viewers: HashMap::new(),
         status: vec![None; seats],
@@ -2748,6 +2773,7 @@ async fn input_loop(
                     } else if st.shared.grants_paused.load(Ordering::SeqCst) && Some(member) != host {
                         tracing::info!(member = ?member, "panic key: a grant on its way was refused");
                     } else {
+                        st.make_kbm(permissions);
                         let effects = st.router.grant(seat, member, permissions, Instant::now());
                         if effects.is_empty() {
                             tracing::warn!(?seat, "the seat router refused a grant");

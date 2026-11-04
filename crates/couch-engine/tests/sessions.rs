@@ -149,9 +149,16 @@ struct Fake {
     starts_at_sign_in: AtomicBool,
     /// A system that watches but can't host, as Linux's was (M16b).
     cannot_host: AtomicBool,
-    /// A host with controller seats alone, as Linux's (M16c): no keyboard
-    /// seat, no desktop control, and the host's own controllers not read.
+    /// A host with controller seats alone, as Linux's was in M16c-1 (and is
+    /// without its virtual devices set up): no keyboard seat, no desktop
+    /// control, and the host's own controllers not read.
     controllers_only: AtomicBool,
+    /// Linux's since M16c-2's first part: desktop control for a device of
+    /// the user's, but no keyboard seat for guests.
+    desktop_only: AtomicBool,
+    /// The host's keys fire for injected keys too, as Linux's portal does
+    /// (M16c-2).
+    hears_injected: AtomicBool,
     /// The host's own controller.
     local: FakeLocal,
     /// How many of the host's controllers are hidden from games now.
@@ -513,6 +520,12 @@ impl Backend for Fake {
                 sessions: true,
                 ..HostCapabilities::default()
             }
+        } else if self.desktop_only.load(Ordering::SeqCst) {
+            HostCapabilities {
+                sessions: true,
+                keyboard_seat: false,
+                desktop_control: true,
+            }
         } else {
             HostCapabilities::ALL
         }
@@ -748,6 +761,10 @@ impl Backend for Fake {
             width: 1920,
             height: 1080,
         })
+    }
+
+    fn host_keys_hear_injected(&self) -> bool {
+        self.hears_injected.load(Ordering::SeqCst)
     }
 
     fn host_keys(
@@ -2972,6 +2989,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             replace_grace: Duration::from_millis(300),
             local: None,
             pad_setup_limit: couch_input::PAD_SETUP_LIMIT,
+            host_chords: Vec::new(),
         },
     )
     .await;
@@ -4807,6 +4825,7 @@ async fn a_pad_not_set_up_in_time_is_given_up() {
             replace_grace: Duration::from_millis(300),
             local: None,
             pad_setup_limit: Duration::from_millis(400),
+            host_chords: Vec::new(),
         },
     )
     .await;
@@ -5930,6 +5949,138 @@ async fn a_controllers_only_host_refuses_keyboard_and_desktop() {
     // Turning it off is never refused.
     b.ok(remote(&room, &a, RemoteAction::Desktop { on: false }))
         .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M16c-2's first part: a host whose guests play with controllers alone
+/// (Linux's) keeps a keyboard seat for desktop control: refused at the PC
+/// with no device of the user's in, allowed from afar, never passed or
+/// granted to a guest; and while the device has the keyboard, the host's
+/// Accept key, which its keys could press too, answers nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_like_host_keeps_the_keyboard_for_desktop_control() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.desktop_only.store(true, Ordering::SeqCst);
+    a.fake.hears_injected.store(true, Ordering::SeqCst);
+    let refused = |reply: Result<Response, EngineError>, words: &str| {
+        assert!(
+            matches!(&reply, Err(EngineError::Refused(why)) if why.contains(words)),
+            "{reply:?}"
+        );
+    };
+    refused(
+        a.handle(go_live_with(&room, 4, setup(1, KeyboardMouseSeat::OwnSeat)))
+            .await,
+        "keyboard and mouse",
+    );
+
+    // B, A's own device: the keyboard seat comes with the session from afar.
+    trusted(&room, &a, &b).await;
+    desktop_session(&room, &a, &b).await;
+    wait_remote(&b, &room, &a, "A's capabilities", |r| {
+        r.and_then(|r| r.capabilities)
+            .is_some_and(|c| c.sessions && !c.keyboard_seat && c.desktop_control)
+    })
+    .await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+
+    // C gets it neither passed nor asked for.
+    refused(
+        a.handle(Command::PassControl {
+            member: c.id(),
+            seat: 1,
+            controller: None,
+        })
+        .await,
+        "a device of yours",
+    );
+    c_window.action(UserAction::RequestControl {
+        seat: 1,
+        controller: None,
+    });
+    a.wait_session(&room, &a, "C asking", |s| {
+        s.is_some_and(|s| s.requests.len() == 1)
+    })
+    .await;
+    refused(
+        a.handle(Command::AnswerControl {
+            member: c.id(),
+            accept: true,
+        })
+        .await,
+        "a device of yours",
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !c_window.held_seats().contains(&1),
+        "the key granted nothing"
+    );
+    c_window.action(UserAction::CancelControl);
+    a.wait_session(&room, &a, "C withdrew", |s| {
+        s.is_some_and(|s| s.requests.is_empty())
+    })
+    .await;
+
+    // B's desktop control: B's keys reach A.
+    desktop_on(&room, &a, &b, &b_window).await;
+    b_window.key(0x04, true);
+    wait("B's A key at A", || injected(&a, 0x04, true)).await;
+    b_window.key(0x04, false);
+
+    // C asks for the controller seat: the Accept key answers nothing while
+    // B has the keyboard; the console still does.
+    c_window.action(UserAction::RequestControl {
+        seat: 0,
+        controller: None,
+    });
+    a.wait_session(&room, &a, "C asking again", |s| {
+        s.is_some_and(|s| s.requests.len() == 1)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(a.fake.press_host_key(Shortcut::AcceptRequest));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!c_window.holding(), "the Accept key answered nothing");
+    a.ok(Command::AnswerControl {
+        member: c.id(),
+        accept: true,
+    })
+    .await;
+    wait("C on the controller seat", || {
+        c_window.held_seats().contains(&0)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M16c-2: where the host's keys fire for injected keys too (Linux), a
+/// guest on the keyboard seat can't press the host's own chords
+/// (Ctrl+Alt+Shift plus the panic key, Accept or Decline); other keys with
+/// the same modifiers go through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guest_cant_press_the_hosts_chords_where_they_would_count() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.hears_injected.store(true, Ordering::SeqCst);
+    let reply = a
+        .live(go_live_with(&room, 4, setup(1, KeyboardMouseSeat::OwnSeat)))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    let b_window = watching(&room, &a, &b).await;
+    give_seat(&room, &mut a, &b, &b_window, 1).await;
+    let panic = couch_input::shortcuts::Shortcuts::default()
+        .binding(Shortcut::Panic)
+        .key
+        .0;
+    for k in [0xE0, 0xE2, 0xE1] {
+        b_window.key(k, true);
+    }
+    b_window.key(panic, true);
+    b_window.key(0x1A, true);
+    wait("B's W, after the chord", || injected(&a, 0x1A, true)).await;
+    assert!(!injected(&a, panic, true), "the panic chord never went in");
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

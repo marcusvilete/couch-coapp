@@ -6,8 +6,9 @@
 //! its preferred trigger, the desktop may let the user change it, and it
 //! tells us when one is pressed, whatever window is in front. Unlike
 //! Windows' hook, the desktop can't tell a key a program injects from a real
-//! one; a Linux host offers no keyboard seat yet (M16c-1), so no guest has
-//! keys to inject.
+//! one (M16c-2): while anyone but the host has the keyboard, the engine lets
+//! Accept and Decline answer nothing, and the seat router refuses guests the
+//! host's chords (`couch_engine`'s `Backend::host_keys_hear_injected`).
 
 use std::{sync::mpsc, time::Duration};
 

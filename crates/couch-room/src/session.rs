@@ -478,6 +478,19 @@ impl HostSession {
             .map(|i| SeatId(i as u8))
     }
 
+    /// Whether someone other than the host has the keyboard now, or is given
+    /// it: a viewer holding the keyboard-and-mouse seat as last reported, or
+    /// desktop control given, its grant reported or not (M16c-2). Where the
+    /// host's keys can't tell injected keys from the host's own, the answer
+    /// keys answer nothing meanwhile.
+    pub fn keyboard_elsewhere(&self) -> bool {
+        let held = self
+            .keyboard_seat()
+            .and_then(|seat| self.holders[usize::from(seat.0)])
+            .is_some_and(|m| self.config.host != Some(m));
+        held || self.desktop.is_some()
+    }
+
     /// The viewer given desktop control (M25b), whether or not the router
     /// has reported its grant yet.
     pub fn desktop(&self) -> Option<MemberId> {
