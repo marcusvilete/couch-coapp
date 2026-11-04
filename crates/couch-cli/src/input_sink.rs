@@ -3,7 +3,8 @@
 //! `SendInput` injector into `couch-viewer --input-sink`, which stands for
 //! the game; the check is that the window received exactly that. Then the
 //! combinations a guest may never send (the Windows key, Alt+Tab, Alt+Esc,
-//! Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4) must not arrive. Proves the scancode
+//! Ctrl+Esc, Ctrl+Shift+Esc, Alt+F4, and Linux's Ctrl+Alt+F3, Backspace and
+//! Delete) must not arrive. Proves the scancode
 //! table, the injector and the router's filter on one machine, without a
 //! second PC.
 //!
@@ -39,13 +40,18 @@ const LAST: [u16; 7] = [0x43, 0xE0, 0xE1, 0xE2, 0xE4, 0xE5, 0xE6];
 /// What a guest may never send (`couch_input::filter`), each pressed in
 /// order and let go in reverse. If the Windows key got through, the Start
 /// menu would take the foreground and stop the run.
-const BLOCKED: [&[u16]; 6] = [
+const BLOCKED: [&[u16]; 9] = [
     &[0xE3],             // Windows
     &[0xE2, 0x2B],       // Alt+Tab
     &[0xE2, 0x29],       // Alt+Esc
     &[0xE0, 0x29],       // Ctrl+Esc
     &[0xE0, 0xE1, 0x29], // Ctrl+Shift+Esc
     &[0xE2, 0x3D],       // Alt+F4
+    // Linux's, blocked on every host (M16c-2); harmless here should one
+    // pass, and Windows never takes Ctrl+Alt+Delete from `SendInput`.
+    &[0xE0, 0xE2, 0x3C], // Ctrl+Alt+F3
+    &[0xE0, 0xE2, 0x2A], // Ctrl+Alt+Backspace
+    &[0xE0, 0xE2, 0x4C], // Ctrl+Alt+Delete
 ];
 /// Ctrl, Shift and Alt: in the blocked combinations, these may arrive.
 const MODIFIERS: [u16; 6] = [0xE0, 0xE1, 0xE2, 0xE4, 0xE5, 0xE6];

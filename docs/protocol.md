@@ -23,7 +23,7 @@ The wire protocol between room members, and the pipe between the main process an
 - M25a adds remote play: a device of the user's own runs a home PC's sessions from afar, the `0x07xx` messages (wire revision 10).
 - M25b adds desktop control for that device: the `DESKTOP` permission bit, `RemoteOp::Desktop` and `BringToFront`, and the console state's desktop holder and window focus (wire revision 11).
 - M25c tells the device when Windows is locked at its home PC: `RemoteState.locked` (wire revision 12).
-- M16c tells the device what its home PC can host (a Linux PC: controller seats, no keyboard seat or desktop control yet): `RemoteState.capabilities` (wire revision 13).
+- M16c tells the device what its home PC can host (a Linux PC: controller seats, no keyboard seat or desktop control then; desktop control since M16c-2, on the same wire): `RemoteState.capabilities` (wire revision 13).
 - M16c's Linux home PC ends a stream whose screen-sharing dialog got no answer, or was dismissed, with `EndReason::NothingShared` (wire revision 14, viewer IPC v15).
 - The rest is a draft for later milestones.
 
@@ -162,7 +162,7 @@ Code: `couch_input::forward` on the viewer's side, `couch_input::router` on the 
 - the holder has the permission for that kind of input;
 - for keyboard and mouse, the captured game window (not just its process) is in the foreground. The host checks right before each input, not only on its 10 ms tick;
 - for a mouse button press, the pointer is over the game window too. Otherwise a click could reach the taskbar or another app. Motion and releases still go through;
-- it isn't blocked: the Windows keys always; Tab while Alt is held; Esc while Alt or Ctrl is held; F4 while Alt is held (M6). Held modifiers count across every seat, so two holders can't combine into Alt+Tab. The pad's Guide bit is cleared.
+- it isn't blocked: the Windows keys always; Tab while Alt is held; Esc while Alt or Ctrl is held; F4 while Alt is held (M6); F1 to F12, Backspace and Delete while Ctrl and Alt are held (M16c-2: a Linux text console, ending the desktop, its log-out dialog; on every host, so a Windows guest's AltGr, which arrives as Ctrl and right Alt, with those keys is dropped too); and where the host's keys hear injected keys (a Linux host), the host's own keys while Ctrl, Alt and Shift are held. Held modifiers count across every seat, so two holders can't combine into Alt+Tab. The pad's Guide bit is cleared.
 
 The one exception is desktop control (M25b), for the home PC's own unlocked device alone: its keyboard and mouse need no window in front, a click needs no pointer over one, and no key is blocked ([Desktop control](#desktop-control)).
 
@@ -549,7 +549,7 @@ M25b: the operator's keyboard and mouse reach the home PC's whole desktop, to la
 
 ### The unattended PC
 
-M25c: nothing on the wire but `RemoteState.locked`. The rest is the home PC's own. (M16c added `RemoteState.capabilities` beside it: a Linux home PC offers no keyboard seat or desktop control yet, and its device hides them.)
+M25c: nothing on the wire but `RemoteState.locked`. The rest is the home PC's own. (M16c added `RemoteState.capabilities` beside it: what a home PC lacks, its device hides. A Linux home PC offers no keyboard seat for guests yet, and desktop control since M16c-2's first part, once its virtual devices are set up; no wire change.)
 - **Locked:** while a device is unlocked, the home PC looks every 2 s whether Windows shows its own desktop (the input desktop is `Default`) or a secure one (the lock screen, a UAC prompt), and sends `RemoteState` when that changes, and with the unlock. A device takes it only as part of its PC's state, on the connection that PC's offer came on.
 - **Awake:** while remote play is on, the home PC holds a power request that keeps the system from sleeping, and while a device is unlocked, the display on too. A display that turns off stops the capture, and Windows may lock then.
 - **Sign-in and the notification area:** two switches of the user's own. An installed app's default profile may start at sign-in. With the notification area icon on, closing the window keeps the app running there (Quit in its menu ends it), and a start at sign-in stays there; off, closing quits, and a start at sign-in opens the window.

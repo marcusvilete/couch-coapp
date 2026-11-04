@@ -33,7 +33,7 @@ import { Callout } from "../ui/Callout";
 import { Badge, Kbd, Spinner } from "../ui/Feedback";
 import { DropdownMenu } from "../ui/Menu";
 import { Why } from "../ui/Why";
-import { ourPads, PAUSED_REASON, requestDetail } from "./hostMenus";
+import { DESKTOP_ONLY_REASON, ourPads, PAUSED_REASON, requestDetail } from "./hostMenus";
 import { PatchBay } from "./PatchBay";
 import { SoundLevel } from "./SoundLevel";
 import { streamsElevated } from "./streamMemory";
@@ -510,7 +510,14 @@ function RequestStrip(props: {
             const detail = requestDetail(s, member, seat, controller);
             const kbm = s.seats[seat]?.keyboardMouse ?? false;
             const fresh = now - (seen.current.get(`${member}:${seat}`)?.at ?? 0) < ANSWER_AFTER_MS;
-            const why = s.controlPaused ? PAUSED_REASON : fresh ? "Just arrived" : null;
+            const why =
+              kbm && !s.guestsKeyboard
+                ? DESKTOP_ONLY_REASON
+                : s.controlPaused
+                  ? PAUSED_REASON
+                  : fresh
+                    ? "Just arrived"
+                    : null;
             return (
               <article key={`${member}:${seat}`} className={`request${i === 0 ? " oldest" : ""}${kbm ? " kbm" : ""}`}>
                 <Avatar id={member} name={nameOf(room, member)} size={32} />

@@ -4,7 +4,8 @@
 //! screen-sharing portal, and what the PC plays from PipeWire; guests'
 //! virtual controllers through `uinput` (with its access set up from
 //! Settings → Drivers); and the host's keys through the global-shortcuts
-//! portal. No keyboard seat or desktop control yet (M16c-2).
+//! portal. Desktop control for a device of the user's, through a `uinput`
+//! keyboard and mouse (M16c-2's first part); no keyboard seat for guests yet.
 
 use std::{
     any::Any,
@@ -25,7 +26,9 @@ use couch_media::{
 use couch_platform_linux::{
     autostart, awake,
     clock::MonotonicClock,
-    global_keys, notices, pads, screencast, session_lock,
+    global_keys,
+    kbm::UinputKbm,
+    notices, pads, screencast, session_lock,
     sound::{Sounds, SystemSound},
 };
 
@@ -139,15 +142,22 @@ impl Backend for LinuxBackend {
         Arc::new(MonotonicClock)
     }
 
-    /// Sessions with controller seats (M16c-1); no keyboard seat (the
-    /// desktop can't say which window is in front, nor tell the host's keys
-    /// from injected ones) nor desktop control until M16c-2.
+    /// Sessions with controller seats (M16c-1), and desktop control for a
+    /// device of the user's (M16c-2) once this user may make input devices,
+    /// read each time (Set up may come while the app runs). No keyboard seat
+    /// for guests yet: the desktop can't say which window is in front.
     fn capabilities(&self) -> HostCapabilities {
         HostCapabilities {
             sessions: true,
             keyboard_seat: false,
-            desktop_control: false,
+            desktop_control: pads::available(),
         }
+    }
+
+    /// The desktop's global shortcuts can't tell a key a guest injects
+    /// through `uinput` from the host's own (ADR 0012).
+    fn host_keys_hear_injected(&self) -> bool {
+        true
     }
 
     /// Kept awake through logind and the inhibit portal, its lock screen
@@ -266,8 +276,17 @@ impl Backend for LinuxBackend {
         }
     }
 
+    /// A `uinput` keyboard and mouse (M16c-2), made at a session's first
+    /// grant of either; nothing if this user can't make input devices (the
+    /// capabilities say so first).
     fn kbm(&self) -> Box<dyn KbmInjector> {
-        Box::new(NoKbm)
+        match UinputKbm::new() {
+            Ok(kbm) => Box::new(kbm),
+            Err(e) => {
+                tracing::warn!("no keyboard and mouse for this session: {e}");
+                Box::new(NoKbm)
+            }
+        }
     }
 
     fn focus(&self, _: NativeId) -> Focus {

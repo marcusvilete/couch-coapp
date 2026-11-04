@@ -11,6 +11,8 @@ import type { MenuEntry } from "../ui/Menu";
 import type { Run } from "./useRun";
 
 export const PAUSED_REASON = "Allow control first";
+/** Why a Linux host's keyboard seat goes to no guest (M16c-2). */
+export const DESKTOP_ONLY_REASON = "This PC's keyboard seat is for desktop control: guests play with controllers";
 
 export function controllersOf(s: SessionView, member: string): number {
   return s.viewerControllers[s.viewers.indexOf(member)] ?? 0;
@@ -21,6 +23,8 @@ export function passEntries(room: RoomView, s: SessionView, member: string, run:
   const held = seatsOf(s, member);
   return s.seats.flatMap((seat, i): MenuEntry[] => {
     if (held.includes(i)) return [];
+    // A Linux host's keyboard seat is desktop control's alone (M16c-2).
+    if (seat.keyboardMouse && !s.guestsKeyboard) return [];
     const pass = () => void run(`pass-${member}`, { type: "passControl", member, seat: i });
     // With two controllers or more, which one plays it (P12); when one
     // must leave its seat and nothing says which, only those (P13).
@@ -262,7 +266,10 @@ export function seatEntries(room: RoomView, s: SessionView, i: number, run: Run)
     if (choices.length > 0) entries.push({ label: "Play here with", icon: <Gamepad2 />, items: choices });
   }
   const viewers = s.viewers.filter((v) => !seatsOf(s, v).includes(i));
-  if (viewers.length > 0) {
+  // A Linux host's keyboard seat is desktop control's alone (M16c-2).
+  if (viewers.length > 0 && seat.keyboardMouse && !s.guestsKeyboard) {
+    entries.push({ label: "Pass to", icon: <Hand />, disabled: DESKTOP_ONLY_REASON, onSelect: () => {} });
+  } else if (viewers.length > 0) {
     entries.push({
       label: "Pass to",
       icon: <Hand />,

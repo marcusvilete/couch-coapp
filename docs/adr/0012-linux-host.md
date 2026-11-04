@@ -18,6 +18,19 @@ M16c-1 built so far ([results](../m16c-results.md)): part 1, 0.25.0 (capabilitie
 - **our sound is every program's stream but ours, linked into our own node,** ours decided from each client's and stream's own info (a PulseAudio client's process isn't in the registry's snapshot), loopbacks and filters left out; one capture at a time, 1.5 s apart, since PipeWire 1.0.5 froze a program relinked faster;
 - **notifications without answer buttons:** answering stays the host's keys and the console; they ask the server for no sound, which would be in the stream.
 
+M16c-2, planned 2026-11-04, answers the open questions below. The author's choices:
+- **`uinput` for keys and the mouse,** for guests and desktop control alike: no dialog (Set up already grants it), and it works with nobody at the PC. The remote-desktop portal (libei, an absolute pointer kept on the streamed screen) may come later, measured.
+- **The game's window is confirmed by the host,** once per stream, from the windows the desktop lists: the portal never says which window it shares. It's preselected when exactly one window has the shared stream's size, and keys stay held off until it's confirmed.
+- **The "in front" helpers only report:** a KWin script loaded over D-Bus for a session; a GNOME Shell extension installed from Settings (one log-out), then enabled by the app. Their reports count only from the current owner of `org.kde.KWin` or `org.gnome.Shell`.
+- **Desktop control first** (part 1), guests' keyboard seat second (part 2).
+
+Settled in part 1 (0.27.0):
+- **A `uinput` keyboard and mouse** (`couch_platform_linux::kbm`): keys by position (the kernel's HID table), never `KEY_SYSRQ` (the kernel's magic SysRq listens to every keyboard with Alt; Print Screen is the same key), no power or media keys, no autorepeat on the device; made at a session's first grant of keyboard or mouse. A crash leaves nothing held: the kernel releases a device's keys when it goes.
+- **The pointer moves relatively** in desktop control: Wayland tells no program where the pointer is, so it isn't kept on the streamed screen of a PC with several, and the desktop's acceleration applies.
+- **The keyboard seat on a Linux host is desktop control's alone** until part 2: allowed in a session a device of the user's starts from afar (one started at the PC would keep a seat nobody may hold once the device goes), and never passed or granted to anyone else; the console offers it to no guest (`SessionView::guests_keyboard`).
+- **What a guest's keys may do to the global shortcuts:** while anyone but the host has the keyboard (a viewer on its seat, or desktop control given), Accept and Decline answer nothing; the console still does. The router refuses guests Ctrl+Alt+Shift plus the host's keys as offered to the portal (a key the user rebinds in the desktop's settings isn't known). The panic key stays on: a guest could press it only through a key the user rebound, and it then frees guests' seats and, on a home PC, locks the user's devices out (the PIN again, desktop control ended); an operator pressing it locks itself out.
+- **Linux's own dangerous combinations,** blocked for guests on every host: Ctrl+Alt+F1 to F12 (a text console), Ctrl+Alt+Backspace, Ctrl+Alt+Delete (the log-out dialog). Desktop control, the whole PC, passes them as it passes the Windows key.
+
 ## Context
 
 ADR 0011 made a Linux PC a viewer (M16a, M16b) and left the host for its own design, because a host needs what Wayland changes most:
@@ -97,7 +110,7 @@ No window can stay above the game unfocused on GNOME, so a Linux host shows requ
 
 ### Remote play's home PC on Linux
 
-- **The remote console works** (M25a): unlocking with the PIN, starting sessions, passing seats, from the operator's device. Desktop control (M25b) waits for M16c-2.
+- **The remote console works** (M25a): unlocking with the PIN, starting sessions, passing seats, from the operator's device. Desktop control (M25b) waits for M16c-2 (built in its first part, 0.27.0).
 - **The unattended PC** (M25c), the Linux way: kept awake with a logind inhibitor (sleep), and the screen too while a device is unlocked; start at sign-in as an XDG autostart entry, for an AppImage's default profile, naming its own `$APPIMAGE`; "Windows is locked" becomes logind's `LockedHint`. No notification-area icon (GNOME shows none without an extension): closing the window quits.
 - **Added in M16c-1's fifth part:** the desktop's inhibit portal beside logind's inhibitor (GNOME and KDE suspend and blank the screen themselves, and polkit refuses logind's sleep inhibitor to a process in no session, as an app a desktop starts may be); and, nobody being at the PC to answer the screen-sharing dialog, a stream started from afar only with a choice the portal remembers, a dialog that comes anyway closed after 30 s and told to the device (`EndReason::NothingShared`, wire revision 14). An AppImage's autostart entry follows a newer AppImage when the one it names is gone.
 
@@ -130,6 +143,6 @@ A Linux `release-check` follows the Windows one: a host killed, a viewer gone, a
 
 ## Open questions, for the parts' plans
 
-- **M16c-2:** how the KWin script and the GNOME extension are installed and trusted (the extension is the user's to enable); what a guest's keys may do to the global shortcuts; whether the remote-desktop portal (libei, asked each session) beats `uinput` for keys, given the "in front" check is ours either way.
+- **M16c-2** (answered 2026-11-04, above): how the KWin script and the GNOME extension are installed and trusted (the extension is the user's to enable); what a guest's keys may do to the global shortcuts; whether the remote-desktop portal (libei, asked each session) beats `uinput` for keys, given the "in front" check is ours either way.
 - **The host's own controller through a seat:** grabbing its evdev device hides it from games reading evdev (SDL's usual path), not from raw HID readers; measured on real games before promising it.
 - **A Shell extension or KWin script for the "in front" check** must not become a way to drive the desktop: what it exposes is read-only, the active window's identity.

@@ -206,6 +206,10 @@ pub struct SeatRouter {
     /// While nothing is streamed (M19): `Some(except)`, and input from every
     /// holder but `except` (the host's own controller) is dropped.
     held: Option<Option<MemberId>>,
+    /// The host's keys whose Ctrl+Alt+Shift chords are refused to every
+    /// holder but a desktop one ([`filter::host_chord`]): where the host's
+    /// keys can't tell injected keys from real ones (Linux, M16c-2).
+    host_chords: Vec<HidUsage>,
 }
 
 impl SeatRouter {
@@ -221,7 +225,15 @@ impl SeatRouter {
             foreground: false,
             pointer_inside: false,
             held: None,
+            host_chords: Vec::new(),
         }
+    }
+
+    /// Refuses Ctrl+Alt+Shift plus any of `keys` to every holder but a
+    /// desktop one: the host's keys, where they'd fire for an injected key
+    /// too (Linux's global shortcuts, M16c-2).
+    pub fn block_host_chords(&mut self, keys: Vec<HidUsage>) {
+        self.host_chords = keys;
     }
 
     /// Like [`Self::new`], with each seat's epochs counting on from `epoch`.
@@ -436,7 +448,9 @@ impl SeatRouter {
                 } else if kbm
                     && h.may(Permissions::KEYBOARD)
                     && !h.keys.contains(&key)
-                    && (desktop || filter::key_allowed(key, &all_keys))
+                    && (desktop
+                        || (filter::key_allowed(key, &all_keys)
+                            && !filter::host_chord(key, &all_keys, &self.host_chords)))
                 {
                     h.keys.insert(key);
                     effects.push(Effect::Key(key, true));
@@ -903,6 +917,38 @@ mod tests {
         assert!(
             revoked.contains(&Effect::Key(LEFT_ALT, false)),
             "{revoked:?}"
+        );
+    }
+
+    /// Linux (M16c-2): the desktop's shortcuts would take a guest's
+    /// Ctrl+Alt+Shift+P for the host's panic key.
+    #[test]
+    fn the_hosts_chords_are_refused_to_guests_but_not_to_the_desktop() {
+        const P: u16 = 0x13;
+        let chord = [0xE0, 0xE2, 0xE1];
+        let mut f = Fixture::new(ALL);
+        f.router.block_host_chords(vec![HidUsage(P)]);
+        for (i, k) in chord.into_iter().enumerate() {
+            assert_eq!(
+                f.send(f.key(k, true), 10 + i as u64),
+                vec![Effect::Key(HidUsage(k), true)]
+            );
+        }
+        assert_eq!(f.send(f.key(P, true), 20), vec![]);
+        // Other keys with the same modifiers go through.
+        assert_eq!(
+            f.send(f.key(W, true), 30),
+            vec![Effect::Key(HidUsage(W), true)]
+        );
+
+        let mut f = Fixture::new(DESKTOP);
+        f.router.block_host_chords(vec![HidUsage(P)]);
+        for k in chord {
+            f.send(f.key(k, true), 10);
+        }
+        assert_eq!(
+            f.send(f.key(P, true), 20),
+            vec![Effect::Key(HidUsage(P), true)]
         );
     }
 

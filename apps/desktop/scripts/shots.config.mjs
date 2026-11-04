@@ -89,6 +89,9 @@ export const SHOTS = [
   ["dialog-start", "owner-alone", click("Start a session")],
   ["dialog-start-remapper", "start-remapper", click("Start a session")],
   ["dialog-start-no-drivers", "start-no-drivers", click("Start a session")],
+  // M16c-2: on a Linux PC run from afar, the keyboard seat is desktop
+  // control's alone.
+  ["dialog-start-remote-linux", "remote-linux-unlocked", click("Start a session on it…")],
   // M24: no seats at all, a session to watch together.
   ["dialog-start-together", "owner-alone", async (page) => {
     await click("Start a session")(page);

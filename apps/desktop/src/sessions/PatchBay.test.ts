@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { hostSession } from "../preview/fakeEngine";
-import { cableFrom, frees, guestPads, passHint, requestDetail } from "./hostMenus";
+import {
+  cableFrom,
+  DESKTOP_ONLY_REASON,
+  frees,
+  guestPads,
+  passEntries,
+  passHint,
+  requestDetail,
+} from "./hostMenus";
 import { dropOn } from "./PatchBay";
 
 const room = {
@@ -165,5 +173,19 @@ describe("one of a guest's controllers moving (P13)", () => {
     s.viewerControllers = [3, 1];
     expect(requestDetail(s, "b", 0, 2)).toBe("with their DualSense 2 · leaves Controller 3");
     expect(requestDetail(s, "b", 0, null)).toBeNull();
+  });
+});
+
+describe("a Linux host's keyboard seat (M16c-2)", () => {
+  it("goes to no guest: neither dropped nor in the pass menu", () => {
+    const linux = session({ guestsKeyboard: false });
+    expect(dropOn(room, session(), viewer("c"), 3).ok).toBe(true);
+    expect(dropOn(room, linux, viewer("c"), 3)).toEqual({ ok: false, hint: DESKTOP_ONLY_REASON });
+    const run = async () => true;
+    const labels = (s: SessionView) => passEntries(room, s, "c", run).flatMap((e) => (typeof e !== "string" && "label" in e ? [e.label] : []));
+    expect(labels(session())).toContain("Keyboard and mouse");
+    expect(labels(linux)).not.toContain("Keyboard and mouse");
+    // Controllers still pass as ever.
+    expect(labels(linux)).toContain("Controller 3");
   });
 });

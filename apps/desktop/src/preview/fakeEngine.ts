@@ -275,6 +275,7 @@ export function hostSession(
     operator: false,
     operatedBy: [],
     desktop: null,
+    guestsKeyboard: true,
   };
 }
 

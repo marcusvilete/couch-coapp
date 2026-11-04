@@ -26,6 +26,7 @@ import {
   guestPads,
   ourPads,
   passHint,
+  DESKTOP_ONLY_REASON,
   PAUSED_REASON,
   seatEntries,
   viewerEntries,
@@ -89,6 +90,7 @@ export function dropOn(
       own === seat ? "Back on its seat" : other >= 0 ? `Swaps with your ${pads[other]}` : "Plays here";
     return { ok: true, hint: what + loses };
   }
+  if (target.keyboardMouse && !s.guestsKeyboard) return { ok: false, hint: DESKTOP_ONLY_REASON };
   if (s.controlPaused) return { ok: false, hint: PAUSED_REASON };
   const held = seatsOf(s, drag.member);
   if (held.includes(seat)) return { ok: false, hint: "Theirs already" };

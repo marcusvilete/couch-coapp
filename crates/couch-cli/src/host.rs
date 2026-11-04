@@ -158,6 +158,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             replace_grace: REPLACE_GRACE,
             local: local.clone(),
             pad_setup_limit: couch_input::PAD_SETUP_LIMIT,
+            // No hook for the host's keys here.
+            host_chords: Vec::new(),
         },
     )
     .await;

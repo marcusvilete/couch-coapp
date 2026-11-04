@@ -42,6 +42,7 @@ function view(over: Partial<SessionView>): SessionView {
     operator: false,
     operatedBy: [],
     desktop: null,
+    guestsKeyboard: true,
     ...over,
   };
 }

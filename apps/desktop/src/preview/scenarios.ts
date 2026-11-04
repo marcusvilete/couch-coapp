@@ -97,6 +97,7 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     operator: false,
     operatedBy: [],
     desktop: null,
+    guestsKeyboard: true,
     ...over,
   };
 }
@@ -340,8 +341,18 @@ export const SCENARIOS: Record<string, Scenario> = {
       return base([sofa({ members: [you(false), homePc({ unlocked: true }), bia, caio], sessions: [s] })]);
     },
   },
+  "remote-linux-unlocked": {
+    title: "Remote play: a Linux PC unlocked, its keyboard seat for desktop control alone (M16c-2)",
+    world: () => {
+      const pc = homePc({
+        unlocked: true,
+        capabilities: { sessions: true, keyboardSeat: false, desktopControl: true },
+      });
+      return base([sofa({ members: [you(false), pc, bia, caio] })]);
+    },
+  },
   "remote-console-linux": {
-    title: "Remote play: running a Linux PC's session (controllers only, no desktop control, M16c)",
+    title: "Remote play: running a Linux PC's session (controllers only; no desktop control: its virtual devices not set up)",
     world: () => {
       const s = hostSession(HOME_PC, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []);
       Object.assign(s, { role: "watching", operator: true, panicKey: null, answerKeys: null });
@@ -704,7 +715,7 @@ export const SCENARIOS: Record<string, Scenario> = {
         info: {
           ...base([]).info,
           platform: "linux",
-          capabilities: { sessions: true, keyboardSeat: false, desktopControl: false },
+          capabilities: { sessions: true, keyboardSeat: false, desktopControl: true },
           homePc: true,
           dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
         },

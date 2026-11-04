@@ -149,4 +149,11 @@ operatedBy: Array<string>,
  * For the host, and a session we run from afar: the member controlling
  * the host's desktop (M25b), by id. The host's banner names its device.
  */
-desktop: string | null, };
+desktop: string | null, 
+/**
+ * For the host, and a session we run from afar: whether guests may
+ * hold its keyboard-and-mouse seat. Not on a Linux host (M16c-2), where
+ * the seat is desktop control's alone: the console offers it to nobody
+ * else (the engine refuses anyway). True where unknown.
+ */
+guestsKeyboard: boolean, };

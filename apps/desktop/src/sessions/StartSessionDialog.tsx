@@ -31,9 +31,14 @@ export function StartSessionDialog(props: {
    * controllers, and none of its own controllers (nobody is there). */
   remote?: RemoteTarget;
   /** The host (this PC, or the one run from here) offers a keyboard seat:
-   * a Linux host has controller seats alone (M16c). */
+   * a Linux host has controller seats alone (M16c), but for desktop control
+   * from afar (M16c-2). */
   keyboardSeat: boolean;
+  /** Guests may hold that seat too (not on a Linux host, where it is
+   * desktop control's alone); as `keyboardSeat` if not said. */
+  guestsKeyboard?: boolean;
 }) {
+  const guestsKeyboard = props.guestsKeyboard ?? props.keyboardSeat;
   const remote = props.remote;
   const pcName = remote ? nameOf(props.room, remote.member) : null;
   const [sources, setSources] = useState<SourceList | null>(null);
@@ -245,14 +250,25 @@ export function StartSessionDialog(props: {
                     label="Keyboard and mouse"
                     value={kbm}
                     onChange={setKbm}
-                    options={[
-                      { value: "none", label: "Not for guests" },
-                      {
-                        value: "ownSeat",
-                        label: "A seat of their own",
-                        title: "One player can hold it beside a controller",
-                      },
-                    ]}
+                    options={
+                      guestsKeyboard
+                        ? [
+                            { value: "none", label: "Not for guests" },
+                            {
+                              value: "ownSeat",
+                              label: "A seat of their own",
+                              title: "One player can hold it beside a controller",
+                            },
+                          ]
+                        : [
+                            { value: "none", label: "None" },
+                            {
+                              value: "ownSeat",
+                              label: "For desktop control",
+                              title: "Your own keyboard and mouse, from here; guests play with controllers",
+                            },
+                          ]
+                    }
                   />
                 )}
               </Field>
@@ -273,7 +289,9 @@ export function StartSessionDialog(props: {
                       {seat.pad ? <Gamepad2 /> : <Keyboard />}
                     </span>
                     <span className="seat-preview-label">{seat.label}</span>
-                    <span className="seat-preview-who">{mineName ? `You · ${mineName}` : "A guest"}</span>
+                    <span className="seat-preview-who">
+                      {mineName ? `You · ${mineName}` : !seat.pad && !guestsKeyboard ? "You, from here" : "A guest"}
+                    </span>
                   </li>
                 );
               })
@@ -282,8 +300,10 @@ export function StartSessionDialog(props: {
           {kbm !== "none" && remote ? (
             <Callout tone="info" icon={<Keyboard />} title="The keyboard seat is how you control the desktop">
               Stream {pcName}'s screen and turn on desktop control in its console: your keyboard and mouse then reach
-              everything on {pcName}, to start a game or switch windows. You can still give the seat to a guest for a
-              game's window; they never get the desktop.
+              everything on {pcName}, to start a game or switch windows.{" "}
+              {guestsKeyboard
+                ? "You can still give the seat to a guest for a game's window; they never get the desktop."
+                : "Guests play with controllers: the seat is yours alone."}
             </Callout>
           ) : kbm !== "none" ? (
             <Callout tone="danger" icon={<ShieldAlert />} title="Keyboard and mouse are control of your PC">

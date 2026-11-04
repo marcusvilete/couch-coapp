@@ -327,6 +327,33 @@ fn desktop_control_rides_the_keyboard_seat_of_the_viewer_named() {
     assert_eq!(grant_of(&s.pass(ANA, S1).unwrap()), Some((S1, ANA, kbm)));
 }
 
+/// M16c-2: where the host's keys hear injected keys, Accept and Decline
+/// wait while anyone else has the keyboard: a viewer on its seat, or
+/// desktop control given, its grant reported or not.
+#[test]
+fn the_keyboard_is_elsewhere_while_a_viewer_has_it_or_is_given_the_desktop() {
+    let mut s = with_seats(&[SeatKind::Controller, SeatKind::KeyboardMouse]);
+    s.join(ANA);
+    s.join(BIA);
+    assert!(!s.keyboard_elsewhere());
+    // A pad seat is no keyboard.
+    s.pass(BIA, S0).unwrap();
+    s.seat_changed(S0, Some(BIA));
+    assert!(!s.keyboard_elsewhere());
+    s.pass(BIA, S1).unwrap();
+    assert!(!s.keyboard_elsewhere(), "not until the router says");
+    s.seat_changed(S1, Some(BIA));
+    assert!(s.keyboard_elsewhere());
+    s.take_back(Some(S1));
+    s.seat_changed(S1, None);
+    assert!(!s.keyboard_elsewhere());
+    // Desktop control counts from the moment it's given.
+    s.set_desktop(Some(ANA)).unwrap();
+    assert!(s.keyboard_elsewhere());
+    s.set_desktop(None).unwrap();
+    assert!(!s.keyboard_elsewhere());
+}
+
 #[test]
 fn desktop_control_ends_with_the_viewer_the_panic_key_and_the_end() {
     let mut s = with_seats(&[SeatKind::KeyboardMouse]);
