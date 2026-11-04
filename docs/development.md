@@ -50,9 +50,11 @@ Linux builds, passes the tests, and watches and plays a Windows host's sessions 
    cargo xtask stage-dlls
    (cd apps/desktop && npm install)
    ```
-6. **Build and test** with the same commands as on Windows (below). Only `probe`, `host` and `view` exist in `couch-cli` there.
+6. **Build and test** with the same commands as on Windows (below). Only `probe`, `host`, `view` and `pad-test` exist in `couch-cli` there.
 
 A workflow (`.github/workflows/linux.yml`) runs clippy, the tests and the front end's checks on Linux for every pull request. The AppImage for other Linux PCs: [self-hosting.md](self-hosting.md#4-an-appimage-for-friends-on-linux).
+
+**A Linux host on a real desktop** (the portals' dialogs, the host's keys, notifications, a real sound device; WSL has none of them): a VirtualBox VM with GNOME and KDE, made with `scripts/vm/create.ps1`, and the AppImage copied in. A development build (`npm run tauri dev`) on Linux installs no menu entry, so the desktop's portals don't know the app and refuse its global shortcuts: the host's keys work only from an AppImage.
 
 ## Running each part
 

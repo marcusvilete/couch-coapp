@@ -352,6 +352,19 @@ pub trait Backend: Send + Sync + 'static {
         true
     }
 
+    /// Whether a stream shares again, without asking, what was last chosen
+    /// in the desktop's screen-sharing dialog (Linux, M16c).
+    fn remembers_shared_choice(&self) -> bool {
+        false
+    }
+
+    /// Forgets that choice: the next stream asks in the dialog again.
+    fn forget_shared_choice(&self) {}
+
+    /// Plays the request chime, returning at once, where the webview can't
+    /// (Linux); this process's own sound, so out of the stream.
+    fn play_chime(&self) {}
+
     /// Whether the host picks its stream's sound by program (Linux, M16c:
     /// the portal doesn't say whose the shared window is), from
     /// [`Backend::sound_programs`]. Elsewhere a window's own sound follows

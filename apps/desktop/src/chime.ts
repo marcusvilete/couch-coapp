@@ -4,15 +4,26 @@
 // never hear it: a Windows host streams the game's sound or everything but
 // this app, and a Linux host leaves this app's processes out (M16c).
 //
+// On Linux the engine plays it (`Command::PlayChime`): the AppImage's
+// webview has no sound output (no GStreamer plugins it can load).
+//
 // The webview lets a page start sound only after a click, so the audio
 // context is made by the Go live click (`prepareChime`) and kept.
 
+import { request } from "./engine";
 import { overlaySettings } from "./state/overlaySettings";
 
 let context: AudioContext | null = null;
+let byEngine = false;
+
+/** On a host whose webview can't play sound (Linux), from the engine's info. */
+export function chimeByEngine(on: boolean) {
+  byEngine = on;
+}
 
 /** Call from a click (Go live), so the chime may play later. */
 export function prepareChime() {
+  if (byEngine) return;
   try {
     context ??= new AudioContext();
     // Unlocked by this click; held only while a chime plays.
@@ -24,7 +35,13 @@ export function prepareChime() {
 
 /** Two rising tones, about 0.35 s, unless turned off in Settings. */
 export function playChime() {
-  if (!context || !overlaySettings().sound) return;
+  if (!overlaySettings().sound) return;
+  if (byEngine) {
+    // Only a convenience.
+    request({ type: "playChime" }, "done").catch(() => {});
+    return;
+  }
+  if (!context) return;
   try {
     void context.resume();
     const start = context.currentTime + 0.02;

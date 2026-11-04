@@ -13,8 +13,11 @@
 
 pub mod autostart;
 pub mod awake;
+pub mod chime;
 pub mod clock;
 pub mod global_keys;
+pub mod gpu;
+pub mod launcher;
 pub mod notices;
 pub mod pads;
 mod portal;

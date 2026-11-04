@@ -62,15 +62,21 @@ pub fn available() -> bool {
         .is_ok()
 }
 
+/// How long [`set_up`] waits for the rule to reach this session's device
+/// after udev has applied it: logind sets the device's access a moment later.
+const APPLIED_WITHIN: Duration = Duration::from_secs(3);
+
 /// Installs [`SET_UP_RULE`] with the administrator's consent (`pkexec`,
 /// which asks for the password), then applies it, loading `uinput` first
 /// where it's a module so the rule has a device to apply to. The command is
 /// fixed. Undone by deleting [`SET_UP_RULE_FILE`].
 pub fn set_up() -> Result<(), String> {
+    // `--settle` waits for udev to handle the event: without it the device's
+    // access came after we looked (seen on Ubuntu 26.04).
     let script = format!(
         "modprobe uinput 2>/dev/null; \
          printf '%s\\n' '{SET_UP_RULE}' > {SET_UP_RULE_FILE} && \
-         udevadm control --reload-rules && udevadm trigger --name-match=uinput"
+         udevadm control --reload-rules && udevadm trigger --settle --name-match=uinput"
     );
     let status = std::process::Command::new("pkexec")
         .args(["sh", "-c", &script])
@@ -79,7 +85,7 @@ pub fn set_up() -> Result<(), String> {
     match status.code() {
         // The rule applies to this session's device at once, normally; where
         // it doesn't, signing in again does.
-        Some(0) if available() => Ok(()),
+        Some(0) if applied() => Ok(()),
         Some(0) => Err("set up, but this session can't use it yet: sign out and back in".into()),
         // pkexec: the dialog was dismissed, the password refused, or no
         // agent to ask with.
@@ -90,11 +96,25 @@ pub fn set_up() -> Result<(), String> {
     }
 }
 
+/// Whether this user may make input devices, within [`APPLIED_WITHIN`].
+fn applied() -> bool {
+    let until = Instant::now() + APPLIED_WITHIN;
+    loop {
+        if available() {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The command [`set_up`] runs, for doing it by hand in a terminal (the
 /// Settings page shows the same, `sections.tsx`'s `UINPUT_BY_HAND`).
 pub fn set_up_by_hand() -> String {
     format!(
-        "sudo modprobe uinput; echo '{SET_UP_RULE}' | sudo tee {SET_UP_RULE_FILE} && sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput"
+        "sudo modprobe uinput; echo '{SET_UP_RULE}' | sudo tee {SET_UP_RULE_FILE} && sudo udevadm control --reload-rules && sudo udevadm trigger --settle --name-match=uinput"
     )
 }
 

@@ -64,6 +64,20 @@ pub fn forget_own_link_registration(scheme: &str) -> std::io::Result<bool> {
     }
 }
 
+/// Whether the webview should draw without WebKitGTK's DMA-BUF renderer:
+/// on a virtual machine's GPU, where it left the window blank
+/// (`couch_platform_linux::gpu`). Never elsewhere, nor on Windows.
+pub fn webview_needs_plain_renderer() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        couch_platform_linux::gpu::is_virtual()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 /// Everything the UI can ask of the engine. Its `Debug` leaves out passwords
 /// and invites.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -156,6 +170,19 @@ pub enum Command {
     },
     /// Whether ViGEmBus and HidHide are installed.
     GetDrivers,
+    /// Whether this PC shares again, without asking, what was last chosen
+    /// in the desktop's screen-sharing dialog (Linux, M16c), after
+    /// forgetting that choice if `forget`: the next stream asks again (the
+    /// desktops offer no way to revoke it for an app outside Flatpak).
+    /// Answers [`Response::SharedChoice`]; elsewhere nothing is remembered.
+    SharedChoice {
+        forget: bool,
+    },
+    /// Plays the request chime from this process, where the webview can't
+    /// (Linux's AppImage: `couch_platform_linux::chime`); out of the stream,
+    /// as this app's own sound. Elsewhere it does nothing: the webview
+    /// plays it.
+    PlayChime,
     /// The third-party licences installed next to the app
     /// (`THIRD-PARTY-NOTICES.txt`, `cargo xtask notices`), for Settings → About.
     GetNotices,
@@ -1229,6 +1256,9 @@ pub enum Response {
     Drivers {
         drivers: Vec<DriverView>,
     },
+    SharedChoice {
+        remembered: bool,
+    },
     Notices {
         text: String,
     },
@@ -1348,6 +1378,11 @@ impl fmt::Debug for Command {
                 f.debug_struct("SetNetwork").field("relay", relay).finish()
             }
             Self::GetDrivers => f.write_str("GetDrivers"),
+            Self::SharedChoice { forget } => f
+                .debug_struct("SharedChoice")
+                .field("forget", forget)
+                .finish(),
+            Self::PlayChime => f.write_str("PlayChime"),
             Self::GetNotices => f.write_str("GetNotices"),
             // The passphrase opens the whole identity.
             Self::ExportProfile { .. } => f.write_str("ExportProfile { .. }"),
@@ -1548,6 +1583,10 @@ impl fmt::Debug for Response {
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
+            Self::SharedChoice { remembered } => f
+                .debug_struct("SharedChoice")
+                .field("remembered", remembered)
+                .finish(),
             Self::Notices { text } => f
                 .debug_struct("Notices")
                 .field("bytes", &text.len())
@@ -1873,8 +1912,10 @@ pub enum EngineError {
     /// Someone in the room refused us; the text says why.
     #[error("{0}")]
     Refused(&'static str),
+    /// No answer from the owner: its app closed, or (the first dial to an
+    /// owner just started) the connection timed out while iroh found a path.
     #[error(
-        "the room's owner isn't online; invites work while the owner's Couch Co-App is running"
+        "couldn't reach the room's owner: invites work while the owner's Couch Co-App is running (try again in a moment if it is)"
     )]
     OwnerOffline,
     #[error("passwords can't be empty")]
@@ -2616,6 +2657,18 @@ impl Engine {
                 Ok(Response::Done)
             }
             Command::GetDrivers => self.drivers().await,
+            Command::SharedChoice { forget } => {
+                if forget {
+                    self.backend.forget_shared_choice();
+                }
+                Ok(Response::SharedChoice {
+                    remembered: self.backend.remembers_shared_choice(),
+                })
+            }
+            Command::PlayChime => {
+                self.backend.play_chime();
+                Ok(Response::Done)
+            }
             Command::ExportProfile { passphrase } => self.export_profile(passphrase).await,
             Command::RestoreProfile { passphrase } => self.restore_profile(passphrase).await,
             Command::GetNotices => {

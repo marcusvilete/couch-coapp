@@ -62,7 +62,7 @@ A controllers-only host keeps every safety rule on any desktop, unchanged:
 
 ### Capture: the screen-sharing portal
 
-- **Choosing what to stream opens the desktop's own dialog** (a window or a screen), in place of our list of windows. The restore token is kept per profile, so the same choice comes back without the dialog while the desktop can restore it.
+- **Choosing what to stream opens the desktop's own dialog** (a window or a screen), in place of our list of windows. The restore token is kept per profile, so the same choice comes back without the dialog while the desktop can restore it. (Found in the VM, 0.26.1: neither GNOME nor KDE lets the user revoke it for an app outside Flatpak; the stream picker's Choose again forgets it.)
 - **Frames through PipeWire,** in memory first (shared memory, copied once), paced by our pacer (`couch_media::pacing`), which already times frames by arrival.
 - **The window closing ends the stream,** as on Windows; the session goes on (M19). The portal names no process, so "the game exited" and "the window closed" are one event on Linux, and a game that swaps its window ends the stream rather than being followed: the host picks it again (the restore token often brings it back in one click).
 
@@ -75,14 +75,14 @@ A controllers-only host keeps every safety rule on any desktop, unchanged:
 
 ### The panic key, and answering requests
 
-- **Through the global-shortcuts portal:** the panic key, Accept and Decline are offered to the desktop with the user's keys (`shortcuts.json`) as the preferred ones. The desktop may let the user change them; the host console shows the keys in force.
+- **Through the global-shortcuts portal:** the panic key, Accept and Decline are offered to the desktop with the user's keys (`shortcuts.json`) as the preferred ones. The desktop may let the user change them; the host console shows the keys in force. (Found in the VM, 0.26.1: the portal takes an app outside Flatpak only once it registers an app id with an installed desktop entry, not ending in `.desktop`, which KDE drops; and the desktop keeps the keys it bound, so Settings no longer offers changing them on Linux.)
 - **Without the portal,** the session still starts, and the host console says the keys aren't available: its own "Take back every seat" does what the panic key does.
 - **Accept still waits 1 s** after a request arrives (`ANSWER_AFTER`), as on Windows.
 - **In M16c-2,** guests' keys exist. A key injected through `uinput` reaches the desktop as a real one, so the portal's shortcuts could be pressed by a guest: the answer keys are then off while a keyboard seat is held, and the panic key's behaviour is designed in that part (a guest pressing it only takes control from guests, the host's own aim; nothing is ever granted by it).
 
 ### Requests and notices: notifications
 
-No window can stay above the game unfocused on GNOME, so a Linux host shows requests and notices as desktop notifications (with the overlay's sound), never taking the focus. The host console in the app stays the place to answer with the mouse; answering from the notification itself is the host's own click, as in the console. KDE's layer-shell overlay is a possible later step.
+No window can stay above the game unfocused on GNOME, so a Linux host shows requests and notices as desktop notifications (with the overlay's sound), never taking the focus (the chime, which the AppImage's webview can't play, from the engine since 0.26.1). The host console in the app stays the place to answer with the mouse; answering from the notification itself is the host's own click, as in the console. KDE's layer-shell overlay is a possible later step.
 
 ### Encoding
 

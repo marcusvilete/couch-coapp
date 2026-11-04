@@ -153,7 +153,7 @@ const DRIVERS: Record<DriverName, { title: string; why: string }> = {
 /** The Linux setup by hand, as Set up does it (`couch_platform_linux::pads`,
  * whose test checks this is its `set_up_by_hand`). */
 const UINPUT_BY_HAND =
-  "sudo modprobe uinput; echo 'KERNEL==\"uinput\", SUBSYSTEM==\"misc\", OPTIONS+=\"static_node=uinput\", TAG+=\"uaccess\"' | sudo tee /etc/udev/rules.d/60-couch-coapp-uinput.rules && sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput";
+  "sudo modprobe uinput; echo 'KERNEL==\"uinput\", SUBSYSTEM==\"misc\", OPTIONS+=\"static_node=uinput\", TAG+=\"uaccess\"' | sudo tee /etc/udev/rules.d/60-couch-coapp-uinput.rules && sudo udevadm control --reload-rules && sudo udevadm trigger --settle --name-match=uinput";
 
 const STATES: Record<DriverState, { text: string; tone: "ok" | "warn" | "neutral" }> = {
   ready: { text: "Installed", tone: "ok" },
@@ -182,6 +182,11 @@ export function DriversSection(props: { linux: boolean }) {
       setDrivers((await request({ type: "installDriver", driver }, "drivers")).drivers);
     } catch (e) {
       setError(errorText(e));
+      // A setup can fail after doing its part (on Linux, the rule installed
+      // but not yet applied): the cards show what's there now.
+      await request({ type: "getDrivers" }, "drivers")
+        .then((r) => setDrivers(r.drivers))
+        .catch(() => {});
     } finally {
       setInstalling(null);
     }

@@ -128,6 +128,7 @@ Optional. A Linux PC or a Steam Deck **watches and plays** sessions, and runs a 
 - **It needs FUSE,** which desktops normally have. Without it, start it with `--appimage-extract-and-run`.
 - **On a Steam Deck:** in Desktop Mode, download it, make it executable, and open it. For Game Mode, add it to Steam as a non-Steam game.
 - **Invite links** open it once it has started once. Moved to another folder, it needs one start there.
+- **It adds itself to the app menu** when it starts (`~/.local/share/applications/com.couchcoapp.CouchCoApp.desktop`, and its icon in `~/.local/share/icons`): the desktop's shortcuts for the panic key need it. A newer AppImage takes the entry over once the old file is gone; deleting both files removes it.
 - **Its data and log** are in `~/.local/share/CouchCoApp/profiles/default/` (`desktop.log`).
 
 ## How to know it worked

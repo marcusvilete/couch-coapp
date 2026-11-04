@@ -58,6 +58,16 @@ pub(super) struct LinuxBackend {
 
 impl LinuxBackend {
     pub(super) fn new(profile: Option<PathBuf>) -> Self {
+        // The app's (not `couch-cli`'s): its menu entry, which GNOME finds
+        // the window's icon by and the portals the app id (an AppImage's
+        // only; the portals' first request installs it too).
+        if profile.is_some() {
+            match couch_platform_linux::launcher::ensure() {
+                Ok(true) => tracing::info!("installed the menu entry for this AppImage"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("the menu entry couldn't be installed: {e}"),
+            }
+        }
         let portal_file = profile.map(|dir| dir.join(PORTAL_FILE));
         let restore_token = portal_file.as_deref().and_then(|file| {
             let bytes = std::fs::read(file).ok()?;
@@ -282,6 +292,33 @@ impl Backend for LinuxBackend {
                 .is_some(),
             _ => true,
         }
+    }
+
+    fn remembers_shared_choice(&self) -> bool {
+        self.restore_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Our token goes, in the file too; the desktop's own record of it is
+    /// left to expire unused. A dialog open now still gives the next token,
+    /// if its "remember" is ticked: that choice is newer.
+    fn forget_shared_choice(&self) {
+        let had = self
+            .restore_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .is_some();
+        save_token(self.portal_file.as_deref(), None);
+        if had {
+            tracing::info!("the shared window or screen is forgotten: the next stream asks");
+        }
+    }
+
+    fn play_chime(&self) {
+        couch_platform_linux::chime::play();
     }
 
     /// The desktop's dialog comes when the host starts the stream, once:

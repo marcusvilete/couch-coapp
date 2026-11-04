@@ -109,7 +109,7 @@ fn ours_in(dir: &Path) -> io::Result<Option<PathBuf>> {
     Ok(read(&dir.join(FILE))?.and_then(|text| named(&text)))
 }
 
-fn read(file: &Path) -> io::Result<Option<String>> {
+pub(crate) fn read(file: &Path) -> io::Result<Option<String>> {
     match std::fs::read(file) {
         Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -118,13 +118,13 @@ fn read(file: &Path) -> io::Result<Option<String>> {
 }
 
 /// Written beside, then moved over: never half an entry.
-fn write(file: &Path, text: &str) -> io::Result<()> {
+pub(crate) fn write(file: &Path, text: &str) -> io::Result<()> {
     let temp = file.with_extension("desktop.new");
     std::fs::write(&temp, text)?;
     std::fs::rename(&temp, file)
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     a == b
         || matches!(
             (std::fs::canonicalize(a), std::fs::canonicalize(b)),
@@ -159,7 +159,7 @@ fn entry(appimage: &Path) -> io::Result<String> {
 /// `path` as one quoted argument of an `Exec` key: quoting's escapes, `%`
 /// doubled, then the string's own escape of each backslash (the Desktop
 /// Entry Specification, "The Exec key").
-fn exec_quoted(path: &str) -> String {
+pub(crate) fn exec_quoted(path: &str) -> String {
     let mut quoted = String::from("\"");
     for c in path.chars() {
         match c {
@@ -177,13 +177,23 @@ fn exec_quoted(path: &str) -> String {
 
 /// Whether an entry is ours: our key in it, whatever else was edited.
 fn has_our_key(text: &str) -> bool {
-    text.lines().any(|l| l.trim() == OURS)
+    has_key(text, OURS)
+}
+
+pub(crate) fn has_key(text: &str, key: &str) -> bool {
+    text.lines().any(|l| l.trim() == key)
 }
 
 /// The AppImage our entry names: `None` for an entry without our key, or
 /// whose `Exec` isn't ours.
 fn named(text: &str) -> Option<PathBuf> {
-    if !has_our_key(text) {
+    named_by(text, OURS, &format!(" {BACKGROUND}"))
+}
+
+/// The program an entry with `key` in it starts: its `Exec`'s one quoted
+/// path, followed by `rest` exactly.
+pub(crate) fn named_by(text: &str, key: &str, rest: &str) -> Option<PathBuf> {
+    if !has_key(text, key) {
         return None;
     }
     let exec = text
@@ -219,7 +229,7 @@ fn named(text: &str) -> Option<PathBuf> {
             c => path.push(c),
         }
     }
-    (chars.as_str() == format!(" {BACKGROUND}")).then(|| PathBuf::from(path))
+    (chars.as_str() == rest).then(|| PathBuf::from(path))
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ pub fn keep(why: &str, display: bool) -> Result<Awake, String> {
 }
 
 async fn hold(why: String, display: bool, released: oneshot::Receiver<()>) {
+    crate::portal::ready().await;
     // Both asked at once: neither waits on the other's bus. Each within
     // its time, so a bus that never answers can't keep the other's request
     // past the guard.

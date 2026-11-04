@@ -84,6 +84,7 @@ pub fn start(options: Options) -> Result<PortalCapture, String> {
     let task_inbox = inbox.clone();
     runtime.spawn(async move {
         let _done = done_tx;
+        crate::portal::ready().await;
         share(options, &task_inbox, stop_rx).await;
     });
     Ok(PortalCapture {

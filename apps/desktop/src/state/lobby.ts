@@ -9,7 +9,7 @@ import type { RoomView } from "../bindings/RoomView";
 import type { SessionEnd } from "../bindings/SessionEnd";
 import type { WatchEnd } from "../bindings/WatchEnd";
 import { errorText, onEngineEvent, request } from "../engine";
-import { playChime } from "../chime";
+import { chimeByEngine, playChime } from "../chime";
 import { seatPhrase } from "../model/sessions";
 import { platform } from "../platform";
 
@@ -295,6 +295,7 @@ export function useLobby(): Lobby {
         await refreshRooms();
         if (!live) return;
         setInfo(infoReply);
+        chimeByEngine(infoReply.platform === "linux");
         setProfile(profileReply);
         setLoaded(true);
         await takeOpened();

@@ -227,6 +227,9 @@ pub fn run() {
         start_logging(&profile);
     }
     tracing::info!(profile = profile.name(), data_dir = %profile.data_dir().display(), "starting");
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
+        tracing::info!("the webview draws without WebKit's DMA-BUF renderer");
+    }
     // With the relay chosen in Settings → Network.
     let options = EngineOptions {
         backup_files: Some(Arc::new(BackupDialogs(app.handle().clone()))),

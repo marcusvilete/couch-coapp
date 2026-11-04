@@ -826,6 +826,8 @@ impl Actor {
             | Command::GetTray
             | Command::SetTray { .. }
             | Command::GetDrivers
+            | Command::SharedChoice { .. }
+            | Command::PlayChime
             | Command::GetNotices
             | Command::ExportProfile { .. }
             | Command::RestoreProfile { .. }

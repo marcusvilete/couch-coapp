@@ -174,6 +174,8 @@ export const SHOTS = [
   ],
   ["settings-overlay", "lobby", settings("Overlay and sounds")],
   ["settings-overlay-linux", "linux-host", settings("Overlay and sounds")],
+  // 0.26.1: the desktop keeps the host's keys it bound; only the stream window's change here.
+  ["settings-shortcuts-linux", "linux-host", settings("Shortcuts")],
   // M16c: a Linux host picks the sound, everything but us or one program.
   [
     "stream-picker-linux-sound",
