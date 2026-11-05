@@ -1,0 +1,15 @@
+<!-- An alternative for Couch Co-App's icon, not used: the current couch (its backrest a controller) filled white on a violet rounded tile, scaled up (2026-11-05, the author's pick of the tiled versions). Known nit: the flat gap colour leaves a faint lighter edge where the gradient is darker. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs><linearGradient id="gp" x1="0" y1="0" x2="0.3" y2="1"><stop offset="0" stop-color="#9670ff"/><stop offset="1" stop-color="#5f33d6"/></linearGradient></defs>
+<rect width="1024" height="1024" rx="232" fill="url(#gp)"/>
+<g transform="translate(61 82) scale(0.88)">
+<g fill="#fff" stroke="#7a4fec" stroke-width="40" stroke-linejoin="round">
+<rect x="210" y="150" width="604" height="420" rx="120"/>
+<rect x="295" y="580" width="434" height="200" rx="20"/>
+<rect x="105" y="420" width="190" height="400" rx="95"/>
+<rect x="729" y="420" width="190" height="400" rx="95"/>
+</g>
+<path d="M512 600V760" stroke="#7a4fec" stroke-width="40" stroke-linecap="round"/>
+<g fill="#6b3fe0"><rect x="302" y="324" width="140" height="52" rx="17"/><rect x="346" y="280" width="52" height="140" rx="17"/>
+<circle cx="640" cy="312" r="32"/><circle cx="700" cy="376" r="32"/></g>
+</g></svg>
