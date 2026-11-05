@@ -1,0 +1,8 @@
+{
+  "uuid": "front@couchcoapp.com",
+  "name": "Couch Co-App: the window in front",
+  "description": "Tells Couch Co-App which window is in front while you host, so a guest's keyboard and mouse reach your game only while it is. It reports only; it never moves or changes a window.",
+  "shell-version": ["46", "47", "48", "49", "50"],
+  "url": "https://github.com/marcusvilete/couch-coapp",
+  "version": 1
+}

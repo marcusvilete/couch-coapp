@@ -3,4 +3,4 @@
 /**
  * A driver the app relies on (M10a; Settings → Drivers).
  */
-export type DriverName = "vigembus" | "hidhide" | "uinput";
+export type DriverName = "vigembus" | "hidhide" | "uinput" | "gnomeextension";

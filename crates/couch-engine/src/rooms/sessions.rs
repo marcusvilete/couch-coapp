@@ -31,11 +31,11 @@ use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 
 use super::*;
 use crate::{
-    AnswerKeys, GuestControllerView, HostController, InputSetup, OurControllerView, RequestView,
-    ScreenArea, SeatView, SessionEnd, SessionRole, SessionView, SourceChoice, StreamStateView,
-    StreamView, StreamWindowView, WatchEnd,
+    AnswerKeys, GameWindowView, GuestControllerView, HostController, InputSetup, OurControllerView,
+    RequestView, ScreenArea, SeatView, SessionEnd, SessionRole, SessionView, SourceChoice,
+    StreamStateView, StreamView, StreamWindowView, WatchEnd,
     pipeline::{
-        AudioChoice, HostKeyEvent, Source, ViewerOptions,
+        AudioChoice, GameWindow, HostKeyEvent, Source, ViewerOptions,
         host::{HostOptions, LocalSeat, Rates, StreamControl, StreamOptions},
         watch::{Watch, WatchOptions},
     },
@@ -107,8 +107,15 @@ struct Hosting {
     /// main screen's with nothing streamed).
     overlay_area: Option<ScreenArea>,
     /// Whether the streamed window is in front, as last reported; `None`
-    /// before the first report of a stream, and always for a screen.
+    /// before the first report of a stream, and for a screen unless a game
+    /// window is named on it.
     in_front: Option<bool>,
+    /// The desktop's helper telling which window is in front (Linux,
+    /// M16c-2), for a session with a keyboard seat, until it ends.
+    front: Option<Box<dyn Any + Send>>,
+    /// The game window we named on the current stream's shared screen
+    /// (Linux, M16c-2); `None` until named, and after it closes.
+    game_window: Option<GameWindowView>,
     /// Our own controllers, if we chose to play through seats: their names,
     /// by controller (M23), or why they can't.
     controllers: Option<Result<Vec<String>, String>>,
@@ -262,6 +269,17 @@ fn end_reason(reason: EndReason) -> SessionEnd {
 
 fn mbps(v: u32) -> u32 {
     v.saturating_mul(1_000_000)
+}
+
+/// A window the host could name as its game, as the UI shows it; `None` for
+/// an id the UI can't carry.
+fn game_window_view(w: GameWindow) -> Option<GameWindowView> {
+    Some(GameWindowView {
+        id: u32::try_from(w.id).ok()?,
+        title: w.title,
+        app: w.app,
+        matches: w.matches,
+    })
 }
 
 impl Actor {
@@ -1202,6 +1220,7 @@ impl Actor {
             } else {
                 Vec::new()
             },
+            desktop_keys: cfg!(target_os = "linux"),
         };
         self.sessions.hosting = Some(Hosting {
             room,
@@ -1221,6 +1240,8 @@ impl Actor {
             // The main screen's, until something is streamed.
             overlay_area: self.backend.overlay_area(&Source::PrimaryScreen),
             in_front: None,
+            front: None,
+            game_window: None,
             controllers: (!controllers.is_empty())
                 .then(|| Ok(controllers.iter().map(HostController::shown_name).collect())),
             sound_level: crate::store::host_level(&self.data_dir),
@@ -1321,6 +1342,18 @@ impl Actor {
                 }
             },
         };
+        // Where the host names its game among the desktop's windows (Linux,
+        // M16c-2), the desktop's helper tells which is in front while the
+        // session has a keyboard seat.
+        if self.backend.names_game_window()
+            && h.session
+                .config()
+                .seats
+                .iter()
+                .any(|s| s.has_keyboard_mouse())
+        {
+            h.front = self.backend.watch_front();
+        }
         // Our controllers play through seats, or couldn't after all.
         if let Some(Err(e)) = stream.local_seat() {
             tracing::warn!("our controllers can't play through seats: {e}");
@@ -1506,6 +1539,9 @@ impl Actor {
         // keyboard seat is for its desktop control. The router gives a
         // screen's keyboard and mouse to a desktop holder alone.
         let operated = self.session_room().is_some_and(|r| self.operator_in(r));
+        // Or the host names the game's window on the shared screen (Linux,
+        // M16c-2): nothing of the keyboard's reaches anything until then.
+        let names_game = self.backend.names_game_window();
         let h = self
             .sessions
             .hosting
@@ -1516,7 +1552,11 @@ impl Actor {
             return Err(EngineError::Refused("a stream is starting already"));
         }
         let seats = &h.session.config().seats;
-        if seats.iter().any(|s| s.has_keyboard_mouse()) && !source.is_window() && !operated {
+        if seats.iter().any(|s| s.has_keyboard_mouse())
+            && !source.is_window()
+            && !operated
+            && !names_game
+        {
             return Err(EngineError::Refused(
                 "keyboard and mouse need a window as the source: stream a window, or start \
                  a session without them",
@@ -1561,6 +1601,7 @@ impl Actor {
         h.stream = Some(OurStream::Starting { view, request });
         h.overlay_area = overlay_area;
         h.in_front = None;
+        h.game_window = None;
         // Viewers are told it stopped, for the moment of the switch.
         let fx = h.session.set_stream(match h.session.stream() {
             StreamState::Live => StreamState::Stopped(EndReason::HostStopped),
@@ -1649,6 +1690,80 @@ impl Actor {
         ))
     }
 
+    /// The number of our live stream, on a shared screen whose game the host
+    /// names (Linux, M16c-2).
+    fn naming_stream(&self) -> Result<u32, EngineError> {
+        if !self.backend.names_game_window() {
+            return Err(EngineError::Refused(
+                "this PC streams the game's own window: there is nothing to name",
+            ));
+        }
+        let h = self
+            .sessions
+            .hosting
+            .as_ref()
+            .filter(|h| h.pipeline.is_some())
+            .ok_or(EngineError::NotLive)?;
+        match &h.stream {
+            Some(OurStream::Live { number, .. }) => Ok(*number),
+            _ => Err(EngineError::Refused("nothing is being streamed")),
+        }
+    }
+
+    /// The windows our stream's game could be (Linux, M16c-2).
+    pub(super) fn game_windows(&self) -> Result<Response, EngineError> {
+        self.naming_stream()?;
+        let windows = self
+            .backend
+            .game_windows()
+            .into_iter()
+            .filter_map(game_window_view)
+            .collect();
+        Ok(Response::GameWindows { windows })
+    }
+
+    /// Names our stream's game window, or none (Linux, M16c-2): guests'
+    /// keyboard and mouse reach it only while it is in front. At this PC
+    /// only: the host sees what it names.
+    pub(super) fn set_game_window(
+        &mut self,
+        id: Option<u32>,
+        from_afar: bool,
+        now: Instant,
+    ) -> Result<Response, EngineError> {
+        if from_afar {
+            return Err(EngineError::Refused(
+                "the game's window is named at the PC itself",
+            ));
+        }
+        let number = self.naming_stream()?;
+        let named = match id {
+            None => None,
+            Some(id) => Some(
+                self.backend
+                    .game_windows()
+                    .into_iter()
+                    .find(|w| u32::try_from(w.id) == Ok(id))
+                    .ok_or(EngineError::Refused("that window is gone"))?,
+            ),
+        };
+        let h = self.hosting_mut().ok_or(EngineError::NotLive)?;
+        let pipeline = h.pipeline.as_ref().ok_or(EngineError::NotLive)?;
+        if !pipeline.set_game_window(number, named.as_ref().map(|w| w.id)) {
+            return Err(EngineError::Refused("the stream changed meanwhile"));
+        }
+        tracing::info!(
+            named = named.is_some(),
+            "the game's window for keyboard and mouse"
+        );
+        h.game_window = named.and_then(game_window_view);
+        // Told afresh by the pipeline for the new window.
+        h.in_front = None;
+        let room = h.room;
+        self.announce(room, now);
+        Ok(Response::Done)
+    }
+
     /// Stops our stream; the session goes on (viewers stay, and keep their
     /// seats, with their input held off).
     pub(super) fn stop_stream(&mut self, now: Instant) -> Result<Response, EngineError> {
@@ -1681,6 +1796,7 @@ impl Actor {
         }
         h.stream = None;
         h.in_front = None;
+        h.game_window = None;
         h.overlay_area = self.backend.overlay_area(&Source::PrimaryScreen);
         if let Some(pipeline) = &h.pipeline {
             // Queued now, after any start asked for before.
@@ -1833,6 +1949,33 @@ impl Actor {
             }
             HostEvent::GameExited { stream } => {
                 self.end_stream_on_its_own(stream, EndReason::GameExited, now);
+            }
+            // The named game's window closed (Linux, M16c-2): keys reach
+            // nothing until the host names another, and viewers hear the game
+            // isn't in front. Only for the window named now: the host may
+            // have named another since.
+            HostEvent::GameWindowGone { stream, window } => {
+                let session = h.session.id();
+                let viewers: Vec<MemberId> = h.session.viewers().to_vec();
+                let Some(h) = self.hosting_mut().filter(|h| {
+                    matches!(h.stream, Some(OurStream::Live { number, .. }) if number == stream)
+                        && h.game_window
+                            .as_ref()
+                            .is_some_and(|w| u32::try_from(window) == Ok(w.id))
+                }) else {
+                    return;
+                };
+                tracing::info!("the game's window closed: keyboard and mouse wait for another");
+                h.game_window = None;
+                h.in_front = None;
+                let focus = ControlMessage::GameFocus(GameFocus {
+                    session,
+                    in_front: false,
+                });
+                for viewer in viewers {
+                    self.send_to(room, viewer, focus.clone());
+                }
+                self.announce(room, now);
             }
             HostEvent::SourceFollowed { .. } => {
                 tracing::info!("the game opened a new window; streaming that one");
@@ -2859,7 +3002,10 @@ impl Actor {
             host_homes: s.host_homes().to_vec(),
             panic_key: h.panic_key.is_some(),
             desktop: s.desktop_holder(),
-            in_front: h.in_front.filter(|_| streaming.is_some_and(|v| !v.screen)),
+            // A window's, or a game named on a shared screen's (M16c-2).
+            in_front: h
+                .in_front
+                .filter(|_| streaming.is_some_and(|v| !v.screen) || h.game_window.is_some()),
         })
     }
 
@@ -2956,12 +3102,22 @@ impl Actor {
                 pads_missing: h.pads_missing.iter().map(|seat| seat.0).collect(),
                 stream_window: None,
                 // The streamed window's, for Bring to front (M25b).
-                game_in_front: h.in_front.filter(|_| streaming.is_some_and(|v| !v.screen)),
+                game_in_front: h
+                    .in_front
+                    .filter(|_| streaming.is_some_and(|v| !v.screen) || h.game_window.is_some()),
                 note: None,
                 operator: false,
                 operated_by: self.operated_by(),
                 desktop: s.desktop_holder().map(|m| m.to_hex()),
                 guests_keyboard: self.backend.capabilities().keyboard_seat,
+                names_game: self.backend.names_game_window()
+                    && streaming.is_some()
+                    && s.config()
+                        .seats
+                        .iter()
+                        .any(|seat| seat.has_keyboard_mouse()),
+                game_window: h.game_window.clone(),
+                warn_hot_corner: self.backend.warns_hot_corner(),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -3140,6 +3296,9 @@ impl Actor {
                     .remote_access(room, *host)
                     .and_then(|r| r.capabilities)
                     .is_none_or(|c| c.keyboard_seat),
+                names_game: false,
+                game_window: None,
+                warn_hot_corner: false,
             });
         }
         views

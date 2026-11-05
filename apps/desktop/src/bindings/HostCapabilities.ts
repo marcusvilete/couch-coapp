@@ -2,9 +2,10 @@
 
 /**
  * What a system can host (M16c, ADR 0012): Windows everything; Linux
- * sessions since M16c-1, with controller seats for guests (no
- * keyboard-and-mouse seat for them yet), and desktop control since
- * M16c-2's first part once `/dev/uinput` is writable; elsewhere nothing.
+ * sessions since M16c-1, with controller seats for guests, desktop control
+ * since M16c-2's first part once `/dev/uinput` is writable, and the
+ * keyboard seat for guests since its second part while also the desktop's
+ * helper tells which window is in front; elsewhere nothing.
  * Each is refused before anything is set up or announced, whatever the UI
  * shows.
  */

@@ -285,6 +285,19 @@ pub enum Command {
     },
     /// In our session: stops streaming; viewers stay, and keep their seats.
     StopStream,
+    /// The windows our stream's game could be, where the host names it on
+    /// a shared screen (Linux, M16c-2: the screen-sharing portal never
+    /// says), each marked if it has the shared picture's size. Answers
+    /// [`Response::GameWindows`]; empty until the desktop's helper has
+    /// spoken. Refused elsewhere, and with nothing streamed.
+    GameWindows,
+    /// Names our stream's game window (an id from [`Command::GameWindows`]),
+    /// or none: guests' keyboard and mouse reach it only while it is in
+    /// front, and nothing while none is named. Lasts for the stream, or
+    /// until the window closes. Only from this PC.
+    SetGameWindow {
+        id: Option<u32>,
+    },
     /// How loud guests hear our stream's sound (P7): 0 to 100% of the game's
     /// turns it down, up to 400% boosts it (peaks rounded off within full
     /// scale). Applies at once, and is remembered for our next sessions.
@@ -1067,10 +1080,21 @@ pub struct SessionView {
     /// the host's desktop (M25b), by id. The host's banner names its device.
     pub desktop: Option<String>,
     /// For the host, and a session we run from afar: whether guests may
-    /// hold its keyboard-and-mouse seat. Not on a Linux host (M16c-2), where
-    /// the seat is desktop control's alone: the console offers it to nobody
-    /// else (the engine refuses anyway). True where unknown.
+    /// hold its keyboard-and-mouse seat. Not on a Linux host without a helper
+    /// telling which window is in front (M16c-2), where the seat is desktop
+    /// control's alone: the console offers it to nobody else (the engine
+    /// refuses anyway). True where unknown.
     pub guests_keyboard: bool,
+    /// For the host: keyboard and mouse wait for us to name the game's
+    /// window among the desktop's (Linux, M16c-2): the session has a
+    /// keyboard seat, and a stream runs on a shared screen.
+    pub names_game: bool,
+    /// For the host: the game's window we named for this stream, if any.
+    pub game_window: Option<GameWindowView>,
+    /// For the host, while it names the game: its desktop opens a view from
+    /// a screen corner that would take guests' keys unseen (KDE's Overview),
+    /// so the console asks it to turn the corner off (M16c-2).
+    pub warn_hot_corner: bool,
 }
 
 /// Whether a session streams anything (M19).
@@ -1126,6 +1150,10 @@ pub enum DriverName {
     /// On Linux (M16c): this user may make input devices (`/dev/uinput`), for
     /// guests' virtual controllers. Not a driver: one udev rule.
     Uinput,
+    /// On GNOME (M16c-2): our Shell extension, which tells the app which
+    /// window is in front, so guests may have keyboard and mouse. Not a
+    /// driver: files in the user's own extensions folder.
+    GnomeExtension,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
@@ -1138,6 +1166,15 @@ pub enum DriverState {
     NeedsRestart,
     /// HidHide's configuration window holds it.
     Busy,
+    /// Installed, but GNOME reads its extensions only at log-in (M16c-2).
+    NeedsLogout,
+    /// Installed, and turned off: Install turns it on.
+    Off,
+    /// Installed, but GNOME's extensions are all turned off (its Extensions
+    /// app).
+    ExtensionsOff,
+    /// Installed, but this GNOME can't run it.
+    Unsupported,
     #[default]
     Missing,
 }
@@ -1151,6 +1188,31 @@ pub struct DriverView {
     pub state: DriverState,
     /// Its installer ships with this build (Install can run it).
     pub installer: bool,
+}
+
+/// A window the host could name as its stream's game (Linux, M16c-2:
+/// [`Command::GameWindows`]). Its `Debug` leaves out the title.
+#[derive(Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GameWindowView {
+    pub id: u32,
+    pub title: String,
+    /// Its program.
+    pub app: String,
+    /// It has the size of what is shared: likely the game.
+    pub matches: bool,
+}
+
+impl fmt::Debug for GameWindowView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GameWindowView")
+            .field("id", &self.id)
+            .field("title", &"..")
+            .field("app", &self.app)
+            .field("matches", &self.matches)
+            .finish()
+    }
 }
 
 /// The host's keys for answering requests from inside a game (M8), such as
@@ -1260,6 +1322,9 @@ pub enum Response {
     Tray(TrayView),
     Drivers {
         drivers: Vec<DriverView>,
+    },
+    GameWindows {
+        windows: Vec<GameWindowView>,
     },
     SharedChoice {
         remembered: bool,
@@ -1446,6 +1511,8 @@ impl fmt::Debug for Command {
                 .field("upload_mbps", upload_mbps)
                 .finish_non_exhaustive(),
             Self::StopStream => f.write_str("StopStream"),
+            Self::GameWindows => f.write_str("GameWindows"),
+            Self::SetGameWindow { id } => f.debug_struct("SetGameWindow").field("id", id).finish(),
             Self::SetStreamLevel { percent } => f
                 .debug_struct("SetStreamLevel")
                 .field("percent", percent)
@@ -1588,6 +1655,10 @@ impl fmt::Debug for Response {
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
+            Self::GameWindows { windows } => f
+                .debug_struct("GameWindows")
+                .field("windows", windows)
+                .finish(),
             Self::SharedChoice { remembered } => f
                 .debug_struct("SharedChoice")
                 .field("remembered", remembered)
@@ -1635,9 +1706,10 @@ pub struct EngineInfo {
 }
 
 /// What a system can host (M16c, ADR 0012): Windows everything; Linux
-/// sessions since M16c-1, with controller seats for guests (no
-/// keyboard-and-mouse seat for them yet), and desktop control since
-/// M16c-2's first part once `/dev/uinput` is writable; elsewhere nothing.
+/// sessions since M16c-1, with controller seats for guests, desktop control
+/// since M16c-2's first part once `/dev/uinput` is writable, and the
+/// keyboard seat for guests since its second part while also the desktop's
+/// helper tells which window is in front; elsewhere nothing.
 /// Each is refused before anything is set up or announced, whatever the UI
 /// shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]

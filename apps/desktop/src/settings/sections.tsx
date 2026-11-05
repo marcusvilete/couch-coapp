@@ -148,6 +148,10 @@ const DRIVERS: Record<DriverName, { title: string; why: string }> = {
     title: "Virtual controllers",
     why: "Guests' controllers reach the games you host as virtual Xbox 360 controllers, and a device of yours run from afar controls the desktop through a virtual keyboard and mouse. Setting it up lets the programs you run make input devices, as Steam's controller support does. Without it, guests can watch only.",
   },
+  gnomeextension: {
+    title: "Keyboard and mouse for guests (GNOME)",
+    why: "A small GNOME extension of ours tells Couch Co-App which window is in front, so guests' keyboard and mouse reach your game only while it is. It only reports: it never moves or changes a window. GNOME reads extensions when you log in, so after installing it, log out and back in once. KDE Plasma needs nothing.",
+  },
 };
 
 /** The Linux setup by hand, as Set up does it (`couch_platform_linux::pads`,
@@ -159,8 +163,19 @@ const STATES: Record<DriverState, { text: string; tone: "ok" | "warn" | "neutral
   ready: { text: "Installed", tone: "ok" },
   needsRestart: { text: "Installed: restart Windows to finish", tone: "warn" },
   busy: { text: "Installed (its configuration window is open)", tone: "warn" },
+  needsLogout: { text: "Installed: log out and back in to finish", tone: "warn" },
+  off: { text: "Installed, turned off", tone: "neutral" },
+  extensionsOff: { text: "GNOME's extensions are turned off (its Extensions app)", tone: "warn" },
+  unsupported: { text: "Installed, but this GNOME can't run it", tone: "warn" },
   missing: { text: "Not installed", tone: "neutral" },
 };
+
+/** A setup button's label, and while it runs. */
+function installLabels(d: DriverView): [string, string] {
+  if (d.driver === "uinput") return ["Set up", "Setting up…"];
+  if (d.state === "off") return ["Turn on", "Turning on…"];
+  return ["Install", "Installing…"];
+}
 
 /** `linux`: one setting there, not drivers (M16c): Set up asks for the
  * administrator's password and installs one udev rule. */
@@ -196,7 +211,7 @@ export function DriversSection(props: { linux: boolean }) {
     <div className="settings-section">
       <p className="settings-lead">
         {props.linux
-          ? "One setting lets guests' controllers reach the games you host. It is set up once, with your administrator password."
+          ? "Guests' controllers reach the games you host once virtual controllers are set up, with your administrator password. On GNOME, an extension lets their keyboard and mouse reach the game too."
           : "Two drivers make the most of Couch Co-App. Both are optional, free and open source; each installs with its own setup and Windows asks for administrator rights."}
       </p>
       {!drivers && !error && <Skeleton lines={4} height={16} />}
@@ -208,22 +223,16 @@ export function DriversSection(props: { linux: boolean }) {
           </div>
           <div className="driver-state">
             <Badge tone={STATES[d.state].tone}>{STATES[d.state].text}</Badge>
-            {d.state === "missing" &&
+            {(d.state === "missing" || d.state === "off") &&
               (d.installer ? (
                 <Button
                   variant="primary"
                   size="sm"
                   disabled={installing != null}
-                  labels={d.driver === "uinput" ? ["Set up", "Setting up…"] : ["Install", "Installing…"]}
+                  labels={installLabels(d)}
                   onClick={() => void install(d.driver)}
                 >
-                  {d.driver === "uinput"
-                    ? installing === d.driver
-                      ? "Setting up…"
-                      : "Set up"
-                    : installing === d.driver
-                      ? "Installing…"
-                      : "Install"}
+                  {installLabels(d)[installing === d.driver ? 1 : 0]}
                 </Button>
               ) : (
                 <span className="settings-note">Its installer isn't in this build (cargo xtask stage-dlls).</span>
@@ -233,8 +242,10 @@ export function DriversSection(props: { linux: boolean }) {
       ))}
       {installing && (
         <Callout tone="info" compact>
-          {props.linux
-            ? "Your system asks for the administrator password."
+          {installing === "gnomeextension"
+            ? "Installing the extension…"
+            : props.linux
+              ? "Your system asks for the administrator password."
             : "Its setup is open: follow it, and accept Windows' administrator prompt."}
         </Callout>
       )}

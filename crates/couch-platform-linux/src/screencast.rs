@@ -48,6 +48,8 @@ use pw::{
 const OPEN_WAIT: Duration = Duration::from_secs(5);
 /// How long dropping the capture waits for the portal's session to close.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// Held by a capture's task from opening its portal session to closing it.
+static ONE_SESSION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// The largest picture asked for.
 const MAX_SIZE: u32 = 8192;
 
@@ -60,10 +62,20 @@ pub struct Options {
     pub restore_token: Option<String>,
     /// Called with the next token once the user has chosen (never logged).
     pub on_token: Box<dyn FnOnce(String) + Send>,
+    /// Called once the user has chosen, with what is shared.
+    pub on_shared: Box<dyn FnOnce(Shared) + Send>,
     /// How long the dialog may wait for an answer before nothing counts as
     /// shared and it is closed: `Some` when nobody may be at the PC (a
     /// stream started from afar, M16c); `None` waits on the user.
     pub answer_within: Option<Duration>,
+}
+
+/// What the user shared (M16c-2): a window or a screen, and its size as
+/// the portal says (the desktop's logical pixels), when it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shared {
+    pub window: bool,
+    pub size: Option<(u32, u32)>,
 }
 
 /// A capture through the portal, until dropped.
@@ -72,6 +84,8 @@ pub struct PortalCapture {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     /// Closed when the portal task ends, its session closed.
     done: mpsc::Receiver<()>,
+    /// When it started, until its first frame is logged.
+    started: Option<Instant>,
 }
 
 /// Starts a capture: the portal's dialog (or the remembered choice), then
@@ -85,12 +99,23 @@ pub fn start(options: Options) -> Result<PortalCapture, String> {
     runtime.spawn(async move {
         let _done = done_tx;
         crate::portal::ready().await;
+        // One portal session at a time: the last capture's closes before
+        // this one's opens. A stream replaced, or stopped and started again
+        // quickly, otherwise had two at once, after which KDE's portal
+        // answered nothing for a while: the next share, the host's keys
+        // (M16c-2's VM run). Stop still ends a capture waiting here.
+        let mut stop_rx = stop_rx;
+        let _one = tokio::select! {
+            _ = &mut stop_rx => return,
+            one = ONE_SESSION.lock() => one,
+        };
         share(options, &task_inbox, stop_rx).await;
     });
     Ok(PortalCapture {
         inbox,
         stop: Some(stop_tx),
         done: done_rx,
+        started: Some(Instant::now()),
     })
 }
 
@@ -100,6 +125,12 @@ impl Capturer for PortalCapture {
         let mut state = self.inbox.lock();
         loop {
             if let Some(frame) = state.frame.take() {
+                if let Some(started) = self.started.take() {
+                    tracing::info!(
+                        after_ms = started.elapsed().as_millis() as u64,
+                        "the shared picture's first frame"
+                    );
+                }
                 return Ok(Some(CaptureEvent::Frame(VideoFrame::Cpu(frame))));
             }
             match state.end.take() {
@@ -187,8 +218,10 @@ async fn share(options: Options, inbox: &Arc<Inbox>, mut stop: tokio::sync::ones
         fps,
         restore_token,
         on_token,
+        on_shared,
         answer_within,
     } = options;
+    let begun = Instant::now();
     let opened = tokio::time::timeout(OPEN_WAIT, async {
         let proxy = Screencast::new().await?;
         let session = proxy.create_session().await?;
@@ -280,8 +313,27 @@ async fn share(options: Options, inbox: &Arc<Inbox>, mut stop: tokio::sync::ones
             return;
         }
     };
+    // When the desktop answered, and whether it asked: tells the user's time
+    // in its dialog from the capture's own (M16c-2's VM run).
+    tracing::info!(
+        after_ms = begun.elapsed().as_millis() as u64,
+        remembered = restore_token.is_some(),
+        window = streams
+            .streams()
+            .first()
+            .is_some_and(|s| s.source_type() == Some(SourceType::Window)),
+        "the desktop shared a window or screen"
+    );
     if let Some(token) = streams.restore_token() {
         on_token(token.to_owned());
+    }
+    if let Some(stream) = streams.streams().first() {
+        on_shared(Shared {
+            window: stream.source_type() == Some(SourceType::Window),
+            size: stream
+                .size()
+                .and_then(|(w, h)| Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?))),
+        });
     }
     let Some(node) = streams.streams().first().map(|s| s.pipe_wire_node_id()) else {
         inbox.end(End::Failed("the desktop shared nothing".into()));
@@ -390,7 +442,7 @@ fn video(
             }
             _ => {}
         })
-        .param_changed(|_, video, id, param| {
+        .param_changed(|stream, video, id, param| {
             let Some(param) = param else {
                 return;
             };
@@ -399,6 +451,14 @@ fn video(
             }
             if let Ok((MediaType::Video, MediaSubtype::Raw)) = format_utils::parse_format(param) {
                 let _ = video.format.parse(param);
+                // Each buffer's crop region: GNOME shares a window in a
+                // larger picture and marks the window's part with it.
+                let meta = crop_meta();
+                if let Some(meta) = Pod::from_bytes(&meta)
+                    && let Err(e) = stream.update_params(&mut [meta])
+                {
+                    tracing::debug!("the shared picture's crop region isn't asked for: {e}");
+                }
             }
         })
         .process(|stream, video| {
@@ -474,9 +534,52 @@ fn formats(fps: u32) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-/// The buffer's picture as a BGRA frame of its own, or `None` for a buffer
-/// with no picture (a cursor-only update, a corrupted one, a format not
-/// asked for).
+/// The buffer metadata asked for: the crop region (`SPA_META_VideoCrop`).
+fn crop_meta() -> Vec<u8> {
+    let object = Value::Object(spa::pod::Object {
+        type_: SpaTypes::ObjectParamMeta.as_raw(),
+        id: ParamType::Meta.as_raw(),
+        properties: vec![
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_type,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: Value::Id(spa::utils::Id(spa::sys::SPA_META_VideoCrop)),
+            },
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_size,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: Value::Int(std::mem::size_of::<spa::sys::spa_meta_region>() as i32),
+            },
+        ],
+    });
+    PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &object)
+        .map(|(cursor, _)| cursor.into_inner())
+        .unwrap_or_default()
+}
+
+/// The part of a `width` by `height` picture a crop region names, as
+/// (x, y, width, height); the whole picture without a region, or with one
+/// that is empty or reaches outside it (M16c-2's VM run: GNOME shares a
+/// window inside a larger picture).
+fn cropped(width: u32, height: u32, crop: Option<(i32, i32, u32, u32)>) -> (u32, u32, u32, u32) {
+    match crop {
+        Some((x, y, w, h))
+            if x >= 0
+                && y >= 0
+                && w > 0
+                && h > 0
+                && (x as u32).checked_add(w).is_some_and(|r| r <= width)
+                && (y as u32).checked_add(h).is_some_and(|b| b <= height) =>
+        {
+            (x as u32, y as u32, w, h)
+        }
+        _ => (0, 0, width, height),
+    }
+}
+
+/// The buffer's picture (its crop region, if it names one) as a BGRA frame
+/// of its own, or `None` for a buffer with no picture (a cursor-only update,
+/// a corrupted one, a format not asked for).
 fn copy_frame(buffer: &mut pw::buffer::Buffer<'_>, format: &VideoInfoRaw) -> Option<BgraFrame> {
     let swap = match format.format() {
         VideoFormat::BGRx | VideoFormat::BGRA => false,
@@ -484,25 +587,35 @@ fn copy_frame(buffer: &mut pw::buffer::Buffer<'_>, format: &VideoInfoRaw) -> Opt
         _ => return None,
     };
     let size = format.size();
+    let crop = buffer
+        .find_meta::<spa::buffer::meta::MetaVideoCrop>()
+        .map(|c| c.meta_region())
+        .filter(|r| r.is_valid())
+        .map(|r| {
+            (
+                r.position().x,
+                r.position().y,
+                r.size().width,
+                r.size().height,
+            )
+        });
+    let (x, y, width, height) = cropped(size.width, size.height, crop);
     let data = buffer.datas_mut().first_mut()?;
     let chunk = data.chunk();
     if chunk.size() == 0 || chunk.flags().contains(ChunkFlags::CORRUPTED) {
         return None;
     }
-    let (offset, stride) = (chunk.offset() as usize, chunk.stride());
+    let stride = usize::try_from(chunk.stride())
+        .ok()
+        .filter(|&s| s > 0)
+        .unwrap_or(size.width as usize * 4);
+    let offset = chunk.offset() as usize + y as usize * stride + x as usize * 4;
     let captured_at = crate::clock::now();
     let bytes = data.data()?;
-    pack(
-        bytes.get(offset..)?,
-        size.width,
-        size.height,
-        usize::try_from(stride).ok().filter(|&s| s > 0),
-        swap,
-    )
-    .map(|data| BgraFrame {
-        width: size.width,
-        height: size.height,
-        stride: size.width * 4,
+    pack(bytes.get(offset..)?, width, height, Some(stride), swap).map(|data| BgraFrame {
+        width,
+        height,
+        stride: width * 4,
         data: data.into(),
         captured_at,
     })
@@ -565,6 +678,39 @@ mod tests {
     fn formats_serialize() {
         let params = formats(60);
         assert!(Pod::from_bytes(&params).is_some());
+        assert!(Pod::from_bytes(&crop_meta()).is_some());
+    }
+
+    /// GNOME shares a window inside a larger picture, its part marked by a
+    /// crop region: only that part is streamed.
+    #[test]
+    fn a_crop_region_inside_the_picture_is_what_is_shared() {
+        assert_eq!(
+            cropped(1280, 814, Some((300, 120, 640, 480))),
+            (300, 120, 640, 480)
+        );
+        // None, empty, or reaching outside: the whole picture.
+        assert_eq!(cropped(1280, 814, None), (0, 0, 1280, 814));
+        assert_eq!(
+            cropped(1280, 814, Some((10, 10, 0, 480))),
+            (0, 0, 1280, 814)
+        );
+        assert_eq!(
+            cropped(1280, 814, Some((-1, 0, 640, 480))),
+            (0, 0, 1280, 814)
+        );
+        assert_eq!(
+            cropped(1280, 814, Some((700, 0, 640, 480))),
+            (0, 0, 1280, 814)
+        );
+        assert_eq!(
+            cropped(1280, 814, Some((0, 400, 640, 480))),
+            (0, 0, 1280, 814)
+        );
+        assert_eq!(
+            cropped(1280, 814, Some((0, 0, 1280, 814))),
+            (0, 0, 1280, 814)
+        );
     }
 
     /// A capture's end is kept, and frames after it are dropped.
@@ -606,6 +752,7 @@ mod tests {
             inbox: inbox.clone(),
             stop: None,
             done: mpsc::channel().1,
+            started: None,
         };
         let frame = (0..50)
             .find_map(|_| match capture.next_event(Duration::from_millis(100)) {

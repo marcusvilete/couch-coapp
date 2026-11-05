@@ -1,6 +1,7 @@
 // What the UI works out from the engine's view of sessions: who plays, what
 // a pass would do, how to name seats and controllers. Pure functions; the
 // engine decides everything, these only read its state.
+import type { GameWindowView } from "../bindings/GameWindowView";
 import type { HostController } from "../bindings/HostController";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
@@ -240,5 +241,51 @@ export function padsAdded(keys: string[], ticked: string[], key: string): number
   return (
     1 +
     keys.filter((k) => modelOf(k) === modelOf(key) && ordinalOf(k) < ordinalOf(key) && !ticked.includes(k)).length
+  );
+}
+
+/** The game's window to offer first on a Linux host (M16c-2): the one window
+ * with the shared picture's size, if exactly one has it. */
+export function likelyGame(windows: GameWindowView[]): GameWindowView | null {
+  const matching = windows.filter((w) => w.matches);
+  return matching.length === 1 ? matching[0] : null;
+}
+
+/** A game window as menus and the console name it: "Title · program". */
+export function gameWindowName(w: GameWindowView): string {
+  const title = w.title.trim() || "Untitled window";
+  return w.app.trim() ? `${title} · ${w.app.trim()}` : title;
+}
+
+/** Whether the console asks the host to name the game's window (M16c-2): a
+ * keyboard seat on a Linux host's shared screen, unless desktop control
+ * holds that seat (its keys reach the whole desktop, no window needed). */
+export function asksForGame(s: SessionView): boolean {
+  return s.namesGame && s.desktop == null;
+}
+
+/** Whether the stream picker refuses a screen: a session with a
+ * keyboard-and-mouse seat needs the game's window, except a stream started
+ * from afar (the seat is desktop control's, M25b) and a Linux host's one
+ * source, the desktop's dialog, listed as a screen: its host names the game
+ * once it streams (M16c-2; refusing it there was found in the VM run). */
+export function screenNeedsWindow(
+  kbmSeats: boolean,
+  picked: "window" | "screen" | undefined,
+  options: { remote: boolean; shared: boolean },
+): boolean {
+  return kbmSeats && picked === "screen" && !options.remote && !options.shared;
+}
+
+/** For a home PC's session run from a device (M16c-2): a guest holds the
+ * keyboard seat on a streamed screen, and no game window is named at the PC
+ * yet (its focus is unknown), so their keys reach nothing. */
+export function waitsForGameAtPc(s: SessionView): boolean {
+  return (
+    isLive(s) &&
+    s.streaming?.screen === true &&
+    s.desktop == null &&
+    s.gameInFront == null &&
+    s.seats.some((seat) => seat.keyboardMouse && seat.holder != null && !seat.host)
   );
 }

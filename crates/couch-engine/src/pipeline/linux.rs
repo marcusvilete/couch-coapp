@@ -5,7 +5,9 @@
 //! virtual controllers through `uinput` (with its access set up from
 //! Settings → Drivers); and the host's keys through the global-shortcuts
 //! portal. Desktop control for a device of the user's, through a `uinput`
-//! keyboard and mouse (M16c-2's first part); no keyboard seat for guests yet.
+//! keyboard and mouse (M16c-2's first part), and guests' keyboard seat
+//! while the desktop's helper tells which window is in front, the host naming
+//! the game (its second part: `couch_platform_linux::front`).
 
 use std::{
     any::Any,
@@ -26,6 +28,7 @@ use couch_media::{
 use couch_platform_linux::{
     autostart, awake,
     clock::MonotonicClock,
+    front::{self, gnome::ExtensionState},
     global_keys,
     kbm::UinputKbm,
     notices, pads, screencast, session_lock,
@@ -33,8 +36,8 @@ use couch_platform_linux::{
 };
 
 use super::{
-    AudioKind, Backend, CaptureRequest, Focus, HostKeyEvent, NativeId, NoKbm, ScreenSource, Source,
-    Sources, ViewerOptions, ViewerProcess, viewer_process,
+    AudioKind, Backend, CaptureRequest, Focus, GameWindow, HostKeyEvent, NativeId, NoKbm,
+    ScreenSource, Source, Sources, ViewerOptions, ViewerProcess, viewer_process,
 };
 use crate::{DriverName, DriverState, HostCapabilities, NoticeView};
 
@@ -57,6 +60,12 @@ pub(super) struct LinuxBackend {
     /// The token for the last choice. Each is good for one start, and each
     /// start gives the next.
     restore_token: Arc<Mutex<Option<String>>>,
+    /// The profile's folder (the KWin script goes there) and name; `None`
+    /// for `couch-cli`.
+    profile: Option<PathBuf>,
+    /// What the current stream shares, once the user has chosen (M16c-2):
+    /// its size picks out the game among the windows.
+    shared: Arc<Mutex<Option<screencast::Shared>>>,
 }
 
 impl LinuxBackend {
@@ -71,7 +80,7 @@ impl LinuxBackend {
                 Err(e) => tracing::warn!("the menu entry couldn't be installed: {e}"),
             }
         }
-        let portal_file = profile.map(|dir| dir.join(PORTAL_FILE));
+        let portal_file = profile.as_ref().map(|dir| dir.join(PORTAL_FILE));
         let restore_token = portal_file.as_deref().and_then(|file| {
             let bytes = std::fs::read(file).ok()?;
             let saved: PortalFile = serde_json::from_slice(&bytes).ok()?;
@@ -80,6 +89,8 @@ impl LinuxBackend {
         Self {
             portal_file,
             restore_token: Arc::new(Mutex::new(restore_token)),
+            profile,
+            shared: Arc::default(),
         }
     }
 
@@ -98,6 +109,12 @@ impl LinuxBackend {
         if restore_token.is_some() {
             save_token(self.portal_file.as_deref(), None);
         }
+        // Nothing known of this stream's choice yet.
+        *self.shared.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let shared = self.shared.clone();
+        let on_shared = Box::new(move |what: screencast::Shared| {
+            *shared.lock().unwrap_or_else(PoisonError::into_inner) = Some(what);
+        });
         let (kept, file) = (self.restore_token.clone(), self.portal_file.clone());
         let on_token = Box::new(move |token: String| {
             save_token(file.as_deref(), Some(&token));
@@ -107,6 +124,7 @@ impl LinuxBackend {
             fps,
             restore_token,
             on_token,
+            on_shared,
             answer_within: unattended.then_some(super::UNANSWERED_AFTER),
         })
         .map_err(MediaError::Backend)?;
@@ -142,16 +160,84 @@ impl Backend for LinuxBackend {
         Arc::new(MonotonicClock)
     }
 
-    /// Sessions with controller seats (M16c-1), and desktop control for a
-    /// device of the user's (M16c-2) once this user may make input devices,
-    /// read each time (Set up may come while the app runs). No keyboard seat
-    /// for guests yet: the desktop can't say which window is in front.
+    /// Sessions with controller seats (M16c-1); desktop control for a device
+    /// of the user's once this user may make input devices (M16c-2), read
+    /// each time (Set up may come while the app runs); and a keyboard seat
+    /// for guests while the desktop also has a helper that tells which window
+    /// is in front (KDE's KWin, or our GNOME extension on: `front`), as
+    /// last looked.
     fn capabilities(&self) -> HostCapabilities {
+        let devices = pads::available();
         HostCapabilities {
             sessions: true,
-            keyboard_seat: false,
-            desktop_control: pads::available(),
+            keyboard_seat: devices && front::available().is_some(),
+            desktop_control: devices,
         }
+    }
+
+    /// The portal never says which window it shares: the host names the
+    /// game.
+    fn names_game_window(&self) -> bool {
+        true
+    }
+
+    /// The KWin script loaded, or our GNOME extension asked to watch.
+    fn watch_front(&self) -> Option<Box<dyn Any + Send>> {
+        let (dir, name) = match &self.profile {
+            Some(dir) => (
+                dir.clone(),
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            // `couch-cli`: a folder of this user's alone, never a shared
+            // temporary one.
+            None => match front::private_dir() {
+                Some(dir) => (dir, format!("cli-{}", std::process::id())),
+                None => {
+                    tracing::warn!(
+                        "what is in front can't be known: XDG_RUNTIME_DIR isn't set for the KWin script"
+                    );
+                    return None;
+                }
+            },
+        };
+        match front::watch(&dir, &name) {
+            Ok(watch) => Some(Box::new(watch)),
+            Err(e) => {
+                tracing::warn!("what is in front can't be known: {e}");
+                None
+            }
+        }
+    }
+
+    /// The helper's windows, this app's own left out, each marked if it has
+    /// the shared picture's size.
+    fn game_windows(&self) -> Vec<GameWindow> {
+        let size = self
+            .shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .and_then(|s| s.size);
+        let ours = std::process::id();
+        front::windows()
+            .into_iter()
+            .filter(|w| w.pid != ours)
+            .map(|w| GameWindow {
+                matches: size.is_some_and(|size| w.sizes.contains(&size)),
+                id: w.id,
+                title: w.title,
+                app: w.app,
+            })
+            .collect()
+    }
+
+    /// KDE's top-left corner opens its Overview, whose search takes the keys
+    /// while KWin keeps the game active (M16c-2's second review; the
+    /// author's choice, 2026-11-04: the host is told). GNOME's overview the
+    /// extension sees.
+    fn warns_hot_corner(&self) -> bool {
+        front::available() == Some(front::Helper::KWin)
     }
 
     /// The desktop's global shortcuts can't tell a key a guest injects
@@ -253,14 +339,19 @@ impl Backend for LinuxBackend {
         pads::UinputPads::new(ids).plug_pending()
     }
 
-    /// Not a driver on Linux: whether this user may make input devices.
+    /// Not drivers on Linux: whether this user may make input devices, and on
+    /// GNOME our extension (M16c-2). Blocks briefly.
     fn drivers(&self) -> Vec<(DriverName, DriverState, bool)> {
         let state = if pads::available() {
             DriverState::Ready
         } else {
             DriverState::Missing
         };
-        vec![(DriverName::Uinput, state, true)]
+        let mut drivers = vec![(DriverName::Uinput, state, true)];
+        if let Some(extension) = front::gnome::state() {
+            drivers.push((DriverName::GnomeExtension, extension_state(extension), true));
+        }
+        drivers
     }
 
     fn virtual_pads(&self) -> bool {
@@ -272,6 +363,20 @@ impl Backend for LinuxBackend {
     fn install_driver(&self, driver: DriverName) -> Result<(), String> {
         match driver {
             DriverName::Uinput => pads::set_up(),
+            DriverName::GnomeExtension => match front::gnome::install()? {
+                ExtensionState::Ready | ExtensionState::NeedsLogout => Ok(()),
+                ExtensionState::ExtensionsOff => Err(
+                    "GNOME's extensions are turned off: turn them on in its Extensions app, \n                     then try again"
+                        .into(),
+                ),
+                state => Err(format!(
+                    "GNOME didn't turn the extension on ({})",
+                    match state {
+                        ExtensionState::Failed => "this GNOME can't run it",
+                        _ => "it stays off",
+                    }
+                )),
+            },
             _ => Err("not on Linux".into()),
         }
     }
@@ -289,12 +394,18 @@ impl Backend for LinuxBackend {
         }
     }
 
-    fn focus(&self, _: NativeId) -> Focus {
-        Focus::default()
+    /// As the desktop's helper last said; nothing in front while it hasn't.
+    fn focus(&self, window: NativeId) -> Focus {
+        let (foreground, pointer_inside) = front::focus(window);
+        Focus {
+            foreground,
+            pointer_inside,
+        }
     }
 
-    fn window_exists(&self, _: NativeId) -> bool {
-        false
+    /// A named game window still listed by the helper.
+    fn window_exists(&self, window: NativeId) -> bool {
+        front::exists(window)
     }
 
     fn launch_viewer(&self, options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
@@ -415,8 +526,9 @@ impl Backend for LinuxBackend {
 
     /// Through the desktop's global-shortcuts portal, each key with Ctrl,
     /// Alt and Shift as the preferred trigger (the desktop may let the user
-    /// change it). No guest has keys to inject on a Linux host (no keyboard
-    /// seat, `capabilities`), which Windows' hook needs to ignore. Returns at
+    /// change it). The portal can't tell a guest's injected keys from the host's
+    /// (`host_keys_hear_injected`: the router and the session keep guests off
+    /// them instead). Returns at
     /// once: the desktop's answer comes later, as `Bound` or `Lost`.
     fn host_keys(
         &self,
@@ -459,6 +571,18 @@ impl Backend for LinuxBackend {
         global_keys::bind(offered, answer_within, Box::new(reported))
             .map(|keys| Box::new(keys) as Box<dyn Any + Send>)
             .map_err(MediaError::Unsupported)
+    }
+}
+
+/// The GNOME extension's state as Settings → Drivers shows it.
+fn extension_state(state: ExtensionState) -> DriverState {
+    match state {
+        ExtensionState::Missing => DriverState::Missing,
+        ExtensionState::NeedsLogout => DriverState::NeedsLogout,
+        ExtensionState::Off => DriverState::Off,
+        ExtensionState::ExtensionsOff => DriverState::ExtensionsOff,
+        ExtensionState::Failed => DriverState::Unsupported,
+        ExtensionState::Ready => DriverState::Ready,
     }
 }
 

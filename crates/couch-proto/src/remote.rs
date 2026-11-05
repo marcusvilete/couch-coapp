@@ -332,7 +332,9 @@ pub struct RemoteState {
 }
 
 /// What a host can offer (M16c, ADR 0012): a Linux host has controller
-/// seats, but no keyboard-and-mouse seat or desktop control yet. The host
+/// seats, desktop control once its virtual devices are set up, and a
+/// keyboard seat for guests while its desktop says which window is in front
+/// (M16c-2). The host
 /// refuses what it lacks whatever is asked; this only lets a device hide it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostCapabilities {

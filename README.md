@@ -28,7 +28,7 @@ I believe no one wants to contribute to a "vibecoded" repository, but feel free 
 
 ---
 
-**Status:** in development. Windows hosts and watches. Linux watches and plays, and hosts sessions with controller seats on KDE or GNOME (no keyboard-and-mouse seat for guests yet; a device of yours controls its desktop from afar); friends there get an AppImage you build ([self-hosting](docs/self-hosting.md#4-an-appimage-for-friends-on-linux)).
+**Status:** in development. Windows hosts and watches. Linux watches and plays, and hosts sessions on KDE or GNOME: controller seats, the keyboard-and-mouse seat for guests (on GNOME with our extension), and a device of yours controlling its desktop from afar; friends there get an AppImage you build ([self-hosting](docs/self-hosting.md#4-an-appimage-for-friends-on-linux)).
 
 <table align="center">
   <tr>
@@ -76,6 +76,7 @@ Bundled components keep their own licences:
 - SDL3: zlib;
 - ViGEmBus: BSD-3-Clause;
 - HidHide: MIT;
-- the Rust crates and the front end's packages: mostly MIT and Apache-2.0, checked by `cargo deny`.
+- the Rust crates and the front end's packages: mostly MIT and Apache-2.0, checked by `cargo deny`;
+- in the Linux AppImage, Lucide's icon font (ISC) and the Ubuntu system libraries it carries, each named with its package and source.
 
 `cargo xtask notices` gathers them all into `THIRD-PARTY-NOTICES.txt`. Every installer carries it, and the app shows it in Settings → About.

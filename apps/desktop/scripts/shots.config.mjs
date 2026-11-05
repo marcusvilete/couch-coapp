@@ -179,6 +179,10 @@ export const SHOTS = [
   ["settings-overlay-linux", "linux-host", settings("Overlay and sounds")],
   // 0.26.1: the desktop keeps the host's keys it bound; only the stream window's change here.
   ["settings-shortcuts-linux", "linux-host", settings("Shortcuts")],
+  // M16c-2: the GNOME extension beside the virtual devices, and naming the game's window.
+  ["settings-drivers-gnome", "linux-keyboard-unnamed", settings("Drivers")],
+  ["game-window-menu", "linux-keyboard-unnamed", click("Another…")],
+  ["game-window-change", "linux-keyboard-named", click("Change…")],
   // M16c: a Linux host picks the sound, everything but us or one program.
   [
     "stream-picker-linux-sound",
@@ -197,6 +201,10 @@ export const SHOTS = [
       await page.getByRole("option", { name: "Hollow Knight" }).click();
     },
   ],
+  // M16c-2: the picker on a Linux host whose session has a keyboard seat:
+  // the desktop's dialog is offered, never refused for being a screen (the
+  // VM run found it refused).
+  ["stream-picker-linux-keyboard", "linux-keyboard-idle", click("Start streaming…")],
   ["settings-stream-window", "lobby", settings("Stream window")],
   // M25: the home PC's remote play, a laptop trusted; and one set up anew.
   ["settings-remote-home", "remote-home", settings("Remote play")],
@@ -258,6 +266,27 @@ export const STABLE = [
       ["Screens", async (page) => page.getByRole("tab", { name: /Screens/ }).click()],
       ["Windows", async (page) => page.getByRole("tab", { name: /Windows/ }).click()],
       ["pick", async (page) => page.getByText("Task Manager").click()],
+    ],
+  ],
+  // M16c-2: naming the game's window changes its banner in place; the
+  // requests and the patch bay below stay put. On KDE too, with its
+  // corner's advice in both states.
+  [
+    "naming the game's window on KDE",
+    "linux-keyboard-kde",
+    [".console-top", ".console-banners"],
+    [["name it", click("That's the game")]],
+  ],
+  [
+    "naming the game's window",
+    "linux-keyboard-unnamed",
+    [".console-top", ".console-banners"],
+    [
+      ["name it", click("That's the game")],
+      ["none", async (page) => {
+        await click("Change…")(page);
+        await page.getByRole("menuitem", { name: /None/ }).click();
+      }],
     ],
   ],
   // M16c: a Linux host's picker, its one source, in the same dialog.

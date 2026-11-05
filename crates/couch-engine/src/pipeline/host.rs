@@ -200,6 +200,10 @@ pub struct HostOptions {
     /// where the host's keys would fire for injected keys too
     /// (`Backend::host_keys_hear_injected`, M16c-2); empty elsewhere.
     pub host_chords: Vec<HidUsage>,
+    /// A Linux desktop's own shortcuts (a terminal, the lock screen,
+    /// KWin's overviews) are refused to guests: on a Linux host (M16c-2,
+    /// `couch_input::filter::desktop_key`).
+    pub desktop_keys: bool,
 }
 
 /// One stream inside a session (M19): what to capture, and how.
@@ -287,6 +291,10 @@ pub enum HostEvent {
     SourceClosed { stream: u32 },
     /// The game's process exited.
     GameExited { stream: u32 },
+    /// The game window the host named on a shared screen (Linux, M16c-2),
+    /// `window`, closed: keys reach nothing until the host names another.
+    /// One the host already replaced says nothing.
+    GameWindowGone { stream: u32, window: NativeId },
     /// The game replaced its window, and the capture follows the new one.
     SourceFollowed {
         stream: u32,
@@ -410,6 +418,12 @@ struct Stream {
     paced_replaced: AtomicU64,
     /// `StreamOptions::pacing_trace`, written by the capture thread.
     pacing_trace: Mutex<Option<PacingTrace>>,
+    /// The last frame in memory handed out, for a viewer that comes later or
+    /// asks for a keyframe while the picture stands still: a Linux desktop
+    /// shares a still window's picture only when it redraws, so nothing new
+    /// may come for a long time (M16c-2's VM run). Locked while frames are
+    /// handed out, so it is always the newest.
+    last: Mutex<Option<VideoFrame>>,
 }
 
 /// The game's windows other than its new one ([`Shared::remember_windows`]).
@@ -551,7 +565,14 @@ impl Stream {
             paced_held: AtomicU64::new(0),
             paced_replaced: AtomicU64::new(0),
             pacing_trace: Mutex::new(pacing_trace),
+            last: Mutex::new(None),
         }
+    }
+
+    /// Whether keyboard and mouse aim at a window: the captured one, or the
+    /// game the host named on a shared screen (M16c-2).
+    fn has_window(&self) -> bool {
+        self.options.source.is_window() || self.window.load(Ordering::Acquire) != 0
     }
 
     /// Starts watching the process behind `window`, if not yet.
@@ -881,6 +902,23 @@ impl HostPipeline {
         }
     }
 
+    /// Names the game window on stream `number`'s shared screen (Linux,
+    /// M16c-2: the portal never says what it shares), or none: keyboard and
+    /// mouse reach it only while it is in front, and nothing until it is
+    /// named. `false` if that stream isn't the current one, or captures a
+    /// window of its own.
+    pub fn set_game_window(&self, number: u32, window: Option<NativeId>) -> bool {
+        let Some(stream) = self
+            .shared
+            .current()
+            .filter(|s| s.number == number && !s.options.source.is_window())
+        else {
+            return false;
+        };
+        stream.window.store(window.unwrap_or(0), Ordering::Release);
+        true
+    }
+
     /// The stream now, by its number (M19); `None` while nothing is
     /// streamed.
     pub fn stream(&self) -> Option<u32> {
@@ -1108,7 +1146,9 @@ impl HostPipeline {
                 thread: Some(thread),
             },
         );
-        lock(&sh.feeds).push(feed);
+        lock(&sh.feeds).push(feed.clone());
+        // A still picture sends nothing new: the last one to start from.
+        hand_last(sh, &feed);
         lock(&sh.audio_to).push(conn.clone());
         let _ = self.input.send(InputCmd::AddViewer {
             member,
@@ -1150,8 +1190,14 @@ impl HostPipeline {
 
     /// `member`'s decoder needs a keyframe.
     pub fn keyframe(&self, member: MemberId) {
-        if let Some(viewer) = lock(&self.shared.state).viewers.get(&member) {
-            viewer.feed.keyframe.store(true, Ordering::SeqCst);
+        let feed = lock(&self.shared.state)
+            .viewers
+            .get(&member)
+            .map(|viewer| viewer.feed.clone());
+        if let Some(feed) = feed {
+            feed.keyframe.store(true, Ordering::SeqCst);
+            // On a still picture no frame may come to carry it.
+            hand_last(&self.shared, &feed);
         }
     }
 
@@ -1339,6 +1385,21 @@ async fn housekeeping(shared: Weak<Shared>) {
                     // While capturing, the capture watches the window itself.
                     let window = st.window.load(Ordering::Acquire);
                     let mut source = lock(&st.source);
+                    // A game window named on a shared screen (M16c-2) that
+                    // closed: the choice goes, and the host is asked again.
+                    if !st.options.source.is_window()
+                        && window != 0
+                        && !sh.backend.window_exists(window)
+                        && st
+                            .window
+                            .compare_exchange(window, 0, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                    {
+                        sh.event(HostEvent::GameWindowGone {
+                            stream: st.number,
+                            window,
+                        });
+                    }
                     if state.running.is_none()
                         && !source.ended()
                         && st.options.source.is_window()
@@ -1657,7 +1718,27 @@ fn send(
 }
 
 fn hand_out(shared: &Shared, stream: &Arc<Stream>, frame: VideoFrame) {
+    // Kept only in memory: a GPU frame kept would hold a texture of the
+    // capture's pool.
+    let mut last = lock(&stream.last);
+    if matches!(frame, VideoFrame::Cpu(_)) {
+        *last = Some(frame.clone());
+    }
     for feed in lock(&shared.feeds).iter() {
+        feed.frames.put((stream.clone(), frame.clone()));
+    }
+}
+
+/// Gives `feed` the stream's last frame in memory, if there is one (the
+/// newest handed out, so nothing newer waiting is replaced): a viewer that
+/// just came, or that asks for a keyframe, has a picture to start from while
+/// it stands still.
+fn hand_last(shared: &Shared, feed: &Feed) {
+    let Some(stream) = shared.current() else {
+        return;
+    };
+    let last = lock(&stream.last);
+    if let Some(frame) = last.as_ref() {
         feed.frames.put((stream.clone(), frame.clone()));
     }
 }
@@ -2389,6 +2470,8 @@ struct FocusReport {
     at: Instant,
     /// The stream it was reported for: a new one is told afresh.
     stream: u32,
+    /// And the window: one named anew (M16c-2) is told afresh too.
+    window: NativeId,
 }
 
 impl Inputs {
@@ -2429,17 +2512,21 @@ impl Inputs {
     /// [`FOCUS_COALESCE`]; the tick catches up with the latest. Never for a
     /// screen, nor with nothing streamed.
     fn report_focus(&mut self, now: Instant) {
-        let Some(stream) = self
-            .shared
-            .current()
-            .filter(|s| s.options.source.is_window())
-        else {
+        let Some(stream) = self.shared.current().filter(|s| s.has_window()) else {
             return;
         };
         let report = &mut self.focus;
-        if report.stream != stream.number {
+        // A window the capture follows is the same game's: only a named one
+        // starts over.
+        let window = if stream.options.source.is_window() {
+            0
+        } else {
+            stream.window.load(Ordering::Acquire)
+        };
+        if report.stream != stream.number || report.window != window {
             // The first report for a stream may go at once.
             report.stream = stream.number;
+            report.window = window;
             report.reported = None;
             report.at = now.checked_sub(FOCUS_COALESCE).unwrap_or(now);
         }
@@ -2703,6 +2790,7 @@ async fn input_loop(
         router: {
             let mut router = SeatRouter::starting_at(seats as u8, shared.options.first_epoch);
             router.block_host_chords(shared.options.host_chords.clone());
+            router.block_desktop_keys(shared.options.desktop_keys);
             router
         },
         pads,
@@ -2721,6 +2809,7 @@ async fn input_loop(
             reported: None,
             at: start,
             stream: 0,
+            window: 0,
         },
         local,
         desktop: None,

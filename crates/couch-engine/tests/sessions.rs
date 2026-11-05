@@ -19,8 +19,8 @@ use couch_engine::{
     RemoteAccessView, RemoteAction, Response, RoomView, SessionEnd, SessionRole, SessionView,
     SourceChoice, StreamStateView, StreamWindowRequest, StreamWindowSettingsView, WatchEnd,
     pipeline::{
-        AudioKind, Backend, CaptureRequest, Focus, GameProcess, Hiding, HostKeyEvent, NativeId,
-        Source, Sources, ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
+        AudioKind, Backend, CaptureRequest, Focus, GameProcess, GameWindow, Hiding, HostKeyEvent,
+        NativeId, Source, Sources, ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
         virtual_hiding::CHECK_EVERY,
     },
     secrets::Unprotected,
@@ -153,12 +153,20 @@ struct Fake {
     /// without its virtual devices set up): no keyboard seat, no desktop
     /// control, and the host's own controllers not read.
     controllers_only: AtomicBool,
-    /// Linux's since M16c-2's first part: desktop control for a device of
-    /// the user's, but no keyboard seat for guests.
+    /// Linux's without a helper telling which window is in front (M16c-2):
+    /// desktop control for a device of the user's, but no keyboard seat for
+    /// guests.
     desktop_only: AtomicBool,
     /// The host's keys fire for injected keys too, as Linux's portal does
     /// (M16c-2).
     hears_injected: AtomicBool,
+    /// The host names its game among the desktop's windows, as on Linux
+    /// (M16c-2): these windows, the one in front (0 for none), and how many
+    /// watches the desktop's helper has running.
+    names_game: AtomicBool,
+    front_windows: Mutex<Vec<GameWindow>>,
+    front_now: AtomicIsize,
+    front_watches: Arc<AtomicUsize>,
     /// The host's own controller.
     local: FakeLocal,
     /// How many of the host's controllers are hidden from games now.
@@ -384,6 +392,15 @@ impl Drop for Shown {
     fn drop(&mut self) {
         *self.given_up_when_shown.lock().unwrap() = Some(self.given_up.load(Ordering::SeqCst));
         self.hidden.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The desktop's helper running for a session (M16c-2).
+struct FrontWatch(Arc<AtomicUsize>);
+
+impl Drop for FrontWatch {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -702,8 +719,10 @@ impl Backend for Fake {
             .map_or(VirtualDevice::Theirs, |(_, now)| *now)
     }
 
-    fn focus(&self, _window: NativeId) -> Focus {
-        let foreground = !self.away.load(Ordering::SeqCst);
+    fn focus(&self, window: NativeId) -> Focus {
+        let foreground = !self.away.load(Ordering::SeqCst)
+            && (!self.names_game.load(Ordering::SeqCst)
+                || self.front_now.load(Ordering::SeqCst) == window);
         Focus {
             foreground,
             pointer_inside: foreground,
@@ -711,6 +730,14 @@ impl Backend for Fake {
     }
 
     fn window_exists(&self, window: NativeId) -> bool {
+        if self.names_game.load(Ordering::SeqCst) {
+            return self
+                .front_windows
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|w| w.id == window);
+        }
         window != 0 && self.game.window.load(Ordering::SeqCst) == window
     }
 
@@ -765,6 +792,19 @@ impl Backend for Fake {
 
     fn host_keys_hear_injected(&self) -> bool {
         self.hears_injected.load(Ordering::SeqCst)
+    }
+
+    fn names_game_window(&self) -> bool {
+        self.names_game.load(Ordering::SeqCst)
+    }
+
+    fn watch_front(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        self.front_watches.fetch_add(1, Ordering::SeqCst);
+        Some(Box::new(FrontWatch(self.front_watches.clone())))
+    }
+
+    fn game_windows(&self) -> Vec<GameWindow> {
+        self.front_windows.lock().unwrap().clone()
     }
 
     fn host_keys(
@@ -2990,6 +3030,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             local: None,
             pad_setup_limit: couch_input::PAD_SETUP_LIMIT,
             host_chords: Vec::new(),
+            desktop_keys: false,
         },
     )
     .await;
@@ -4826,6 +4867,7 @@ async fn a_pad_not_set_up_in_time_is_given_up() {
             local: None,
             pad_setup_limit: Duration::from_millis(400),
             host_chords: Vec::new(),
+            desktop_keys: false,
         },
     )
     .await;
@@ -6131,5 +6173,142 @@ async fn starting_at_sign_in_is_the_users_choice() {
         a.handle(Command::GetTray).await,
         Ok(Response::Tray(couch_engine::TrayView { on: true }))
     ));
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// M16c-2: a Linux-like host's shared screen never says which window it is,
+/// so the host names the game. A guest on the keyboard seat types nothing
+/// until it is named, then only while it is in front; a window that closes
+/// takes the name with it. The desktop's helper runs for the session alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guests_keys_wait_for_the_named_game_and_follow_its_focus() {
+    const GAME: NativeId = 501;
+    const EDITOR: NativeId = 502;
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.hears_injected.store(true, Ordering::SeqCst);
+    // Not named anywhere yet: like Windows, nothing to list.
+    assert!(matches!(
+        a.handle(Command::GameWindows).await,
+        Err(EngineError::NotLive | EngineError::Refused(_))
+    ));
+    a.fake.names_game.store(true, Ordering::SeqCst);
+    *a.fake.front_windows.lock().unwrap() = vec![
+        GameWindow {
+            id: GAME,
+            title: "Celeste".into(),
+            app: "Celeste.bin.x86_64".into(),
+            matches: true,
+        },
+        GameWindow {
+            id: EDITOR,
+            title: "Notes".into(),
+            app: "kate".into(),
+            matches: false,
+        },
+    ];
+    a.fake.front_now.store(GAME, Ordering::SeqCst);
+    a.ok(go_live_with(&room, 4, setup(1, KeyboardMouseSeat::OwnSeat)))
+        .await;
+    assert_eq!(
+        a.fake.front_watches.load(Ordering::SeqCst),
+        1,
+        "the helper runs"
+    );
+    // A shared screen carries the keyboard seat here.
+    a.ok(Command::StartStream {
+        source: SourceChoice::Screen { id: "1".into() },
+        name: "Shared".into(),
+        fps: 30,
+        max_mbps: 20,
+        upload_mbps: None,
+        program: None,
+    })
+    .await;
+    let b_window = watching(&room, &a, &b).await;
+    give_seat(&room, &mut a, &b, &b_window, 1).await;
+    a.wait_session(&room, &a, "asking to name the game", |s| {
+        s.is_some_and(|s| s.names_game && s.game_window.is_none() && s.game_in_front.is_none())
+    })
+    .await;
+
+    // Nothing named: B's keys reach nothing, even with the game in front.
+    b_window.key(0x04, true);
+    b_window.key(0x04, false);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!injected(&a, 0x04, true), "keys wait for the game's name");
+
+    // The list, the game marked; a window not listed can't be named.
+    let Ok(Response::GameWindows { windows }) = a.handle(Command::GameWindows).await else {
+        panic!("a list");
+    };
+    assert_eq!(windows.len(), 2);
+    assert!(windows[0].matches && windows[0].title == "Celeste" && !windows[1].matches);
+    assert!(matches!(
+        a.handle(Command::SetGameWindow { id: Some(999) }).await,
+        Err(EngineError::Refused(why)) if why.contains("gone")
+    ));
+    a.ok(Command::SetGameWindow {
+        id: Some(GAME as u32),
+    })
+    .await;
+    a.wait_session(&room, &a, "the game named, in front", |s| {
+        s.is_some_and(|s| {
+            s.game_window.as_ref().is_some_and(|g| g.title == "Celeste")
+                && s.game_in_front == Some(true)
+        })
+    })
+    .await;
+    b_window.key(0x05, true);
+    wait("B's key at the game", || injected(&a, 0x05, true)).await;
+    b_window.key(0x05, false);
+
+    // Another window in front: B's keys stop there, and B hears it.
+    a.fake.front_now.store(EDITOR, Ordering::SeqCst);
+    let in_front = |w: &FakeViewer| w.hud.lock().unwrap().as_ref().map(|h| h.game_in_front);
+    wait("B hears the game left the front", || {
+        in_front(&b_window) == Some(false)
+    })
+    .await;
+    b_window.key(0x06, true);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!injected(&a, 0x06, true), "never to another window");
+    b_window.key(0x06, false);
+
+    // The game's window closes: the name goes, the host is asked again.
+    a.fake.front_now.store(GAME, Ordering::SeqCst);
+    a.fake
+        .front_windows
+        .lock()
+        .unwrap()
+        .retain(|w| w.id != GAME);
+    a.wait_session(&room, &a, "asked again", |s| {
+        s.is_some_and(|s| s.names_game && s.game_window.is_none())
+    })
+    .await;
+    b_window.key(0x07, true);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!injected(&a, 0x07, true), "nothing named again");
+    b_window.key(0x07, false);
+
+    // A new stream asks afresh; the session's end stops the helper.
+    a.ok(Command::SetGameWindow {
+        id: Some(EDITOR as u32),
+    })
+    .await;
+    a.ok(Command::StopStream).await;
+    a.wait_session(&room, &a, "nothing named off the stream", |s| {
+        s.is_some_and(|s| !s.names_game && s.game_window.is_none())
+    })
+    .await;
+    assert!(matches!(
+        a.handle(Command::GameWindows).await,
+        Err(EngineError::Refused(why)) if why.contains("nothing is being streamed")
+    ));
+    a.ok(Command::EndSession).await;
+    wait("the helper stopped", || {
+        a.fake.front_watches.load(Ordering::SeqCst) == 0
+    })
+    .await;
+    c.stop().await;
     stop_all(&mut [&mut a, &mut b]).await;
 }

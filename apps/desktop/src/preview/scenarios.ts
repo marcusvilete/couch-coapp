@@ -98,6 +98,9 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     operatedBy: [],
     desktop: null,
     guestsKeyboard: true,
+    namesGame: false,
+    warnHotCorner: false,
+    gameWindow: null,
     ...over,
   };
 }
@@ -225,6 +228,58 @@ function hosting(over: Partial<SessionView> = {}, live = true): SessionView {
     s.gameInFront = true;
   }
   return Object.assign(s, over);
+}
+
+/** A Linux host's windows, as its desktop's helper lists them (M16c-2). */
+const LINUX_WINDOWS = [
+  { id: 1, title: "Dolphin: ~/Games", app: "org.kde.dolphin", matches: false },
+  { id: 2, title: "Celeste", app: "Celeste.bin.x86_64", matches: true },
+  { id: 3, title: "Steam", app: "steam", matches: false },
+];
+
+/** Hosting on Linux with a keyboard seat Caio holds, a shared screen
+ * streamed, and the game's window `named` or not yet (M16c-2). */
+function linuxKeyboard(
+  named: (typeof LINUX_WINDOWS)[number] | null,
+  windows: typeof LINUX_WINDOWS,
+  kde = false,
+  live = true,
+): World {
+  const s = hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "ownSeat" }, []);
+  s.viewers = [bia.id, caio.id];
+  s.viewerControllers = [1, 0];
+  s.viewerPads = [[{ slot: 0, name: "DualSense Wireless Controller" }], []];
+  s.seats[0].holder = bia.id;
+  s.seats[0].guestController = 0;
+  s.seats[s.seats.length - 1].holder = caio.id;
+  s.stream = { state: "live" };
+  s.streaming = { name: "A window or screen, chosen in your desktop's dialog", fps: 60, maxMbps: 20, uploadMbps: null, screen: true };
+  s.namesGame = true;
+  s.gameWindow = named;
+  s.gameInFront = named ? true : null;
+  s.guestsKeyboard = true;
+  s.warnHotCorner = kde;
+  if (!live) {
+    // Nothing streamed yet: Start streaming… opens the picker.
+    s.stream = { state: "waiting" };
+    s.streaming = null;
+    s.namesGame = false;
+    s.gameInFront = null;
+  }
+  return base([sofa({ sessions: [s] })], {
+    info: {
+      ...base([]).info,
+      platform: "linux",
+      capabilities: { sessions: true, keyboardSeat: true, desktopControl: true },
+      homePc: false,
+      dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+    },
+    drivers: [
+      { driver: "uinput", state: "ready", installer: true },
+      { driver: "gnomeextension", state: "needsLogout", installer: true },
+    ],
+    gameWindows: windows,
+  });
 }
 
 export type Scenario = { title: string; world: () => World; release?: boolean };
@@ -727,6 +782,45 @@ export const SCENARIOS: Record<string, Scenario> = {
         startAtSignIn: true,
       });
       return world;
+    },
+  },
+  "linux-keyboard-unnamed": {
+    title: "Linux: Caio on the keyboard seat, the game's window not named yet, one window of the shared size (M16c-2)",
+    world: () => linuxKeyboard(null, LINUX_WINDOWS),
+  },
+  "linux-keyboard-named": {
+    title: "Linux: the game's window named, guests' keys reach it while it's in front (M16c-2)",
+    world: () => linuxKeyboard(LINUX_WINDOWS[1], LINUX_WINDOWS),
+  },
+  "linux-keyboard-idle": {
+    title: "Linux: a session with the keyboard seat, nothing streamed yet: the picker takes the desktop's dialog (M16c-2)",
+    world: () => linuxKeyboard(null, LINUX_WINDOWS, false, false),
+  },
+  "linux-keyboard-kde": {
+    title: "Linux on KDE: the game's window to name, and the top-left corner to turn off first (M16c-2)",
+    world: () => linuxKeyboard(null, LINUX_WINDOWS, true),
+  },
+  "linux-keyboard-no-windows": {
+    title: "Linux: the desktop hasn't listed its windows yet (M16c-2)",
+    world: () => linuxKeyboard(null, []),
+  },
+  "remote-linux-keyboard-waits": {
+    title: "Remote play: a guest on a Linux PC's keyboard seat waits for the game's window to be named there (M16c-2)",
+    world: () => {
+      const s = hostSession(HOME_PC, "Game night", 4, { controllers: 2, keyboardMouse: "ownSeat" }, []);
+      Object.assign(s, { role: "watching", operator: true, panicKey: null, answerKeys: null });
+      s.viewers = [ME, caio.id];
+      s.viewerControllers = [1, 0];
+      s.viewerPads = [[{ slot: 0, name: "Xbox Wireless Controller" }], []];
+      s.seats[s.seats.length - 1].holder = caio.id;
+      s.stream = { state: "live" };
+      s.streaming = { name: "A window or screen, chosen in your desktop's dialog", fps: 60, maxMbps: 20, uploadMbps: null, screen: true };
+      s.streamWindow = ourWindow({});
+      const pc = homePc({
+        unlocked: true,
+        capabilities: { sessions: true, keyboardSeat: true, desktopControl: true },
+      });
+      return base([sofa({ members: [you(false), pc, bia, caio], sessions: [s] })]);
     },
   },
   "release-build": {

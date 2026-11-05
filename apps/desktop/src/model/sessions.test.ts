@@ -3,8 +3,12 @@ import type { HostController } from "../bindings/HostController";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
 import {
+  asksForGame,
+  gameWindowName,
+  screenNeedsWindow,
   keeps,
   listed,
+  likelyGame,
   numbered,
   padKeys,
   padsAdded,
@@ -17,6 +21,7 @@ import {
   uploadLimit,
   uploadLimitOk,
 } from "./sessions";
+import { waitsForGameAtPc } from "./sessions";
 
 const seat = (label: string, pad: boolean, holder: string | null = null, host = false): SeatView => ({
   label,
@@ -68,6 +73,9 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     operatedBy: [],
     desktop: null,
     guestsKeyboard: true,
+    namesGame: false,
+    warnHotCorner: false,
+    gameWindow: null,
   };
 }
 
@@ -162,5 +170,55 @@ describe("soundChoices (a Linux host's sound, M16c)", () => {
     expect(soundChoices(["Hollow Knight"], "Hollow Knight")).toHaveLength(2);
     // Not yet known: not said to be silent.
     expect(soundChoices(null, "Hollow Knight")[1].detail).toBeUndefined();
+  });
+});
+
+describe("naming the game's window (a Linux host, M16c-2)", () => {
+  const w = (id: number, title: string, app: string, matches = false) => ({ id, title, app, matches });
+
+  it("offers first the one window with the shared size, and only one", () => {
+    expect(likelyGame([w(1, "Editor", "kate"), w(2, "Game", "game", true)])?.id).toBe(2);
+    expect(likelyGame([w(1, "A", "a", true), w(2, "B", "b", true)])).toBeNull();
+    expect(likelyGame([w(1, "Editor", "kate")])).toBeNull();
+    expect(likelyGame([])).toBeNull();
+  });
+
+  it("names a window by its title and program", () => {
+    expect(gameWindowName(w(1, "Celeste", "celeste"))).toBe("Celeste · celeste");
+    expect(gameWindowName(w(1, " ", ""))).toBe("Untitled window");
+  });
+
+  it("asks the host only where a game is named, and not for desktop control", () => {
+    const s = session([seat("Keyboard and mouse", false)]);
+    expect(asksForGame(s)).toBe(false);
+    expect(asksForGame({ ...s, namesGame: true })).toBe(true);
+    expect(asksForGame({ ...s, namesGame: true, desktop: "d" })).toBe(false);
+  });
+
+  it("refuses a screen with a keyboard seat, but not from afar nor a Linux host's dialog", () => {
+    const here = { remote: false, shared: false };
+    expect(screenNeedsWindow(true, "screen", here)).toBe(true);
+    expect(screenNeedsWindow(true, "window", here)).toBe(false);
+    expect(screenNeedsWindow(false, "screen", here)).toBe(false);
+    expect(screenNeedsWindow(true, undefined, here)).toBe(false);
+    // From afar: desktop control's seat.
+    expect(screenNeedsWindow(true, "screen", { remote: true, shared: false })).toBe(false);
+    // Linux: the desktop's dialog, listed as a screen; the game is named after.
+    expect(screenNeedsWindow(true, "screen", { remote: false, shared: true })).toBe(false);
+  });
+
+  it("tells a device running the PC when a guest's keys wait for the game there", () => {
+    const live: Partial<SessionView> = {
+      stream: { state: "live" },
+      streaming: { name: "Shared", fps: 60, maxMbps: 20, uploadMbps: null, screen: true },
+    };
+    const s = { ...session([seat("Keyboard and mouse", false, "a")]), ...live } as SessionView;
+    expect(waitsForGameAtPc(s)).toBe(true);
+    // Named there: its focus is known.
+    expect(waitsForGameAtPc({ ...s, gameInFront: false })).toBe(false);
+    // Desktop control, or nobody on the seat, or a window streamed.
+    expect(waitsForGameAtPc({ ...s, desktop: "a" })).toBe(false);
+    expect(waitsForGameAtPc({ ...s, seats: [seat("Keyboard and mouse", false)] })).toBe(false);
+    expect(waitsForGameAtPc({ ...s, streaming: { ...s.streaming!, screen: false } })).toBe(false);
   });
 });

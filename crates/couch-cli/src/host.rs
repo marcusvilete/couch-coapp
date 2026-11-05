@@ -160,6 +160,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             pad_setup_limit: couch_input::PAD_SETUP_LIMIT,
             // No hook for the host's keys here.
             host_chords: Vec::new(),
+            desktop_keys: cfg!(target_os = "linux"),
         },
     )
     .await;
@@ -377,6 +378,7 @@ fn on_event(
         }
         HostEvent::SourceClosed { .. }
         | HostEvent::GameExited { .. }
+        | HostEvent::GameWindowGone { .. }
         | HostEvent::CaptureFailed { .. } => {}
         HostEvent::GameFocus(in_front) => {
             let (what, event) = if in_front {

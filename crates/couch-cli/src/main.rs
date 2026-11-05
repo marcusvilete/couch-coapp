@@ -21,6 +21,8 @@ mod audio_probe;
 mod capture_test;
 #[cfg(windows)]
 mod fake_game;
+#[cfg(target_os = "linux")]
+mod front_probe;
 #[cfg(windows)]
 mod gates;
 mod host;
@@ -315,6 +317,13 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, value_enum, default_value = "media")]
         congestion: CongestionArg,
+    },
+    /// What the desktop's helper says is in front, live (Linux, M16c-2):
+    /// KDE's KWin script, or our GNOME extension. Reads only.
+    #[cfg(target_os = "linux")]
+    FrontProbe {
+        #[arg(long, default_value_t = 30)]
+        secs: u64,
     },
     /// Plug a virtual Xbox 360 pad and move it; watch it in joy.cpl (on
     /// Linux, evtest: a uinput device).
@@ -619,6 +628,8 @@ async fn main() -> ExitCode {
             })
             .await
         }
+        #[cfg(target_os = "linux")]
+        Cmd::FrontProbe { secs } => tokio::task::block_in_place(|| front_probe::run(secs)),
         #[cfg(any(windows, target_os = "linux"))]
         Cmd::PadTest {
             secs,
