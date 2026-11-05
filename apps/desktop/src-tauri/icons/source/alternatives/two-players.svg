@@ -1,0 +1,9 @@
+<!-- An alternative for Couch Co-App's icon, not used: two players on a couch seen from above, the couch shaped like a controller (its grips the armrests, a band at the top the backrest) (2026-11-05, kept to work on later). Known flaw: the heads inside the shoulders can read as eyes; try smaller heads set lower, or a gap between the two. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 256 256">
+<defs><linearGradient id="gf" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#26324a"/><stop offset="1" stop-color="#111827"/></linearGradient></defs>
+<rect width="256" height="256" rx="58" fill="url(#gf)"/>
+<path d="M70 82h116a40 40 0 0 1 38 52l-14 44a20 20 0 0 1-33 8l-21-22H100l-21 22a20 20 0 0 1-33-8l-14-44a40 40 0 0 1 38-52z" fill="#f1f5f9"/>
+<path d="M70 82h116a40 40 0 0 1 36 24H34a40 40 0 0 1 36-24z" fill="#cbd5e1"/>
+<ellipse cx="96" cy="140" rx="31" ry="19" fill="#14b8a6"/><circle cx="96" cy="134" r="16" fill="#5eead4"/>
+<ellipse cx="160" cy="140" rx="31" ry="19" fill="#db2777"/><circle cx="160" cy="134" r="16" fill="#f9a8d4"/>
+</svg>
