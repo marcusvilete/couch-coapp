@@ -37,12 +37,13 @@ use super::{
 };
 use crate::{DriverName, DriverState, ScreenArea};
 
-/// Windows' drivers; `None` for Linux's uinput access.
+/// Windows' drivers; `None` for Linux's rows (uinput access, the GNOME
+/// extension).
 fn platform_driver(name: DriverName) -> Option<drivers::Driver> {
     match name {
         DriverName::Vigembus => Some(drivers::Driver::ViGEmBus),
         DriverName::Hidhide => Some(drivers::Driver::HidHide),
-        DriverName::Uinput => None,
+        DriverName::Uinput | DriverName::GnomeExtension => None,
     }
 }
 

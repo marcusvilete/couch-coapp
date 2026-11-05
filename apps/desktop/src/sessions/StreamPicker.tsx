@@ -13,6 +13,7 @@ import {
   EVERYTHING,
   FRAME_RATES,
   QUALITIES,
+  screenNeedsWindow,
   soundChoices,
   uploadLimit,
   uploadLimitOk,
@@ -111,8 +112,13 @@ export function StreamPicker(props: {
   const pickedRefresh = (pickedWindow ?? pickedScreen)?.refreshHz ?? null;
   const refreshTooLow = pickedRefresh != null && fps > pickedRefresh + 1;
   // From afar a screen goes with the keyboard seat: it is desktop control's
-  // (M25b), and a guest holding it gets nothing in on a screen.
-  const screenWithKbm = kbmSeats && picked?.kind === "screen" && props.remote == null;
+  // (M25b), and a guest holding it gets nothing in on a screen. So does the
+  // desktop's dialog on Linux (M16c-2), whose share is listed as a screen:
+  // the host names the game's window once it streams (`GameWindowBanner`).
+  const screenWithKbm = screenNeedsWindow(kbmSeats, picked?.kind, {
+    remote: props.remote != null,
+    shared: props.shared === true,
+  });
   const needle = search.trim().toLowerCase();
   const windows = (sources?.windows ?? []).filter(
     (w) => needle === "" || w.title.toLowerCase().includes(needle) || w.app.toLowerCase().includes(needle),
@@ -224,11 +230,17 @@ export function StreamPicker(props: {
                           : "Your desktop asks which when the stream starts."}
                       </span>
                     </span>
-                    {remembered && (
-                      <Button size="sm" disabled={busy != null} onClick={() => void sharedChoice(true)}>
-                        Choose again
-                      </Button>
-                    )}
+                    {/* Always there, so it never comes and goes: each start
+                        spends the desktop's remembered choice and the next
+                        comes once it shares again. */}
+                    <Button
+                      size="sm"
+                      disabled={busy != null || !remembered}
+                      reason={remembered ? null : "Nothing remembered: your desktop asks which when the stream starts."}
+                      onClick={() => void sharedChoice(true)}
+                    >
+                      Choose again
+                    </Button>
                   </label>
                 </div>
               )}

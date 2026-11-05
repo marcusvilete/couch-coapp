@@ -523,3 +523,17 @@
     outline-offset: -2px;
   }
 }
+
+/* Naming the game's window (M16c-2): both states in one cell, the unseen
+   one reserving its height, so naming it moves nothing below. */
+.game-banner {
+  display: grid;
+}
+.game-banner > *,
+.game-banner-reserve > * {
+  grid-area: 1 / 1;
+}
+.game-banner-reserve {
+  display: grid;
+  visibility: hidden;
+}

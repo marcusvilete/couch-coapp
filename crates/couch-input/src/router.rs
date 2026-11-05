@@ -166,8 +166,16 @@ impl Holder {
         effects.push(Effect::Pad(seat, PadState::NEUTRAL));
     }
 
-    /// Applies newer motion totals; moves the pointer only if `allowed`.
-    fn motion(&mut self, totals: MouseTotals, allowed: bool, effects: &mut Vec<Effect>) {
+    /// Applies newer motion totals; moves the pointer only if `allowed`, and
+    /// turns the wheel only if `wheel` too (the pointer over the game: the
+    /// wheel scrolls whatever is under it).
+    fn motion(
+        &mut self,
+        totals: MouseTotals,
+        allowed: bool,
+        wheel: bool,
+        effects: &mut Vec<Effect>,
+    ) {
         // Versions wrap; newer means ahead by less than half the range.
         if (totals.version.wrapping_sub(self.mouse.version) as i32) <= 0 {
             return;
@@ -184,7 +192,7 @@ impl Holder {
             totals.wheel_x.wrapping_sub(old.wheel_x),
             totals.wheel_y.wrapping_sub(old.wheel_y),
         );
-        if (wx, wy) != (0, 0) {
+        if wheel && (wx, wy) != (0, 0) {
             effects.push(Effect::Wheel(wx, wy));
         }
     }
@@ -210,6 +218,9 @@ pub struct SeatRouter {
     /// holder but a desktop one ([`filter::host_chord`]): where the host's
     /// keys can't tell injected keys from real ones (Linux, M16c-2).
     host_chords: Vec<HidUsage>,
+    /// A Linux desktop's own shortcuts are refused too
+    /// ([`filter::desktop_key`]): on a Linux host (M16c-2).
+    desktop_keys: bool,
 }
 
 impl SeatRouter {
@@ -226,6 +237,7 @@ impl SeatRouter {
             pointer_inside: false,
             held: None,
             host_chords: Vec::new(),
+            desktop_keys: false,
         }
     }
 
@@ -234,6 +246,12 @@ impl SeatRouter {
     /// too (Linux's global shortcuts, M16c-2).
     pub fn block_host_chords(&mut self, keys: Vec<HidUsage>) {
         self.host_chords = keys;
+    }
+
+    /// Refuses a Linux desktop's own shortcuts ([`filter::desktop_key`]) to
+    /// every holder but a desktop one: on a Linux host (M16c-2).
+    pub fn block_desktop_keys(&mut self, on: bool) {
+        self.desktop_keys = on;
     }
 
     /// Like [`Self::new`], with each seat's epochs counting on from `epoch`.
@@ -419,11 +437,13 @@ impl SeatRouter {
             }
             Input::Mouse(d) => {
                 let allowed = kbm && h.may(Permissions::MOUSE);
-                h.motion(d.totals, allowed, &mut effects);
+                let wheel = allowed && (pointer_inside || desktop);
+                h.motion(d.totals, allowed, wheel, &mut effects);
             }
             Input::MouseButton(e) => {
                 let allowed = kbm && h.may(Permissions::MOUSE);
-                h.motion(e.totals, allowed, &mut effects);
+                let wheel = allowed && (pointer_inside || desktop);
+                h.motion(e.totals, allowed, wheel, &mut effects);
                 let Some(button) = MouseButton::from_code(e.button) else {
                     return effects;
                 };
@@ -450,7 +470,8 @@ impl SeatRouter {
                     && !h.keys.contains(&key)
                     && (desktop
                         || (filter::key_allowed(key, &all_keys)
-                            && !filter::host_chord(key, &all_keys, &self.host_chords)))
+                            && !filter::host_chord(key, &all_keys, &self.host_chords)
+                            && !(self.desktop_keys && filter::desktop_key(key, &all_keys))))
                 {
                     h.keys.insert(key);
                     effects.push(Effect::Key(key, true));
@@ -920,6 +941,35 @@ mod tests {
         );
     }
 
+    /// Linux (M16c-2): a terminal, the lock screen and KWin's overviews are
+    /// refused to guests on a Linux host, never on another, and never to
+    /// desktop control.
+    #[test]
+    fn a_linux_desktops_shortcuts_are_refused_to_guests_on_a_linux_host() {
+        const T: u16 = 0x17;
+        let ctrl_alt_t = |f: &mut Fixture| {
+            let mut effects = f.send(f.key(0xE0, true), 10);
+            effects.extend(f.send(f.key(0xE2, true), 11));
+            effects.extend(f.send(f.key(T, true), 12));
+            effects
+        };
+        let mut f = Fixture::new(ALL);
+        f.router.block_desktop_keys(true);
+        assert_eq!(
+            ctrl_alt_t(&mut f),
+            vec![
+                Effect::Key(HidUsage(0xE0), true),
+                Effect::Key(HidUsage(0xE2), true)
+            ]
+        );
+        // Elsewhere it is AltGr+T, a character.
+        let mut f = Fixture::new(ALL);
+        assert!(ctrl_alt_t(&mut f).contains(&Effect::Key(HidUsage(T), true)));
+        let mut f = Fixture::new(DESKTOP);
+        f.router.block_desktop_keys(true);
+        assert!(ctrl_alt_t(&mut f).contains(&Effect::Key(HidUsage(T), true)));
+    }
+
     /// Linux (M16c-2): the desktop's shortcuts would take a guest's
     /// Ctrl+Alt+Shift+P for the host's panic key.
     #[test]
@@ -1014,6 +1064,53 @@ mod tests {
                 Effect::MouseButton(MouseButton::Right, true)
             ]
         );
+    }
+
+    #[test]
+    fn the_wheel_turns_only_with_the_pointer_over_the_game() {
+        let mut f = Fixture::new(ALL);
+        let epoch = f.epoch;
+        let datagram = |v, x, wheel_y| {
+            Input::Mouse(MouseDatagram {
+                seat: SEAT,
+                seat_epoch: epoch,
+                totals: MouseTotals {
+                    version: v,
+                    x,
+                    y: 0,
+                    wheel_x: 0,
+                    wheel_y,
+                },
+            })
+        };
+        // The pointer elsewhere (another window, the panel): it moves, so
+        // the guest can come back, but the wheel would scroll what's there.
+        f.router.set_pointer_inside(false);
+        assert_eq!(
+            f.send(datagram(1, 10, -120), 10),
+            vec![Effect::MouseMove(10, 0)]
+        );
+        // Back over the game: only the turns from now on, none saved up.
+        f.router.set_pointer_inside(true);
+        assert_eq!(
+            f.send(datagram(2, 10, -240), 20),
+            vec![Effect::Wheel(0, -120)]
+        );
+        // Desktop control scrolls wherever the pointer is.
+        let mut f = Fixture::new(DESKTOP | ALL);
+        f.router.set_pointer_inside(false);
+        f.router.set_foreground(false);
+        let epoch = f.epoch;
+        let wheel = Input::Mouse(MouseDatagram {
+            seat: SEAT,
+            seat_epoch: epoch,
+            totals: MouseTotals {
+                version: 1,
+                wheel_y: 120,
+                ..Default::default()
+            },
+        });
+        assert_eq!(f.send(wheel, 10), vec![Effect::Wheel(0, 120)]);
     }
 
     #[test]

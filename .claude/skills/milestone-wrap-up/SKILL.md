@@ -33,7 +33,7 @@ A scenario that fails once in ten runs is a race to understand, not noise.
 - **The version:** `cargo xtask bump patch` for fixes and small features, `minor` for a milestone or a new wire revision (with its `REVISIONS` row). Once per PR.
 - **CLAUDE.md:** new rules and commands where they belong (a rule that guards safety goes beside its kin). `docs/development.md` and `docs/self-hosting.md` stay in step with its commands. The README's top is the author's, above its "human-made section" marker.
 - **ADRs:** what was settled while building, under the status.
-- **Stale claims:** search the docs and skills for what the change made untrue (the old behaviour's words, the files it moved) and fix them; a skill's tables of guards gain the new rule.
+- **Stale claims:** `bash scripts/check-docs.sh` (Git Bash, or WSL) finds what the living docs and skills name but the code no longer has: files, `couch-cli` subcommands, `COUCH_*` variables, test names, `couch_*::` paths (a right name that isn't ours, an upstream test say, goes in its `IGNORE` list). Then read for what it can't see: search the docs and skills for what the change made untrue (the old behaviour's words, a status line such as the README's below the marker, `development.md`'s Linux setup, `architecture.md`'s crate table and Linux paragraph) and fix them; a skill's tables of guards gain the new rule, and a skill whose code area grew gains it in its `description` (that is what loads it).
 - **Skills:** ask the author whether a new one would help; write it under `.claude/skills/`, with any scripts it needs in the repo (the scratchpad doesn't survive the session).
 
 ## 3. The review

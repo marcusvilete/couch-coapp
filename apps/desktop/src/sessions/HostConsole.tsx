@@ -25,7 +25,7 @@ import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { desktopBlocked, desktopCommand, desktopOffered, type RemoteTarget } from "../model/remote";
-import { hostIdleText, isLive, listed, nameOf, seatPhrase } from "../model/sessions";
+import { hostIdleText, isLive, listed, nameOf, seatPhrase, waitsForGameAtPc } from "../model/sessions";
 import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
 import { Button, IconButton } from "../ui/Button";
@@ -33,6 +33,7 @@ import { Callout } from "../ui/Callout";
 import { Badge, Kbd, Spinner } from "../ui/Feedback";
 import { DropdownMenu } from "../ui/Menu";
 import { Why } from "../ui/Why";
+import { GameWindowBanner } from "./GameWindowBanner";
 import { DESKTOP_ONLY_REASON, ourPads, PAUSED_REASON, requestDetail } from "./hostMenus";
 import { PatchBay } from "./PatchBay";
 import { SoundLevel } from "./SoundLevel";
@@ -108,7 +109,7 @@ export function HostConsole(props: {
               <>
                 <strong>{s.streaming.name}</strong> · {s.streaming.fps} fps · up to {s.streaming.maxMbps} Mbit/s each
                 {s.streaming.uploadMbps != null && ` · ${s.streaming.uploadMbps} Mbit/s in all`}
-                {windowStream && s.gameInFront === false && (
+                {(windowStream || s.gameWindow != null) && s.gameInFront === false && (
                   <>
                     {" · "}
                     <span className="console-away">not in front</span>{" "}
@@ -365,6 +366,15 @@ function ConsoleBanners(props: {
             {s.operatedBy.length === 1 ? "it" : "them"} out, turn remote play off in Settings.
           </Callout>
         )
+      )}
+      {!remote && <GameWindowBanner session={s} busy={props.busy} run={props.run} />}
+      {remote && waitsForGameAtPc(s) && (
+        // A Linux home PC (M16c-2): a guest's keys wait for its window to be
+        // named there, which a device can't do (it sees no list of windows).
+        <Callout tone="warn" icon={<Keyboard />}>
+          {nameOf(props.room, s.seats.find((seat) => seat.keyboardMouse)?.holder)}'s keyboard and mouse wait until
+          someone at {remote} names the game's window there.
+        </Callout>
       )}
       {s.controlPaused && (
         <Callout

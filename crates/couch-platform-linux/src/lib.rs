@@ -3,7 +3,8 @@
 //! the clock frames are timed on, keeping the stream window's stdout for its
 //! pipe, guests' virtual controllers and the injected keyboard and mouse
 //! through `uinput`, the desktop's portals (the host's keys, screen
-//! sharing), its notifications (the host's notices), PipeWire (the shared
+//! sharing), its notifications (the host's notices), which window is in
+//! front (a KWin script, or our GNOME extension), PipeWire (the shared
 //! picture, the PC's sound), and what a home
 //! PC run from afar needs: staying awake (logind and the inhibit portal),
 //! its lock screen (logind), and starting at sign-in (XDG autostart).
@@ -16,6 +17,7 @@ pub mod autostart;
 pub mod awake;
 pub mod chime;
 pub mod clock;
+pub mod front;
 pub mod global_keys;
 pub mod gpu;
 pub mod kbm;

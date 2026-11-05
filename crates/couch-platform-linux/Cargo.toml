@@ -16,9 +16,12 @@ couch-media.workspace = true
 ashpd.workspace = true
 evdev.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 pipewire.workspace = true
 tokio.workspace = true
-rustix = { workspace = true, features = ["time", "stdio", "event", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+rustix = { workspace = true, features = ["time", "stdio", "event", "process", "fs"] }
 tracing.workspace = true
 
 [lints]

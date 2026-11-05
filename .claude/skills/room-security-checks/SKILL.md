@@ -1,6 +1,6 @@
 ---
 name: room-security-checks
-description: Check that Couch Co-App's rooms still keep strangers out after a change: who may join, what a peer's word is worth, what a refusal reveals, and that leaving and bans reach everyone. Runs the room simulator, admission over iroh and the three-engine scenarios, then walks a review list. Use after changing couch_room (room, signing, limits), couch_net::admission or control, couch-proto's room, admission or invite types, or couch-engine's rooms.rs, store.rs or secrets.rs; and before reporting or committing such a change.
+description: Check that Couch Co-App's rooms still keep strangers out after a change: who may join, what a peer's word is worth, what a refusal reveals, and that leaving and bans reach everyone. Runs the room simulator, admission over iroh and the three-engine scenarios, then walks a review list. Use after changing couch_room (room, signing, limits), couch_net::admission or control, couch-proto's room, admission or invite types, or couch-engine's rooms.rs, rooms/sessions.rs, rooms/remote.rs, remote.rs, backup.rs, store.rs or secrets.rs (sessions, remote play and its PIN, backups), or couch-proto's remote types; and before reporting or committing such a change.
 ---
 
 # Room security checks

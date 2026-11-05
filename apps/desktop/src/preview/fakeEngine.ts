@@ -22,6 +22,7 @@ import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
 import type { ShortcutView } from "../bindings/ShortcutView";
+import type { GameWindowView } from "../bindings/GameWindowView";
 import type { SourceList } from "../bindings/SourceList";
 import { seatsFor } from "../model/seats";
 import { keeps, numbered, seatsOf } from "../model/sessions";
@@ -43,6 +44,9 @@ export type World = {
   soundPrograms: string[];
   /** Whether the desktop's screen-sharing choice is remembered (Linux). */
   sharedRemembered: boolean;
+  /** The windows a Linux host could name as its game (M16c-2); none if
+   * left out. */
+  gameWindows?: GameWindowView[];
   notices: string;
   /** An invite link the app was "opened with", taken once. */
   openedInvite: string | null;
@@ -276,6 +280,9 @@ export function hostSession(
     operatedBy: [],
     desktop: null,
     guestsKeyboard: true,
+    namesGame: false,
+    warnHotCorner: false,
+    gameWindow: null,
   };
 }
 
@@ -782,7 +789,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       return new Promise((resolve) =>
         later(1500, () => {
           const d = world.drivers.find((x) => x.driver === cmd.driver);
-          if (d) d.state = cmd.driver === "hidhide" ? "needsRestart" : "ready";
+          if (d) d.state = cmd.driver === "hidhide" ? "needsRestart" : cmd.driver === "gnomeextension" ? "needsLogout" : "ready";
           resolve({ type: "drivers", drivers: world.drivers });
         }),
       );
@@ -842,8 +849,23 @@ function handle(cmd: Command): Response | Promise<Response> {
       });
       return roomReply(room);
     }
+    case "gameWindows": {
+      const { session: s } = hosting();
+      if (!s.namesGame) throw "this PC streams the game's own window: there is nothing to name";
+      return { type: "gameWindows", windows: world.gameWindows ?? [] };
+    }
+    case "setGameWindow": {
+      const { room, session: s } = hosting();
+      const named = cmd.id == null ? null : (world.gameWindows ?? []).find((x) => x.id === cmd.id);
+      if (named === undefined) throw "that window is gone";
+      s.gameWindow = named;
+      s.gameInFront = named ? true : null;
+      changed(room);
+      return { type: "done" };
+    }
     case "stopStream": {
       const { room, session: s } = hosting();
+      s.gameWindow = null;
       if (s.stream.state !== "live" && s.stream.state !== "starting") throw "nothing is being streamed";
       s.stream = { state: "stopped", reason: "hostStopped" };
       s.streaming = null;

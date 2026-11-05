@@ -509,6 +509,61 @@ pub trait Backend: Send + Sync + 'static {
     fn host_keys_hear_injected(&self) -> bool {
         false
     }
+
+    /// Whether the host names its game among the desktop's windows (Linux,
+    /// M16c-2): its one source is a screen-sharing dialog's choice, which
+    /// never says which window it is. A session there may give guests the
+    /// keyboard seat on that source; their keys reach nothing until the host
+    /// names the game ([`host::HostPipeline::set_game_window`]), then only while
+    /// it is in front ([`Backend::focus`]).
+    fn names_game_window(&self) -> bool {
+        false
+    }
+
+    /// Starts the desktop's helper that tells which window is in front, for
+    /// a session with a keyboard seat, until the guard drops (Linux,
+    /// M16c-2). Returns at once; `None` where there is none to start.
+    fn watch_front(&self) -> Option<Box<dyn Any + Send>> {
+        None
+    }
+
+    /// The windows the host could name as its game (Linux, M16c-2), each
+    /// with whether it has the shared picture's size. Empty until the
+    /// helper has spoken.
+    fn game_windows(&self) -> Vec<GameWindow> {
+        Vec::new()
+    }
+
+    /// The host's desktop opens a full-screen view from a screen corner that
+    /// takes guests' keys without another window coming to the front, which
+    /// the helper can't see (KDE's Overview, M16c-2): the console asks the
+    /// host to turn the corner off before giving a guest the keyboard.
+    fn warns_hot_corner(&self) -> bool {
+        false
+    }
+}
+
+/// A window the host could name as its game on a shared screen
+/// ([`Backend::game_windows`]). Its `Debug` leaves out the title.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GameWindow {
+    pub id: NativeId,
+    pub title: String,
+    /// Its program.
+    pub app: String,
+    /// It has the size of what is shared: likely the game.
+    pub matches: bool,
+}
+
+impl std::fmt::Debug for GameWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GameWindow")
+            .field("id", &self.id)
+            .field("title", &"..")
+            .field("app", &self.app)
+            .field("matches", &self.matches)
+            .finish()
+    }
 }
 
 /// What the host's keys report (`Backend::host_keys`).

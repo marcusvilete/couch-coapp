@@ -880,6 +880,8 @@ impl Actor {
                 return;
             }
             Command::StopStream => self.stop_stream(now),
+            Command::GameWindows => self.game_windows(),
+            Command::SetGameWindow { id } => self.set_game_window(id, from_afar, now),
             Command::SetStreamLevel { percent } => self.set_stream_level(percent, now),
             Command::EndSession => self.end_session(now),
             Command::Watch { room, host } => {
