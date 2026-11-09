@@ -11,7 +11,7 @@ export function Welcome(props: { name: string | null; onCreate: () => void; onJo
     <div className="welcome">
       <div className="welcome-inner">
         <span className="welcome-mark" aria-hidden="true">
-          <CouchMark weight={64} />
+          <CouchMark />
         </span>
         <h1 className="welcome-title">Play together, from your own couches</h1>
         <p className="welcome-lead">

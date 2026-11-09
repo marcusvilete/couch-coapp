@@ -171,29 +171,35 @@ export function hostOf(url: string): string {
   }
 }
 
-/** The app's mark, as its icon (`src-tauri/icons/source`): a couch whose
- *  backrest is a controller, two seats. Each part hides the lines of those
- *  drawn before it; `weight` is the line width, of 1024. */
-export function CouchMark(props: { weight?: number }) {
-  const mask = useId();
+/** The app's mark, as its icon (`src-tauri/icons/source/icon.svg`, since
+ *  0.27.2): a couch whose backrest is a controller, white on the violet
+ *  rounded tile. Its own colours, in every theme, like the icon. */
+export function CouchMark() {
+  const tile = useId();
   return (
-    <svg viewBox="37 10 950 950" aria-hidden="true">
-      <mask id={mask} maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
-        <g fill="#000" stroke="#fff" strokeWidth={props.weight ?? 88} strokeLinejoin="round">
+    <svg viewBox="0 0 1024 1024" aria-hidden="true">
+      <defs>
+        <linearGradient id={tile} x1="0" y1="0" x2="0.3" y2="1">
+          <stop offset="0" stopColor="#9670ff" />
+          <stop offset="1" stopColor="#5f33d6" />
+        </linearGradient>
+      </defs>
+      <rect width="1024" height="1024" rx="232" fill={`url(#${tile})`} />
+      <g transform="translate(61 82) scale(0.88)">
+        <g fill="#fff" stroke="#7a4fec" strokeWidth="40" strokeLinejoin="round">
           <rect x="210" y="150" width="604" height="420" rx="120" />
           <rect x="295" y="580" width="434" height="200" rx="20" />
           <rect x="105" y="420" width="190" height="400" rx="95" />
           <rect x="729" y="420" width="190" height="400" rx="95" />
         </g>
-        <path d="M 512 600 V 760" stroke="#fff" strokeWidth={props.weight ?? 88} strokeLinecap="round" />
-        <g fill="#fff">
-          <rect x="296" y="322" width="152" height="56" rx="19" />
-          <rect x="344" y="274" width="56" height="152" rx="19" />
-          <circle cx="640" cy="312" r="38" />
-          <circle cx="700" cy="376" r="38" />
+        <path d="M512 600V760" stroke="#7a4fec" strokeWidth="40" strokeLinecap="round" />
+        <g fill="#6b3fe0">
+          <rect x="302" y="324" width="140" height="52" rx="17" />
+          <rect x="346" y="280" width="52" height="140" rx="17" />
+          <circle cx="640" cy="312" r="32" />
+          <circle cx="700" cy="376" r="32" />
         </g>
-      </mask>
-      <rect width="1024" height="1024" fill="currentColor" mask={`url(#${mask})`} />
+      </g>
     </svg>
   );
 }
