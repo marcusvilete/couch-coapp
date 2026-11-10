@@ -13,7 +13,7 @@ The front end is M21's ([results](../../../docs/m21-results.md)): React and Type
   - logic without React in `src/model` (pure) or `src/state` (the lobby's store, web storage), each with vitest tests beside it (`*.test.ts`);
   - screens in `src/shell`, `src/rooms`, `src/sessions`, `src/settings`; shared pieces in `src/ui` (styles from `src/styles/tokens.css`, never raw colours);
   - **Tauri only through `src/platform.ts`** (`platform/tauri.ts` implements it); the preview's fake (`src/preview`) is installed by its own entry, never as a fallback.
-  - **The overlay's page stays apart** (`src/overlay/main.tsx`, `overlay.css` scoped to `.overlay`): no theme tokens, no global styles, no Radix.
+  - **The overlay's page stays apart** (`src/overlay/main.tsx`, `overlay.css` scoped to `.overlay`): no theme tokens, no global styles, no Radix. The host's board over the game (M27b, `src/board/`) too: `board.css` scoped to `.board`, its surface (`BoardSurface`) knows nothing of Tauri, and its editor (`model/editor.ts`) is a port of the stream window's: change one, change the other, and keep `model/editor.test.ts` passing the same cases as `couch-viewer`'s `editor/tests.rs`. Its surface is seen in the preview at `preview.html?board` (shot `board-drawing`).
 - **A new engine command or view:** the TypeScript types come from the engine (`cargo test -p couch-engine` writes `src/bindings`; line-ending-only changes in other bindings drop out on staging). Give the preview's fake engine an answer for it (`preview/fakeEngine.ts`), as the real one would refuse or answer. A room view is kept by its `revision` (`state/lobby.ts`'s `putRoom`): anything new that stores room views does the same.
 - **Platform differences come from `EngineInfo`:** `capabilities` (sessions, keyboard seat, desktop control), `homePc`, `platform`; never guessed from the user agent. The engine's refusal is the guard; the UI only hides what's missing.
 
@@ -38,6 +38,7 @@ The front end is M21's ([results](../../../docs/m21-results.md)): React and Type
 - **The engine's info arrives after the first render:** a hook choosing a mode from it (`useOverlay`'s overlay or notices) must follow a change of mode, not read it once; clean up with the mode current at unmount (a ref).
 - **Prettier isn't the project's formatter** (it would rewrite 155 files): match the code around.
 - **Editing from the shell:** files are CRLF in the working copy, so `perl -pi` patterns with `\n` silently miss; prefer the Edit tool, or normalise in the script. Perl with `{}` delimiters breaks on code with braces.
+- **Text kept even when empty** uses a no-break space (`"00a0"`, as in `HostConsole`): an Edit whose old text holds one must hold it too, or it won't match (met in M27b).
 - **`npm run build` fails if preview code reaches `dist`** (`scripts/check-dist.mjs`): import the preview only from its entry.
 
 ## After

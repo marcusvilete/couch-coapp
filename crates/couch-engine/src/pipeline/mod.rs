@@ -476,6 +476,36 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Whether the host sees and draws on the board over the game here
+    /// (M27b, ADR 0013): a board overlay of ours can lie over the captured
+    /// window and take the focus for drawing. Windows; nowhere else yet.
+    fn draws_over_game(&self) -> bool {
+        false
+    }
+
+    /// Exactly what a capture of `source` shows, on the desktop, in
+    /// physical pixels (M27b): a window's visible frame, a whole screen.
+    /// `None` if it is gone or minimized: the board then waits off screen.
+    fn board_area(&self, _source: &Source) -> Option<ScreenArea> {
+        None
+    }
+
+    /// Lays the board overlay's window over `area` without activating it,
+    /// or parks it off every screen (`None`).
+    fn place_board(&self, _board: NativeId, _area: Option<ScreenArea>) {}
+
+    /// Lets the board overlay take clicks and the focus (drawing), or makes
+    /// it click-through and never activated again. `false` if it is gone.
+    fn board_interactive(&self, _board: NativeId, _on: bool) -> bool {
+        false
+    }
+
+    /// The window in front now, if known (M27b: given the front back when
+    /// drawing over a streamed screen ends).
+    fn foreground_window(&self) -> Option<NativeId> {
+        None
+    }
+
     /// What this system can host (M16c, ADR 0012): sessions (capture,
     /// encode, guests' controllers), a keyboard-and-mouse seat, desktop
     /// control. Windows has them all; Linux sessions with controller seats

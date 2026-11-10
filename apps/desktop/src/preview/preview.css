@@ -67,3 +67,12 @@
   font: 11px "Segoe UI", system-ui, sans-serif;
   color: #cfe;
 }
+
+/* The board overlay's preview (M27b): a stand-in game under it. */
+.preview-board-game {
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(circle at 70% 30%, rgb(255 190 90 / 0.5), transparent 40%),
+    linear-gradient(160deg, #1d3b5a 0%, #2c5f3a 55%, #3d2a1a 100%);
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "board",
+  "description": "The host's board overlay over the game (M27b): it hears the board and its state from the main window and hands it the host's drawing; it may call none of the app's commands",
+  "windows": ["board"],
+  "permissions": ["core:event:default"]
+}

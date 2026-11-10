@@ -179,6 +179,7 @@ fn the_eraser_takes_only_ours_and_undoes() {
         colour: 0,
         width: 0,
         fades: false,
+        stay: 4,
         done: true,
         points: vec![p(10_000, 10_000), p(20_000, 20_000)],
     };
@@ -398,6 +399,7 @@ fn a_stroke_left_open_by_a_crash_is_finished() {
         colour: 0,
         width: 0,
         fades: true,
+        stay: 4,
         done: false,
         points: vec![p(1, 1)],
     };
@@ -467,6 +469,7 @@ fn what_the_host_cleared_leaves_the_history() {
             colour: 0,
             width: 0,
             fades: false,
+            stay: 4,
             done: true,
             points: vec![p(0, 0), p(1, 1)],
         })],
@@ -476,4 +479,65 @@ fn what_the_host_cleared_leaves_the_history() {
     d.tool(DrawTool::Line);
     d.stroke(&[p(0, 0), p(9, 9)], false);
     assert!(d.board.get(ME, 42).is_some());
+}
+
+/// Wire revision 16 (the author's request in M27b's run): how long a fading
+/// stroke stays is its author's pick.
+#[test]
+fn picking_how_long_turns_fading_on_and_restyles_the_selection() {
+    let mut d = Desk::new();
+    assert_eq!(d.editor.stay, couch_proto::board::DEFAULT_STAY);
+    d.tool(DrawTool::Line);
+    d.stroke(&[p(1_000, 1_000), p(4_000, 3_000)], false);
+    d.key(DrawAction::SelectAll);
+    d.editor.set_stay(15, &mut d.board, d.now);
+    let e = &d.mine()[0];
+    assert!(e.fades && e.stay == 15, "{e:?}");
+    d.editor.set_stay(5, &mut d.board, d.now);
+    assert_eq!(d.editor.stay, 15, "only the stays offered");
+    d.key(DrawAction::Undo);
+    assert!(!d.mine()[0].fades && d.mine()[0].stay == 4);
+    // What's drawn next fades after the stay picked.
+    d.tool(DrawTool::Line);
+    d.stroke(&[p(1_000, 1_000), p(4_000, 3_000)], false);
+    assert!(d.mine()[1].fades && d.mine()[1].stay == 15);
+    d.send();
+    assert_eq!(d.hosts_copy(), d.mine());
+}
+
+/// The toolbar's one fade button (the author's choice in M27b's run): a
+/// click goes round "stays", 2, 4, 8, 15 s; the wheel steps up or down and
+/// stops at either end; the selection takes each step.
+#[test]
+fn the_fade_button_goes_round_and_the_wheel_steps() {
+    let mut d = Desk::new();
+    let state = |d: &Desk| (d.editor.fades, d.editor.stay);
+    assert_eq!(state(&d), (false, 4), "stays, by default");
+    for want in [(true, 2), (true, 4), (true, 8), (true, 15)] {
+        d.editor.step_fade(FadeStep::Next, &mut d.board, d.now);
+        assert_eq!(state(&d), want);
+    }
+    d.editor.step_fade(FadeStep::Next, &mut d.board, d.now);
+    assert!(!d.editor.fades, "round to stays");
+    d.editor.step_fade(FadeStep::Shorter, &mut d.board, d.now);
+    assert!(!d.editor.fades, "the wheel stops at stays");
+    d.editor.step_fade(FadeStep::Longer, &mut d.board, d.now);
+    assert_eq!(state(&d), (true, 2));
+    for _ in 0..6 {
+        d.editor.step_fade(FadeStep::Longer, &mut d.board, d.now);
+    }
+    assert_eq!(state(&d), (true, 15), "and at the longest");
+    d.editor.step_fade(FadeStep::Shorter, &mut d.board, d.now);
+    assert_eq!(state(&d), (true, 8));
+    // The selection follows.
+    d.tool(DrawTool::Line);
+    d.stroke(&[p(1_000, 1_000), p(4_000, 3_000)], false);
+    d.key(DrawAction::SelectAll);
+    d.editor.step_fade(FadeStep::Shorter, &mut d.board, d.now);
+    assert!(d.mine()[0].fades && d.mine()[0].stay == 4);
+    d.editor.step_fade(FadeStep::Shorter, &mut d.board, d.now);
+    d.editor.step_fade(FadeStep::Shorter, &mut d.board, d.now);
+    assert!(!d.mine()[0].fades, "stays now");
+    d.send();
+    assert_eq!(d.hosts_copy(), d.mine());
 }

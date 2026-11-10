@@ -284,6 +284,15 @@ export function hostSession(
     desktop: null,
     guestsKeyboard: true,
     drawing: noDrawing(),
+    // Ours: the board over the game (M27b); a Linux host's scenario says
+    // it isn't available.
+    boardOverlay: {
+      available: true,
+      shown: true,
+      drawing: false,
+      key: seats.length > 0 ? "Ctrl+Alt+Shift+D" : null,
+      note: null,
+    },
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,
@@ -717,7 +726,11 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (key == null) throw "that key can't be used for a shortcut";
       if (!row.chord && !/^F([1-9]|1[0-2])$/.test(key)) throw "only F1 to F12 (but F4) work without Ctrl+Alt+Shift";
       const keys = row.chord ? `Ctrl+Alt+Shift+${key}` : key;
-      const taken = world.shortcuts.find((s) => s.id !== row.id && s.keys === keys);
+      // The two drawing keys may share one (M27b), as the engine allows.
+      const drawing = ["hostDrawing", "toggleDrawing"];
+      const taken = world.shortcuts.find(
+        (s) => s.id !== row.id && s.keys === keys && !(drawing.includes(s.id) && drawing.includes(row.id)),
+      );
       if (taken) throw `${keys} already does this: ${taken.action}`;
       row.keys = keys;
       row.isDefault = keys === DEFAULT_KEYS[row.id];
@@ -747,6 +760,22 @@ function handle(cmd: Command): Response | Promise<Response> {
     case "stopDrawing": {
       const { room, session: s } = hosting();
       return drawingCommand(room, s, cmd);
+    }
+    // The board over the game (M27b): the preview has no board window, so
+    // its drawing and its page's asking change nothing.
+    case "hostDraw":
+    case "hostBoard":
+      hosting();
+      return { type: "done" };
+    case "endHostDrawing":
+    case "showBoardOverlay": {
+      const { room, session: s } = hosting();
+      if (s.boardOverlay) {
+        if (cmd.type === "endHostDrawing") s.boardOverlay.drawing = false;
+        else s.boardOverlay.shown = cmd.on;
+      }
+      changed(room);
+      return { type: "done" };
     }
     case "setTray":
       world.tray = cmd.on;
@@ -1048,6 +1077,7 @@ const DEFAULT_KEYS: Record<string, string> = {
   panic: "Ctrl+Alt+Shift+Backspace",
   acceptRequest: "Ctrl+Alt+Shift+Y",
   declineRequest: "Ctrl+Alt+Shift+N",
+  hostDrawing: "Ctrl+Alt+Shift+D",
   toggleControl: "Ctrl+Alt+Shift+C",
   freeMouse: "Ctrl+Alt+Shift+M",
   fullscreen: "Ctrl+Alt+Shift+F",
@@ -1130,6 +1160,7 @@ export function defaultShortcuts(): ShortcutView[] {
     ["panic", true, "Take the controller back from everyone and pause control", "host", "while you stream; the game never sees it"],
     ["acceptRequest", true, "Accept the oldest request for a seat", "host", "while you stream and someone asks; the game never sees it"],
     ["declineRequest", true, "Decline the oldest request for a seat", "host", "while you stream and someone asks; the game never sees it"],
+    ["hostDrawing", true, "Draw over the game, or back to the game", "host", "while you stream on Windows with drawing on; the game never sees it"],
     ["toggleControl", true, "Ask for the controller, withdraw the request, or give it back", "viewer", ""],
     ["freeMouse", true, "Free the mouse, or capture it again", "viewer", "while you may use the mouse"],
     ["fullscreen", true, "Full screen, or back to a window", "viewer", ""],

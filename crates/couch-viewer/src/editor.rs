@@ -18,8 +18,8 @@ use std::{
 use couch_input::shortcuts::{DrawAction, DrawTool};
 use couch_proto::{
     board::{
-        BoardOp, Element, ElementKind, MAX_LASER_POINTS, MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS,
-        PALETTE, Point, WIDTHS, batches, line_width,
+        BoardOp, DEFAULT_STAY, Element, ElementKind, FADE_STAYS, MAX_LASER_POINTS,
+        MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, PALETTE, Point, WIDTHS, batches, line_width,
     },
     ids::MemberId,
 };
@@ -41,6 +41,18 @@ const TOUCH: f32 = 0.012;
 const NUDGE: i32 = 131;
 /// Where a paste lands from what was copied, in picture coordinates.
 const PASTE_STEP: i32 = 1_300;
+
+/// How the toolbar's one fade button steps (the author's choice, M27b):
+/// through "stays", then each fade time offered, shortest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeStep {
+    /// A click: on round, from the longest back to "stays".
+    Next,
+    /// The wheel up: longer, stopping at the longest.
+    Longer,
+    /// The wheel down: shorter, stopping at "stays".
+    Shorter,
+}
 
 /// What a key did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +111,9 @@ pub struct Editor {
     pub colour: u8,
     pub width: u8,
     pub fades: bool,
+    /// How long a fading element stays before it fades, in seconds: one of
+    /// `FADE_STAYS` (wire revision 16).
+    pub stay: u8,
     /// The picture's width over its height: distances are measured in
     /// picture heights.
     aspect: f32,
@@ -129,6 +144,7 @@ impl Editor {
             colour: 0,
             width: 1,
             fades: false,
+            stay: DEFAULT_STAY,
             aspect: 16.0 / 9.0,
             next_id: 1,
             gesture: None,
@@ -228,6 +244,55 @@ impl Editor {
                     e.fades = f;
                 }
                 e
+            })
+            .collect();
+        self.replace_all(changed, board, now);
+    }
+
+    /// The fade button stepped: "stays", or one of `FADE_STAYS`, as
+    /// [`Self::set_style`] and [`Self::set_stay`] would make it (what is
+    /// selected takes it too).
+    pub fn step_fade(&mut self, step: FadeStep, board: &mut BoardView, now: Instant) {
+        // 0 stays; 1.. the stays offered, in order.
+        let at = if self.fades {
+            FADE_STAYS
+                .iter()
+                .position(|s| *s == self.stay)
+                .map_or(0, |i| i + 1)
+        } else {
+            0
+        };
+        let last = FADE_STAYS.len();
+        let to = match step {
+            FadeStep::Next if at == last => 0,
+            FadeStep::Next => at + 1,
+            FadeStep::Longer => (at + 1).min(last),
+            FadeStep::Shorter => at.saturating_sub(1),
+        };
+        if to == at {
+            return;
+        }
+        match to {
+            0 => self.set_style(None, None, Some(false), board, now),
+            n => self.set_stay(FADE_STAYS[n - 1], board, now),
+        }
+    }
+
+    /// How long fading elements stay before they fade (one of
+    /// `FADE_STAYS`): fading turns on, and what is selected takes both.
+    pub fn set_stay(&mut self, stay: u8, board: &mut BoardView, now: Instant) {
+        if !FADE_STAYS.contains(&stay) {
+            return;
+        }
+        self.stay = stay;
+        self.fades = true;
+        let changed: Vec<Element> = self
+            .selected(board)
+            .into_iter()
+            .map(|e| Element {
+                fades: true,
+                stay,
+                ..e
             })
             .collect();
         self.replace_all(changed, board, now);
@@ -630,6 +695,7 @@ impl Editor {
             colour: self.colour,
             width: self.width,
             fades: self.fades,
+            stay: self.stay,
             done,
             points,
         }

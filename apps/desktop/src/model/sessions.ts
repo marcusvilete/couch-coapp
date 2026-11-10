@@ -302,7 +302,9 @@ export function noDrawing(): DrawingView {
  * Bia and Caio". */
 export function drawingSummary(room: RoomView, d: DrawingView): string {
   if (d.elements === 0) return "Nothing drawn yet.";
-  const who = listed(d.drawers.map((x) => nameOf(room, x.member)));
+  // The host draws too, over the game (M27b): "you" then.
+  const me = room.members.find((m) => m.link === "me")?.id;
+  const who = listed(d.drawers.map((x) => (x.member === me ? "you" : nameOf(room, x.member))));
   return `${d.elements} ${d.elements === 1 ? "drawing" : "drawings"} by ${who}.`;
 }
 

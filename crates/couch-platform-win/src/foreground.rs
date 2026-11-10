@@ -30,6 +30,12 @@ fn root(hwnd: HWND) -> Option<WindowId> {
     (!root.is_invalid()).then_some(WindowId(root.0 as isize))
 }
 
+/// The foreground window, at its root; `None` if there is none.
+pub fn foreground_window() -> Option<WindowId> {
+    // SAFETY: no arguments.
+    root(unsafe { GetForegroundWindow() })
+}
+
 /// Whether `window` (or one of its children) is the foreground window.
 pub fn is_foreground(window: WindowId) -> bool {
     // SAFETY: no arguments.

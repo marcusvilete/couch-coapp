@@ -233,6 +233,13 @@ pub fn run() {
     // With the relay chosen in Settings → Network.
     let options = EngineOptions {
         backup_files: Some(Arc::new(BackupDialogs(app.handle().clone()))),
+        // Windows only: the engine there lays it over the game (M27b).
+        board_windows: cfg!(windows).then(|| {
+            Arc::new(BoardWindow {
+                app: app.handle().clone(),
+                data_dir: profile.data_dir().join("webview"),
+            }) as Arc<dyn couch_engine::board::BoardWindows>
+        }),
         ..EngineOptions::desktop(&profile)
     };
     let engine =
@@ -267,6 +274,14 @@ pub fn run() {
                 tracing::info!("the window went to the notification area");
             }
         }
+        // The board over the game (M27b) goes only when the engine closes it
+        // (`destroy`, which asks nothing): Alt+F4 while drawing would leave
+        // the engine a window that's gone.
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == BOARD_WINDOW => api.prevent_close(),
         // The app is its main window: closing it while the host overlay is
         // up (M8) must still end the app.
         RunEvent::WindowEvent {
@@ -322,6 +337,103 @@ impl BackupFiles for BackupDialogs {
             .into_path()
             .ok()
     }
+}
+
+/// The host's board overlay over the game (M27b): made here, placed and
+/// switched by the engine (`couch_engine::board`), which never lets the
+/// webview move or focus it. Transparent, click-through, never activated,
+/// left out of captures, waiting off every screen until the engine lays it
+/// over the game.
+struct BoardWindow {
+    app: AppHandle,
+    /// The main window's webview data: one webview environment per process.
+    data_dir: PathBuf,
+}
+
+const BOARD_WINDOW: &str = "board";
+/// Off every screen, as the engine parks it.
+const BOARD_PARKED: f64 = -32_000.0;
+
+impl couch_engine::board::BoardWindows for BoardWindow {
+    fn open(&self) -> Option<couch_engine::pipeline::NativeId> {
+        if let Some(old) = self.app.get_webview_window(BOARD_WINDOW) {
+            let _ = old.destroy();
+        }
+        let mut builder = WebviewWindowBuilder::new(
+            &self.app,
+            BOARD_WINDOW,
+            tauri::WebviewUrl::App("board.html".into()),
+        );
+        // It shares the main window's webview data, and WebView2 refuses a
+        // second webview on one data folder unless its environment's options
+        // are the same (the scroll bars' style among them, which the main
+        // window sets): taken from the main window's own configuration.
+        if let Some(main) = self
+            .app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|w| w.label == MAIN_WINDOW)
+        {
+            builder = builder
+                .scroll_bar_style(scroll_bar_style(&main.scroll_bar_style))
+                .browser_extensions_enabled(main.browser_extensions_enabled)
+                .incognito(main.incognito);
+            if let Some(args) = &main.additional_browser_args {
+                builder = builder.additional_browser_args(args);
+            }
+        }
+        let built = builder
+            .title("Couch Co-App drawings")
+            .data_directory(self.data_dir.clone())
+            .position(BOARD_PARKED, BOARD_PARKED)
+            .inner_size(64.0, 64.0)
+            .transparent(true)
+            .background_color(tauri::webview::Color(0, 0, 0, 0))
+            .decorations(false)
+            .shadow(false)
+            .resizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .focusable(false)
+            .content_protected(true)
+            .build();
+        let window = match built {
+            Ok(window) => window,
+            Err(e) => {
+                tracing::warn!("the board overlay's window: {e}");
+                return None;
+            }
+        };
+        // Click-through from the start. The engine switches it from here
+        // on, never through these setters (they show the window again).
+        let _ = window.set_ignore_cursor_events(true);
+        native_handle(&window)
+    }
+
+    fn close(&self, board: couch_engine::pipeline::NativeId) {
+        // That window alone: a newer one may have been made since.
+        if let Some(window) = self.app.get_webview_window(BOARD_WINDOW)
+            && native_handle(&window) == Some(board)
+        {
+            let _ = window.destroy();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn native_handle(window: &tauri::WebviewWindow) -> Option<couch_engine::pipeline::NativeId> {
+    window
+        .hwnd()
+        .ok()
+        .map(|hwnd| hwnd.0 as couch_engine::pipeline::NativeId)
+}
+
+#[cfg(not(windows))]
+fn native_handle(_: &tauri::WebviewWindow) -> Option<couch_engine::pipeline::NativeId> {
+    None
 }
 
 /// The log: in development, the console (or the file `profiles.ps1` sends
@@ -517,4 +629,18 @@ fn tray_icon(app: &AppHandle) -> Option<tauri::image::Image<'static>> {
 fn fail(error: impl std::fmt::Display) -> ! {
     eprintln!("Couch Co-App: {error}");
     std::process::exit(2);
+}
+
+/// The configuration's scroll bar style as the builder takes it (two enums
+/// of one name).
+fn scroll_bar_style(
+    style: &tauri::utils::config::ScrollBarStyle,
+) -> tauri::webview::ScrollBarStyle {
+    match style {
+        #[cfg(windows)]
+        tauri::utils::config::ScrollBarStyle::FluentOverlay => {
+            tauri::webview::ScrollBarStyle::FluentOverlay
+        }
+        _ => tauri::webview::ScrollBarStyle::Default,
+    }
 }

@@ -61,6 +61,15 @@ const PASSWORD: &str = "pizza night";
 const WAIT: Duration = Duration::from_secs(20);
 /// The fake window everyone streams.
 const WINDOW: NativeId = 7;
+/// The host's board overlay window (M27b).
+const BOARD: NativeId = 0xB0A2D;
+/// Where the game's window is on the desktop.
+const GAME_AREA: couch_engine::ScreenArea = couch_engine::ScreenArea {
+    x: 100,
+    y: 50,
+    width: 1280,
+    height: 720,
+};
 
 // ---- The fake machine ----
 
@@ -198,6 +207,24 @@ struct Fake {
     capture_slow: AtomicBool,
     /// The codec of every encoder opened, in order.
     codecs: Mutex<Vec<Codec>>,
+    /// The host draws over the game here (M27b, as on Windows).
+    draws: AtomicBool,
+    /// A game in exclusive full screen is in front (M27b).
+    full_screen: AtomicBool,
+    /// The board overlay's window: opened and closed so far, where it was
+    /// last placed (`None` parked off screen), whether it takes clicks, and
+    /// whether it has the focus.
+    board_opened: AtomicUsize,
+    board_closed: Arc<AtomicUsize>,
+    board_placed: Mutex<Vec<Option<couch_engine::ScreenArea>>>,
+    board_interactive: AtomicBool,
+    board_in_front: AtomicBool,
+    /// The board's window went by itself (its webview crashed).
+    board_gone: AtomicBool,
+    /// The game's window is minimized: nothing to lay the board over.
+    off_screen: AtomicBool,
+    /// The board's window can't be made (WebView2 refused it).
+    board_open_fails: AtomicBool,
 }
 
 /// GPU frames on the fake machine: off unless a scenario turns them on.
@@ -722,6 +749,13 @@ impl Backend for Fake {
     }
 
     fn focus(&self, window: NativeId) -> Focus {
+        if window == BOARD {
+            let front = self.board_in_front.load(Ordering::SeqCst);
+            return Focus {
+                foreground: front,
+                pointer_inside: front,
+            };
+        }
         let foreground = !self.away.load(Ordering::SeqCst)
             && (!self.names_game.load(Ordering::SeqCst)
                 || self.front_now.load(Ordering::SeqCst) == window);
@@ -739,6 +773,9 @@ impl Backend for Fake {
                 .unwrap()
                 .iter()
                 .any(|w| w.id == window);
+        }
+        if window == BOARD {
+            return !self.board_gone.load(Ordering::SeqCst);
         }
         window != 0 && self.game.window.load(Ordering::SeqCst) == window
     }
@@ -759,7 +796,34 @@ impl Backend for Fake {
 
     fn bring_to_front(&self, window: NativeId) -> bool {
         self.brought_to_front.lock().unwrap().push(window);
-        self.away.store(false, Ordering::SeqCst);
+        // The board in front means the game isn't (M27b).
+        let board = window == BOARD;
+        self.board_in_front.store(board, Ordering::SeqCst);
+        self.away.store(board, Ordering::SeqCst);
+        true
+    }
+
+    fn draws_over_game(&self) -> bool {
+        self.draws.load(Ordering::SeqCst)
+    }
+
+    fn exclusive_full_screen(&self) -> bool {
+        self.full_screen.load(Ordering::SeqCst)
+    }
+
+    fn board_area(&self, source: &Source) -> Option<couch_engine::ScreenArea> {
+        (matches!(source, Source::Window(WINDOW)) && !self.off_screen.load(Ordering::SeqCst))
+            .then_some(GAME_AREA)
+    }
+
+    fn place_board(&self, board: NativeId, area: Option<couch_engine::ScreenArea>) {
+        assert_eq!(board, BOARD);
+        self.board_placed.lock().unwrap().push(area);
+    }
+
+    fn board_interactive(&self, board: NativeId, on: bool) -> bool {
+        assert_eq!(board, BOARD);
+        self.board_interactive.store(on, Ordering::SeqCst);
         true
     }
 
@@ -827,6 +891,24 @@ impl Backend for Fake {
             .find(|(_, s)| *s == Shortcut::Panic)
             .map(|(key, _)| *key);
         Ok(Box::new(Unhook(self.panic_key.clone())))
+    }
+}
+
+/// The app's side of the board overlay's window (M27b).
+impl couch_engine::board::BoardWindows for Fake {
+    fn open(&self) -> Option<NativeId> {
+        self.board_gone.store(false, Ordering::SeqCst);
+        self.board_opened.fetch_add(1, Ordering::SeqCst);
+        if self.board_open_fails.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(BOARD)
+    }
+
+    fn close(&self, window: NativeId) {
+        assert_eq!(window, BOARD);
+        self.board_closed.fetch_add(1, Ordering::SeqCst);
+        self.board_in_front.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1247,12 +1329,13 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
         tick: Duration::from_millis(50),
         invite_valid_for: Duration::from_secs(3600),
         profile_wait: Duration::from_secs(2),
-        backend: fake,
+        backend: fake.clone(),
         join_wait: Duration::from_secs(5),
         replace_grace: Duration::from_millis(500),
         reconnect_wait: Duration::from_secs(5),
         relay_only: false,
         backup_files: None,
+        board_windows: Some(fake.clone()),
         start_at_sign_in: false,
     }
 }
@@ -6375,6 +6458,7 @@ fn a_box(id: u32) -> BoardOp {
         colour: 0,
         width: 1,
         fades: false,
+        stay: 4,
         done: true,
         points: vec![Point::new(100, 100), Point::new(9_000, 6_000)],
     })
@@ -6609,4 +6693,347 @@ async fn a_device_runs_the_board_from_afar() {
     })
     .await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+// ---- The host draws over the game (M27b) ----
+
+/// The board overlay as the host's console shows it.
+fn overlay_of(s: Option<&SessionView>) -> Option<couch_engine::BoardOverlayView> {
+    s.and_then(|s| s.board_overlay.clone())
+}
+
+fn last_placed(fake: &Fake) -> Option<Option<couch_engine::ScreenArea>> {
+    fake.board_placed.lock().unwrap().last().copied()
+}
+
+fn brought_last(fake: &Fake) -> Option<NativeId> {
+    fake.brought_to_front.lock().unwrap().last().copied()
+}
+
+fn interactive(fake: &Fake) -> bool {
+    fake.board_interactive.load(Ordering::SeqCst)
+}
+
+fn board_count(n: &AtomicUsize) -> usize {
+    n.load(Ordering::SeqCst)
+}
+
+/// M27b: the host's board overlay opens while drawing is on, lies over the
+/// game only while something is drawn and the game is in front, and never
+/// over a game in exclusive full screen; the host's own key makes it take
+/// the focus for drawing, and the host's drawing goes to every viewer; the
+/// key again, the overlay's Done, the focus going elsewhere and the panic
+/// key end it, the game back in front unless the host went elsewhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_host_draws_over_the_game() {
+    use couch_engine::board::{
+        BoardElement, BoardElementKind, BoardNewsView, BoardOpView, BoardPoint,
+    };
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.draws.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let (aid, bid) = (a.id(), b.id());
+    assert!(
+        a.fake
+            .host_keys_on
+            .lock()
+            .unwrap()
+            .contains(&(HidUsage(0x07), Shortcut::HostDrawing)),
+        "the drawing key hooked with the host's keys"
+    );
+
+    // Drawing off: no window, and the key says why.
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    a.wait_session(&room, &a, "the key refused", |s| {
+        overlay_of(s).is_some_and(|o| {
+            o.available && !o.drawing && o.note.as_deref() == Some("Turn drawing on first")
+        })
+    })
+    .await;
+    assert_eq!(board_count(&a.fake.board_opened), 0);
+
+    // On: the window opens, off screen while nothing is drawn.
+    a.ok(Command::SetDrawing { on: true }).await;
+    wait("the board window", || {
+        board_count(&a.fake.board_opened) == 1
+    })
+    .await;
+    // Its page loads and asks for the board; until then it stays off screen.
+    a.ok(Command::HostBoard).await;
+    wait("parked", || last_placed(&a.fake) == Some(None)).await;
+    let view = overlay_of(a.session(&room, &a).await.as_ref()).unwrap();
+    assert!(view.shown && view.key.as_deref() == Some("Ctrl+Alt+Shift+D"));
+
+    // A viewer draws: it lies over the game, and the overlay hears it.
+    wait("B hears drawing is on", || drawing_on(&b_window, true)).await;
+    b_window.draw(&b, vec![a_box(1)]);
+    let author = a
+        .event("B's drawing", |e| match e {
+            Event::HostBoard {
+                news: BoardNewsView::Update { author, .. },
+                ..
+            } => Some(author.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(author, bid);
+    wait("over the game", || {
+        last_placed(&a.fake) == Some(Some(GAME_AREA))
+    })
+    .await;
+    // The overlay that just loaded gets the board whole.
+    a.ok(Command::HostBoard).await;
+    let (elements, generation) = a
+        .event("the board whole", |e| match e {
+            Event::HostBoard {
+                news:
+                    BoardNewsView::Snapshot {
+                        elements,
+                        first: true,
+                        generation,
+                    },
+                ..
+            } => Some((elements.len(), *generation)),
+            _ => None,
+        })
+        .await;
+    assert_eq!(elements, 1);
+    // The game not in front: off screen.
+    a.fake.away.store(true, Ordering::SeqCst);
+    wait("parked with the game away", || {
+        last_placed(&a.fake) == Some(None)
+    })
+    .await;
+    a.fake.away.store(false, Ordering::SeqCst);
+    wait("back over the game", || {
+        last_placed(&a.fake) == Some(Some(GAME_AREA))
+    })
+    .await;
+
+    // The key: the board takes the mouse and the focus.
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    a.wait_session(&room, &a, "drawing", |s| {
+        overlay_of(s).is_some_and(|o| o.drawing && o.note.is_none())
+    })
+    .await;
+    assert!(interactive(&a.fake));
+    assert_eq!(brought_last(&a.fake), Some(BOARD));
+    // The host draws, as itself, to every viewer.
+    let stroke = BoardOpView::Put {
+        element: BoardElement {
+            id: 1,
+            kind: BoardElementKind::Pen,
+            colour: 2,
+            width: 1,
+            fades: false,
+            stay: 4,
+            done: true,
+            points: vec![BoardPoint { x: 10, y: 10 }, BoardPoint { x: 900, y: 400 }],
+        },
+    };
+    a.ok(Command::HostDraw {
+        generation,
+        ops: vec![stroke],
+    })
+    .await;
+    wait("B sees the host's", || {
+        b_window.board().contains(&(aid.clone(), 1))
+    })
+    .await;
+    // A malformed batch never reaches the session.
+    assert!(matches!(
+        a.handle(Command::HostDraw {
+            generation: 0,
+            ops: vec![]
+        })
+        .await,
+        Err(EngineError::Refused(_))
+    ));
+    // Done: click-through again, the game back in front.
+    a.ok(Command::EndHostDrawing).await;
+    assert!(!interactive(&a.fake));
+    assert_eq!(brought_last(&a.fake), Some(WINDOW));
+    // The key twice.
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("drawing again", || interactive(&a.fake)).await;
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("ended by the key", || !interactive(&a.fake)).await;
+    assert_eq!(brought_last(&a.fake), Some(WINDOW));
+
+    // The focus going elsewhere ends it, without bringing the game back.
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("drawing", || interactive(&a.fake)).await;
+    a.fake.board_in_front.store(false, Ordering::SeqCst);
+    a.wait_session(&room, &a, "ended by the focus going", |s| {
+        overlay_of(s).is_some_and(|o| !o.drawing)
+    })
+    .await;
+    assert_eq!(
+        brought_last(&a.fake),
+        Some(BOARD),
+        "the host went elsewhere"
+    );
+
+    // The panic key ends it, the game back.
+    a.fake.away.store(false, Ordering::SeqCst);
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("drawing", || interactive(&a.fake)).await;
+    assert!(a.fake.press_panic_key());
+    a.wait_session(&room, &a, "ended by the panic key", |s| {
+        overlay_of(s).is_some_and(|o| !o.drawing)
+    })
+    .await;
+    assert_eq!(brought_last(&a.fake), Some(WINDOW));
+    a.ok(Command::AllowControl).await;
+
+    // A game in exclusive full screen: nothing over it, and the key says so.
+    a.fake.full_screen.store(true, Ordering::SeqCst);
+    wait("parked over full screen", || {
+        last_placed(&a.fake) == Some(None)
+    })
+    .await;
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    a.wait_session(&room, &a, "refused over full screen", |s| {
+        overlay_of(s).is_some_and(|o| {
+            !o.drawing && o.note.is_some_and(|n| n.contains("exclusive full screen"))
+        })
+    })
+    .await;
+    a.fake.full_screen.store(false, Ordering::SeqCst);
+
+    // Hidden: the window goes; drawing over the game shows it anyway.
+    a.ok(Command::ShowBoardOverlay { on: false }).await;
+    wait("closed", || board_count(&a.fake.board_closed) == 1).await;
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("opened to draw", || board_count(&a.fake.board_opened) == 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!interactive(&a.fake), "not before its page has loaded");
+    a.ok(Command::HostBoard).await;
+    wait("and focused", || brought_last(&a.fake) == Some(BOARD)).await;
+    assert!(interactive(&a.fake));
+    a.ok(Command::EndHostDrawing).await;
+    wait("closed again", || board_count(&a.fake.board_closed) == 2).await;
+    a.ok(Command::ShowBoardOverlay { on: true }).await;
+    wait("open again", || board_count(&a.fake.board_opened) == 3).await;
+    a.ok(Command::HostBoard).await;
+
+    // The game off screen (minimized): the key is refused; drawing that
+    // began ends when it goes, rather than leave an unseen board in front.
+    a.fake.off_screen.store(true, Ordering::SeqCst);
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    a.wait_session(&room, &a, "refused off screen", |s| {
+        overlay_of(s)
+            .is_some_and(|o| !o.drawing && o.note.is_some_and(|n| n.contains("isn't on screen")))
+    })
+    .await;
+    a.fake.off_screen.store(false, Ordering::SeqCst);
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("drawing", || interactive(&a.fake)).await;
+    a.fake.off_screen.store(true, Ordering::SeqCst);
+    a.wait_session(&room, &a, "ended off screen", |s| {
+        overlay_of(s)
+            .is_some_and(|o| !o.drawing && o.note.is_some_and(|n| n.contains("off screen")))
+    })
+    .await;
+    assert_eq!(brought_last(&a.fake), Some(WINDOW), "the game back");
+    a.fake.off_screen.store(false, Ordering::SeqCst);
+
+    // The window going by itself (its webview crashed): another opens.
+    a.fake.board_gone.store(true, Ordering::SeqCst);
+    wait("another window", || board_count(&a.fake.board_opened) == 4).await;
+    a.ok(Command::HostBoard).await;
+
+    // The stream stopping ends it all: drawing, and the window.
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("drawing", || interactive(&a.fake)).await;
+    a.ok(Command::StopStream).await;
+    wait("closed with the stream", || {
+        board_count(&a.fake.board_closed) == 4
+    })
+    .await;
+    a.wait_session(&room, &a, "not drawing", |s| {
+        overlay_of(s).is_some_and(|o| !o.drawing)
+    })
+    .await;
+    a.ok(stream_window()).await;
+    wait("open with the next", || {
+        board_count(&a.fake.board_opened) == 5
+    })
+    .await;
+    a.ok(Command::EndSession).await;
+    wait("closed with the session", || {
+        board_count(&a.fake.board_closed) == 5
+    })
+    .await;
+    c.stop().await;
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// M27b, the author's choice: a session to watch together has no hook of
+/// the host's keys (M24), but while drawing is on, one with the drawing key
+/// alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn watching_together_hooks_the_drawing_key_alone_while_drawing_is_on() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.draws.store(true, Ordering::SeqCst);
+    let nobody = setup(0, KeyboardMouseSeat::None);
+    let reply = a.live(go_live_with(&room, 4, nobody)).await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    assert!(!a.fake.panic_key_hooked(), "no hook");
+    a.ok(Command::SetDrawing { on: true }).await;
+    wait("the drawing key alone", || {
+        a.fake.panic_key_hooked()
+            && *a.fake.host_keys_on.lock().unwrap() == [(HidUsage(0x07), Shortcut::HostDrawing)]
+    })
+    .await;
+    wait("the board window", || {
+        board_count(&a.fake.board_opened) == 1
+    })
+    .await;
+    a.ok(Command::HostBoard).await;
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("drawing", || interactive(&a.fake)).await;
+    a.ok(Command::SetDrawing { on: false }).await;
+    wait("no hook with drawing off", || !a.fake.panic_key_hooked()).await;
+    assert!(!interactive(&a.fake), "drawing ended");
+    c.stop().await;
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// M27b, the author's one-PC run: a board window that can't be made is
+/// tried once, never again on every change (each try flashed a window), and
+/// once more when the host asks again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_board_window_that_cant_be_made_is_not_tried_over_and_over() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.draws.store(true, Ordering::SeqCst);
+    a.fake.board_open_fails.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    a.ok(Command::SetDrawing { on: true }).await;
+    wait("one try", || board_count(&a.fake.board_opened) == 1).await;
+    // Ticks and changes come and go: no other try.
+    a.ok(Command::ClearBoard).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(board_count(&a.fake.board_opened), 1, "not tried again");
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("the key tries once more", || {
+        board_count(&a.fake.board_opened) == 2
+    })
+    .await;
+    a.wait_session(&room, &a, "said so", |s| {
+        overlay_of(s).is_some_and(|o| {
+            !o.drawing && o.note.as_deref() == Some("The drawing window couldn't be opened")
+        })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(board_count(&a.fake.board_opened), 2, "and no more");
+    // It works again: the switch, toggled, opens it.
+    a.fake.board_open_fails.store(false, Ordering::SeqCst);
+    a.ok(Command::ShowBoardOverlay { on: false }).await;
+    a.ok(Command::ShowBoardOverlay { on: true }).await;
+    wait("opened", || board_count(&a.fake.board_opened) == 3).await;
+    c.stop().await;
+    stop_all(&mut [&mut a, &mut b]).await;
 }

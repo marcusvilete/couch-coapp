@@ -9,6 +9,7 @@
 #![cfg(windows)]
 
 pub mod audio;
+pub mod board_window;
 pub mod capture;
 pub mod clock;
 pub mod controllers;

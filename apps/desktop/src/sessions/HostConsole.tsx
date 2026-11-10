@@ -23,6 +23,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import type { BoardOverlayView } from "../bindings/BoardOverlayView";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { desktopBlocked, desktopCommand, desktopOffered, type RemoteTarget } from "../model/remote";
@@ -35,6 +36,7 @@ import {
   seatPhrase,
   waitsForGameAtPc,
 } from "../model/sessions";
+import { platform } from "../platform";
 import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
 import { Button, IconButton } from "../ui/Button";
@@ -293,6 +295,14 @@ function DrawingPanel(props: {
             boxes, a laser pointer and pings. Whoever has the keyboard and mouse can't, since those are the game's.
             Each erases only their own; you clear everything, or stop one person (which clears theirs). Drawings go
             when the stream ends, and nothing is kept. Settings decides whether sessions start with it on.
+            {s.boardOverlay?.available && (
+              <>
+                {" "}
+                On this PC the drawings show over the game (unless you hide them), and your drawing key lets you draw
+                there too: it takes the mouse and the keyboard from the game until Esc or Done, so whoever has the
+                keyboard and mouse waits meanwhile. A game in exclusive full screen can't have anything over it.
+              </>
+            )}
           </Why>
         </span>
       </header>
@@ -331,7 +341,72 @@ function DrawingPanel(props: {
           " "
         )}
       </p>
+      {s.boardOverlay?.available && <OverGame overlay={s.boardOverlay} on={d.on} busy={busy} run={run} />}
     </section>
+  );
+}
+
+/** How often the console asks whether a game is in exclusive full screen,
+ * while drawing is on. */
+const FULL_SCREEN_EVERY_MS = 2000;
+
+/** The board over the game at this PC (M27b, Windows): shown or not, how to
+ * draw there (only the host's own key begins it: never a button here), and a
+ * line kept even when empty for why the key did nothing, or a game in
+ * exclusive full screen, which nothing can lie over. */
+function OverGame(props: {
+  overlay: BoardOverlayView;
+  on: boolean;
+  busy: string | null;
+  run: ReturnType<typeof useRun>["run"];
+}) {
+  const { overlay: o, on, busy, run } = props;
+  const [fullScreen, setFullScreen] = useState(false);
+  useEffect(() => {
+    if (!on) {
+      setFullScreen(false);
+      return;
+    }
+    let live = true;
+    const ask = () =>
+      void platform()
+        .command({ type: "fullScreenGame" })
+        .then((r) => {
+          if (live) setFullScreen(r.type === "fullScreenGame" && r.on);
+        })
+        .catch(() => {});
+    ask();
+    const timer = window.setInterval(ask, FULL_SCREEN_EVERY_MS);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [on]);
+  const key = o.key ?? "your drawing key";
+  const detail = o.drawing
+    ? "You're drawing over the game: Esc or Done to go back to it."
+    : on
+      ? `Press ${key} to draw over the game yourself.`
+      : "Once drawing is on.";
+  const warn = fullScreen || o.note != null;
+  const note = fullScreen
+    ? "Drawings can't show over a game in exclusive full screen. Set the game to borderless or windowed full screen to see them."
+    : (o.note ?? " ");
+  return (
+    <>
+      <div className="drawing-row">
+        <Switch
+          checked={o.shown}
+          disabled={busy != null}
+          onChange={(shown) => void run("board-overlay", { type: "showBoardOverlay", on: shown })}
+          label="Show drawings over the game"
+          detail={detail}
+        />
+      </div>
+      <p className={warn ? "panel-foot drawing-note warn" : "panel-foot drawing-note"} role="status">
+        {note}
+      </p>
+    </>
   );
 }
 

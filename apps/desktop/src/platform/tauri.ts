@@ -16,8 +16,9 @@ import type { Event as EngineEvent } from "../bindings/Event";
 import type { Response } from "../bindings/Response";
 import type { ScreenArea } from "../bindings/ScreenArea";
 import type { Toast } from "../model/overlay";
+import { BOARD_DONE, BOARD_NEWS, BOARD_OPS, BOARD_READY, BOARD_STATE, type BoardBatch } from "../board/events";
 import { OVERLAY_READY, OVERLAY_TOASTS } from "../overlay/events";
-import type { OverlayHost, Platform } from "../platform";
+import type { BoardHost, OverlayHost, Platform } from "../platform";
 
 export const tauriPlatform: Platform = {
   command: (command: Command) => invoke<Response>("engine_command", { command }),
@@ -38,7 +39,25 @@ export const tauriPlatform: Platform = {
   setTheme: (theme) => getCurrentWindow().setTheme(theme),
   splash: true,
   overlay: overlayHost(),
+  board: boardHost(),
 };
+
+// ---- The host's board overlay over the game (M27b) ----
+//
+// The engine makes its window, lays it over the game and gives it the focus
+// for drawing; here the main window only talks to its page.
+
+const BOARD = "board";
+
+function boardHost(): BoardHost {
+  return {
+    onReady: (handler) => listen(BOARD_READY, () => handler()),
+    sendState: (state) => void emitTo(BOARD, BOARD_STATE, state).catch(() => {}),
+    sendNews: (news) => void emitTo(BOARD, BOARD_NEWS, news).catch(() => {}),
+    onOps: (handler) => listen<BoardBatch>(BOARD_OPS, (e) => handler(e.payload)),
+    onDone: (handler) => listen(BOARD_DONE, () => handler()),
+  };
+}
 
 // ---- The host overlay's window (M8) ----
 //

@@ -1,0 +1,206 @@
+/* The host's board overlay (M27b), dark whatever the app's theme: it lies
+   over a game. Everything is scoped to `.board`, so the preview can draw it
+   inside its own page; `page.css` makes the window itself transparent. The
+   toolbar looks like the stream window's (`couch-viewer`'s HUD bar). */
+.board {
+  --bar: rgba(20, 20, 24, 0.94);
+  --border: #3a3a40;
+  --text: #f2f2f2;
+  --faint: #9a9aa2;
+  --blue: #4a9ff0;
+  --blue-tint: rgba(74, 159, 240, 0.25);
+  --hover: rgba(255, 255, 255, 0.08);
+
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  color-scheme: dark;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.board * {
+  box-sizing: border-box;
+}
+
+.board-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+}
+
+/* Drawing: the board takes every click, so every pixel is a little tinted
+   (a fully transparent pixel of a layered window lets clicks through), and a
+   frame says so. */
+.board.drawing {
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.06);
+  box-shadow: inset 0 0 0 3px var(--blue);
+  cursor: crosshair;
+}
+
+.board-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  max-width: calc(100% - 24px);
+  padding: 6px 14px;
+  background: var(--bar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.board-banner span {
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.board-toolbar {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: calc(100% - 40px);
+  padding: 8px 10px;
+  background: var(--bar);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: default;
+}
+
+.board-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.board-button,
+.board-swatch,
+.board-done {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  min-width: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.board-button:hover,
+.board-swatch:hover {
+  background: var(--hover);
+}
+
+.board-button.on {
+  background: var(--blue-tint);
+  color: var(--blue);
+}
+
+.board-swatch {
+  min-width: 26px;
+}
+
+.board-swatch span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px transparent;
+}
+
+.board-swatch.on span {
+  box-shadow: 0 0 0 2px var(--bar), 0 0 0 4px var(--text);
+}
+
+.board-dot {
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.board-gap {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+.board-done {
+  gap: 6px;
+  padding: 0 12px;
+  background: var(--blue-tint);
+}
+
+.board-done:hover {
+  background: rgba(74, 159, 240, 0.4);
+}
+
+.board :focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.board-hints {
+  color: var(--faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 520px) {
+  .board-hints {
+    display: none;
+  }
+}
+
+/* Staying or fading, and how long (M27b, the author's choice): one button
+   of one width either way, so nothing moves when it changes. */
+.board-fade {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 56px;
+  height: 30px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.board-fade:hover {
+  background: var(--hover);
+}
+
+.board-fade.on {
+  justify-content: space-between;
+  background: var(--blue-tint);
+  color: var(--blue);
+}

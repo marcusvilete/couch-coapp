@@ -42,6 +42,13 @@ if (params.has("sheet")) {
       <Sheet />
     </React.StrictMode>,
   );
+} else if (params.has("board")) {
+  const { BoardPreview } = await import("./BoardPreview");
+  root.render(
+    <React.StrictMode>
+      <BoardPreview />
+    </React.StrictMode>,
+  );
 } else {
   const [{ default: App }, { PreviewPanel }] = await Promise.all([import("../shell/App"), import("./PreviewPanel")]);
   root.render(
