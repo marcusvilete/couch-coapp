@@ -109,3 +109,17 @@ pub fn foreground_process() -> Option<u32> {
         (pid != 0).then_some(pid)
     }
 }
+
+/// Whether a Direct3D program in exclusive full screen is in front (a game
+/// set to plain "Full screen", not borderless): any window of ours shown over
+/// it, the host overlay's included, makes it leave full screen, which many
+/// games do by minimizing. Borderless and windowed games say no.
+pub fn exclusive_full_screen() -> bool {
+    use windows::Win32::UI::Shell::{QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState};
+    // SAFETY: no arguments; the call reads the shell's state and fails
+    // harmlessly where there is no shell.
+    matches!(
+        unsafe { SHQueryUserNotificationState() },
+        Ok(QUNS_RUNNING_D3D_FULL_SCREEN)
+    )
+}

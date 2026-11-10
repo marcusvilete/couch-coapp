@@ -172,7 +172,7 @@ The one exception is desktop control (M25b), for the home PC's own unlocked devi
 - Releases (key up, button up) only ever let go of something the router pressed, so keys held when a seat is granted stay ignored until released.
 - `Held` only releases: anything pressed that isn't in it goes up. It never presses.
 - **Dead-man:** nothing from the holder for 300 ms suspends the seat. Every key and button goes up and the pad goes neutral. Input resumes it. The first input after a grant arms the timer.
-- **Lapses:** suspended for 10 s, or granted and never heard from in 10 s, the seat returns to the host. So does a third suspension within 5 minutes; the member needs a new grant.
+- **Lapses:** suspended for 10 s, or granted and never heard from in 10 s, the seat returns to the host. So does a third suspension lasting 1.5 s or more within 5 minutes (`FLAP_AFTER`), counted as it reaches 1.5 s; the member needs a new grant. Shorter ones, a Wi-Fi link's gaps, release everything all the same but never take the seat.
 - Every grant, revocation, disconnect and loss of foreground releases first. So does stopping the host (Ctrl+C, Ctrl+Break, closing its console): Windows keeps injected keys down after the process that pressed them exits.
 
 **Injection on Windows** (`couch-platform-win`)
@@ -198,7 +198,7 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
   - Whether the path is relayed. A switch between relay and direct clears the round-trip and delay minimums, since a new path's longer baseline isn't a queue.
 
 **Control law** (`RateController::tick`, in this order)
-1. **Outage.** No report for 500 ms with video outstanding: abandon the epoch, halve the bitrate and stop encoding (`Pause`). A report fresher than 100 ms: resume with one keyframe (`Resume`). The resume counts as a catch-up for the cooldown, so data queued behind a transport that is still waking up doesn't cause a second keyframe.
+1. **Outage.** No report for 500 ms with video outstanding: abandon the epoch, halve the bitrate and stop encoding (`Pause`). A report fresher than 100 ms: resume with one keyframe (`Resume`), at the bitrate from before the pause if reports were silent for less than 1.5 s (a gap in a Wi-Fi link, not less capacity: halving on each left a Steam Deck at the minimum), else at the halved one. The resume counts as a catch-up for the cooldown, so data queued behind a transport that is still waking up doesn't cause a second keyframe.
 2. **Catch-up.** Queued video = outstanding ÷ max(bitrate, send rate) − (round trip + report age). The bytes went out at the send rate, which right after a cut is still above the new bitrate. If that exceeds max(150 ms, 2 × minimum round trip) for two ticks, at most once a second:
    - reset the epoch stream (`SKIP_AHEAD`) and start a new one with a keyframe;
    - if the path shows congestion (round-trip inflation or a delay trend as below, or loss above 2%), new bitrate = 0.85 × delivery rate, kept between a quarter and half of the old bitrate;

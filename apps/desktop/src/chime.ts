@@ -1,6 +1,7 @@
 // The chime when someone asks for a seat (M8): two short tones, made with
-// Web Audio, so no sound file ships. In true exclusive full screen the
-// overlay can't show; this is how the host hears of a request there. Guests
+// Web Audio, so no sound file ships. Over a game in exclusive full screen the
+// overlay doesn't show (`model/overlay.ts`'s `overGame`); this is how the
+// host hears of a request there. Guests
 // never hear it: a Windows host streams the game's sound or everything but
 // this app, and a Linux host leaves this app's processes out (M16c).
 //

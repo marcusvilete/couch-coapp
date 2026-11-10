@@ -797,6 +797,8 @@ function handle(cmd: Command): Response | Promise<Response> {
       return { type: "notices", text: world.notices };
     case "playChime":
       return { type: "done" };
+    case "fullScreenGame":
+      return { type: "fullScreenGame", on: false };
     case "sharedChoice":
       if (cmd.forget) world.sharedRemembered = false;
       return { type: "sharedChoice", remembered: world.info.platform === "linux" && world.sharedRemembered };

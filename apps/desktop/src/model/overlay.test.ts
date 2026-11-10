@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { desktopBanner, noticesOf, sessionEvents } from "./overlay";
+import { desktopBanner, noticesOf, overGame, sessionEvents, type Toast } from "./overlay";
 
 const names: Record<string, string> = { a: "Ana", b: "Bia" };
 const name = (m: string) => names[m] ?? "someone";
@@ -131,5 +131,22 @@ describe("noticesOf (a Linux host's notifications, M16c)", () => {
   it("sends to the app when no keys answer", () => {
     const [n] = noticesOf([{ kind: "request", id: "r", text: "Bia asks", accept: null, decline: null, first: true }]);
     expect(n.body).toBe("Answer in Couch Co-App");
+  });
+});
+
+describe("over a game in exclusive full screen", () => {
+  const toasts: Toast[] = [
+    { kind: "banner", id: "desktop:a", text: "phone is controlling this PC", panic: null },
+    { kind: "request", id: "request:b:1", text: "bob asks", accept: null, decline: null, first: true },
+    { kind: "event", id: "event:1", text: "carol left" },
+  ];
+
+  it("shows everything over a windowed or borderless game", () => {
+    expect(overGame(toasts, false)).toEqual(toasts);
+  });
+
+  it("keeps only the desktop control banner", () => {
+    expect(overGame(toasts, true).map((t) => t.kind)).toEqual(["banner"]);
+    expect(overGame(toasts.slice(1), true)).toEqual([]);
   });
 });

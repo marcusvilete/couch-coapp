@@ -828,6 +828,7 @@ impl Actor {
             | Command::GetDrivers
             | Command::SharedChoice { .. }
             | Command::PlayChime
+            | Command::FullScreenGame
             | Command::GetNotices
             | Command::ExportProfile { .. }
             | Command::RestoreProfile { .. }

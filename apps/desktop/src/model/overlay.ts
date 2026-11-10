@@ -128,3 +128,13 @@ export function hosted(rooms: RoomView[]): { room: RoomView; session: SessionVie
   }
   return null;
 }
+
+/** What may come up over the game. Over a game in exclusive full screen
+ * (Windows) only the desktop control banner does: any window over it makes
+ * the game leave full screen, often minimizing. Requests are still announced
+ * by the chime, the host's keys and the console; notes are skipped. The
+ * banner stays, whatever it costs the game: whoever is at this PC must know
+ * someone controls it. */
+export function overGame(toasts: Toast[], fullScreen: boolean): Toast[] {
+  return fullScreen ? toasts.filter((t) => t.kind === "banner") : toasts;
+}

@@ -315,6 +315,10 @@ impl Backend for WindowsBackend {
         foreground::bring_to_front(WindowId(window))
     }
 
+    fn exclusive_full_screen(&self) -> bool {
+        foreground::exclusive_full_screen()
+    }
+
     fn keep_awake(&self, display: bool) -> Option<Box<dyn Any + Send>> {
         match couch_platform_win::power::Awake::new("Couch Co-App: remote play is on", display) {
             Ok(awake) => Some(Box::new(awake)),

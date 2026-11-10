@@ -183,6 +183,11 @@ pub enum Command {
     /// as this app's own sound. Elsewhere it does nothing: the webview
     /// plays it.
     PlayChime,
+    /// Whether a game in exclusive full screen is in front (Windows), for
+    /// the host overlay, which must not come up over one: the game would
+    /// leave full screen, often minimizing. Answers
+    /// [`Response::FullScreenGame`]; elsewhere always no.
+    FullScreenGame,
     /// The third-party licences installed next to the app
     /// (`THIRD-PARTY-NOTICES.txt`, `cargo xtask notices`), for Settings → About.
     GetNotices,
@@ -1329,6 +1334,9 @@ pub enum Response {
     SharedChoice {
         remembered: bool,
     },
+    FullScreenGame {
+        on: bool,
+    },
     Notices {
         text: String,
     },
@@ -1453,6 +1461,7 @@ impl fmt::Debug for Command {
                 .field("forget", forget)
                 .finish(),
             Self::PlayChime => f.write_str("PlayChime"),
+            Self::FullScreenGame => f.write_str("FullScreenGame"),
             Self::GetNotices => f.write_str("GetNotices"),
             // The passphrase opens the whole identity.
             Self::ExportProfile { .. } => f.write_str("ExportProfile { .. }"),
@@ -1663,6 +1672,9 @@ impl fmt::Debug for Response {
                 .debug_struct("SharedChoice")
                 .field("remembered", remembered)
                 .finish(),
+            Self::FullScreenGame { on } => {
+                f.debug_struct("FullScreenGame").field("on", on).finish()
+            }
             Self::Notices { text } => f
                 .debug_struct("Notices")
                 .field("bytes", &text.len())
@@ -2748,6 +2760,9 @@ impl Engine {
                 self.backend.play_chime();
                 Ok(Response::Done)
             }
+            Command::FullScreenGame => Ok(Response::FullScreenGame {
+                on: self.backend.exclusive_full_screen(),
+            }),
             Command::ExportProfile { passphrase } => self.export_profile(passphrase).await,
             Command::RestoreProfile { passphrase } => self.restore_profile(passphrase).await,
             Command::GetNotices => {

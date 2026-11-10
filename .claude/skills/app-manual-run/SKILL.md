@@ -187,7 +187,7 @@ Each feature's notes sit under its area, tagged with the milestone that added it
 - **The chime:** two tones from the main window on each request, if Settings → Overlay and sounds allows (on a Linux host the engine plays them, through PipeWire, and needs no click). On Windows it needs the Start the session click (the webview's autoplay rule), so it only sounds for sessions started from this run of the app.
 - **What to check every time:** the game keeps the focus when toasts come and go (guests' stream windows would say "the game isn't in front" otherwise, and their keyboard would stop); clicks on the overlay's corner reach the game; a stream of the whole screen doesn't show the overlay.
 - **On one PC** the stream window of a watching profile is usually in front, not the game: test with the game in front and the stream windows behind it.
-- **True exclusive full screen** draws over the overlay; only the chime and the keys work there.
+- **True exclusive full screen** (a game set to plain "Full screen"): since 0.27.4 no overlay comes up over it but desktop control's banner (a window over it would make the game leave full screen, often minimizing); requests come by the chime, the host's keys and the console. Ask for a run with such a game: a guest asking and someone joining or leaving must leave it in full screen with no toast; the same game borderless shows the toasts again.
 
 ## A full run to ask for
 
