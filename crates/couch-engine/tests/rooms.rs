@@ -1222,7 +1222,7 @@ async fn revoked_and_expired_invites_stop_working() {
     assert!(refused_because(&err, "expired or was revoked"), "{err}");
 
     let invite = a.invite(&room).await;
-    tokio::time::sleep(Duration::from_millis(2100)).await;
+    until_expired(&b, &invite).await;
     let err = b.join(&invite, PASSWORD).await.unwrap_err();
     assert!(refused_because(&err, "expired or was revoked"), "{err}");
 
@@ -1324,6 +1324,27 @@ async fn preview(m: &Member, invite: String) -> Result<InvitePreview, EngineErro
     }
 }
 
+/// Waits out an invite that lasts a second, as `m` previews it: two seconds
+/// (expiry counts whole seconds), then until it reads expired. Invites
+/// expire by the wall clock, which WSL moves by however far Windows' is off
+/// (seen: 2.2 s back in the middle of the wait, failing a single check);
+/// previewing joins nothing meanwhile.
+async fn until_expired(m: &Member, invite: &str) {
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = preview(m, invite.to_string()).await.unwrap();
+        if seen.status == InviteStatus::Expired {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the invite never expired: {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// The join screen: a link the app was opened with waits for the UI, and an
 /// invite is previewed before any password is asked for.
 #[tokio::test]
@@ -1376,7 +1397,7 @@ async fn an_opened_invite_is_previewed_before_joining() {
     let mut c = Member::with_options("Caio", short).await;
     let short_room = c.create("Rápido").await.id;
     let short_invite = c.invite(&short_room).await;
-    tokio::time::sleep(Duration::from_millis(2100)).await;
+    until_expired(&b, &short_invite).await;
     let seen = preview(&b, short_invite).await.unwrap();
     assert_eq!(
         (seen.status, seen.expires_in_secs),
