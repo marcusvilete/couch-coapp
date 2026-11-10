@@ -53,8 +53,15 @@ pub const DEAD_MAN: Duration = Duration::from_millis(300);
 /// the host.
 pub const SUSPEND_LIMIT: Duration = Duration::from_secs(10);
 /// This many suspensions within [`FLAP_WINDOW`] return the seat to the host;
-/// the member needs a fresh grant.
+/// the member needs a fresh grant. Only suspensions lasting [`FLAP_AFTER`]
+/// count: a shorter one is a gap in a Wi-Fi link, released at once all the
+/// same.
 pub const MAX_FLAPS: usize = 3;
+/// How long a suspension lasts before it counts toward [`MAX_FLAPS`]. A
+/// guest's Wi-Fi drops out for 0.3 to 1.3 s now and then (a Steam Deck's,
+/// 2026-11): every such gap releases what they held, but none takes their
+/// seat.
+pub const FLAP_AFTER: Duration = Duration::from_millis(1500);
 pub const FLAP_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +126,8 @@ struct Holder {
     granted_at: Instant,
     last_heard: Option<Instant>,
     suspended_since: Option<Instant>,
+    /// Whether the suspension now has counted as a flap yet.
+    flap_counted: bool,
     flaps: VecDeque<Instant>,
     pad_seq: Option<u32>,
     pad: PadState,
@@ -136,6 +145,7 @@ impl Holder {
             granted_at: now,
             last_heard: None,
             suspended_since: None,
+            flap_counted: false,
             flaps: VecDeque::new(),
             pad_seq: None,
             pad: PadState::NEUTRAL,
@@ -514,19 +524,28 @@ impl SeatRouter {
             };
             let end = match (h.last_heard, h.suspended_since) {
                 (None, _) => now.duration_since(h.granted_at) >= SUSPEND_LIMIT,
-                (Some(_), Some(since)) => now.duration_since(since) >= SUSPEND_LIMIT,
+                (Some(_), Some(since)) => {
+                    let quiet = now.duration_since(since);
+                    // A long suspension counts once, from its start.
+                    let flapped = quiet >= FLAP_AFTER && !h.flap_counted;
+                    if flapped {
+                        h.flap_counted = true;
+                        while h
+                            .flaps
+                            .front()
+                            .is_some_and(|&t| now.duration_since(t) >= FLAP_WINDOW)
+                        {
+                            h.flaps.pop_front();
+                        }
+                        h.flaps.push_back(since);
+                    }
+                    quiet >= SUSPEND_LIMIT || (flapped && h.flaps.len() >= MAX_FLAPS)
+                }
                 (Some(heard), None) if now.duration_since(heard) >= DEAD_MAN => {
                     h.release_all(seat, &mut effects);
                     h.suspended_since = Some(now);
-                    while h
-                        .flaps
-                        .front()
-                        .is_some_and(|&t| now.duration_since(t) >= FLAP_WINDOW)
-                    {
-                        h.flaps.pop_front();
-                    }
-                    h.flaps.push_back(now);
-                    h.flaps.len() >= MAX_FLAPS
+                    h.flap_counted = false;
+                    false
                 }
                 (Some(_), None) => false,
             };
@@ -1222,9 +1241,15 @@ mod tests {
     fn the_third_flap_needs_a_fresh_grant() {
         let mut f = Fixture::new(ALL);
         let mut t = 0;
+        let flap_ms = FLAP_AFTER.as_millis() as u64;
         for flap in 1..=MAX_FLAPS {
             f.send(f.pad(flap as u32, PadButtons::empty()), t);
             t += 300;
+            f.router.tick(f.at(t));
+            // Counted only once it has lasted.
+            let effects = f.router.tick(f.at(t + flap_ms - 1));
+            assert!(!matches!(effects.last(), Some(Effect::Revoked { .. })));
+            t += flap_ms;
             let effects = f.router.tick(f.at(t));
             let revoked = matches!(effects.last(), Some(Effect::Revoked { .. }));
             assert_eq!(revoked, flap == MAX_FLAPS, "flap {flap}");
@@ -1232,14 +1257,39 @@ mod tests {
         }
     }
 
+    /// A guest on a gappy Wi-Fi (2026-11): every gap releases what they
+    /// held, but short ones never take the seat, however many.
+    #[test]
+    fn short_gaps_release_but_keep_the_seat() {
+        let mut f = Fixture::new(ALL);
+        let gap = FLAP_AFTER.as_millis() as u64 - 1;
+        let mut t = 0;
+        for seq in 1..=20 {
+            f.send(f.pad(seq, PadButtons::A), t);
+            t += 300;
+            assert_eq!(
+                f.router.tick(f.at(t)),
+                vec![Effect::Pad(SEAT, PadState::NEUTRAL)],
+                "gap {seq}"
+            );
+            assert_eq!(f.router.tick(f.at(t + gap)), vec![], "gap {seq}");
+            assert_eq!(f.router.seat(SEAT).unwrap().2, SeatStatus::Suspended);
+            t += gap;
+        }
+        f.send(f.pad(21, PadButtons::A), t);
+        assert_eq!(f.router.seat(SEAT).unwrap().2, SeatStatus::Active);
+    }
+
     #[test]
     fn flaps_older_than_the_window_are_forgotten() {
         let mut f = Fixture::new(ALL);
+        let flap_ms = FLAP_AFTER.as_millis() as u64;
         let mut seq = 0;
-        for start in [0, 1_000, 400_000] {
+        for start in [0, 3_000, 400_000] {
             seq += 1;
             f.send(f.pad(seq, PadButtons::empty()), start);
             f.router.tick(f.at(start + 300));
+            f.router.tick(f.at(start + 300 + flap_ms));
         }
         assert_eq!(f.router.seat(SEAT).unwrap().2, SeatStatus::Suspended);
     }

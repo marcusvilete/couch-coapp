@@ -361,6 +361,12 @@ pub trait Backend: Send + Sync + 'static {
     /// Forgets that choice: the next stream asks in the dialog again.
     fn forget_shared_choice(&self) {}
 
+    /// Whether a game in exclusive full screen is in front (Windows): no
+    /// window of ours may come up over it, or it leaves full screen.
+    fn exclusive_full_screen(&self) -> bool {
+        false
+    }
+
     /// Plays the request chime, returning at once, where the webview can't
     /// (Linux); this process's own sound, so out of the stream.
     fn play_chime(&self) {}

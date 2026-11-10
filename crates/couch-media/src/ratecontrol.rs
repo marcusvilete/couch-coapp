@@ -237,6 +237,13 @@ const CATCH_UP_COOLDOWN: Duration = Duration::from_secs(1);
 const REPORT_TIMEOUT_MS: u32 = 500;
 /// A report this fresh after a pause means the path is back.
 const RESUME_REPORT_AGE_MS: u32 = 100;
+/// Reports silent for less than this, pause included, were a gap in the
+/// link, not a sign of less capacity: the stream resumes at the bitrate it
+/// had. A guest's Wi-Fi drops out for 0.5 to 1.3 s now and then (a Steam
+/// Deck's, 2026-11), and halving on each gap left it at the minimum. A longer
+/// outage (gate G4's 2 s) halves it. If the path did shrink, the catch-up
+/// cuts by its delivery rate within a second or so.
+const SHORT_GAP: Duration = Duration::from_millis(1500);
 const LOSS_WINDOW: Duration = Duration::from_secs(1);
 const LOSS_HOLD: f64 = 0.02;
 const LOSS_DECREASE: f64 = 0.10;
@@ -255,6 +262,9 @@ pub struct RateController {
     last_change: Option<Instant>,
     backlog_strikes: u8,
     paused: bool,
+    /// While paused: since when reports are silent, and the target and
+    /// bitrate from before the pause, for a short gap's resume.
+    pause: Option<(Instant, f64, u32)>,
     /// (time, packets sent, packets lost) over the last second.
     loss_window: VecDeque<(Instant, u64, u64)>,
 }
@@ -273,6 +283,7 @@ impl RateController {
             last_change: None,
             backlog_strikes: 0,
             paused: false,
+            pause: None,
             loss_window: VecDeque::new(),
         }
     }
@@ -299,6 +310,18 @@ impl RateController {
         self.share = bps;
     }
 
+    /// The ceiling now: the path's (lower through a relay) and our share
+    /// of the upload cap, never below the minimum.
+    fn cap(&self, fb: &FeedbackSnapshot) -> u32 {
+        if fb.relayed {
+            self.cfg.max_bps.min(self.cfg.relay_max_bps)
+        } else {
+            self.cfg.max_bps
+        }
+        .min(self.share.unwrap_or(u32::MAX))
+        .max(self.cfg.min_bps)
+    }
+
     pub fn tick(&mut self, now: Instant, fb: &FeedbackSnapshot) -> RateAction {
         let dt = self.last_tick.map_or(Duration::ZERO, |t| {
             now.duration_since(t).min(Duration::from_millis(250))
@@ -311,6 +334,18 @@ impl RateController {
                 return RateAction::Keep;
             }
             self.paused = false;
+            if let Some((silent_since, target, applied)) = self.pause.take() {
+                let heard = now
+                    .checked_sub(Duration::from_millis(u64::from(fb.report_age_ms)))
+                    .unwrap_or(now);
+                if heard.saturating_duration_since(silent_since) < SHORT_GAP {
+                    // Within today's ceiling: the gap may have moved the
+                    // path to a relay, or a viewer joined meanwhile.
+                    let cap = self.cap(fb);
+                    self.target = target.min(f64::from(cap));
+                    self.applied = applied.min(cap);
+                }
+            }
             self.last_change = Some(now);
             self.hold_until = Some(now + HOLD_AFTER_DECREASE);
             // The resume keyframe may wait while the transport finds the
@@ -324,19 +359,17 @@ impl RateController {
         }
         if fb.report_age_ms >= REPORT_TIMEOUT_MS && fb.outstanding_bytes > 0 {
             self.paused = true;
+            let silent_since = now
+                .checked_sub(Duration::from_millis(u64::from(fb.report_age_ms)))
+                .unwrap_or(now);
+            self.pause = Some((silent_since, self.target, self.applied));
             self.target = (f64::from(self.applied) / 2.0).max(f64::from(self.cfg.min_bps));
             self.applied = self.target as u32;
             return RateAction::Pause;
         }
 
         let loss_rate = self.loss_rate(now, fb);
-        let cap = if fb.relayed {
-            self.cfg.max_bps.min(self.cfg.relay_max_bps)
-        } else {
-            self.cfg.max_bps
-        }
-        .min(self.share.unwrap_or(u32::MAX))
-        .max(self.cfg.min_bps);
+        let cap = self.cap(fb);
 
         // 1. Catch up when video queues up beyond what the path can drain soon.
         //    Outstanding bytes include what is on the wire and what arrived
@@ -867,6 +900,71 @@ mod tests {
         };
         assert!((5 * MBPS..6 * MBPS).contains(bitrate), "{bitrate}");
         assert!(!c.is_paused());
+    }
+
+    /// A Wi-Fi gap (2026-11): paused, then resumed at the bitrate it had,
+    /// however many come.
+    #[test]
+    fn a_short_gap_resumes_at_the_same_bitrate() {
+        let start = Instant::now();
+        let mut c = RateController::new(config(false));
+        let before = c.applied_bps();
+        let gap = |from: f64, t: f64| FeedbackSnapshot {
+            report_age_ms: ((t - from) * 1000.0) as u32 + 50,
+            outstanding_bytes: 10_000,
+            ..clean()
+        };
+        // Three gaps of 0.9 s of silence, a second apart.
+        let actions = run(&mut c, start, 6.0, |t| match t {
+            t if (0.2..1.1).contains(&t) => gap(0.2, t),
+            t if (2.2..3.1).contains(&t) => gap(2.2, t),
+            t if (4.2..5.1).contains(&t) => gap(4.2, t),
+            _ => clean(),
+        });
+        let resumes: Vec<u32> = actions
+            .iter()
+            .filter_map(|a| match a {
+                RateAction::Resume { bitrate } => Some(*bitrate),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resumes.len(), 3, "{actions:?}");
+        for bitrate in resumes {
+            assert!(bitrate >= before, "{bitrate} < {before}: {actions:?}");
+        }
+    }
+
+    /// A gap that moved the path to a relay resumes within the relay's
+    /// ceiling, not at the direct path's bitrate.
+    #[test]
+    fn a_short_gap_resumes_within_the_ceiling_it_comes_back_to() {
+        let start = Instant::now();
+        let mut c = RateController::new(config(false));
+        assert!(c.applied_bps() > 3 * MBPS);
+        let actions = run(&mut c, start, 1.5, |t| {
+            if (0.2..1.1).contains(&t) {
+                FeedbackSnapshot {
+                    report_age_ms: ((t - 0.2) * 1000.0) as u32 + 50,
+                    outstanding_bytes: 10_000,
+                    ..clean()
+                }
+            } else if t >= 1.1 {
+                FeedbackSnapshot {
+                    relayed: true,
+                    ..clean()
+                }
+            } else {
+                clean()
+            }
+        });
+        let resumes: Vec<u32> = actions
+            .iter()
+            .filter_map(|a| match a {
+                RateAction::Resume { bitrate } => Some(*bitrate),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resumes, vec![3 * MBPS], "{actions:?}");
     }
 
     #[test]

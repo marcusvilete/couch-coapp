@@ -22,6 +22,7 @@ How the timing checks work:
 Every gate also needs a full run with 0 decode errors. Two checks are regression guards rather than plan targets:
 - **G3 mean bitrate.** Cubic passed G3's latency target while collapsing to 2 Mbit/s.
 - **G5 latency back.** A bitrate can settle while a queue stays standing.
+- **G4's resume halves.** Since P14 a pause shorter than `SHORT_GAP` (1.5 s of silence) resumes at the bitrate from before it, within the ceiling (a guest's Wi-Fi gaps); G4's 2 s blackout must still resume at half (its `actions:` line). A short-gap repro: `couch-cli host --pads 1 --netem "delay=3ms,at15s=blackout:700ms,at17s=blackout:600ms,..."` with `view --netem delay=3ms`, reading the host's "resuming at" lines and seat states.
 
 **The gates run in H.264** (M12c): `gates` sets `COUCH_HOST_CODEC=h264` for the host it starts. HEVC, the default between NVIDIA PCs, sends only about 0.3 Mbit/s on the latency clock: the throttles never touch it, so G5 read "settled never" and G3's and G7's numbers said nothing about rate control. H.264 fills its target on the clock, as the gates assume. A plain `latency-probe` follows `COUCH_HOST_CODEC` as set, so it measures HEVC there.
 
