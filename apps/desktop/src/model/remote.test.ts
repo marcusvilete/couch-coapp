@@ -73,6 +73,23 @@ describe("commands for a home PC run from afar", () => {
     expect(desktop).toEqual({ type: "remote", room: "r1", member: "pc", action: { type: "desktop", on: true } });
     expect(viaRemote(target, desktop)).toBe(desktop);
   });
+
+  it("runs the board from afar (M27a)", () => {
+    const action = (c: Parameters<typeof viaRemote>[1]) => {
+      const sent = viaRemote(target, c);
+      return sent.type === "remote" ? sent.action : null;
+    };
+    expect(action({ type: "setDrawing", on: true })).toEqual({ type: "setDrawing", on: true });
+    expect(action({ type: "clearBoard" })).toEqual({ type: "clearBoard" });
+    expect(action({ type: "stopDrawing", member: "bia", stopped: true })).toEqual({
+      type: "stopDrawing",
+      member: "bia",
+      stopped: true,
+    });
+    // Settings stay the device's own.
+    const setting = { type: "setDrawingDefault", on: true } as const;
+    expect(viaRemote(target, setting)).toBe(setting);
+  });
 });
 
 describe("when desktop control can start (M25b)", () => {

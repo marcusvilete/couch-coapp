@@ -64,15 +64,55 @@ pub struct InputCapture {
     captured: bool,
     /// The system keys are ours (M25b, desktop control).
     keyboard_grabbed: bool,
+    /// Drawing on the stream (M27a): the mouse stays free, and nothing of
+    /// the keyboard or mouse is forwarded; pads keep playing.
+    drawing: bool,
     /// Sub-pixel motion and sub-notch wheel carried to the next event.
     motion_rest: (f32, f32),
     wheel_rest: (f32, f32),
+    /// Keys forwarded and still down, and those pressed for a shortcut.
+    keys: Keys,
     /// Forwarded and still down, to release when focus goes.
-    keys: BTreeSet<u16>,
     buttons: BTreeSet<u8>,
-    /// Pressed for a hotkey or a capturing click: their releases stay local too.
-    swallowed_keys: BTreeSet<u16>,
+    /// Pressed for a capturing click: their releases stay local too.
     swallowed_buttons: BTreeSet<u8>,
+}
+
+/// Which keys were forwarded and are still down (to release when focus
+/// goes), and which were pressed for a shortcut, whose releases stay here.
+#[derive(Debug, Default)]
+struct Keys {
+    down: BTreeSet<u16>,
+    swallowed: BTreeSet<u16>,
+}
+
+impl Keys {
+    /// A press to forward; `true` if it must go out (it wasn't down).
+    /// Never swallowed from then on: its release must go out too.
+    fn forward(&mut self, usage: u16) -> bool {
+        self.swallowed.remove(&usage);
+        self.down.insert(usage)
+    }
+
+    /// A press taken by a shortcut: its release stays here.
+    fn swallow(&mut self, usage: u16) {
+        self.swallowed.insert(usage);
+    }
+
+    /// A release; `true` if it must go out (the press went out).
+    fn release(&mut self, usage: u16) -> bool {
+        !self.swallowed.remove(&usage) && self.down.remove(&usage)
+    }
+
+    /// Every key forwarded and down, now let go of.
+    fn take_down(&mut self) -> BTreeSet<u16> {
+        std::mem::take(&mut self.down)
+    }
+
+    /// Releases that never came here (they went to the board, M27a).
+    fn forget_swallowed(&mut self) {
+        self.swallowed.clear();
+    }
 }
 
 impl InputCapture {
@@ -98,11 +138,11 @@ impl InputCapture {
             mouse_freed: false,
             captured: false,
             keyboard_grabbed: false,
+            drawing: false,
             motion_rest: (0.0, 0.0),
             wheel_rest: (0.0, 0.0),
-            keys: BTreeSet::new(),
+            keys: Keys::default(),
             buttons: BTreeSet::new(),
-            swallowed_keys: BTreeSet::new(),
             swallowed_buttons: BTreeSet::new(),
         })
     }
@@ -215,7 +255,7 @@ impl InputCapture {
     /// What the bar tells a player holding the mouse (M21): how to capture
     /// it, or how to free it again. `None` without the mouse.
     pub fn mouse_hint(&self) -> Option<String> {
-        if !self.seats.holding() || !self.may(Permissions::MOUSE) {
+        if !self.seats.holding() || !self.may(Permissions::MOUSE) || self.drawing {
             return None;
         }
         let what = if self.may(Permissions::DESKTOP) {
@@ -262,12 +302,12 @@ impl InputCapture {
                     .viewer_shortcut(HidUsage(usage), chord)
                     .filter(|_| chord || !self.may(Permissions::KEYBOARD));
                 let Some(shortcut) = shortcut else {
-                    if self.focused && self.keys.insert(usage) {
+                    if self.focused && self.keys.forward(usage) {
                         out.push(LocalInput::Key { usage, down: true });
                     }
                     return None;
                 };
-                self.swallowed_keys.insert(usage);
+                self.keys.swallow(usage);
                 if shortcut == Shortcut::FreeMouse {
                     self.mouse_freed = !self.mouse_freed;
                     return None;
@@ -279,13 +319,15 @@ impl InputCapture {
                 ..
             } => {
                 let usage = scancode.to_i32() as u16;
-                if !self.swallowed_keys.remove(&usage) && self.keys.remove(&usage) {
+                if self.keys.release(usage) {
                     out.push(LocalInput::Key { usage, down: false });
                 }
             }
             Event::MouseButtonDown { mouse_btn, .. } => {
                 let button = button_code(*mouse_btn)?;
                 if self.captured {
+                    // Forwarded: its release must be too.
+                    self.swallowed_buttons.remove(&button);
                     if self.buttons.insert(button) {
                         out.push(LocalInput::MouseButton { button, down: true });
                     }
@@ -366,7 +408,8 @@ impl InputCapture {
     /// the free shortcut gives both back (Ctrl+Alt+Del always stays this
     /// PC's). Call after events.
     pub fn sync_capture(&mut self, mouse: &MouseUtil, window: &mut Window) {
-        let want = self.focused && !self.mouse_freed && self.may(Permissions::MOUSE);
+        let want =
+            self.focused && !self.mouse_freed && !self.drawing && self.may(Permissions::MOUSE);
         if want != self.captured {
             mouse.set_relative_mouse_mode(window, want);
             self.captured = want;
@@ -380,9 +423,59 @@ impl InputCapture {
         }
     }
 
+    /// Drawing mode on or off (M27a). On, whatever keys and buttons were
+    /// forwarded go up, and the mouse is freed at the next
+    /// [`Self::sync_capture`]; the caller then hands the keyboard and mouse
+    /// to the board, never to [`Self::event`].
+    pub fn set_drawing(&mut self, on: bool, out: &mut Vec<LocalInput>) {
+        if on && !self.drawing {
+            self.release_all(out);
+        }
+        // Releases that came to the board while drawing never reached
+        // `event`: a key or button swallowed before (the drawing shortcut's
+        // own key, say) would otherwise stay swallowed, and its next release,
+        // once forwarded, never be sent: a key held on the host (the M27a
+        // review's finding).
+        self.keys.forget_swallowed();
+        self.swallowed_buttons.clear();
+        self.drawing = on;
+    }
+
+    /// Whether this member holds the keyboard: drawing is then never theirs
+    /// (M27a).
+    pub fn has_keyboard(&self) -> bool {
+        self.may(Permissions::KEYBOARD)
+    }
+
+    /// The window's own chord shortcut a key press is, if it is one, for a
+    /// key the board would otherwise take (M27a). The press's release then
+    /// stays here too.
+    pub fn chord_shortcut(&mut self, event: &Event) -> Option<Shortcut> {
+        let Event::KeyDown {
+            scancode: Some(scancode),
+            keymod,
+            repeat: false,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let held = |a, b| keymod.intersects(a | b);
+        let chord = held(Mod::LCTRLMOD, Mod::RCTRLMOD)
+            && held(Mod::LALTMOD, Mod::RALTMOD)
+            && held(Mod::LSHIFTMOD, Mod::RSHIFTMOD);
+        let usage = scancode.to_i32() as u16;
+        let shortcut = self.shortcuts.viewer_shortcut(HidUsage(usage), chord);
+        // F3 alone too: nothing is forwarded while drawing.
+        if shortcut.is_some() {
+            self.keys.swallow(usage);
+        }
+        shortcut.filter(|s| *s != Shortcut::FreeMouse)
+    }
+
     /// Lets go of everything forwarded (focus lost, seat gone).
     pub fn release_all(&mut self, out: &mut Vec<LocalInput>) {
-        for usage in std::mem::take(&mut self.keys) {
+        for usage in self.keys.take_down() {
             out.push(LocalInput::Key { usage, down: false });
         }
         for button in std::mem::take(&mut self.buttons) {
@@ -646,6 +739,31 @@ fn take_whole(rest: &mut (f32, f32), x: f32, y: f32) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The M27a review's finding: a shortcut's key whose release went to the
+    /// board (drawing mode) must not stay swallowed, or a later press of it,
+    /// forwarded, would never be let go of on the host.
+    #[test]
+    fn a_key_forwarded_after_its_shortcut_is_always_released() {
+        const D: u16 = 0x07;
+        let mut keys = Keys::default();
+        // Ctrl+Alt+Shift+D turns drawing on: swallowed; its release goes to
+        // the board, never here.
+        keys.swallow(D);
+        // Drawing ends; later, holding the keyboard, D alone is typed.
+        keys.forget_swallowed();
+        assert!(keys.forward(D));
+        assert!(keys.release(D), "the release goes out");
+        // Even without the drawing switch forgetting: a forwarded press is
+        // never swallowed.
+        keys.swallow(D);
+        assert!(keys.forward(D));
+        assert!(keys.release(D));
+        assert!(keys.take_down().is_empty());
+        // A shortcut's own press and release stay here.
+        keys.swallow(D);
+        assert!(!keys.release(D));
+    }
 
     #[test]
     fn fractions_carry_over() {

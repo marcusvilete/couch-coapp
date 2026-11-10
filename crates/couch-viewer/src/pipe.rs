@@ -7,9 +7,9 @@ use std::{
 };
 
 use couch_proto::ipc::{
-    self, AudioPacket, AudioStats, ControllerNames, FrameTiming, HudState, LocalInput, NetStats,
-    RumbleState, SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
-    WindowRequest, WindowState,
+    self, AudioPacket, AudioStats, BoardNews, ControllerNames, Draw, FrameTiming, HudState,
+    LocalInput, NetStats, RumbleState, SeatState, ShortcutKeys, StreamVolume, UserAction,
+    VideoFrameHeader, WindowRequest, WindowState,
 };
 
 use crate::audio::AudioFeed;
@@ -30,10 +30,14 @@ pub enum ForWindow {
     Volume(StreamVolume),
     /// Something the app asks of the window (P11).
     Window(WindowRequest),
+    /// What the host said of the board (M27a).
+    Board(BoardNews),
 }
 
 /// What the viewer sends back.
 pub enum Outgoing {
+    /// The user's own drawing (M27a).
+    Draw(Draw),
     Timing(FrameTiming),
     KeyframeRequest,
     Input(LocalInput),
@@ -101,7 +105,8 @@ pub fn spawn_reader(
                     | ipc::kinds::HUD_STATE
                     | ipc::kinds::SHORTCUTS
                     | ipc::kinds::VOLUME
-                    | ipc::kinds::WINDOW => {
+                    | ipc::kinds::WINDOW
+                    | ipc::kinds::BOARD => {
                         let message = match frame.kind {
                             ipc::kinds::SEAT => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Seat)
@@ -124,6 +129,9 @@ pub fn spawn_reader(
                                 }),
                             ipc::kinds::WINDOW => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Window)
+                            }
+                            ipc::kinds::BOARD => {
+                                ipc::from_payload(&frame.payload).map(ForWindow::Board)
                             }
                             _ => ipc::from_payload(&frame.payload).map(ForWindow::Hud),
                         };
@@ -220,6 +228,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>, out: Box<dyn Write + Send>) ->
                     Outgoing::ControllerNames(names) => {
                         payload = ipc::to_payload(&names);
                         ipc::kinds::CONTROLLER_NAMES
+                    }
+                    Outgoing::Draw(draw) => {
+                        payload = ipc::to_payload(&draw);
+                        ipc::kinds::DRAW
                     }
                     Outgoing::Close => break,
                 };

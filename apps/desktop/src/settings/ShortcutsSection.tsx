@@ -2,6 +2,7 @@
 // modifiers stay. The engine checks every key (`couch_input::shortcuts`).
 import { RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
+import type { DrawingKeyView } from "../bindings/DrawingKeyView";
 import type { ShortcutView } from "../bindings/ShortcutView";
 import { errorText, request } from "../engine";
 import { Button } from "../ui/Button";
@@ -37,6 +38,8 @@ export function ShortcutsSection(props: {
 }) {
   const desktopHolds = (s: ShortcutView) => props.linux && s.scope === "host";
   const [shortcuts, setShortcuts] = useState<ShortcutView[] | null>(null);
+  /** The drawing editor's keys (M27a): fixed, listed only. */
+  const [drawingKeys, setDrawingKeys] = useState<DrawingKeyView[]>([]);
   const [error, setError] = useState<string | null>(null);
   /** The row waiting for its new key. */
   const [waiting, setWaiting] = useState<string | null>(null);
@@ -46,7 +49,10 @@ export function ShortcutsSection(props: {
 
   useEffect(() => {
     request({ type: "getShortcuts" }, "shortcuts")
-      .then((r) => setShortcuts(r.shortcuts))
+      .then((r) => {
+        setShortcuts(r.shortcuts);
+        setDrawingKeys(r.drawingKeys);
+      })
       .catch((e) => setError(errorText(e)));
   }, []);
 
@@ -184,6 +190,28 @@ export function ShortcutsSection(props: {
           Reset all
         </Button>
       </div>
+      {shortcuts && drawingKeys.length > 0 && (
+        <section className="shortcut-group">
+          <h3 className="settings-subtitle">While drawing in the stream window</h3>
+          <p className="settings-note">
+            The board's own keys, as in Excalidraw: like a text box's, they can't be moved.
+          </p>
+          <ul className="shortcuts">
+            {drawingKeys.map((k) => (
+              <li key={k.keys} className="shortcut">
+                <span className="shortcut-text">
+                  <span>{k.action}</span>
+                </span>
+                <span className="shortcut-keys drawing-keys">
+                  {k.keys.split(", ").map((keys) => (
+                    <Kbd key={keys} keys={keys} />
+                  ))}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }

@@ -21,7 +21,8 @@ import {
   uploadLimit,
   uploadLimitOk,
 } from "./sessions";
-import { waitsForGameAtPc } from "./sessions";
+import { drawingStopped, drawingSummary, noDrawing, waitsForGameAtPc } from "./sessions";
+import type { RoomView } from "../bindings/RoomView";
 
 const seat = (label: string, pad: boolean, holder: string | null = null, host = false): SeatView => ({
   label,
@@ -73,6 +74,7 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     operatedBy: [],
     desktop: null,
     guestsKeyboard: true,
+    drawing: noDrawing(),
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,
@@ -220,5 +222,32 @@ describe("naming the game's window (a Linux host, M16c-2)", () => {
     expect(waitsForGameAtPc({ ...s, desktop: "a" })).toBe(false);
     expect(waitsForGameAtPc({ ...s, seats: [seat("Keyboard and mouse", false)] })).toBe(false);
     expect(waitsForGameAtPc({ ...s, streaming: { ...s.streaming!, screen: false } })).toBe(false);
+  });
+});
+
+describe("drawing on the stream", () => {
+  const room = { members: [{ id: "a", name: "Ana" }, { id: "b", name: "Bia" }] } as unknown as RoomView;
+
+  it("says what is on the board", () => {
+    expect(drawingSummary(room, noDrawing())).toBe("Nothing drawn yet.");
+    const d = {
+      ...noDrawing(),
+      on: true,
+      elements: 4,
+      drawers: [
+        { member: "a", elements: 1 },
+        { member: "b", elements: 3 },
+      ],
+    };
+    expect(drawingSummary(room, d)).toBe("4 drawings by Ana and Bia.");
+    expect(drawingSummary(room, { ...d, elements: 1, drawers: [{ member: "b", elements: 1 }] })).toBe(
+      "1 drawing by Bia.",
+    );
+  });
+
+  it("knows whom the host stopped", () => {
+    const s = { ...session([]), drawing: { ...noDrawing(), stopped: ["b"] } };
+    expect(drawingStopped(s, "b")).toBe(true);
+    expect(drawingStopped(s, "a")).toBe(false);
   });
 });

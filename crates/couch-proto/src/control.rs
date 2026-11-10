@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::{
     admission::{AdmitConfirm, AdmitReply, JoinStart, MemberHello},
+    board::{BoardCleared, BoardOps, BoardRefused, BoardSnapshot, BoardState, BoardUpdate},
     envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND},
     ids::{Permissions, SeatEpoch, SeatId},
     remote::{
@@ -79,6 +80,14 @@ pub mod type_ids {
     pub const REMOTE_REPLY: u16 = MUST_UNDERSTAND | 0x0705;
     pub const REMOTE_STATE: u16 = MUST_UNDERSTAND | 0x0706;
     pub const REMOTE_LOCK: u16 = MUST_UNDERSTAND | 0x0707;
+    /// Drawing on the stream (M27): all optional, since a peer that doesn't
+    /// know them only misses the drawings.
+    pub const BOARD_OPS: u16 = 0x0801;
+    pub const BOARD_UPDATE: u16 = 0x0802;
+    pub const BOARD_SNAPSHOT: u16 = 0x0803;
+    pub const BOARD_CLEARED: u16 = 0x0804;
+    pub const BOARD_STATE: u16 = 0x0805;
+    pub const BOARD_REFUSED: u16 = 0x0806;
 }
 
 /// QUIC application close codes for connections between members.
@@ -211,6 +220,12 @@ pub enum ControlMessage {
     RemoteReply(Box<RemoteReply>),
     RemoteState(Box<RemoteState>),
     RemoteLock(RemoteLock),
+    BoardOps(BoardOps),
+    BoardUpdate(BoardUpdate),
+    BoardSnapshot(BoardSnapshot),
+    BoardCleared(BoardCleared),
+    BoardState(BoardState),
+    BoardRefused(BoardRefused),
 }
 
 impl ControlMessage {
@@ -249,6 +264,12 @@ impl ControlMessage {
                 | Self::SeatReleased(_)
                 | Self::SeatController(_)
                 | Self::KeyframeRequest(_)
+                | Self::BoardOps(_)
+                | Self::BoardUpdate(_)
+                | Self::BoardSnapshot(_)
+                | Self::BoardCleared(_)
+                | Self::BoardState(_)
+                | Self::BoardRefused(_)
         )
     }
 }
@@ -316,6 +337,12 @@ impl ControlMessage {
             Self::RemoteReply(_) => type_ids::REMOTE_REPLY,
             Self::RemoteState(_) => type_ids::REMOTE_STATE,
             Self::RemoteLock(_) => type_ids::REMOTE_LOCK,
+            Self::BoardOps(_) => type_ids::BOARD_OPS,
+            Self::BoardUpdate(_) => type_ids::BOARD_UPDATE,
+            Self::BoardSnapshot(_) => type_ids::BOARD_SNAPSHOT,
+            Self::BoardCleared(_) => type_ids::BOARD_CLEARED,
+            Self::BoardState(_) => type_ids::BOARD_STATE,
+            Self::BoardRefused(_) => type_ids::BOARD_REFUSED,
         }
     }
 
@@ -358,6 +385,12 @@ impl ControlMessage {
             Self::RemoteReply(m) => postcard::to_stdvec(m)?,
             Self::RemoteState(m) => postcard::to_stdvec(m)?,
             Self::RemoteLock(m) => postcard::to_stdvec(m)?,
+            Self::BoardOps(m) => postcard::to_stdvec(m)?,
+            Self::BoardUpdate(m) => postcard::to_stdvec(m)?,
+            Self::BoardSnapshot(m) => postcard::to_stdvec(m)?,
+            Self::BoardCleared(m) => postcard::to_stdvec(m)?,
+            Self::BoardState(m) => postcard::to_stdvec(m)?,
+            Self::BoardRefused(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -402,6 +435,12 @@ impl ControlMessage {
             type_ids::REMOTE_REPLY => Self::RemoteReply(payload(frame)?),
             type_ids::REMOTE_STATE => Self::RemoteState(payload(frame)?),
             type_ids::REMOTE_LOCK => Self::RemoteLock(payload(frame)?),
+            type_ids::BOARD_OPS => Self::BoardOps(payload(frame)?),
+            type_ids::BOARD_UPDATE => Self::BoardUpdate(payload(frame)?),
+            type_ids::BOARD_SNAPSHOT => Self::BoardSnapshot(payload(frame)?),
+            type_ids::BOARD_CLEARED => Self::BoardCleared(payload(frame)?),
+            type_ids::BOARD_STATE => Self::BoardState(payload(frame)?),
+            type_ids::BOARD_REFUSED => Self::BoardRefused(payload(frame)?),
             other if frame.must_understand() => return Err(DecodeError::UnknownRequired(other)),
             other => return Ok(Decoded::SkippedOptional(other)),
         };
@@ -749,6 +788,12 @@ mod tests {
                     panic_key: true,
                     desktop: Some(MemberId([6; 32])),
                     in_front: Some(false),
+                    drawing: RemoteDrawing {
+                        on: true,
+                        elements: 3,
+                        drawers: vec![(MemberId([7; 32]), 3)],
+                        stopped: vec![MemberId([8; 32])],
+                    },
                 }),
                 locked: true,
                 capabilities: crate::remote::HostCapabilities {
@@ -763,6 +808,21 @@ mod tests {
             ControlMessage::RemoteCommand(RemoteCommand {
                 id: 10,
                 op: RemoteOp::BringToFront,
+            }),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 11,
+                op: RemoteOp::SetDrawing { on: true },
+            }),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 12,
+                op: RemoteOp::ClearBoard,
+            }),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 13,
+                op: RemoteOp::StopDrawing {
+                    member: MemberId([9; 32]),
+                    stopped: true,
+                },
             }),
             ControlMessage::RemoteLock(RemoteLock {
                 reason: LockReason::Panic,
@@ -834,6 +894,16 @@ mod tests {
                 panic_key: true,
                 desktop: Some(MemberId([u8::MAX; 32])),
                 in_front: Some(true),
+                drawing: RemoteDrawing {
+                    on: true,
+                    elements: u32::MAX,
+                    drawers: (0..MAX_REMOTE_LISTED)
+                        .map(|i| (MemberId([i as u8; 32]), u32::MAX))
+                        .collect(),
+                    stopped: (0..MAX_REMOTE_LISTED)
+                        .map(|i| MemberId([i as u8; 32]))
+                        .collect(),
+                },
             }),
             locked: true,
             capabilities: crate::remote::HostCapabilities::ALL,
@@ -871,6 +941,82 @@ mod tests {
             let mut buf = Vec::new();
             message.encode(&mut buf).unwrap();
             assert!(buf.len() < envelope::MAX_FRAME_LEN, "{} bytes", buf.len());
+        }
+    }
+
+    #[test]
+    fn board_messages_roundtrip_and_are_optional() {
+        use crate::{
+            board::*,
+            ids::{MemberId, SessionId},
+        };
+        let session = SessionId(7);
+        let element = Element {
+            id: 3,
+            kind: ElementKind::Arrow,
+            colour: 1,
+            width: 2,
+            fades: true,
+            done: true,
+            points: vec![Point::new(0, 0), Point::new(u16::MAX, 40)],
+        };
+        for message in [
+            ControlMessage::BoardOps(BoardOps {
+                session,
+                generation: 4,
+                ops: vec![
+                    BoardOp::Put(element.clone()),
+                    BoardOp::Append {
+                        id: 4,
+                        points: vec![Point::new(1, 2)],
+                        done: true,
+                    },
+                    BoardOp::Remove(vec![1, 2]),
+                    BoardOp::Laser {
+                        points: vec![Point::new(5, 6)],
+                        start: true,
+                        colour: 5,
+                    },
+                    BoardOp::Ping(Point::new(9, 9)),
+                ],
+            }),
+            ControlMessage::BoardUpdate(BoardUpdate {
+                session,
+                author: MemberId([2; 32]),
+                ops: vec![BoardOp::Remove(vec![u32::MAX])],
+            }),
+            ControlMessage::BoardSnapshot(BoardSnapshot {
+                session,
+                generation: u32::MAX,
+                first: true,
+                elements: vec![Authored {
+                    author: MemberId([3; 32]),
+                    element,
+                }],
+            }),
+            ControlMessage::BoardCleared(BoardCleared {
+                session,
+                generation: 1,
+                author: None,
+            }),
+            ControlMessage::BoardCleared(BoardCleared {
+                session,
+                generation: 2,
+                author: Some(MemberId([4; 32])),
+            }),
+            ControlMessage::BoardState(BoardState {
+                session,
+                on: true,
+                stopped: vec![MemberId([5; 32])],
+            }),
+            ControlMessage::BoardRefused(BoardRefused {
+                session,
+                why: Refusal::BoardFull,
+            }),
+        ] {
+            assert!(message.is_session());
+            assert_eq!(message.type_id() & MUST_UNDERSTAND, 0, "{message:?}");
+            roundtrip(message);
         }
     }
 

@@ -1,6 +1,7 @@
 // What the UI works out from the engine's view of sessions: who plays, what
 // a pass would do, how to name seats and controllers. Pure functions; the
 // engine decides everything, these only read its state.
+import type { DrawingView } from "../bindings/DrawingView";
 import type { GameWindowView } from "../bindings/GameWindowView";
 import type { HostController } from "../bindings/HostController";
 import type { RoomView } from "../bindings/RoomView";
@@ -288,4 +289,24 @@ export function waitsForGameAtPc(s: SessionView): boolean {
     s.gameInFront == null &&
     s.seats.some((seat) => seat.keyboardMouse && seat.holder != null && !seat.host)
   );
+}
+
+// ---- Drawing on the stream (M27a) ----
+
+/** A board with nothing on it, drawing off: a session's view before any. */
+export function noDrawing(): DrawingView {
+  return { on: false, elements: 0, drawers: [], stopped: [] };
+}
+
+/** What the console says of the board: "Nothing drawn yet", "4 drawings by
+ * Bia and Caio". */
+export function drawingSummary(room: RoomView, d: DrawingView): string {
+  if (d.elements === 0) return "Nothing drawn yet.";
+  const who = listed(d.drawers.map((x) => nameOf(room, x.member)));
+  return `${d.elements} ${d.elements === 1 ? "drawing" : "drawings"} by ${who}.`;
+}
+
+/** Whether the host stopped `member` drawing. */
+export function drawingStopped(s: SessionView, member: string): boolean {
+  return s.drawing.stopped.includes(member);
 }

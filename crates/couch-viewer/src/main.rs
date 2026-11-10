@@ -18,7 +18,10 @@
 #![deny(clippy::print_stdout)]
 
 mod audio;
+mod board;
 mod clock;
+mod draw_ui;
+mod editor;
 mod gpu;
 mod hud;
 mod input;

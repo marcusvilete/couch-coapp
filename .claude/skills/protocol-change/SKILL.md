@@ -31,7 +31,8 @@ A datagram must be safe to lose. Send full state or running totals, as the pad s
 ## Steps
 
 1. **Type id.**
-   - Control families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats and control requests, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions. Input stream: `0x03xx`.
+   - Control families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats and control requests, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions, `0x07xx` remote play (M25), `0x08xx` the board (M27, drawing on the stream). Input stream: `0x03xx`.
+   - A message the host sends with a member's data (the board's updates and snapshots) must fit a frame at its fullest: give it a test at the limits, as `couch_proto::board` does, and split it in parts when it can't (`BoardSnapshot::parts`).
    - Set `MUST_UNDERSTAND` (`0x8000`) if a peer that doesn't know the message can't work correctly. An unknown must-understand type closes the connection; an unknown optional one is skipped.
    - A message only some peers understand: advertise a feature bit in `Hello.features`, and send the message only to peers that set it.
 2. **Payload struct** with `Serialize`/`Deserialize`.

@@ -260,6 +260,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     println!("window: full screen {}, bar {}, stats {}", w.fullscreen, w.bar, w.stats);
                 }
                 Some(WatchEvent::Action(action)) => println!("the viewer asked to {action:?}; no session here"),
+                // No session, no board (M27a).
+                Some(WatchEvent::Draw(_)) => {}
                 Some(WatchEvent::ViewerRestarted) => {
                     println!("EVENT viewer-restarted {}", clock.now().0);
                     println!("the viewer window was started again");

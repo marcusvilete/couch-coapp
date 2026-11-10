@@ -5,6 +5,7 @@
 //! - [`admission`]: the password check's messages.
 //! - [`room`]: member records, the owner's policy, snapshots, presence.
 //! - [`session`]: sessions (a member streaming to others) and control requests.
+//! - [`board`]: drawing on the stream (M27), the board its host keeps.
 //! - [`remote`]: remote play, between a home PC and a device it trusts.
 //! - [`invite`]: invite links.
 //! - [`ipc`]: framing for the pipe between the main process and `couch-viewer`.
@@ -16,6 +17,7 @@
 //! `docs/protocol.md`.
 
 pub mod admission;
+pub mod board;
 mod bytes;
 pub mod control;
 pub mod envelope;
@@ -66,7 +68,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// 12: the unattended PC (M25c): `RemoteState.locked`.
 /// 13: what a host can offer (M16c): `RemoteState.capabilities`.
 /// 14: a Linux home PC (M16c): `EndReason::NothingShared`.
-pub const PROTOCOL_MINOR: u16 = 14;
+/// 15: drawing on the stream (M27a): the board's `0x08xx` messages, and the
+/// console's drawing ops in `RemoteOp` and `RemoteSession`.
+pub const PROTOCOL_MINOR: u16 = 15;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -88,6 +92,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (12, "0.23"),
     (13, "0.25"),
     (14, "0.26"),
+    (15, "0.28"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

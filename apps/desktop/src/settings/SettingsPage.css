@@ -347,3 +347,9 @@
     outline: 2px dashed Highlight;
   }
 }
+
+/* The drawing keys (M27a): several keys for one action, side by side. */
+.drawing-keys {
+  gap: var(--s1);
+  flex-wrap: wrap;
+}

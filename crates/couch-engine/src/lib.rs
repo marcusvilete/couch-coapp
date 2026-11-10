@@ -378,6 +378,27 @@ pub enum Command {
     /// The host: the window we stream to the front (M25b), restored if
     /// minimized. Only ever that window.
     BringToFront,
+    /// While hosting: lets those watching draw on the stream, or stops it
+    /// (M27a). Off clears the board. A session starts as Settings says
+    /// ([`Command::SetDrawingDefault`]).
+    SetDrawing {
+        on: bool,
+    },
+    /// While hosting: everything drawn on the stream gone (M27a).
+    ClearBoard,
+    /// While hosting: stops a member drawing, clearing what they drew, or
+    /// lets them draw again (M27a).
+    StopDrawing {
+        member: String,
+        stopped: bool,
+    },
+    /// Settings: whether sessions start with drawing on (M27a).
+    GetDrawingDefault,
+    /// Saves it, for the next session; answers like
+    /// [`Command::GetDrawingDefault`].
+    SetDrawingDefault {
+        on: bool,
+    },
     /// While watching: the stream window's volume (P11), 0 to 100%, saved
     /// for the profile as the window's own slider is.
     SetStreamVolume {
@@ -514,6 +535,15 @@ pub enum RemoteAction {
     },
     /// The window the home PC streams, to the front (M25b).
     BringToFront,
+    /// Drawing on the stream (M27a), as the home PC's own commands.
+    SetDrawing {
+        on: bool,
+    },
+    ClearBoard,
+    StopDrawing {
+        member: String,
+        stopped: bool,
+    },
 }
 
 impl RemoteAction {
@@ -534,6 +564,9 @@ impl RemoteAction {
             Self::StopWaitingForPads => "StopWaitingForPads",
             Self::Desktop { .. } => "Desktop",
             Self::BringToFront => "BringToFront",
+            Self::SetDrawing { .. } => "SetDrawing",
+            Self::ClearBoard => "ClearBoard",
+            Self::StopDrawing { .. } => "StopDrawing",
         }
     }
 }
@@ -579,6 +612,15 @@ pub struct StreamWindowSettingsView {
     pub bar: bool,
 }
 
+/// Answer to [`Command::GetDrawingDefault`] (M27a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DrawingSettingsView {
+    /// Sessions start with drawing on.
+    pub on: bool,
+}
+
 /// Answer to [`Command::GetTray`] (M25c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -622,6 +664,36 @@ pub struct ShortcutView {
     pub scope: ShortcutScope,
     /// When it applies, if not always; empty otherwise.
     pub condition: String,
+}
+
+/// One of the drawing editor's keys (M27a), as Settings lists it: rows that
+/// do the same thing come together ("Ctrl+Shift+Z or Ctrl+Y").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DrawingKeyView {
+    pub keys: String,
+    pub action: String,
+}
+
+impl DrawingKeyView {
+    /// Every drawing key, from `couch_input::shortcuts::DRAWING_KEYS`.
+    pub fn all() -> Vec<Self> {
+        let mut rows: Vec<Self> = Vec::new();
+        for key in couch_input::shortcuts::DRAWING_KEYS {
+            if key.description.is_empty() {
+                if let Some(last) = rows.last_mut() {
+                    last.keys = format!("{}, {}", last.keys, key.keys());
+                }
+            } else {
+                rows.push(Self {
+                    keys: key.keys(),
+                    action: key.description.to_string(),
+                });
+            }
+        }
+        rows
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -1100,6 +1172,57 @@ pub struct SessionView {
     /// a screen corner that would take guests' keys unseen (KDE's Overview),
     /// so the console asks it to turn the corner off (M16c-2).
     pub warn_hot_corner: bool,
+    /// Drawing on the stream (M27a): for the host and a session we run from
+    /// afar, the board as the console shows it; for a viewer, whether the
+    /// host lets us draw (no counts).
+    pub drawing: DrawingView,
+}
+
+/// Drawing on the stream, as the console shows it (M27a).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DrawingView {
+    /// The host lets those watching draw.
+    pub on: bool,
+    /// Elements on the board.
+    pub elements: u32,
+    /// Each member with something on the board, by id, and how many.
+    pub drawers: Vec<DrawerView>,
+    /// Members the host stopped drawing, by id.
+    pub stopped: Vec<String>,
+}
+
+/// One member's share of the board (M27a).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DrawerView {
+    pub member: String,
+    pub elements: u32,
+}
+
+impl DrawingView {
+    /// The console's view of a board, from the console state.
+    pub(crate) fn of(d: &couch_proto::remote::RemoteDrawing) -> Self {
+        Self {
+            on: d.on,
+            elements: d.elements,
+            drawers: d
+                .drawers
+                .iter()
+                .map(|(m, n)| DrawerView {
+                    member: m.to_hex(),
+                    elements: *n,
+                })
+                .collect(),
+            stopped: d
+                .stopped
+                .iter()
+                .map(couch_proto::ids::MemberId::to_hex)
+                .collect(),
+        }
+    }
 }
 
 /// Whether a session streams anything (M19).
@@ -1321,10 +1444,15 @@ pub enum Response {
     },
     Shortcuts {
         shortcuts: Vec<ShortcutView>,
+        /// The drawing editor's own keys (M27a): fixed, listed only.
+        #[serde(rename = "drawingKeys")]
+        #[ts(rename = "drawingKeys")]
+        drawing_keys: Vec<DrawingKeyView>,
     },
     Network(NetworkView),
     StreamWindow(StreamWindowSettingsView),
     Tray(TrayView),
+    Drawing(DrawingSettingsView),
     Drivers {
         drivers: Vec<DriverView>,
     },
@@ -1569,6 +1697,17 @@ impl fmt::Debug for Command {
             Self::AllowControl => f.write_str("AllowControl"),
             Self::StopWaitingForPads => f.write_str("StopWaitingForPads"),
             Self::BringToFront => f.write_str("BringToFront"),
+            Self::SetDrawing { on } => f.debug_struct("SetDrawing").field("on", on).finish(),
+            Self::ClearBoard => f.write_str("ClearBoard"),
+            Self::StopDrawing { member, stopped } => f
+                .debug_struct("StopDrawing")
+                .field("member", member)
+                .field("stopped", stopped)
+                .finish(),
+            Self::GetDrawingDefault => f.write_str("GetDrawingDefault"),
+            Self::SetDrawingDefault { on } => {
+                f.debug_struct("SetDrawingDefault").field("on", on).finish()
+            }
             Self::SetStreamVolume { percent, muted } => f
                 .debug_struct("SetStreamVolume")
                 .field("percent", percent)
@@ -1654,13 +1793,14 @@ impl fmt::Debug for Response {
                 .debug_struct("SoundSources")
                 .field("programs", &programs.len())
                 .finish(),
-            Self::Shortcuts { shortcuts } => f
+            Self::Shortcuts { shortcuts, .. } => f
                 .debug_struct("Shortcuts")
                 .field("shortcuts", &shortcuts.len())
-                .finish(),
+                .finish_non_exhaustive(),
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
             Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
             Self::Tray(tray) => f.debug_tuple("Tray").field(tray).finish(),
+            Self::Drawing(d) => f.debug_tuple("Drawing").field(d).finish(),
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
@@ -2499,6 +2639,7 @@ impl Engine {
                     condition: b.condition.to_string(),
                 })
                 .collect(),
+            drawing_keys: DrawingKeyView::all(),
         }
     }
 
@@ -2641,6 +2782,13 @@ impl Engine {
                 bar: store::stream_window(self.profile.data_dir()).bar,
             })),
             Command::GetTray => Ok(Response::Tray(TrayView { on: self.tray_on() })),
+            Command::GetDrawingDefault => Ok(Response::Drawing(DrawingSettingsView {
+                on: store::drawing(self.profile.data_dir()).on,
+            })),
+            Command::SetDrawingDefault { on } => {
+                store::save_drawing(self.profile.data_dir(), store::DrawingSettings { on })?;
+                Ok(Response::Drawing(DrawingSettingsView { on }))
+            }
             Command::SetTray { on } => {
                 store::save_app(self.profile.data_dir(), store::AppSettings { tray: on })?;
                 self.tray.store(on, Ordering::SeqCst);
@@ -2981,7 +3129,8 @@ mod tests {
     async fn shortcuts_list_the_panic_key_first() {
         let dir = tempfile::tempdir().unwrap();
         let engine = engine(dir.path()).await;
-        let Response::Shortcuts { shortcuts } = engine.handle(Command::GetShortcuts).await.unwrap()
+        let Response::Shortcuts { shortcuts, .. } =
+            engine.handle(Command::GetShortcuts).await.unwrap()
         else {
             panic!("expected shortcuts");
         };
@@ -3002,7 +3151,7 @@ mod tests {
                 code: code.into(),
             })
         };
-        let Response::Shortcuts { shortcuts } = set("panic", "KeyP").await.unwrap() else {
+        let Response::Shortcuts { shortcuts, .. } = set("panic", "KeyP").await.unwrap() else {
             panic!("expected shortcuts");
         };
         assert_eq!(shortcuts[0].keys, "Ctrl+Alt+Shift+P");

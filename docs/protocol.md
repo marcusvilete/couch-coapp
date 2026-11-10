@@ -25,13 +25,14 @@ The wire protocol between room members, and the pipe between the main process an
 - M25c tells the device when Windows is locked at its home PC: `RemoteState.locked` (wire revision 12).
 - M16c tells the device what its home PC can host (a Linux PC: controller seats, no keyboard seat or desktop control then; desktop control since M16c-2 and a keyboard seat for guests since its second part, on the same wire): `RemoteState.capabilities` (wire revision 13).
 - M16c's Linux home PC ends a stream whose screen-sharing dialog got no answer, or was dismissed, with `EndReason::NothingShared` (wire revision 14, viewer IPC v15).
+- M27a adds drawing on the stream: the board's `0x08xx` messages, the console's drawing ops in `RemoteOp` and its board in `RemoteSession` (wire revision 15), and viewer IPC v16 (`BOARD`, `DRAW`, the board in the HUD's state).
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 14, for M16c's `EndReason::NothingShared`). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 15, for M27a's drawing on the stream). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -79,14 +80,20 @@ u32 len (big-endian) | u16 type | payload (postcard)
 | `0x0701` | `RemoteOffer { wait_secs u32? }` | Optional. Home PC to a device it trusts, on every room connection while remote play is on ([Remote play](#remote-play)): it may unlock; `wait_secs` while wrong PINs make it wait |
 | `0x8702` | `RemoteUnlock { pin }` | Device to home PC: the PIN, at most 64 bytes, to become its operator on this connection. Never logged |
 | `0x8703` | `RemoteUnlockReply { result: Unlocked \| WrongPin { wait_secs u32 } \| Wait { secs u32 } \| Off }` | Home PC to the device that sent `RemoteUnlock` |
-| `0x8704` | `RemoteCommand { id u32, op }` | Operator to home PC: one of the host's commands (`RemoteOp`: `ListSources`, `StartSession { title, max_viewers, controllers u8, keyboard_mouse }`, `StartStream { source: Window(i64) \| Screen(i64), name, fps, max_mbps, upload_mbps? }`, `StopStream`, `SetStreamLevel`, `EndSession`, `AnswerControl`, `PassControl`, `TakeBackControl`, `PlaySeat`, `AllowControl`, `StopWaitingForPads`; M25b: `Desktop { on }`, `BringToFront`); texts at most 200 bytes |
+| `0x8704` | `RemoteCommand { id u32, op }` | Operator to home PC: one of the host's commands (`RemoteOp`: `ListSources`, `StartSession { title, max_viewers, controllers u8, keyboard_mouse }`, `StartStream { source: Window(i64) \| Screen(i64), name, fps, max_mbps, upload_mbps? }`, `StopStream`, `SetStreamLevel`, `EndSession`, `AnswerControl`, `PassControl`, `TakeBackControl`, `PlaySeat`, `AllowControl`, `StopWaitingForPads`; M25b: `Desktop { on }`, `BringToFront`; M27a: `SetDrawing { on }`, `ClearBoard`, `StopDrawing { member, stopped }`); texts at most 200 bytes |
 | `0x8705` | `RemoteReply { id u32, result: Done \| Sources(...) \| Failed(text) }` | Home PC to its operator: how that command went. Sources: at most 64 windows and 16 screens, texts at most 200 bytes |
-| `0x8706` | `RemoteState { session?, locked, capabilities }` | Home PC to each operator, on unlocking and on every change: what its host console shows that members don't otherwise hear (requests, each guest's controllers report, the stream's name and rate, the sound level, pads setting up or missing, its own controllers and their seats, whether it has a panic key; M25b: the member controlling its desktop, and whether a streamed window is in front, with the stream's `screen` flag; M16c: what it can host, `HostCapabilities { sessions, keyboard_seat, desktop_control }`, so the device hides the rest; the home PC refuses what it lacks whatever is asked). Lists within the room's size; each guest's report checked as a host checks one |
+| `0x8706` | `RemoteState { session?, locked, capabilities }` | Home PC to each operator, on unlocking and on every change: what its host console shows that members don't otherwise hear (requests, each guest's controllers report, the stream's name and rate, the sound level, pads setting up or missing, its own controllers and their seats, whether it has a panic key; M25b: the member controlling its desktop, and whether a streamed window is in front, with the stream's `screen` flag; M16c: what it can host, `HostCapabilities { sessions, keyboard_seat, desktop_control }`, so the device hides the rest; the home PC refuses what it lacks whatever is asked; M27a: the board, `RemoteDrawing { on, elements u32, drawers [(member, u32)], stopped [member] }`). Lists within the room's size; each guest's report checked as a host checks one |
 | `0x8707` | `RemoteLock { reason: ByOperator \| Panic \| Removed \| PinChanged \| Off }` | Either way: the operator locks itself, or the home PC locks it out |
+| `0x0801` | `BoardOps { session, generation u32, ops [BoardOp] }` | Optional. Viewer to host: its own drawing, made in the board's `generation` ([Drawing on the stream](#drawing-on-the-stream), M27a). 1 to 64 ops, at most 4,000 points and ids in all |
+| `0x0802` | `BoardUpdate { session, author, ops [BoardOp] }` | Optional. Host to every viewer but the author: a batch it took, and whose |
+| `0x0803` | `BoardSnapshot { session, generation u32, first bool, elements [{ author, element }] }` | Optional. Host to one viewer: the board whole, in parts that each fit a frame; the `first` replaces what the viewer had. On joining and when drawing is turned on |
+| `0x0804` | `BoardCleared { session, generation u32, author? }` | Optional. Host to every viewer: one member's elements, or everyone's, gone; a new generation. Also to a member alone, its own, before they are sent back to it after a refused batch |
+| `0x0805` | `BoardState { session, on bool, stopped [member id] }` | Optional. Host to every viewer, on joining and on every change: whether drawing is on, and whom the host stopped |
+| `0x0806` | `BoardRefused { session, why: Off \| Stopped \| KeyboardSeat \| NotWatching \| BoardFull \| TooMany \| TooFast \| Invalid \| Stale \| NoStream }` | Optional. Host to the member whose batch it refused (never for `NotWatching` or `Stale`, which go unsaid); its own elements follow at the next tick |
 
 Message families still to come, all on this stream: **media control** (`VideoConfig`, `BitrateHint`).
 
-Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions, `0x07xx` remote play.
+Families: `0x00xx` session basics, `0x01xx` media control, `0x02xx` seats, `0x03xx` the input stream, `0x04xx` admission, `0x05xx` rooms, `0x06xx` sessions, `0x07xx` remote play, `0x08xx` the board (M27a).
 
 ### Liveness
 
@@ -560,6 +567,52 @@ M25c: nothing on the wire but `RemoteState.locked`. The rest is the home PC's ow
 - **Sign-in:** an XDG autostart entry naming the AppImage, for its default profile only; one an older AppImage left, naming a file that's gone, follows the newer one. No notification-area icon: closing the window quits.
 - **Streams from afar** need a choice the desktop remembers (the screen-sharing portal's restore token), since nobody is at the PC to answer its dialog: without one, `RemoteOp::StartStream` is refused, and a dialog that comes up anyway is closed after 30 s, the stream ending as `EndReason::NothingShared`.
 
+## Drawing on the stream
+
+M27a ([ADR 0013](adr/0013-drawing-on-the-stream.md)): those watching draw on the picture in their stream window, and see each other's drawings. Code: `couch_proto::board` (the types and limits), `couch_room::board` (the host's board and its checks), `HostSession::draw` and the host's switches, `rooms::sessions` (the messages), `couch-viewer`'s `board`, `editor` and `draw_ui`.
+
+**The board is the host's,** in memory only: it belongs to the session, is cleared whenever a stream ends (a new stream is a new picture) and is gone at the session's end.
+
+**An element** is `{ id u32, kind: Pen | Highlighter | Line | Arrow | Rectangle | Ellipse, colour u8 (of 8), width u8 (of 3), fades bool, done bool, points [{ x u16, y u16 }] }`:
+- its key is its author, the member whose connection sent it, and `id`, the author's own number: **nobody names another member's element**;
+- points are in the picture's own coordinates, 0 to 65,535 each way, whatever the window's size; widths are fractions of the picture's height (`board::line_width`);
+- a stroke (pen, highlighter) has 1 to 2,000 points and grows while not `done`; a shape has exactly two (start and end, a box's corners) and is always `done`.
+
+**What a member sends** (`BoardOps`, its own operations, in order):
+- `Put(element)`: a new element, or one of its own replaced (same id; it keeps its place in the drawing order);
+- `Append { id, points, done }`: more points for its stroke in progress, about every 30 ms while drawing, so the others see it drawn;
+- `Remove([id])`: some of its own gone (an id it doesn't have is nothing);
+- `Laser { points, start, colour }` and `Ping(point)`: passing marks, never on the board. Each window draws a laser trail fading within 1 s, in the colour its author picked (your request, 2026-11-10), and a ping as a ring pulsing for 2 s with its author's name.
+
+**The host checks each batch whole,** and takes it or drops it:
+- the sender watches the session, on the connection it joined on (otherwise nothing is said);
+- the rates: 40 batches a second per member, and 60 laser points and pings, as token buckets that count **every** batch first, refused or not, so refusals are no way to try faster;
+- it was made in the sender's current **generation** (otherwise it is dropped, and nothing is said: the member hears of the clear itself). A member's generation is the newer of the one everyone's last clear started and the one its own last clear or resync started, all from one counter: clearing one member never stales another's batches. So nothing drawn before a clear of one's elements lands after it;
+- the sender doesn't hold the keyboard-and-mouse seat (as reported, or a grant on its way, or desktop control): its keys and mouse are the game's;
+- something is streamed (a new stream is a new picture: nothing drawn between two carries over);
+- drawing is on, and the host hasn't stopped the sender;
+- the batch is well formed (1 to 64 ops, at most 4,000 points and ids, valid elements, laser ops of at most 64 points);
+- it touches only the sender's elements, never extends a finished stroke or a shape, keeps a stroke within 2,000 points;
+- the limits: 300 elements per member, 1,500 and 200,000 points on the board (only growth counts: removing while full is fine).
+
+**What the host sends:**
+- a batch it took, as `BoardUpdate` with its author, to every viewer **but the author**, whose window drew it already;
+- a batch it refused: `BoardRefused` with why, to the sender at once. Then at its next tick (every 200 ms), and at most once a second per member, the sender's strokes still open are finished (an empty `Append { done: true }` to the others, so fading ones fade), the sender gets a new generation of its own, and `BoardCleared { author: Some(sender), generation }` and its own elements as `BoardUpdate`s go to it alone. What it sent meanwhile is dropped as stale, and what its window shows of its own is the host's again;
+- a viewer that leaves mid-stroke: its open strokes finished, to the others. Operations the host makes itself go out in batches the checks allow, like any member's. A stream window started again after a crash finishes its own strokes left open itself, once it has the board back;
+- to a viewer as it starts watching, and to everyone when drawing is turned on: `BoardState`, then the board in `BoardSnapshot` parts (at least one, the `first`), in a new generation of that viewer's own: the window takes a snapshot as a clear of its own elements, so what it made before is dropped here too;
+- every change of `on` or of whom it stopped (at most a room's size: those not watching are forgotten first): `BoardState` to every viewer;
+- every clear: `BoardCleared` (the host's Clear, drawing off, a stream ending: `None`, a new generation for everyone; stopping a member: theirs, a new generation for it alone). A window takes the generation only from a clear of everyone's or its own, and drops what waits in its outbox then (made before the clear, the host would drop it).
+
+The console's count is told at the tick, never per batch.
+
+Like every session fact, the host sends them straight to each viewer, never relayed, and a member acts on them only from the host it watches, on the current connection.
+
+**Fading:** a finished fading element stays 4 s, then fades out over 1 s, each window timing it from when it finished arriving there (no clocks to agree on). The host drops it from its board 7 s after it finished, so a newcomer never gets it.
+
+**The host's switches** are `Command::SetDrawing { on }` (off clears the board; a session starts as Settings says, `drawing.json`), `ClearBoard`, and `StopDrawing { member, stopped }` (stopping clears theirs). A device running the session from afar has them as `RemoteOp`s, through the same checks. The host draws nothing in M27a: its own board overlay (M27b) and stream window (M27d) come later, through the same checks.
+
+**In the stream window,** a shortcut (Ctrl+Alt+Shift+D) or the bar's pen turns drawing mode on, while drawing is on, the host hasn't stopped us, we don't hold the keyboard and mouse and something is streamed; being given that seat, or any of those changing, ends it. While it is on, the mouse is free and goes to the board, the keys go to the board, and nothing of either is sent to the host as input: a controller seat's pad keeps playing. Ctrl+Alt+Shift+B shows or hides the drawings in this window alone. The editor's keys (Excalidraw's) are a fixed table, `couch_input::shortcuts::DRAWING_KEYS`. A window keeps its batches 30 ms apart, its laser points 20 ms apart and its pings 500 ms apart, within the host's rates; its outbox carries the generation its operations were made in. Entering or leaving drawing mode forgets the keys and buttons the window swallowed for its shortcuts, whose releases went to the board: otherwise a later press of that key, forwarded, would never be released on the host.
+
 ## Close and reset codes
 
 **Connection close** (`couch_proto::control::close_code`):
@@ -595,7 +648,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x01` | main to viewer | Hello: `IPC_VERSION` as a big-endian `u16`. A viewer that speaks another version stops |
 | `0x02` | main to viewer | Video frame: `{epoch u32, seq u32, keyframe u8, codec u8 (as in the preamble), capture_us u64, encode_us u32, arrived_us u64}`, then the access unit. The viewer reopens its decoder when a keyframe brings another codec |
 | `0x03` | main to viewer | Audio packet (postcard): `{seq, capture_us, arrived_us, packet}`, the datagram plus its arrival time on this machine |
-| `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], host_on_seats, viewers u8, control_paused, game_in_front, stream, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller; `host_on_seats` that the host's controller plays only through the seats (a free seat is empty); `stream` is `SessionStatus.stream` (M19): while it isn't `Live`, the window shows black and says why |
+| `0x04` | main to viewer | HUD state (postcard): `{title, host, role: Watching \| Asking \| Controlling, seats [{label, pad, keyboard_mouse, holder?, host, mine, asked}], host_on_seats, viewers u8, control_paused, game_in_front, stream, note}`, on every change. `host` and `holder` are display names; a seat's `host` says the host plays it with their own controller; `host_on_seats` that the host's controller plays only through the seats (a free seat is empty); `stream` is `SessionStatus.stream` (M19): while it isn't `Live`, the window shows black and says why; `board` (M27a) is `{on, stopped, me?, names [(member, name)]}`: whether the host lets anyone draw and stopped us, who we are, and who may have drawn, for a ping's name |
 | `0x05` | main to viewer | Shutdown |
 | `0x06` | main to viewer | Network stats for the HUD: `{rtt_us u32, relayed u8, receive_bps u32}`, 4 times a second |
 | `0x07` | main to viewer | Seat state (postcard): `{seats: [{seat, permissions, controller?}]}`, every seat held (M18), with the controller slot the main process chose to drive each (the window rumbles and shows by it). The viewer captures the mouse only while a held seat has mouse permission |
@@ -603,6 +656,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x09` | main to viewer | Shortcut keys (postcard): `{keys: map of row id to HID usage}`, the rows the user moved off their defaults, sent right after Hello. The viewer checks them as the app does (`Shortcuts::with_keys`); rows that don't fit keep their defaults, which also apply until this frame arrives (P3) |
 | `0x0A` | main to viewer | Stream volume (postcard): `{percent u8, muted}`, the profile's (`audio.json`), sent right after the shortcut keys, before any sound (P6). The pipe reader applies it to the sound at once, as a squared gain (50% is -12 dB) and never above 100%; full volume until it arrives. Sent again whenever the app's own volume control changes it (P11); the viewer doesn't echo it back as `0x86` |
 | `0x0B` | main to viewer | Window request (postcard `WindowRequest`, P11): `Fullscreen(bool)`, `ShowBar(bool)` (the session bar alone: the centre card and the stats stay; the window's own shortcut, which hides everything over the picture, is apart and not reported), `ShowStats(bool)` or `Raise` (restored if minimized, then brought to the front; the app calls `AllowSetForegroundWindow` on the viewer's process first, since Windows refuses a background process the foreground otherwise) |
+| `0x0C` | main to viewer | Board news (postcard `BoardNews`, M27a): `Snapshot`, `Update` or `Cleared` as the host sent them, or `Refused(why)`. The main process keeps a copy of the board (`couch_room::board::Replica`, its own drawing included) for a window started again, which gets it as a snapshot, less what was fading |
 | `0x81` | viewer to main | Local input (postcard `LocalInput`): `Key{usage, down}`, `MouseButton{button, down}`, `MouseMotion{dx, dy}`, `Wheel{dx, dy}`, `Pad{controller, pad}` (a controller's state by its slot, kept while connected, M18), `ControllerSlots(bits)` (the slots connected, after every change) or `Alive` (every 100 ms). Deltas; the main process keeps the running totals |
 | `0x82` | viewer to main | Frame timing: `{epoch, seq, capture_us, arrived_us, decoded_us, presented_us, barcode_us}` |
 | `0x83` | viewer to main | User action (postcard): `RequestControl { seat u8, controller u8? }` (the controller its bar's choice named, with two or more, P13), `CancelControl` (withdraw, or give every seat back), `GiveBack(seat u8)` (one seat, M18; also sent by the main process's forwarder when the controller driving one of several seats goes), `Leave`. The viewer also sends `Leave` when its window is closed (M6): a viewer that exits without it crashed, and the app starts it again, at most once a minute |
@@ -612,14 +666,17 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 | `0x87` | viewer to main | Window state (postcard `WindowState`, P11): `{fullscreen, bar, stats}`, at once and whenever any changes, however (its shortcuts, its bar, a `0x0B`). The main process keeps the bar and stats for a window started again after a crash |
 | `0x88` | viewer to main | Controller names (postcard `ControllerNames`, P12): `{controllers: [{slot, name}]}`, every connected controller, just before each `ControllerSlots` input, so a new one reaches the host by name at once. The main process's forwarder keeps each name until its controller goes and tells the host (`ViewerControllers`) |
 
-`IPC_VERSION` (now 15: `EndReason::NothingShared` in the HUD's state, M16c; 14 was a request's controller, P13) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+| `0x89` | viewer to main | Draw (postcard `Draw`, M27a): `{generation, ops}`, the user's own operations, sent on as `BoardOps` once joined |
+
+`IPC_VERSION` (now 16: the board, M27a; 15 was `EndReason::NothingShared` in the HUD's state, M16c) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the host-keys hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;
 - F toggles full screen;
 - H shows or hides the HUD; F3 alone does too, unless the keyboard is being forwarded;
 - M frees the mouse; clicking the window captures it again;
-- `-` and `=` turn the stream down and up by 10%, `0` mutes or unmutes it (P6); the HUD's bar has Mute and a slider.
+- `-` and `=` turn the stream down and up by 10%, `0` mutes or unmutes it (P6); the HUD's bar has Mute and a slider;
+- D turns drawing mode on or off, and B shows or hides the drawings (M27a); the bar has a pen and an eye.
 
 On the host, while streaming, with Ctrl+Alt+Shift held (`couch_platform_win::host_keys`, one low-level hook for all three; physical keys only, so a guest's injected keys never count and the game never sees them):
 - Backspace is the panic key;

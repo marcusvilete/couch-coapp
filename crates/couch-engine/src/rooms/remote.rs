@@ -1481,6 +1481,12 @@ fn command_for(room: RoomId, op: RemoteOp) -> Option<Command> {
         RemoteOp::AllowControl => Command::AllowControl,
         RemoteOp::StopWaitingForPads => Command::StopWaitingForPads,
         RemoteOp::BringToFront => Command::BringToFront,
+        RemoteOp::SetDrawing { on } => Command::SetDrawing { on },
+        RemoteOp::ClearBoard => Command::ClearBoard,
+        RemoteOp::StopDrawing { member, stopped } => Command::StopDrawing {
+            member: member.to_hex(),
+            stopped,
+        },
         // Our own window has no such command: `remote_command_in` handles
         // it with the operator's id.
         RemoteOp::Desktop { .. } => return None,
@@ -1549,6 +1555,12 @@ fn op_for(action: RemoteAction) -> Result<RemoteOp, EngineError> {
         RemoteAction::StopWaitingForPads => RemoteOp::StopWaitingForPads,
         RemoteAction::Desktop { on } => RemoteOp::Desktop { on },
         RemoteAction::BringToFront => RemoteOp::BringToFront,
+        RemoteAction::SetDrawing { on } => RemoteOp::SetDrawing { on },
+        RemoteAction::ClearBoard => RemoteOp::ClearBoard,
+        RemoteAction::StopDrawing { member: m, stopped } => RemoteOp::StopDrawing {
+            member: member(&m)?,
+            stopped,
+        },
     })
 }
 

@@ -123,6 +123,13 @@ Each feature's notes sit under its area, tagged with the milestone that added it
 - **The stream window scales with bicubic** on luma (P8); the stats panel's decoder line says "…, bicubic scaling, …". `COUCH_VIEWER_SCALER=bilinear` in the watcher's environment gives the old one, to compare. The difference is small, most visible on text.
 - **A soft picture is mostly the upscale and the bitrate,** not the scaler: a game in a window smaller than the watcher's screen is stretched to fit, and a stream starts at 10 Mbit/s and climbs only up to the host's quality setting. When the user reports blur, suggest the game borderless at the host's screen resolution, and the quality at 20 Mbit/s or higher (30 or 50 on a fast connection); the stats panel shows the size streamed and the bitrate.
 
+### Drawing on the stream (M27a)
+
+- **Turning it on:** the host console's last panel, "Drawing on the stream": the switch (a session starts as Settings → Drawing says, off by default), what is on the board ("5 drawings by Bia"), Clear, and whom the host stopped with "Let … draw again". Each viewer's menu (the patch bay's players, the members panel) has "Stop their drawing" (it clears theirs) or "Let … draw again".
+- **Drawing:** in the stream window, Ctrl+Alt+Shift+D or the bar's pen; the toolbar comes up at the bottom, the stats card goes, the pointer is a crosshair. Esc leaves the tool, then drawing. Ctrl+Alt+Shift+B or the bar's eye hides the drawings in that window alone. On one PC two profiles' windows show each other's drawings within about 30 ms of each stroke.
+- **What to ask the user to try:** a stroke, an arrow with Shift (15° steps), a box and an ellipse; the laser (fades within a second) and a middle-click ping (a ring with their name); undo and redo; select, move, copy and paste; erase only their own; a fading stroke going after about 5 s; the host's Clear and Stop; the stream stopped (drawings gone, drawing still on); a guest given the keyboard-and-mouse seat (their drawing mode ends, the pen greys out); drawing while playing on a controller seat (the pad keeps playing, the keyboard and mouse reach nothing on the host).
+- **Logs:** nothing per stroke. A refused batch shows in the window as a note ("The board is full: the host can clear it").
+
 ### Seats (P1), the host on a seat (P2), several seats for one guest (M18)
 
 **The seats themselves (P1):**

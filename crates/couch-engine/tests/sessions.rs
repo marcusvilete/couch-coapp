@@ -41,14 +41,16 @@ use couch_media::{
 };
 use couch_net::endpoint::{RelayChoice, RelayToken};
 use couch_proto::{
+    board::{BoardOp, Element, ElementKind, Point, Refusal},
+    ids::MemberId,
     input::PadSnapshot,
     ipc::{
-        HudState, LocalInput, SeatState, ShortcutKeys, StreamVolume, UserAction, VideoFrameHeader,
-        WindowRequest, WindowState,
+        BoardNews, Draw, HudState, LocalInput, SeatState, ShortcutKeys, StreamVolume, UserAction,
+        VideoFrameHeader, WindowRequest, WindowState,
     },
     session::{EndReason, SeatKind, StreamState},
 };
-use couch_room::{limits::LimitConfig, room::Timings, session::SessionError};
+use couch_room::{board::Replica, limits::LimitConfig, room::Timings, session::SessionError};
 use couch_testkit::{
     FakeCapturer, FakeEncoder, FakeGpu, RecordingInjector, RecordingPadFactory, relay::TestRelay,
 };
@@ -897,6 +899,9 @@ struct FakeViewer {
     started_without_bar: Arc<AtomicBool>,
     /// It was started with its stats shown (no `--hide-stats`).
     started_with_stats: Arc<AtomicBool>,
+    /// The board as the window keeps it (M27a), and the host's refusals.
+    board: Arc<Mutex<Replica>>,
+    refusals: Arc<Mutex<Vec<Refusal>>>,
 }
 
 /// A fake power request: gone from the list when dropped.
@@ -985,6 +990,19 @@ impl FakeViewer {
                             couch_proto::ipc::kinds::HUD_STATE => {
                                 *v.hud.lock().unwrap() = couch_proto::ipc::from_payload(&frame.payload);
                             }
+                            couch_proto::ipc::kinds::BOARD => {
+                                let Some(news) = couch_proto::ipc::from_payload::<BoardNews>(&frame.payload) else { continue };
+                                let mut board = v.board.lock().unwrap();
+                                match news {
+                                    BoardNews::Snapshot(s) => board.snapshot_part(s.generation, s.first, &s.elements),
+                                    BoardNews::Update(u) => board.heard(u.author, &u.ops),
+                                    BoardNews::Cleared(c) => {
+                                        let me = v.hud.lock().unwrap().as_ref().and_then(|h| h.board.me);
+                                        board.cleared(c.generation, c.author, me);
+                                    }
+                                    BoardNews::Refused(why) => v.refusals.lock().unwrap().push(why),
+                                }
+                            }
                             couch_proto::ipc::kinds::VOLUME => {
                                 *v.volume.lock().unwrap() = couch_proto::ipc::from_payload(&frame.payload);
                             }
@@ -1055,6 +1073,36 @@ impl FakeViewer {
         if let Some(say) = &*self.say.lock().unwrap() {
             let _ = say.send((kind, payload));
         }
+    }
+
+    /// The user draws `ops` (M27a): the window keeps them as its own, as
+    /// the real one does, and sends them on.
+    fn draw(&self, me: &Member, ops: Vec<BoardOp>) {
+        let generation = {
+            let mut board = self.board.lock().unwrap();
+            board.heard(member_id(me), &ops);
+            board.generation()
+        };
+        self.say(
+            couch_proto::ipc::kinds::DRAW,
+            couch_proto::ipc::to_payload(&Draw { generation, ops }),
+        );
+    }
+
+    /// The board as this window has it: (author, element id) in drawing
+    /// order.
+    fn board(&self) -> Vec<(String, u32)> {
+        self.board
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .map(|a| (a.author.to_hex(), a.element.id))
+            .collect()
+    }
+
+    fn refused(&self) -> Vec<Refusal> {
+        self.refusals.lock().unwrap().clone()
     }
 
     /// The local gamepad, with these buttons down.
@@ -6311,4 +6359,254 @@ async fn a_guests_keys_wait_for_the_named_game_and_follow_its_focus() {
     .await;
     c.stop().await;
     stop_all(&mut [&mut a, &mut b]).await;
+}
+
+// ---- Drawing on the stream (M27a) ----
+
+fn member_id(m: &Member) -> MemberId {
+    MemberId::from_hex(&m.id()).expect("a member id")
+}
+
+/// A box, as element `id` of whoever draws it.
+fn a_box(id: u32) -> BoardOp {
+    BoardOp::Put(Element {
+        id,
+        kind: ElementKind::Rectangle,
+        colour: 0,
+        width: 1,
+        fades: false,
+        done: true,
+        points: vec![Point::new(100, 100), Point::new(9_000, 6_000)],
+    })
+}
+
+/// Whether `window`'s HUD says drawing is `on`.
+fn drawing_on(window: &FakeViewer, on: bool) -> bool {
+    window.hud().is_some_and(|h| h.board.on == on)
+}
+
+/// M27a: a viewer's drawing goes through the host to every other window,
+/// and to a newcomer whole; the host clears, stops one member (clearing
+/// theirs) and lets them draw again; a stream ending clears the board, and
+/// turning drawing off too. Off by default, until Settings says otherwise.
+#[tokio::test(flavor = "multi_thread")]
+async fn drawings_go_through_the_host_to_every_window() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let (bid, cid) = (b.id(), c.id());
+
+    // Off: refused, and nothing of it stays in B's window.
+    b_window.draw(&b, vec![a_box(1)]);
+    wait("refused while off", || b_window.refused() == [Refusal::Off]).await;
+    wait("B's own back as the host has it", || {
+        b_window.board().is_empty()
+    })
+    .await;
+
+    a.ok(Command::SetDrawing { on: true }).await;
+    wait("B hears drawing is on", || drawing_on(&b_window, true)).await;
+    b_window.draw(&b, vec![a_box(1)]);
+    a.wait_session(&room, &a, "one element on the board", |s| {
+        s.is_some_and(|s| {
+            s.drawing.on
+                && s.drawing.elements == 1
+                && s.drawing.drawers.len() == 1
+                && s.drawing.drawers[0].member == bid
+        })
+    })
+    .await;
+
+    // A newcomer gets the board whole.
+    let c_window = watching(&room, &a, &c).await;
+    wait("C gets the board", || {
+        c_window.board() == [(bid.clone(), 1)]
+    })
+    .await;
+    // And what's drawn after.
+    b_window.draw(&b, vec![a_box(2)]);
+    wait("C sees B's second", || c_window.board().len() == 2).await;
+    c_window.draw(&c, vec![a_box(1)]);
+    wait("B sees C's", || b_window.board().len() == 3).await;
+    assert_eq!(
+        b_window.board()[2],
+        (cid.clone(), 1),
+        "C's own number, C's own"
+    );
+
+    // The host stops B: B's go everywhere, and B's next is refused.
+    a.ok(Command::StopDrawing {
+        member: bid.clone(),
+        stopped: true,
+    })
+    .await;
+    wait("B's gone from C's window", || {
+        c_window.board() == [(cid.clone(), 1)]
+    })
+    .await;
+    wait("B hears it was stopped", || {
+        b_window.hud().is_some_and(|h| h.board.stopped)
+    })
+    .await;
+    b_window.draw(&b, vec![a_box(3)]);
+    wait("refused, stopped", || {
+        b_window.refused().last() == Some(&Refusal::Stopped)
+    })
+    .await;
+    wait("B's window back to the host's", || {
+        b_window.board() == [(cid.clone(), 1)]
+    })
+    .await;
+    a.ok(Command::StopDrawing {
+        member: bid.clone(),
+        stopped: false,
+    })
+    .await;
+    wait("B may draw again", || {
+        b_window.hud().is_some_and(|h| !h.board.stopped)
+    })
+    .await;
+    b_window.draw(&b, vec![a_box(4)]);
+    wait("C sees B's again", || c_window.board().len() == 2).await;
+
+    // The host clears everything.
+    a.ok(Command::ClearBoard).await;
+    wait("cleared everywhere", || {
+        b_window.board().is_empty() && c_window.board().is_empty()
+    })
+    .await;
+    a.wait_session(&room, &a, "an empty board", |s| {
+        s.is_some_and(|s| s.drawing.elements == 0 && s.drawing.on)
+    })
+    .await;
+
+    // A stream ending clears it; drawing stays on for the next.
+    b_window.draw(&b, vec![a_box(5)]);
+    wait("C sees it", || c_window.board().len() == 1).await;
+    a.ok(Command::StopStream).await;
+    wait("cleared with the stream", || {
+        b_window.board().is_empty() && c_window.board().is_empty()
+    })
+    .await;
+    a.ok(stream_window()).await;
+    b_window.draw(&b, vec![a_box(6)]);
+    wait("drawn on the next stream", || c_window.board().len() == 1).await;
+
+    // Off clears it too.
+    a.ok(Command::SetDrawing { on: false }).await;
+    wait("off everywhere", || {
+        drawing_on(&b_window, false) && drawing_on(&c_window, false)
+    })
+    .await;
+    wait("and cleared", || c_window.board().is_empty()).await;
+
+    // Settings' default applies to the next session.
+    let Response::Drawing(d) = a.handle(Command::GetDrawingDefault).await.unwrap() else {
+        panic!("the default");
+    };
+    assert!(!d.on, "off by default");
+    a.ok(Command::SetDrawingDefault { on: true }).await;
+    a.ok(Command::EndSession).await;
+    a.ok(go_live(&room, 4)).await;
+    a.wait_session(&room, &a, "drawing on from the start", |s| {
+        s.is_some_and(|s| s.drawing.on)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M27a: the keyboard-and-mouse seat's holder draws nothing (its keys and
+/// mouse are the game's); a controller seat's holder draws.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_keyboard_seats_holder_draws_nothing() {
+    let (mut a, mut b, mut c, room) = three().await;
+    let reply = a
+        .live(go_live_with(&room, 4, setup(1, KeyboardMouseSeat::OwnSeat)))
+        .await;
+    assert!(matches!(reply, Ok(Response::Room(_))), "{reply:?}");
+    a.ok(Command::SetDrawing { on: true }).await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    give_seat(&room, &mut a, &b, &b_window, 1).await;
+    b_window.draw(&b, vec![a_box(1)]);
+    wait("refused on the keyboard seat", || {
+        b_window.refused() == [Refusal::KeyboardSeat]
+    })
+    .await;
+    wait("nothing of it left", || b_window.board().is_empty()).await;
+    give_seat(&room, &mut a, &c, &c_window, 0).await;
+    c_window.draw(&c, vec![a_box(1)]);
+    wait("the controller seat's holder draws", || {
+        b_window.board() == [(c.id(), 1)]
+    })
+    .await;
+    assert!(c_window.refused().is_empty());
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M27a: a device running the home PC from afar turns drawing on, sees the
+/// board's count, stops a guest and clears the board, as the home PC's own
+/// console would.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_runs_the_board_from_afar() {
+    let (mut a, mut b, mut c, room) = three().await;
+    trusted(&room, &a, &b).await;
+    a.go_live(&room, 4).await;
+    b.ok(unlock(&room, &a, PIN)).await;
+    b.ok(remote(&room, &a, RemoteAction::SetDrawing { on: true }))
+        .await;
+    a.wait_session(&room, &a, "drawing on at A", |s| {
+        s.is_some_and(|s| s.drawing.on)
+    })
+    .await;
+    let c_window = watching(&room, &a, &c).await;
+    wait("C hears it", || drawing_on(&c_window, true)).await;
+    c_window.draw(&c, vec![a_box(1), a_box(2)]);
+    let cid = c.id();
+    b.wait_session(&room, &a, "B counts C's two", |s| {
+        s.is_some_and(|s| {
+            s.operator
+                && s.drawing.elements == 2
+                && s.drawing.drawers.first().is_some_and(|d| d.member == cid)
+        })
+    })
+    .await;
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::StopDrawing {
+            member: cid.clone(),
+            stopped: true,
+        },
+    ))
+    .await;
+    b.wait_session(&room, &a, "C stopped, the board empty", |s| {
+        s.is_some_and(|s| s.drawing.stopped == [cid.clone()] && s.drawing.elements == 0)
+    })
+    .await;
+    wait("C's window cleared", || c_window.board().is_empty()).await;
+    b.ok(remote(
+        &room,
+        &a,
+        RemoteAction::StopDrawing {
+            member: cid.clone(),
+            stopped: false,
+        },
+    ))
+    .await;
+    wait("C may draw again", || {
+        c_window.hud().is_some_and(|h| !h.board.stopped)
+    })
+    .await;
+    c_window.draw(&c, vec![a_box(3)]);
+    b.wait_session(&room, &a, "one on the board", |s| {
+        s.is_some_and(|s| s.drawing.elements == 1)
+    })
+    .await;
+    b.ok(remote(&room, &a, RemoteAction::ClearBoard)).await;
+    a.wait_session(&room, &a, "cleared from afar", |s| {
+        s.is_some_and(|s| s.drawing.elements == 0)
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }

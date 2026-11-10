@@ -48,6 +48,7 @@ use std::{
 };
 
 use couch_proto::{
+    board::{BoardCleared, BoardOp, BoardRefused, BoardSnapshot, BoardState, BoardUpdate, Refusal},
     control::ControlMessage,
     ids::{MemberId, Permissions, SeatId, SessionId},
     room::valid_name,
@@ -56,6 +57,8 @@ use couch_proto::{
         SessionJoinReply, SessionStatus, StreamState, valid_seats,
     },
 };
+
+use crate::board::Board;
 
 /// Viewers a session takes unless its host chooses otherwise.
 pub const DEFAULT_MAX_VIEWERS: u8 = 4;
@@ -226,7 +229,22 @@ pub struct HostSession {
     /// The viewer whose grant of the keyboard-and-mouse seat carries desktop
     /// control (M25b), as the engine last said.
     desktop: Option<MemberId>,
+    /// What viewers drew on the stream (M27a): off until the host turns it
+    /// on, and cleared whenever a stream ends.
+    board: Board,
+    /// A batch taken since the last tick changed the board's count.
+    board_changed: bool,
+    /// Members refused since their last resync, and since when; and when
+    /// each was last sent its own elements back.
+    resync_due: BTreeMap<MemberId, Instant>,
+    resynced: BTreeMap<MemberId, Instant>,
+    /// The time the board last heard (a batch, a tick): for finishing the
+    /// strokes of a viewer that leaves, which comes with no time.
+    board_now: Option<Instant>,
 }
+
+/// A refused member gets its own elements back at most this often (M27a).
+pub const RESYNC_EVERY: Duration = Duration::from_secs(1);
 
 /// A grant on its way to the router (M18).
 #[derive(Debug, Clone)]
@@ -288,6 +306,11 @@ impl HostSession {
             asked_with: BTreeMap::new(),
             pending: Vec::new(),
             desktop: None,
+            board: Board::new(false),
+            board_changed: false,
+            resync_due: BTreeMap::new(),
+            resynced: BTreeMap::new(),
+            board_now: None,
         })
     }
 
@@ -626,18 +649,19 @@ impl HostSession {
             return Vec::new();
         }
         if self.is_viewer(member) {
-            return vec![reply(JoinResult::Joined)];
+            let mut fx = vec![reply(JoinResult::Joined)];
+            fx.extend(self.board_for(member));
+            return fx;
         }
         if self.viewers.len() >= usize::from(self.config.max_viewers) {
             return vec![reply(JoinResult::Full)];
         }
         self.viewers.push(member);
-        vec![
-            Effect::StartViewer(member),
-            reply(JoinResult::Joined),
-            Effect::Broadcast(self.status()),
-            Effect::Changed,
-        ]
+        let mut fx = vec![Effect::StartViewer(member), reply(JoinResult::Joined)];
+        // What is drawn on the stream, after the join's answer (M27a).
+        fx.extend(self.board_for(member));
+        fx.extend([Effect::Broadcast(self.status()), Effect::Changed]);
+        fx
     }
 
     /// The host couldn't stream to this viewer (no encoder, say): it is
@@ -676,6 +700,17 @@ impl HostSession {
         if self.desktop == Some(member) {
             self.desktop = None;
         }
+        // What it drew stays until the host clears it; a stroke it was
+        // drawing is finished for the others, so a fading one fades.
+        self.board.forget_rates(member);
+        self.resync_due.remove(&member);
+        self.resynced.remove(&member);
+        // No clock here: the time last heard (a stroke is only open after a
+        // batch, so there is one).
+        let finished = self
+            .board_now
+            .map(|now| self.board.finish_open(member, now))
+            .unwrap_or_default();
         // Stopping the viewer releases what it held; the router's own report
         // of that follows.
         for holder in &mut self.holders {
@@ -689,6 +724,7 @@ impl HostSession {
         fx.extend(self.reclaim());
         if !self.ended {
             fx.push(Effect::Broadcast(self.status()));
+            fx.extend(self.updates_to_others(member, finished));
         }
         fx.push(Effect::Changed);
         fx
@@ -1158,7 +1194,14 @@ impl HostSession {
             return Vec::new();
         }
         self.stream = stream;
-        vec![Effect::Broadcast(self.status()), Effect::Changed]
+        let mut fx = vec![Effect::Broadcast(self.status())];
+        // A stream ending clears the board (M27a): the next stream is a new
+        // picture.
+        if stream != StreamState::Live {
+            fx.extend(self.clear_board());
+        }
+        fx.push(Effect::Changed);
+        fx
     }
 
     /// Viewers may be given control again. Each host controller's seat, if
@@ -1185,6 +1228,8 @@ impl HostSession {
         self.asked_with.clear();
         self.pending.clear();
         self.desktop = None;
+        // Nothing drawn outlives the session (M27a).
+        self.board.clear();
         vec![
             Effect::Broadcast(ControlMessage::SessionEnded(SessionEnded {
                 session: self.id,
@@ -1192,6 +1237,282 @@ impl HostSession {
             })),
             Effect::Changed,
         ]
+    }
+
+    // ---- Drawing on the stream (M27a) ----
+
+    /// The board: what viewers drew, whether drawing is on, whom the host
+    /// stopped.
+    pub fn board(&self) -> &Board {
+        &self.board
+    }
+
+    /// Whether `member` holds the keyboard-and-mouse seat, or is being given
+    /// it (a grant on its way, desktop control): its keys and mouse are the
+    /// game's, never the board's.
+    fn on_keyboard_seat(&self, member: MemberId) -> bool {
+        let Some(seat) = self.keyboard_seat() else {
+            return false;
+        };
+        self.holders[usize::from(seat.0)] == Some(member)
+            || self.desktop == Some(member)
+            || self
+                .pending
+                .iter()
+                .any(|p| p.seat == seat && p.member == member && !p.cancelled)
+    }
+
+    /// Why the session refuses `member` drawing beyond the board's own
+    /// checks: it holds the keyboard-and-mouse seat, or nothing is streamed
+    /// (a new stream is a new picture: nothing drawn between two may carry
+    /// over onto the next).
+    fn drawing_blocked(&self, member: MemberId) -> Option<Refusal> {
+        if self.on_keyboard_seat(member) {
+            Some(Refusal::KeyboardSeat)
+        } else if self.stream != StreamState::Live {
+            Some(Refusal::NoStream)
+        } else {
+            None
+        }
+    }
+
+    /// Sends `message` to every viewer but `except`.
+    fn to_viewers(&self, message: &ControlMessage, except: Option<MemberId>) -> Vec<Effect> {
+        self.viewers
+            .iter()
+            .filter(|v| Some(**v) != except)
+            .map(|v| Effect::Send {
+                to: *v,
+                message: message.clone(),
+            })
+            .collect()
+    }
+
+    fn board_state(&self) -> ControlMessage {
+        ControlMessage::BoardState(BoardState {
+            session: self.id,
+            on: self.board.is_on(),
+            stopped: self.board.stopped(),
+        })
+    }
+
+    /// The clear of `author`'s elements (or everyone's), with the
+    /// generation it starts for them.
+    fn board_cleared(&self, author: Option<MemberId>) -> ControlMessage {
+        ControlMessage::BoardCleared(BoardCleared {
+            session: self.id,
+            generation: author.map_or(self.board.generation(), |a| self.board.generation_of(a)),
+            author,
+        })
+    }
+
+    /// `author`'s operations the host made itself (its strokes finished), to
+    /// every viewer but the author, in batches the checks allow: as many
+    /// as 300 open strokes would make one update every window drops.
+    fn updates_to_others(&self, author: MemberId, ops: Vec<BoardOp>) -> Vec<Effect> {
+        couch_proto::board::batches(ops)
+            .into_iter()
+            .flat_map(|ops| {
+                let update = ControlMessage::BoardUpdate(BoardUpdate {
+                    session: self.id,
+                    author,
+                    ops,
+                });
+                self.to_viewers(&update, Some(author))
+            })
+            .collect()
+    }
+
+    /// The board's state and the board whole, to one viewer: as it starts
+    /// watching, in a new generation of its own (the window takes a
+    /// snapshot as a clear of its own elements, so a batch it made before
+    /// must be dropped here too, not taken).
+    fn board_for(&mut self, member: MemberId) -> Vec<Effect> {
+        self.board.new_generation(member);
+        let mut fx = vec![Effect::Send {
+            to: member,
+            message: self.board_state(),
+        }];
+        fx.extend(
+            BoardSnapshot::parts(
+                self.id,
+                self.board.generation_of(member),
+                self.board.snapshot(),
+            )
+            .into_iter()
+            .map(|part| Effect::Send {
+                to: member,
+                message: ControlMessage::BoardSnapshot(part),
+            }),
+        );
+        fx
+    }
+
+    /// A viewer's batch of its own operations, made in `generation`: taken
+    /// whole and sent to every other viewer with its author, or refused.
+    ///
+    /// - **Not watching:** nothing to say.
+    /// - **Stale** (made before a clear of its elements it hadn't heard of):
+    ///   dropped, nothing to say: it hears of the clear itself.
+    /// - **Refused** otherwise: it is told why at once, and gets its own
+    ///   elements back as the host has them at the next [`Self::board_tick`]
+    ///   (at most once a second per member: refusals must never make the
+    ///   host send a member's whole drawing over and over), in a new
+    ///   generation of its own, so what it sent meanwhile is dropped and
+    ///   what it shows of its own is the host's again.
+    pub fn draw(
+        &mut self,
+        member: MemberId,
+        generation: u32,
+        ops: Vec<BoardOp>,
+        now: Instant,
+    ) -> Vec<Effect> {
+        if self.ended || !self.is_viewer(member) {
+            return Vec::new();
+        }
+        self.board_now = Some(now);
+        let blocked = self.drawing_blocked(member);
+        match self.board.apply(member, generation, &ops, now, blocked) {
+            Ok(taken) => {
+                let update = ControlMessage::BoardUpdate(BoardUpdate {
+                    session: self.id,
+                    author: member,
+                    ops,
+                });
+                // The console's count, at the next tick: never a view per
+                // batch.
+                self.board_changed |= taken.counts_changed;
+                self.to_viewers(&update, Some(member))
+            }
+            Err(Refusal::Stale) => Vec::new(),
+            Err(why) => {
+                self.resync_due.entry(member).or_insert(now);
+                vec![Effect::Send {
+                    to: member,
+                    message: ControlMessage::BoardRefused(BoardRefused {
+                        session: self.id,
+                        why,
+                    }),
+                }]
+            }
+        }
+    }
+
+    /// `member`'s own elements back to it, as the host has them, in a new
+    /// generation of its own; its strokes still open are finished first,
+    /// for everyone, since it can't finish them now.
+    fn resync(&mut self, member: MemberId, now: Instant) -> Vec<Effect> {
+        let finished = self.board.finish_open(member, now);
+        let mut fx = self.updates_to_others(member, finished);
+        self.board.new_generation(member);
+        fx.push(Effect::Send {
+            to: member,
+            message: self.board_cleared(Some(member)),
+        });
+        let own: Vec<BoardOp> = self
+            .board
+            .of(member)
+            .into_iter()
+            .map(BoardOp::Put)
+            .collect();
+        fx.extend(
+            couch_proto::board::batches(own)
+                .into_iter()
+                .map(|ops| Effect::Send {
+                    to: member,
+                    message: ControlMessage::BoardUpdate(BoardUpdate {
+                        session: self.id,
+                        author: member,
+                        ops,
+                    }),
+                }),
+        );
+        self.resynced.insert(member, now);
+        fx
+    }
+
+    /// Drawing on or off for the session. Off clears the board; on, every
+    /// viewer gets the (empty) board.
+    pub fn set_drawing(&mut self, on: bool) -> Vec<Effect> {
+        if self.ended || !self.board.set_on(on) {
+            return Vec::new();
+        }
+        let mut fx = self.to_viewers(&self.board_state(), None);
+        if on {
+            for viewer in self.viewers.clone() {
+                fx.extend(self.board_for(viewer).into_iter().skip(1));
+            }
+        } else {
+            fx.extend(self.to_viewers(&self.board_cleared(None), None));
+        }
+        fx.push(Effect::Changed);
+        fx
+    }
+
+    /// Everything on the board gone, at the host's word.
+    pub fn clear_board(&mut self) -> Vec<Effect> {
+        if self.ended {
+            return Vec::new();
+        }
+        self.board.clear();
+        let mut fx = self.to_viewers(&self.board_cleared(None), None);
+        fx.push(Effect::Changed);
+        fx
+    }
+
+    /// Stops `member` drawing, clearing what it drew, or lets it draw again.
+    /// The host can't stop themself: they draw at their own PC.
+    pub fn stop_drawing(&mut self, member: MemberId, stopped: bool) -> Vec<Effect> {
+        if self.ended || self.config.host == Some(member) {
+            return Vec::new();
+        }
+        // Whom the host stopped stays within a room's size: those no longer
+        // watching are forgotten first.
+        if stopped && self.board.stopped().len() >= couch_proto::room::MAX_ROSTER {
+            let viewers = self.viewers.clone();
+            self.board.forget_stopped(|m| viewers.contains(&m));
+        }
+        if !self.board.set_stopped(member, stopped) {
+            return Vec::new();
+        }
+        let mut fx = Vec::new();
+        if stopped {
+            self.resync_due.remove(&member);
+            fx.extend(self.to_viewers(&self.board_cleared(Some(member)), None));
+        }
+        fx.extend(self.to_viewers(&self.board_state(), None));
+        fx.push(Effect::Changed);
+        fx
+    }
+
+    /// Every tick of the engine's: the finished fading elements whose time
+    /// is up leave the board (windows fade them by themselves, but a
+    /// newcomer mustn't get them), refused members get their own elements
+    /// back (at most once a second each), and the console hears of the
+    /// count once for every batch since the last tick.
+    pub fn board_tick(&mut self, now: Instant) -> Vec<Effect> {
+        self.board_now = Some(now);
+        let mut fx = Vec::new();
+        let due: Vec<MemberId> = self
+            .resync_due
+            .keys()
+            .copied()
+            .filter(|m| {
+                self.resynced
+                    .get(m)
+                    .is_none_or(|t| now.saturating_duration_since(*t) >= RESYNC_EVERY)
+            })
+            .collect();
+        for member in due {
+            self.resync_due.remove(&member);
+            if !self.ended && self.is_viewer(member) {
+                fx.extend(self.resync(member, now));
+            }
+        }
+        if self.board.expire(now) || std::mem::take(&mut self.board_changed) {
+            fx.push(Effect::Changed);
+        }
+        fx
     }
 
     /// Grants `seat`, after revoking `member` from the pad seats it must

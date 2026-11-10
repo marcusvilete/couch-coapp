@@ -46,6 +46,340 @@ fn broadcasts_status(fx: &[Effect]) -> bool {
         .any(|e| matches!(e, Effect::Broadcast(ControlMessage::SessionStatus(_))))
 }
 
+// ---- Drawing on the stream (M27a) ----
+
+/// What `fx` sends `to`, in order.
+fn sent_to(fx: &[Effect], to: MemberId) -> Vec<&ControlMessage> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Send { to: t, message } if *t == to => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn drawing_session() -> HostSession {
+    let mut s = HostSession::new(
+        SessionId(9),
+        SessionConfig {
+            seats: vec![SeatKind::Controller, SeatKind::KeyboardMouse],
+            ..config(4)
+        },
+    )
+    .unwrap();
+    s.join(ANA);
+    s.join(BIA);
+    s.set_stream(StreamState::Live);
+    s
+}
+
+fn draw_box(s: &mut HostSession, who: MemberId, id: u32) -> Vec<Effect> {
+    let generation = s.board().generation_of(who);
+    s.draw(who, generation, vec![a_box(id)], Instant::now())
+}
+
+#[test]
+fn a_drawing_goes_to_the_other_viewers_with_its_author() {
+    let mut s = drawing_session();
+    let fx = s.set_drawing(true);
+    // Everyone hears drawing is on, and gets the (empty) board.
+    for v in [ANA, BIA] {
+        let to = sent_to(&fx, v);
+        assert!(matches!(to[0], ControlMessage::BoardState(b) if b.on));
+        assert!(
+            matches!(to[1], ControlMessage::BoardSnapshot(b) if b.first && b.elements.is_empty())
+        );
+    }
+    let fx = draw_box(&mut s, ANA, 1);
+    assert!(sent_to(&fx, ANA).is_empty(), "the author drew it already");
+    assert!(matches!(
+        sent_to(&fx, BIA)[..],
+        [ControlMessage::BoardUpdate(u)] if u.author == ANA
+    ));
+    assert!(!fx.contains(&Effect::Changed), "never a view per batch");
+    assert_eq!(
+        s.board_tick(Instant::now()),
+        vec![Effect::Changed],
+        "the console counts it at the tick"
+    );
+    assert!(s.board_tick(Instant::now()).is_empty());
+    // A newcomer gets it whole.
+    let fx = s.join(CAIO);
+    let snapshot = sent_to(&fx, CAIO)
+        .into_iter()
+        .find_map(|m| match m {
+            ControlMessage::BoardSnapshot(b) => Some(b.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(snapshot.elements.len(), 1);
+    assert_eq!(snapshot.elements[0].author, ANA);
+}
+
+#[test]
+fn nobody_draws_while_drawing_is_off_or_from_outside() {
+    let mut s = drawing_session();
+    let fx = draw_box(&mut s, ANA, 1);
+    assert!(matches!(
+        sent_to(&fx, ANA)[0],
+        ControlMessage::BoardRefused(r) if r.why == Refusal::Off
+    ));
+    assert!(sent_to(&fx, BIA).is_empty());
+    s.set_drawing(true);
+    // Not watching: nothing taken, nothing said.
+    assert!(draw_box(&mut s, CAIO, 1).is_empty());
+    assert!(s.board().is_empty());
+}
+
+#[test]
+fn the_keyboard_seats_holder_draws_nothing() {
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    let kbm = SeatId(1);
+    // Passed, not yet reported: already refused.
+    s.pass(BIA, kbm).unwrap();
+    let fx = draw_box(&mut s, BIA, 1);
+    assert!(matches!(
+        sent_to(&fx, BIA)[0],
+        ControlMessage::BoardRefused(r) if r.why == Refusal::KeyboardSeat
+    ));
+    s.seat_changed(kbm, Some(BIA));
+    draw_box(&mut s, BIA, 2);
+    assert!(s.board().is_empty());
+    // A controller seat's holder draws.
+    s.pass(ANA, SeatId(0)).unwrap();
+    s.seat_changed(SeatId(0), Some(ANA));
+    draw_box(&mut s, ANA, 1);
+    assert_eq!(s.board().len(), 1);
+    // Given back, the keyboard seat's former holder draws again.
+    s.give_back(BIA, Some(kbm));
+    s.seat_changed(kbm, None);
+    draw_box(&mut s, BIA, 3);
+    assert_eq!(s.board().len(), 2);
+}
+
+#[test]
+fn a_refused_author_gets_its_own_back_at_the_tick() {
+    use couch_proto::board::{BoardOp, Point};
+    let t0 = Instant::now();
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    draw_box(&mut s, ANA, 1);
+    draw_box(&mut s, BIA, 1);
+    // A stroke Ana is drawing.
+    let g = s.board().generation_of(ANA);
+    let open = couch_proto::board::Element {
+        id: 2,
+        kind: couch_proto::board::ElementKind::Pen,
+        colour: 0,
+        width: 0,
+        fades: true,
+        done: false,
+        points: vec![Point::new(1, 1)],
+    };
+    s.draw(ANA, g, vec![BoardOp::Put(open)], t0);
+    // Stopping someone else doesn't stale Ana's batches.
+    s.stop_drawing(CAIO, true);
+    assert_eq!(s.board().generation_of(ANA), g);
+    // An append to a stroke Ana doesn't have: refused, said at once.
+    let bad = || {
+        vec![BoardOp::Append {
+            id: 9,
+            points: vec![Point::new(1, 1)],
+            done: true,
+        }]
+    };
+    let fx = s.draw(ANA, g, bad(), t0);
+    assert!(matches!(
+        sent_to(&fx, ANA)[..],
+        [ControlMessage::BoardRefused(r)] if r.why == Refusal::Invalid
+    ));
+    // At the tick: its open stroke finished for the others, and its own
+    // back to it, in a new generation of its own.
+    let fx = s.board_tick(t0);
+    assert!(matches!(
+        sent_to(&fx, BIA)[..],
+        [ControlMessage::BoardUpdate(u)] if u.author == ANA
+            && u.ops == vec![BoardOp::Append { id: 2, points: vec![], done: true }]
+    ));
+    let to = sent_to(&fx, ANA);
+    let fresh = s.board().generation_of(ANA);
+    assert_ne!(fresh, g);
+    assert!(
+        matches!(to[0], ControlMessage::BoardCleared(c) if c.author == Some(ANA) && c.generation == fresh)
+    );
+    assert!(matches!(
+        to[1],
+        ControlMessage::BoardUpdate(u) if u.author == ANA && u.ops.len() == 2
+    ));
+    // What Ana sent before hearing of it: dropped, nothing said.
+    assert!(s.draw(ANA, g, vec![a_box(3)], t0).is_empty());
+    assert!(s.board().element(ANA, 3).is_none());
+    // Another refusal soon after: said, but its resync waits a second.
+    s.draw(ANA, fresh, bad(), t0);
+    let fx = s.board_tick(t0 + Duration::from_millis(200));
+    assert!(sent_to(&fx, ANA).is_empty(), "{fx:?}");
+    let fx = s.board_tick(t0 + RESYNC_EVERY);
+    assert!(matches!(
+        sent_to(&fx, ANA)[0],
+        ControlMessage::BoardCleared(_)
+    ));
+}
+
+#[test]
+fn a_snapshot_starts_a_generation_of_its_own() {
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    let before = s.board().generation_of(ANA);
+    // Ana joins again (a reconnect): a batch made before the snapshot is
+    // dropped, as the window drops it on taking the snapshot.
+    let fx = s.join(ANA);
+    let snapshot = sent_to(&fx, ANA)
+        .into_iter()
+        .find_map(|m| match m {
+            ControlMessage::BoardSnapshot(b) => Some(b.generation),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(snapshot, before);
+    assert_eq!(snapshot, s.board().generation_of(ANA));
+    assert!(
+        s.draw(ANA, before, vec![a_box(1)], Instant::now())
+            .is_empty()
+    );
+    assert!(s.board().is_empty());
+}
+
+#[test]
+fn many_open_strokes_are_finished_in_batches_the_checks_allow() {
+    use couch_proto::board::{BoardOp, Element, ElementKind, Point, valid_batch};
+    let t0 = Instant::now();
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    for k in 0..4u32 {
+        let g = s.board().generation_of(ANA);
+        let ops = (0..50)
+            .map(|i| {
+                BoardOp::Put(Element {
+                    id: k * 50 + i,
+                    kind: ElementKind::Pen,
+                    colour: 0,
+                    width: 0,
+                    fades: true,
+                    done: false,
+                    points: vec![Point::new(1, 1)],
+                })
+            })
+            .collect();
+        s.draw(ANA, g, ops, t0 + Duration::from_secs(u64::from(k)));
+    }
+    let fx = s.leave(ANA);
+    let updates: Vec<&BoardUpdate> = sent_to(&fx, BIA)
+        .into_iter()
+        .filter_map(|m| match m {
+            ControlMessage::BoardUpdate(u) => Some(u),
+            _ => None,
+        })
+        .collect();
+    assert!(updates.len() >= 4, "{}", updates.len());
+    assert!(updates.iter().all(|u| valid_batch(&u.ops)));
+    assert_eq!(updates.iter().map(|u| u.ops.len()).sum::<usize>(), 200);
+}
+
+#[test]
+fn nothing_is_drawn_while_nothing_is_streamed() {
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    s.set_stream(StreamState::Stopped(EndReason::HostStopped));
+    let fx = draw_box(&mut s, ANA, 1);
+    assert!(matches!(
+        sent_to(&fx, ANA)[0],
+        ControlMessage::BoardRefused(r) if r.why == Refusal::NoStream
+    ));
+    assert!(s.board().is_empty());
+}
+
+#[test]
+fn a_viewer_leaving_mid_stroke_has_it_finished() {
+    use couch_proto::board::{BoardOp, Point};
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    let open = couch_proto::board::Element {
+        id: 1,
+        kind: couch_proto::board::ElementKind::Pen,
+        colour: 0,
+        width: 0,
+        fades: true,
+        done: false,
+        points: vec![Point::new(1, 1)],
+    };
+    let g = s.board().generation_of(ANA);
+    s.draw(ANA, g, vec![BoardOp::Put(open)], Instant::now());
+    let fx = s.leave(ANA);
+    assert!(s.board().element(ANA, 1).unwrap().done);
+    assert!(
+        sent_to(&fx, BIA)
+            .iter()
+            .any(|m| matches!(m, ControlMessage::BoardUpdate(u) if u.author == ANA))
+    );
+}
+
+#[test]
+fn the_host_clears_and_stops() {
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    draw_box(&mut s, ANA, 1);
+    draw_box(&mut s, BIA, 1);
+    let fx = s.stop_drawing(ANA, true);
+    for v in [ANA, BIA] {
+        let to = sent_to(&fx, v);
+        assert!(matches!(to[0], ControlMessage::BoardCleared(c) if c.author == Some(ANA)));
+        assert!(matches!(to[1], ControlMessage::BoardState(b) if b.stopped == vec![ANA]));
+    }
+    assert_eq!(s.board().counts(), vec![(BIA, 1)]);
+    let fx = draw_box(&mut s, ANA, 2);
+    assert!(matches!(
+        sent_to(&fx, ANA)[0],
+        ControlMessage::BoardRefused(r) if r.why == Refusal::Stopped
+    ));
+    let fx = s.clear_board();
+    assert!(matches!(
+        sent_to(&fx, BIA)[..],
+        [ControlMessage::BoardCleared(c)] if c.author.is_none()
+    ));
+    assert!(s.board().is_empty());
+    // Off clears too, and on again starts empty.
+    draw_box(&mut s, BIA, 2);
+    let fx = s.set_drawing(false);
+    assert!(s.board().is_empty());
+    assert!(
+        sent_to(&fx, BIA)
+            .iter()
+            .any(|m| matches!(m, ControlMessage::BoardCleared(_)))
+    );
+}
+
+#[test]
+fn a_stream_ending_clears_the_board() {
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    s.set_stream(StreamState::Live);
+    draw_box(&mut s, ANA, 1);
+    let fx = s.set_stream(StreamState::Stopped(EndReason::GameExited));
+    assert!(s.board().is_empty());
+    assert!(
+        sent_to(&fx, BIA)
+            .iter()
+            .any(|m| matches!(m, ControlMessage::BoardCleared(_)))
+    );
+    assert!(s.board().is_on(), "drawing stays on for the next stream");
+    s.set_stream(StreamState::Live);
+    draw_box(&mut s, ANA, 3);
+    s.end(EndReason::HostStopped);
+    assert!(s.board().is_empty());
+    assert!(draw_box(&mut s, ANA, 4).is_empty(), "nothing after the end");
+}
+
 #[test]
 fn titles_and_limits_are_checked() {
     let new = |title: &str, max| {
@@ -1509,6 +1843,12 @@ enum Op {
     Lapse(u8),
     /// The engine gives a viewer desktop control, or ends it (M25b).
     Desktop(Option<u8>),
+    /// A member draws a box on the stream (M27a).
+    Draw(u8),
+    /// The host turns drawing on or off (M27a).
+    Drawing(bool),
+    /// The host stops a member drawing, or lets it again (M27a).
+    StopDrawing(u8, bool),
     Wait(u64),
     End,
 }
@@ -1542,7 +1882,25 @@ fn op() -> impl Strategy<Value = Op> {
         1 => seat.prop_map(Op::Lapse),
         1 => (0u64..4000).prop_map(Op::Wait),
         1 => Just(Op::End),
+        // Light, or no viewer reaches two pad seats any more (M27a).
+        1 => (0u8..5).prop_map(Op::Draw),
+        1 => any::<bool>().prop_map(Op::Drawing),
+        1 => (0u8..5, any::<bool>()).prop_map(|(w, s)| Op::StopDrawing(w, s)),
     ]
+}
+
+/// A box, as member `i`'s element `id`.
+fn a_box(id: u32) -> couch_proto::board::BoardOp {
+    use couch_proto::board::{BoardOp, Element, ElementKind, Point};
+    BoardOp::Put(Element {
+        id,
+        kind: ElementKind::Rectangle,
+        colour: 0,
+        width: 0,
+        fades: false,
+        done: true,
+        points: vec![Point::new(0, 0), Point::new(10, 10)],
+    })
 }
 
 /// Stands in for `couch_input::router::SeatRouter`: who holds each seat, and
@@ -1683,6 +2041,8 @@ proptest! {
         let fx = s.start();
         prop_assert_eq!(claims(&fx).len(), usize::from(host_controllers));
         router.apply(&fx);
+        // Something streamed, so the drawing ops can draw (M27a).
+        s.set_stream(StreamState::Live);
         // What the host did with each controller's seat, from the ops alone:
         // the seat it last played, and whether they passed it on or took it
         // back to leave it empty.
@@ -1696,6 +2056,11 @@ proptest! {
         // session may end it on more (a pass to another, a give-back), never
         // grant it to anyone else.
         let mut desktop: Option<MemberId> = None;
+        // Drawing on the stream (M27a), from the ops alone.
+        let mut drawing_on = false;
+        let mut stopped: BTreeSet<MemberId> = BTreeSet::new();
+        let mut drawn: u32 = 0;
+        let mut viewer_drew = false;
 
         for op in ops {
             let paused_before = s.control_paused();
@@ -1775,6 +2140,54 @@ proptest! {
                     }
                     Err(_) => Vec::new(),
                 },
+                Op::Draw(i) => {
+                    let m = member(i);
+                    drawn += 1;
+                    let generation = s.board().generation_of(m);
+                    let fx = s.draw(m, generation, vec![a_box(drawn)], now);
+                    let taken = s.board().element(m, drawn).is_some();
+                    viewer_drew |= taken;
+                    if taken {
+                        prop_assert!(s.is_viewer(m), "a non-viewer drew");
+                        prop_assert!(drawing_on && !stopped.contains(&m));
+                        prop_assert!(!ended_before);
+                        prop_assert_ne!(router.holders[2], Some(m), "the keyboard seat's holder drew");
+                        prop_assert_ne!(desktop, Some(m), "desktop control drew");
+                    }
+                    for e in &fx {
+                        if let Effect::Send { to, message: ControlMessage::BoardUpdate(u) } = e
+                            && u.author == m
+                            && *to != m
+                        {
+                            prop_assert!(taken && s.is_viewer(*to));
+                        }
+                        prop_assert!(!matches!(e, Effect::Broadcast(_)), "the board goes to viewers alone");
+                    }
+                    fx
+                }
+                Op::Drawing(on) => {
+                    if !ended_before {
+                        drawing_on = on;
+                    }
+                    let fx = s.set_drawing(on);
+                    if !on {
+                        prop_assert!(s.board().is_empty(), "off clears the board");
+                    }
+                    fx
+                }
+                Op::StopDrawing(i, stop) => {
+                    let m = member(i);
+                    let fx = s.stop_drawing(m, stop);
+                    if !ended_before {
+                        if stop {
+                            stopped.insert(m);
+                        } else {
+                            stopped.remove(&m);
+                        }
+                    }
+                    prop_assert!(!stop || s.board().counts().iter().all(|(a, _)| *a != m));
+                    fx
+                }
                 Op::Wait(ms) => {
                     now += Duration::from_millis(ms);
                     Vec::new()
@@ -1936,7 +2349,8 @@ proptest! {
         }
         // To check the ops still reach the host on two seats (M23) and a
         // viewer on two pad seats (M18), make one of these fail for a
-        // moment: `prop_assert!(!host_held_two)` or `!viewer_two` must fail.
-        let _ = (host_held_two, viewer_two);
+        // moment: `prop_assert!(!host_held_two)` or `!viewer_two` must fail;
+        // and `!viewer_drew`, for a viewer's drawing taken (M27a).
+        let _ = (host_held_two, viewer_two, viewer_drew);
     }
 }

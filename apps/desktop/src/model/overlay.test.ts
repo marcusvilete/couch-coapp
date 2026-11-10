@@ -43,6 +43,7 @@ function view(over: Partial<SessionView>): SessionView {
     operatedBy: [],
     desktop: null,
     guestsKeyboard: true,
+    drawing: { on: false, elements: 0, drawers: [], stopped: [] },
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,

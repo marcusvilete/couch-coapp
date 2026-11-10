@@ -3,10 +3,10 @@
 // controllers). The console's buttons, its right-click menus and the
 // members panel's menu all use these lists. The engine decides; the hints
 // ("added", "moves them", "swaps…") say what it will do.
-import { Gamepad2, Hand, Keyboard, Undo2 } from "lucide-react";
+import { Gamepad2, Hand, Keyboard, Pencil, PencilOff, Undo2 } from "lucide-react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
-import { listed, nameOf, numbered, seatsOf } from "../model/sessions";
+import { drawingStopped, listed, nameOf, numbered, seatsOf } from "../model/sessions";
 import type { MenuEntry } from "../ui/Menu";
 import type { Run } from "./useRun";
 
@@ -55,8 +55,39 @@ export function passHint(s: SessionView, member: string, i: number): string | nu
   return freed.seats.length === 0 ? "added" : `leaves ${seatsPhrase(s, freed.seats)}`;
 }
 
-/** A viewer's entries: pass a seat, take theirs back. */
+/** A viewer's entries: pass a seat, take theirs back; stop their drawing,
+ * or let them draw again (M27a). */
 export function viewerEntries(room: RoomView, s: SessionView, member: string, run: Run): MenuEntry[] {
+  const seats = seatEntriesOf(room, s, member, run);
+  const drawing = drawingEntries(room, s, member, run);
+  return seats.length > 0 && drawing.length > 0 ? [...seats, "separator", ...drawing] : [...seats, ...drawing];
+}
+
+/** Stop a member's drawing (clearing what they drew), or let them draw
+ * again: while drawing is on, for those watching and those stopped. */
+export function drawingEntries(room: RoomView, s: SessionView, member: string, run: Run): MenuEntry[] {
+  const stopped = drawingStopped(s, member);
+  if (stopped) {
+    return [
+      {
+        label: `Let ${nameOf(room, member)} draw again`,
+        icon: <Pencil />,
+        onSelect: () => void run(`draw-${member}`, { type: "stopDrawing", member, stopped: false }),
+      },
+    ];
+  }
+  if (!s.drawing.on || !s.viewers.includes(member)) return [];
+  return [
+    {
+      label: "Stop their drawing",
+      icon: <PencilOff />,
+      hint: "clears it",
+      onSelect: () => void run(`draw-${member}`, { type: "stopDrawing", member, stopped: true }),
+    },
+  ];
+}
+
+function seatEntriesOf(room: RoomView, s: SessionView, member: string, run: Run): MenuEntry[] {
   // Watching together (M24): no seats, nothing to pass.
   if (!s.viewers.includes(member) || s.seats.length === 0) return [];
   const held = seatsOf(s, member);

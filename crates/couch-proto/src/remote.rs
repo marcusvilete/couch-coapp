@@ -140,6 +140,18 @@ pub enum RemoteOp {
     /// The streamed window to the front (M25b). Only ever the streamed
     /// window: the op names none.
     BringToFront,
+    /// Drawing on the stream on or off (M27a); off clears the board.
+    SetDrawing {
+        on: bool,
+    },
+    /// Everything on the board gone (M27a).
+    ClearBoard,
+    /// Stops one member drawing, clearing what it drew, or lets it draw
+    /// again (M27a).
+    StopDrawing {
+        member: MemberId,
+        stopped: bool,
+    },
 }
 
 impl fmt::Debug for RemoteOp {
@@ -202,6 +214,13 @@ impl fmt::Debug for RemoteOp {
             Self::StopWaitingForPads => f.write_str("StopWaitingForPads"),
             Self::Desktop { on } => f.debug_struct("Desktop").field("on", on).finish(),
             Self::BringToFront => f.write_str("BringToFront"),
+            Self::SetDrawing { on } => f.debug_struct("SetDrawing").field("on", on).finish(),
+            Self::ClearBoard => f.write_str("ClearBoard"),
+            Self::StopDrawing { member, stopped } => f
+                .debug_struct("StopDrawing")
+                .field("member", member)
+                .field("stopped", stopped)
+                .finish(),
         }
     }
 }
@@ -381,6 +400,19 @@ pub struct RemoteSession {
     /// Whether the streamed window is in front, once the home PC knows;
     /// `None` for a screen (M25b).
     pub in_front: Option<bool>,
+    /// Drawing on the stream (M27a).
+    pub drawing: RemoteDrawing,
+}
+
+/// The board as the console shows it (M27a): whether drawing is on, what is
+/// on the board, and whom the host stopped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteDrawing {
+    pub on: bool,
+    pub elements: u32,
+    /// Each member with something on the board, and how many elements.
+    pub drawers: Vec<(MemberId, u32)>,
+    pub stopped: Vec<MemberId>,
 }
 
 /// Its `Debug` leaves out the name, a window's title.
@@ -425,6 +457,8 @@ impl RemoteState {
             let text = |t: &str| t.len() <= MAX_REMOTE_TEXT;
             if s.requests.len() > MAX_REMOTE_LISTED
                 || s.guests.len() > MAX_REMOTE_LISTED
+                || s.drawing.drawers.len() > MAX_REMOTE_LISTED
+                || s.drawing.stopped.len() > MAX_REMOTE_LISTED
                 || s.host_controllers.len() > crate::session::MAX_PAD_SEATS
                 || s.host_homes.len() > crate::session::MAX_PAD_SEATS
                 || s.pads_setting_up.len() > crate::session::MAX_SEATS
@@ -587,6 +621,7 @@ mod tests {
                 panic_key: true,
                 desktop: None,
                 in_front: None,
+                drawing: RemoteDrawing::default(),
             }),
             locked: false,
             capabilities: HostCapabilities::ALL,
