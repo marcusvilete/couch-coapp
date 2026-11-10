@@ -16,11 +16,15 @@ use std::{
 };
 
 use couch_input::{HidUsage, shortcuts::Shortcut};
-use couch_proto::remote::{RemoteGuest, RemoteRequest, RemoteSession, RemoteStream};
+use couch_proto::remote::{RemoteDrawing, RemoteGuest, RemoteRequest, RemoteSession, RemoteStream};
 use couch_proto::{
+    board::BoardOps,
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
-    ipc::{HudRole, HudSeat, HudState, ShortcutKeys, StreamVolume, UserAction, WindowState},
+    ipc::{
+        BoardNews, HudBoard, HudRole, HudSeat, HudState, ShortcutKeys, StreamVolume, UserAction,
+        WindowState,
+    },
     session::{
         Cancel, ControlCancel, ControlRequest, ControllerReport, EndReason, GameFocus, JoinResult,
         SeatKind, SessionAnnounce, SessionJoin, SessionLeave, SessionStatus, StreamState,
@@ -31,9 +35,9 @@ use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
 
 use super::*;
 use crate::{
-    AnswerKeys, GameWindowView, GuestControllerView, HostController, InputSetup, OurControllerView,
-    RequestView, ScreenArea, SeatView, SessionEnd, SessionRole, SessionView, SourceChoice,
-    StreamStateView, StreamView, StreamWindowView, WatchEnd,
+    AnswerKeys, DrawingView, GameWindowView, GuestControllerView, HostController, InputSetup,
+    OurControllerView, RequestView, ScreenArea, SeatView, SessionEnd, SessionRole, SessionView,
+    SourceChoice, StreamStateView, StreamView, StreamWindowView, WatchEnd,
     pipeline::{
         AudioChoice, GameWindow, HostKeyEvent, Source, ViewerOptions,
         host::{HostOptions, LocalSeat, Rates, StreamControl, StreamOptions},
@@ -163,6 +167,10 @@ struct Watching {
     /// The window's full screen, bar and stats, as it last said; `None`
     /// until it has (P11).
     window: Option<WindowState>,
+    /// Drawing on the stream (M27a), as the host last said: on, and whether
+    /// it stopped us.
+    board_on: bool,
+    board_stopped: bool,
 }
 
 enum WatchState {
@@ -658,6 +666,19 @@ impl Actor {
                     self.announce(room, now);
                 }
             }
+            // A viewer's drawing (M27a): only its own, from the viewer
+            // itself on the connection it joined on. The board keys what it
+            // takes by this connection's member, never by anything named in
+            // the message.
+            ControlMessage::BoardOps(m) if ours(&self.sessions, m.session) => {
+                let fx = self.hosting_mut().and_then(|h| {
+                    (h.session.is_viewer(peer) && h.viewer_conns.get(&peer) == Some(&conn))
+                        .then(|| h.session.draw(peer, m.generation, m.ops, now))
+                });
+                if let Some(fx) = fx {
+                    self.apply_session(room, fx, now);
+                }
+            }
             ControlMessage::KeyframeRequest(_) => {
                 if let Some(h) = self.sessions.hosting.as_ref()
                     && h.room == room
@@ -911,7 +932,53 @@ impl Actor {
                 self.send_hud();
                 self.announce(room, now);
             }
+            // The board (M27a): only from the host we watch, about its
+            // session, once joined; the window shows it.
+            ControlMessage::BoardState(b) => {
+                if !self.watching(room, peer, b.session) || !b.is_valid() {
+                    return;
+                }
+                let me = self.me;
+                if let Some(w) = self.sessions.watching.as_mut() {
+                    let (on, stopped) = (b.on, b.stopped.contains(&me));
+                    if (w.board_on, w.board_stopped) != (on, stopped) {
+                        w.board_on = on;
+                        w.board_stopped = stopped;
+                        self.send_hud();
+                    }
+                }
+            }
+            ControlMessage::BoardSnapshot(s)
+                if self.watching(room, peer, s.session) && s.is_valid() =>
+            {
+                self.to_window_board(BoardNews::Snapshot(s));
+            }
+            ControlMessage::BoardUpdate(u)
+                if self.watching(room, peer, u.session)
+                    && couch_proto::board::valid_batch(&u.ops) =>
+            {
+                self.to_window_board(BoardNews::Update(u));
+            }
+            ControlMessage::BoardCleared(c) if self.watching(room, peer, c.session) => {
+                self.to_window_board(BoardNews::Cleared(c));
+            }
+            ControlMessage::BoardRefused(r) if self.watching(room, peer, r.session) => {
+                self.to_window_board(BoardNews::Refused(r.why));
+            }
             _ => {}
+        }
+    }
+
+    /// What the host we watch said of the board, to our stream window.
+    fn to_window_board(&self, news: BoardNews) {
+        if let Some(watch) = self
+            .sessions
+            .watching
+            .as_ref()
+            .filter(|w| w.joined())
+            .and_then(|w| w.watch.as_ref())
+        {
+            watch.board(news);
         }
     }
 
@@ -1191,7 +1258,11 @@ impl Actor {
             host: (!controllers.is_empty()).then_some(self.me),
             host_controllers: controllers.len() as u8,
         };
-        let host_session = HostSession::new(session, config)?;
+        let mut host_session = HostSession::new(session, config)?;
+        // Drawing on the stream starts as Settings says (M27a), before
+        // anyone hears of the session: nobody to tell yet.
+        let drawing = crate::store::drawing(&self.data_dir).on;
+        let _ = host_session.set_drawing(drawing);
         let options = HostOptions {
             seats,
             // Games and Steam know a controller by its ids; a made-up pair
@@ -2196,6 +2267,50 @@ impl Actor {
         self.our_session(|s| Ok(s.allow_control()), now)
     }
 
+    // ---- Drawing on the stream (M27a) ----
+
+    /// Lets those watching draw, or stops it (clearing the board).
+    pub(super) fn set_drawing(&mut self, on: bool, now: Instant) -> Result<Response, EngineError> {
+        self.our_session(|s| Ok(s.set_drawing(on)), now)
+    }
+
+    pub(super) fn clear_board(&mut self, now: Instant) -> Result<Response, EngineError> {
+        self.our_session(|s| Ok(s.clear_board()), now)
+    }
+
+    /// Stops a member of the session's room drawing, or lets them again.
+    pub(super) fn stop_drawing(
+        &mut self,
+        member: &str,
+        stopped: bool,
+        now: Instant,
+    ) -> Result<Response, EngineError> {
+        let member = MemberId::from_hex(member).ok_or(EngineError::UnknownMember)?;
+        let in_room = self.sessions.hosting.as_ref().is_some_and(|h| {
+            self.rooms
+                .get(&h.room)
+                .is_some_and(|e| e.room.is_member(member))
+        });
+        if !in_room || member == self.me {
+            return Err(EngineError::UnknownMember);
+        }
+        self.our_session(|s| Ok(s.stop_drawing(member, stopped)), now)
+    }
+
+    /// Every tick: fading drawings whose time is up leave our board, refused
+    /// members get their own back, and the console hears the count.
+    pub(super) fn board_tick(&mut self, now: Instant) {
+        let fx = self
+            .hosting_mut()
+            .filter(|h| h.pipeline.is_some())
+            .map(|h| (h.room, h.session.board_tick(now)));
+        if let Some((room, fx)) = fx
+            && !fx.is_empty()
+        {
+            self.apply_session(room, fx, now);
+        }
+    }
+
     /// The panic key. The engine has already released through the
     /// pipeline's panic handle; this declines the requests and pauses
     /// control.
@@ -2432,6 +2547,8 @@ impl Actor {
             controllers: ControllerReport::default(),
             volume,
             window: None,
+            board_on: false,
+            board_stopped: false,
         });
         self.announce(room, now);
         Ok(None)
@@ -2754,6 +2871,19 @@ impl Actor {
             // A late report about an earlier connection counts for nothing.
             WatchEvent::ConnectionLost { link } if link == w.link => self.lost_host(now),
             WatchEvent::ConnectionLost { .. } => {}
+            // Our drawing (M27a), to the host once joined: it checks it all.
+            WatchEvent::Draw(draw) => {
+                // Our own window's, but checked anyway: a batch too large
+                // for a control frame would close the connection.
+                if w.joined() && couch_proto::board::valid_batch(&draw.ops) {
+                    let message = ControlMessage::BoardOps(BoardOps {
+                        session: w.session,
+                        generation: draw.generation,
+                        ops: draw.ops,
+                    });
+                    self.send(w.conn, Outgoing::Message(message));
+                }
+            }
             WatchEvent::Timing(_)
             | WatchEvent::AudioStats(_)
             | WatchEvent::Net(_)
@@ -2809,6 +2939,23 @@ impl Actor {
             game_in_front: w.in_front,
             stream: status.map_or(StreamState::Waiting, |s| s.stream),
             note: w.note.clone(),
+            board: HudBoard {
+                on: w.board_on,
+                stopped: w.board_stopped,
+                me: Some(self.me),
+                names: self
+                    .rooms
+                    .get(&w.room)
+                    .map(|e| {
+                        e.room
+                            .status()
+                            .members
+                            .into_iter()
+                            .map(|m| (m.id, m.name))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
         })
     }
 
@@ -3006,6 +3153,7 @@ impl Actor {
             in_front: h
                 .in_front
                 .filter(|_| streaming.is_some_and(|v| !v.screen) || h.game_window.is_some()),
+            drawing: remote_drawing(s.board()),
         })
     }
 
@@ -3118,6 +3266,7 @@ impl Actor {
                         .any(|seat| seat.has_keyboard_mouse()),
                 game_window: h.game_window.clone(),
                 warn_hot_corner: self.backend.warns_hot_corner(),
+                drawing: DrawingView::of(&remote_drawing(s.board())),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -3299,9 +3448,40 @@ impl Actor {
                 names_game: false,
                 game_window: None,
                 warn_hot_corner: false,
+                // Run from afar, the console's board; watched, whether we
+                // may draw (M27a).
+                drawing: match (console, ours) {
+                    (Some(c), _) => DrawingView::of(&c.drawing),
+                    (None, Some(w)) => DrawingView {
+                        on: w.board_on,
+                        stopped: if w.board_stopped {
+                            vec![self.me.to_hex()]
+                        } else {
+                            Vec::new()
+                        },
+                        ..DrawingView::default()
+                    },
+                    (None, None) => DrawingView::default(),
+                },
             });
         }
         views
+    }
+}
+
+/// Our board as the console shows it (M27a), here and on our devices.
+fn remote_drawing(board: &couch_room::board::Board) -> RemoteDrawing {
+    let listed = couch_proto::remote::MAX_REMOTE_LISTED;
+    RemoteDrawing {
+        on: board.is_on(),
+        elements: board.len() as u32,
+        drawers: board
+            .counts()
+            .into_iter()
+            .take(listed)
+            .map(|(m, n)| (m, n as u32))
+            .collect(),
+        stopped: board.stopped().into_iter().take(listed).collect(),
     }
 }
 

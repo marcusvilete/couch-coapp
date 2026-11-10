@@ -32,6 +32,11 @@ pub enum Shortcut {
     VolumeUp,
     /// Viewer: mute the stream, or unmute it (P6).
     Mute,
+    /// Viewer: drawing mode on or off (M27a): the mouse and keys go to the
+    /// board instead of the game.
+    ToggleDrawing,
+    /// Viewer: show or hide the drawings, for this window alone (M27a).
+    ToggleBoard,
     /// Host: take the controller back from everyone and pause control.
     Panic,
     /// Host: accept the oldest request for a seat.
@@ -204,7 +209,9 @@ pub fn key_for_code(code: &str) -> Option<&'static Key> {
 const KEY_0: HidUsage = HidUsage(0x27);
 const KEY_MINUS: HidUsage = HidUsage(0x2D);
 const KEY_EQUAL: HidUsage = HidUsage(0x2E);
+const KEY_B: HidUsage = HidUsage(0x05);
 const KEY_C: HidUsage = HidUsage(0x06);
+const KEY_D: HidUsage = HidUsage(0x07);
 const KEY_F: HidUsage = HidUsage(0x09);
 const KEY_H: HidUsage = HidUsage(0x0B);
 const KEY_M: HidUsage = HidUsage(0x10);
@@ -297,6 +304,24 @@ pub const SHORTCUTS: &[Binding] = &[
         condition: "",
     },
     Binding {
+        id: "toggleDrawing",
+        shortcut: Shortcut::ToggleDrawing,
+        chord: true,
+        key: KEY_D,
+        action: "Draw on the stream, or back to the game",
+        scope: Scope::Viewer,
+        condition: "while the host lets you draw, and you don't have the keyboard and mouse",
+    },
+    Binding {
+        id: "toggleBoard",
+        shortcut: Shortcut::ToggleBoard,
+        chord: true,
+        key: KEY_B,
+        action: "Show or hide the drawings",
+        scope: Scope::Viewer,
+        condition: "",
+    },
+    Binding {
         id: "toggleHud",
         shortcut: Shortcut::ToggleHud,
         chord: true,
@@ -315,6 +340,337 @@ pub const SHORTCUTS: &[Binding] = &[
         condition: "while you aren't sending keys to the game",
     },
 ];
+
+// ---- The drawing editor's keys (M27a) ----
+
+/// A drawing tool (M27a; text comes with M27c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DrawTool {
+    Select,
+    Pen,
+    Highlighter,
+    Laser,
+    Arrow,
+    Line,
+    Rectangle,
+    Ellipse,
+    Eraser,
+}
+
+impl DrawTool {
+    /// In the toolbar's order.
+    pub const ALL: [Self; 9] = [
+        Self::Select,
+        Self::Pen,
+        Self::Highlighter,
+        Self::Laser,
+        Self::Arrow,
+        Self::Line,
+        Self::Rectangle,
+        Self::Ellipse,
+        Self::Eraser,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::Pen => "Pen",
+            Self::Highlighter => "Highlighter",
+            Self::Laser => "Laser pointer",
+            Self::Arrow => "Arrow",
+            Self::Line => "Line",
+            Self::Rectangle => "Rectangle",
+            Self::Ellipse => "Ellipse",
+            Self::Eraser => "Eraser",
+        }
+    }
+}
+
+/// What a drawing key does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawAction {
+    Undo,
+    Redo,
+    Copy,
+    Paste,
+    Duplicate,
+    SelectAll,
+    Delete,
+    /// Moves the selection by a step (Shift: further), by direction.
+    Nudge(i8, i8),
+    Tool(DrawTool),
+    /// Leaves the tool, then drawing mode.
+    Leave,
+}
+
+/// One of the drawing editor's keys. They are each editor's own (the stream
+/// window's and, from M27b, the host's board overlay's), like a text box's:
+/// fixed, listed in Settings but never moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawingKey {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub key: HidUsage,
+    /// As printed on a US keyboard.
+    pub name: &'static str,
+    /// The browser's `KeyboardEvent.code`.
+    pub code: &'static str,
+    pub action: DrawAction,
+    /// What the app lists for it; empty for a row listed with another.
+    pub description: &'static str,
+}
+
+impl DrawingKey {
+    /// The keys to press, such as "Ctrl+Shift+Z".
+    pub fn keys(&self) -> String {
+        let mut keys = String::new();
+        if self.ctrl {
+            keys.push_str("Ctrl+");
+        }
+        if self.shift {
+            keys.push_str("Shift+");
+        }
+        keys.push_str(self.name);
+        keys
+    }
+}
+
+const fn dk(
+    ctrl: bool,
+    shift: bool,
+    usage: u16,
+    name: &'static str,
+    code: &'static str,
+    action: DrawAction,
+    description: &'static str,
+) -> DrawingKey {
+    DrawingKey {
+        ctrl,
+        shift,
+        key: HidUsage(usage),
+        name,
+        code,
+        action,
+        description,
+    }
+}
+
+/// Every drawing key (Excalidraw's), in the order the app lists them.
+pub const DRAWING_KEYS: &[DrawingKey] = &[
+    dk(
+        true,
+        false,
+        0x1D,
+        "Z",
+        "KeyZ",
+        DrawAction::Undo,
+        "Undo what you drew last",
+    ),
+    dk(true, true, 0x1D, "Z", "KeyZ", DrawAction::Redo, "Redo"),
+    dk(true, false, 0x1C, "Y", "KeyY", DrawAction::Redo, ""),
+    dk(
+        true,
+        false,
+        0x06,
+        "C",
+        "KeyC",
+        DrawAction::Copy,
+        "Copy what you selected",
+    ),
+    dk(
+        true,
+        false,
+        0x19,
+        "V",
+        "KeyV",
+        DrawAction::Paste,
+        "Paste it",
+    ),
+    dk(
+        true,
+        false,
+        0x07,
+        "D",
+        "KeyD",
+        DrawAction::Duplicate,
+        "Duplicate what you selected",
+    ),
+    dk(
+        true,
+        false,
+        0x04,
+        "A",
+        "KeyA",
+        DrawAction::SelectAll,
+        "Select all you drew",
+    ),
+    dk(
+        false,
+        false,
+        0x4C,
+        "Delete",
+        "Delete",
+        DrawAction::Delete,
+        "Delete what you selected",
+    ),
+    dk(
+        false,
+        false,
+        0x2A,
+        "Backspace",
+        "Backspace",
+        DrawAction::Delete,
+        "",
+    ),
+    dk(
+        false,
+        false,
+        0x52,
+        "Up",
+        "ArrowUp",
+        DrawAction::Nudge(0, -1),
+        "Nudge what you selected (Shift: further)",
+    ),
+    dk(
+        false,
+        false,
+        0x51,
+        "Down",
+        "ArrowDown",
+        DrawAction::Nudge(0, 1),
+        "",
+    ),
+    dk(
+        false,
+        false,
+        0x50,
+        "Left",
+        "ArrowLeft",
+        DrawAction::Nudge(-1, 0),
+        "",
+    ),
+    dk(
+        false,
+        false,
+        0x4F,
+        "Right",
+        "ArrowRight",
+        DrawAction::Nudge(1, 0),
+        "",
+    ),
+    dk(
+        false,
+        false,
+        0x19,
+        "V",
+        "KeyV",
+        DrawAction::Tool(DrawTool::Select),
+        "Select",
+    ),
+    dk(
+        false,
+        false,
+        0x13,
+        "P",
+        "KeyP",
+        DrawAction::Tool(DrawTool::Pen),
+        "Pen",
+    ),
+    dk(
+        false,
+        false,
+        0x0B,
+        "H",
+        "KeyH",
+        DrawAction::Tool(DrawTool::Highlighter),
+        "Highlighter",
+    ),
+    dk(
+        false,
+        false,
+        0x0E,
+        "K",
+        "KeyK",
+        DrawAction::Tool(DrawTool::Laser),
+        "Laser pointer",
+    ),
+    dk(
+        false,
+        false,
+        0x04,
+        "A",
+        "KeyA",
+        DrawAction::Tool(DrawTool::Arrow),
+        "Arrow",
+    ),
+    dk(
+        false,
+        false,
+        0x0F,
+        "L",
+        "KeyL",
+        DrawAction::Tool(DrawTool::Line),
+        "Line",
+    ),
+    dk(
+        false,
+        false,
+        0x15,
+        "R",
+        "KeyR",
+        DrawAction::Tool(DrawTool::Rectangle),
+        "Rectangle",
+    ),
+    dk(
+        false,
+        false,
+        0x12,
+        "O",
+        "KeyO",
+        DrawAction::Tool(DrawTool::Ellipse),
+        "Ellipse",
+    ),
+    dk(
+        false,
+        false,
+        0x08,
+        "E",
+        "KeyE",
+        DrawAction::Tool(DrawTool::Eraser),
+        "Eraser",
+    ),
+    dk(
+        false,
+        false,
+        0x29,
+        "Esc",
+        "Escape",
+        DrawAction::Leave,
+        "Leave the tool, then drawing",
+    ),
+];
+
+/// What a key does while drawing, if anything: Ctrl and Shift as held (an
+/// arrow nudges whether Shift is held or not; Alt is never part of one).
+pub fn drawing_key(usage: HidUsage, ctrl: bool, shift: bool) -> Option<DrawAction> {
+    let exact = DRAWING_KEYS
+        .iter()
+        .find(|k| k.key == usage && k.ctrl == ctrl && k.shift == shift);
+    let nudge = || {
+        DRAWING_KEYS
+            .iter()
+            .find(|k| k.key == usage && !ctrl && matches!(k.action, DrawAction::Nudge(..)))
+    };
+    exact.or_else(nudge).map(|k| k.action)
+}
+
+/// The tool a key picks, for the toolbar's tooltips ("Pen (P)").
+pub fn tool_key(tool: DrawTool) -> &'static str {
+    DRAWING_KEYS
+        .iter()
+        .find(|k| k.action == DrawAction::Tool(tool))
+        .map_or("", |k| k.name)
+}
 
 /// Why a key can't go on a row.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -505,6 +861,8 @@ mod tests {
             Shortcut::VolumeDown,
             Shortcut::VolumeUp,
             Shortcut::Mute,
+            Shortcut::ToggleDrawing,
+            Shortcut::ToggleBoard,
             Shortcut::Panic,
             Shortcut::AcceptRequest,
             Shortcut::DeclineRequest,
@@ -548,6 +906,46 @@ mod tests {
         assert_eq!(panic.keys(), "Ctrl+Alt+Shift+Backspace");
         assert_eq!(panic.scope, Scope::Host);
         assert_eq!(table.viewer_shortcut(panic.key, true), None);
+    }
+
+    #[test]
+    fn drawing_keys_are_excalidraws() {
+        use DrawAction::*;
+        assert_eq!(drawing_key(HidUsage(0x1D), true, false), Some(Undo));
+        assert_eq!(drawing_key(HidUsage(0x1D), true, true), Some(Redo));
+        assert_eq!(drawing_key(HidUsage(0x1C), true, false), Some(Redo));
+        assert_eq!(drawing_key(HidUsage(0x19), true, false), Some(Paste));
+        assert_eq!(
+            drawing_key(HidUsage(0x19), false, false),
+            Some(Tool(DrawTool::Select))
+        );
+        assert_eq!(
+            drawing_key(HidUsage(0x04), false, false),
+            Some(Tool(DrawTool::Arrow))
+        );
+        assert_eq!(drawing_key(HidUsage(0x04), true, false), Some(SelectAll));
+        // An arrow nudges with Shift too: further.
+        assert_eq!(drawing_key(HidUsage(0x50), false, true), Some(Nudge(-1, 0)));
+        assert_eq!(drawing_key(HidUsage(0x1D), false, false), None);
+        // Each key and modifiers once; every tool has its key.
+        for (i, a) in DRAWING_KEYS.iter().enumerate() {
+            for b in &DRAWING_KEYS[..i] {
+                assert!(
+                    (a.key, a.ctrl, a.shift) != (b.key, b.ctrl, b.shift),
+                    "{}",
+                    a.keys()
+                );
+            }
+        }
+        for tool in DrawTool::ALL {
+            assert!(!tool_key(tool).is_empty(), "{tool:?}");
+        }
+        // None is a chord the window's own shortcuts use.
+        assert!(
+            DRAWING_KEYS
+                .iter()
+                .all(|k| !(k.ctrl && k.shift && k.key == KEY_D))
+        );
     }
 
     #[test]

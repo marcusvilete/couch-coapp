@@ -825,6 +825,8 @@ impl Actor {
             | Command::GetStreamWindow
             | Command::GetTray
             | Command::SetTray { .. }
+            | Command::GetDrawingDefault
+            | Command::SetDrawingDefault { .. }
             | Command::GetDrivers
             | Command::SharedChoice { .. }
             | Command::PlayChime
@@ -907,6 +909,9 @@ impl Actor {
             Command::AllowControl => self.allow_control(now),
             Command::StopWaitingForPads => self.stop_waiting_for_pads(),
             Command::BringToFront => self.bring_to_front().map(|()| Response::Done),
+            Command::SetDrawing { on } => self.set_drawing(on, now),
+            Command::ClearBoard => self.clear_board(now),
+            Command::StopDrawing { member, stopped } => self.stop_drawing(&member, stopped, now),
             Command::SetStreamVolume { percent, muted } => {
                 self.set_stream_volume(StreamVolume { percent, muted }, now)
             }
@@ -1778,6 +1783,8 @@ impl Actor {
         let now = Instant::now();
         // Whether Windows is locked here, for our devices (M25c).
         self.remote_tick(now);
+        // Faded drawings leave our board (M27a).
+        self.board_tick(now);
         if now >= self.next_addr_check {
             self.next_addr_check = now + ADDR_CHECK_EVERY;
             self.refresh_addr(now);

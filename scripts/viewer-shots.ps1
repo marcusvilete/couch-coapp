@@ -42,13 +42,15 @@ public static class ViewerShots {
 [ViewerShots]::SetProcessDPIAware() | Out-Null
 
 $states = 'watching', 'asking', 'controlling', 'asking-more', 'paused', 'stopped', 'waiting',
-    'beside', 'single', 'muted', 'crowded', 'worst', 'choosing', 'together'
+    'beside', 'single', 'muted', 'crowded', 'worst', 'choosing', 'together', 'drawing'
 $shots = [ordered]@{}
 foreach ($state in $states) { $shots[$state] = @('--hud-preview', $state, '--hud-scale', '1') }
 $shots['crowded-480x300'] = @('--hud-preview', 'crowded', '--size', '480', '300', '--hud-scale', '1')
 $shots['crowded-150'] = @('--hud-preview', 'crowded', '--hud-scale', '1.5')
 # Narrower than the bar's minimum: Leave must stay on screen.
 $shots['crowded-320x300'] = @('--hud-preview', 'crowded', '--size', '320', '300', '--hud-scale', '1')
+# The drawing toolbar in a small window (M27a).
+$shots['drawing-480x300'] = @('--hud-preview', 'drawing', '--size', '480', '300', '--hud-scale', '1')
 # The pointer on Controller 2's chip, which can be asked for.
 $shots['hover'] = @('--hud-preview', 'watching', '--hud-scale', '1', '--hud-preview-pointer', '620', '78')
 

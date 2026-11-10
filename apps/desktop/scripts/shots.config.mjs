@@ -125,6 +125,26 @@ export const SHOTS = [
       await menuOpens(page);
     },
   ],
+  // Drawing on the stream (M27a): the console's panel, and a drawer's menu.
+  [
+    "drawing-panel",
+    "hosting-drawing",
+    async (page) => {
+      await page
+        .getByRole("region", { name: "Drawing on the stream" })
+        .evaluate((el) => el.scrollIntoView({ block: "center" }));
+      await page.waitForTimeout(150);
+    },
+  ],
+  [
+    "drawing-menu",
+    "hosting-drawing",
+    async (page) => {
+      await centreBay(page);
+      await page.locator(".bay-person.viewer", { hasText: "Bia" }).click({ button: "right" });
+      await menuOpens(page);
+    },
+  ],
   ["end-session", "hosting-live", async (page) => {
     await page.getByRole("button", { name: "Session options" }).click();
     await page.getByRole("menuitem", { name: "End session…" }).click();
@@ -206,6 +226,7 @@ export const SHOTS = [
   // VM run found it refused).
   ["stream-picker-linux-keyboard", "linux-keyboard-idle", click("Start streaming…")],
   ["settings-stream-window", "lobby", settings("Stream window")],
+  ["settings-drawing", "lobby", settings("Drawing")],
   // M25: the home PC's remote play, a laptop trusted; and one set up anew.
   ["settings-remote-home", "remote-home", settings("Remote play")],
   ["settings-remote-new", "lobby", settings("Remote play")],

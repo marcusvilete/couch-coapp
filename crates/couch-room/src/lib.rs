@@ -7,11 +7,13 @@
 //!
 //! - [`room`]: membership, the owner's policy, and the mesh of connections.
 //! - [`limits`]: admission rate limits.
+//! - [`board`]: drawing on the stream (M27), the board a session's host keeps.
 //! - [`signing`]: room ids and the signatures on records and policies.
 //! - [`session`]: a session as its host runs it: viewers, requests for
 //!   control, the panic key's pause. Who holds a seat is decided by
 //!   `couch_input::router`, which this mirrors.
 
+pub mod board;
 pub mod limits;
 pub mod room;
 pub mod session;

@@ -36,16 +36,18 @@ use couch_net::{
     video::{VideoFrameIn, ViewerVideo},
 };
 use couch_proto::{
+    board::BoardSnapshot,
     control::{SeatAssigned, SeatController, SeatReleased},
     input::RumbleDatagram,
     ipc::{
-        self, AudioPacket, AudioStats, ControllerNames, FrameTiming, HudState, IpcFrame,
-        LocalInput, NetStats, RumbleState, ShortcutKeys, StreamVolume, UserAction,
+        self, AudioPacket, AudioStats, BoardNews, ControllerNames, Draw, FrameTiming, HudState,
+        IpcFrame, LocalInput, NetStats, RumbleState, ShortcutKeys, StreamVolume, UserAction,
         VideoFrameHeader, WindowRequest, WindowState,
     },
     media::{AudioDatagram, datagram, decode_payload},
     session::ControllerReport,
 };
+use couch_room::board::Replica;
 use tokio::{io::AsyncWrite, sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 
 use super::{Backend, ViewerOptions, ViewerProcess, ipc as pipe};
@@ -112,9 +114,13 @@ pub enum WatchEvent {
     /// connection: 0 for the first, then what [`Watch::reconnect`] returned,
     /// so a late report about an earlier one can be told apart.
     ConnectionLost { link: u32 },
+    /// The user drew on the stream (M27a): for the host (`BoardOps`).
+    Draw(Draw),
 }
 
 enum WatchCmd {
+    /// What the host said of the board (M27a).
+    Board(BoardNews),
     SeatAssigned(SeatAssigned),
     SeatReleased(SeatReleased),
     SeatController(SeatController),
@@ -170,6 +176,7 @@ impl Watch {
             last_hud: None,
             last_restart: None,
             reported: ControllerReport::default(),
+            board: Replica::default(),
         };
         let task = tokio::spawn(run(ctx, cmds_rx));
         Ok((
@@ -213,6 +220,12 @@ impl Watch {
 
     pub fn set_hud(&self, hud: HudState) {
         let _ = self.cmds.send(WatchCmd::Hud(hud));
+    }
+
+    /// What the host said of the board (M27a): the window shows it, and a
+    /// restarted one gets it again.
+    pub fn board(&self, news: BoardNews) {
+        let _ = self.cmds.send(WatchCmd::Board(news));
     }
 
     /// The app changed the stream volume (P11): the window plays at it, and
@@ -370,6 +383,8 @@ struct Ctx {
     last_restart: Option<Instant>,
     /// What the host was last told of our controllers (P12).
     reported: ControllerReport,
+    /// The board as the window has it (M27a), for a restarted window.
+    board: Replica,
 }
 
 impl Ctx {
@@ -458,6 +473,16 @@ async fn hello(ctx: &mut Ctx, forwarder: &Forwarder) -> bool {
         && !to.send(ipc::kinds::HUD_STATE, &ipc::to_payload(hud)).await
     {
         return false;
+    }
+    // The board as it was (M27a), but what was fading: gone by now.
+    let mut board = ctx.board.clone();
+    board.retain(|_, e| !(e.done && e.fades));
+    let session = couch_proto::ids::SessionId(ctx.options.session.unwrap_or(0));
+    for part in BoardSnapshot::parts(session, board.generation(), board.snapshot()) {
+        let news = BoardNews::Snapshot(part);
+        if !to.send(ipc::kinds::BOARD, &ipc::to_payload(&news)).await {
+            return false;
+        }
     }
     if !forwarder.holding().is_empty() {
         return send_seat(to, forwarder).await;
@@ -595,6 +620,20 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
                     ctx.last_hud = Some(hud);
                     sent
                 }
+                Some(WatchCmd::Board(news)) => {
+                    match &news {
+                        BoardNews::Snapshot(s) => {
+                            ctx.board.snapshot_part(s.generation, s.first, &s.elements);
+                        }
+                        BoardNews::Update(u) => ctx.board.heard(u.author, &u.ops),
+                        BoardNews::Cleared(c) => {
+                            let me = ctx.last_hud.as_ref().and_then(|h| h.board.me);
+                            ctx.board.cleared(c.generation, c.author, me);
+                        }
+                        BoardNews::Refused(_) => {}
+                    }
+                    ctx.window.to.send(ipc::kinds::BOARD, &ipc::to_payload(&news)).await
+                }
                 Some(WatchCmd::Volume(volume)) => {
                     ctx.options.volume = volume;
                     ctx.window.to.send(ipc::kinds::VOLUME, &ipc::to_payload(&volume)).await
@@ -721,6 +760,20 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
                 ctx.options.viewer.hide_bar = !state.bar;
                 ctx.options.viewer.hide_stats = !state.stats;
                 ctx.event(WatchEvent::Window(state));
+            }
+        }
+        // The user's own drawing (M27a), as the window did it: the window's
+        // copy of the board has it already, so ours does too.
+        ipc::kinds::DRAW => {
+            if let Some(draw) = ipc::from_payload::<Draw>(&frame.payload) {
+                // Made before a clear of ours: the host drops it, and the
+                // window has dropped it too.
+                if let Some(me) = ctx.last_hud.as_ref().and_then(|h| h.board.me)
+                    && draw.generation == ctx.board.generation()
+                {
+                    ctx.board.heard(me, &draw.ops);
+                }
+                ctx.event(WatchEvent::Draw(draw));
             }
         }
         ipc::kinds::USER_ACTION => {

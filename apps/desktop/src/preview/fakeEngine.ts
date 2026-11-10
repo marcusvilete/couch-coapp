@@ -25,7 +25,8 @@ import type { ShortcutView } from "../bindings/ShortcutView";
 import type { GameWindowView } from "../bindings/GameWindowView";
 import type { SourceList } from "../bindings/SourceList";
 import { seatsFor } from "../model/seats";
-import { keeps, numbered, seatsOf } from "../model/sessions";
+import { keeps, noDrawing, numbered, seatsOf } from "../model/sessions";
+import type { DrawingKeyView } from "../bindings/DrawingKeyView";
 import { frees } from "../sessions/hostMenus";
 
 export { seatsFor };
@@ -67,6 +68,8 @@ export type World = {
   streamWindowBar: boolean;
   /** The app keeps an icon in the notification area (M25c). */
   tray: boolean;
+  /** Settings: sessions start with drawing on (M27a). */
+  drawingDefault: boolean;
   /** Remote play (M25): Settings → Remote play. Members offering it carry
    * their `remote` in the rooms. A PC unlocks with "246810". */
   remotePlay: RemotePlayView;
@@ -280,6 +283,7 @@ export function hostSession(
     operatedBy: [],
     desktop: null,
     guestsKeyboard: true,
+    drawing: noDrawing(),
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,
@@ -532,6 +536,11 @@ function remoteAction(room: FakeRoom, pc: MemberView, action: RemoteAction): Res
     case "endSession":
       room.sessions = room.sessions.filter((x) => x !== s);
       return roomReply(room);
+    case "setDrawing":
+    case "clearBoard":
+    case "stopDrawing":
+      if (!s) throw "there's no session";
+      return drawingCommand(room, s, action);
     default:
       return roomReply(room);
   }
@@ -700,7 +709,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       return roomReply(room);
     }
     case "getShortcuts":
-      return { type: "shortcuts", shortcuts: world.shortcuts };
+      return { type: "shortcuts", shortcuts: world.shortcuts, drawingKeys: DRAWING_KEYS };
     case "setShortcut": {
       const row = world.shortcuts.find((s) => s.id === cmd.id);
       if (!row) throw `there is no shortcut "${cmd.id}"`;
@@ -712,7 +721,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (taken) throw `${keys} already does this: ${taken.action}`;
       row.keys = keys;
       row.isDefault = keys === DEFAULT_KEYS[row.id];
-      return { type: "shortcuts", shortcuts: world.shortcuts };
+      return { type: "shortcuts", shortcuts: world.shortcuts, drawingKeys: DRAWING_KEYS };
     }
     case "resetShortcuts":
       for (const row of world.shortcuts) {
@@ -721,13 +730,24 @@ function handle(cmd: Command): Response | Promise<Response> {
           row.isDefault = true;
         }
       }
-      return { type: "shortcuts", shortcuts: world.shortcuts };
+      return { type: "shortcuts", shortcuts: world.shortcuts, drawingKeys: DRAWING_KEYS };
     case "getNetwork":
       return { type: "network", ...world.network };
     case "getStreamWindow":
       return { type: "streamWindow", bar: world.streamWindowBar };
     case "getTray":
       return { type: "tray", on: world.tray };
+    case "getDrawingDefault":
+      return { type: "drawing", on: world.drawingDefault };
+    case "setDrawingDefault":
+      world.drawingDefault = cmd.on;
+      return { type: "drawing", on: world.drawingDefault };
+    case "setDrawing":
+    case "clearBoard":
+    case "stopDrawing": {
+      const { room, session: s } = hosting();
+      return drawingCommand(room, s, cmd);
+    }
     case "setTray":
       world.tray = cmd.on;
       return { type: "tray", on: world.tray };
@@ -829,6 +849,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       const hiding = world.sources.hiding;
       const chosen = hiding === "ready" ? cmd.controllers.map((c: HostController) => c.name) : [];
       const s = hostSession(me(), cmd.title.trim(), cmd.max_viewers, cmd.input, chosen);
+      s.drawing.on = world.drawingDefault;
       if (hiding !== "ready" && cmd.controllers.length > 0) {
         s.hostControllerProblem = hiding === "busy" ? "HidHide is busy" : "HidHide isn't installed";
       }
@@ -871,6 +892,8 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (s.stream.state !== "live" && s.stream.state !== "starting") throw "nothing is being streamed";
       s.stream = { state: "stopped", reason: "hostStopped" };
       s.streaming = null;
+      // A stream ending clears the board (M27a).
+      Object.assign(s.drawing, { elements: 0, drawers: [] });
       changed(room);
       return { type: "done" };
     }
@@ -1031,9 +1054,65 @@ const DEFAULT_KEYS: Record<string, string> = {
   volumeDown: "Ctrl+Alt+Shift+-",
   volumeUp: "Ctrl+Alt+Shift+=",
   mute: "Ctrl+Alt+Shift+0",
+  toggleDrawing: "Ctrl+Alt+Shift+D",
+  toggleBoard: "Ctrl+Alt+Shift+B",
   toggleHud: "Ctrl+Alt+Shift+H",
   toggleHudAlone: "F3",
 };
+
+/** The drawing editor's keys, as the engine lists them (M27a). */
+export const DRAWING_KEYS: DrawingKeyView[] = [
+  { keys: "Ctrl+Z", action: "Undo what you drew last" },
+  { keys: "Ctrl+Shift+Z, Ctrl+Y", action: "Redo" },
+  { keys: "Ctrl+C", action: "Copy what you selected" },
+  { keys: "Ctrl+V", action: "Paste it" },
+  { keys: "Ctrl+D", action: "Duplicate what you selected" },
+  { keys: "Ctrl+A", action: "Select all you drew" },
+  { keys: "Delete, Backspace", action: "Delete what you selected" },
+  { keys: "Up, Down, Left, Right", action: "Nudge what you selected (Shift: further)" },
+  { keys: "V", action: "Select" },
+  { keys: "P", action: "Pen" },
+  { keys: "H", action: "Highlighter" },
+  { keys: "K", action: "Laser pointer" },
+  { keys: "A", action: "Arrow" },
+  { keys: "L", action: "Line" },
+  { keys: "R", action: "Rectangle" },
+  { keys: "O", action: "Ellipse" },
+  { keys: "E", action: "Eraser" },
+  { keys: "Esc", action: "Leave the tool, then drawing" },
+];
+
+/** The host's drawing commands on session `s` (M27a), here or from afar. */
+function drawingCommand(
+  room: FakeRoom,
+  s: SessionView,
+  cmd: { type: "setDrawing"; on: boolean } | { type: "clearBoard" } | { type: "stopDrawing"; member: string; stopped: boolean },
+): Response {
+  const d = s.drawing;
+  const clear = (member?: string) => {
+    d.drawers = member == null ? [] : d.drawers.filter((x) => x.member !== member);
+    d.elements = d.drawers.reduce((n, x) => n + x.elements, 0);
+  };
+  switch (cmd.type) {
+    case "setDrawing":
+      d.on = cmd.on;
+      if (!cmd.on) clear();
+      break;
+    case "clearBoard":
+      clear();
+      break;
+    case "stopDrawing":
+      if (!room.members.some((m) => m.id === cmd.member)) throw "unknown member";
+      d.stopped = d.stopped.filter((m) => m !== cmd.member);
+      if (cmd.stopped) {
+        d.stopped.push(cmd.member);
+        clear(cmd.member);
+      }
+      break;
+  }
+  changed(room);
+  return { type: "done" };
+}
 
 /** The engine's name for a key the app accepts, or `null`. */
 function keyName(code: string): string | null {
@@ -1057,6 +1136,8 @@ export function defaultShortcuts(): ShortcutView[] {
     ["volumeDown", true, "Turn the stream down", "viewer", ""],
     ["volumeUp", true, "Turn the stream up, to as loud as the host sends it", "viewer", ""],
     ["mute", true, "Mute the stream, or unmute it", "viewer", ""],
+    ["toggleDrawing", true, "Draw on the stream, or back to the game", "viewer", "while the host lets you draw, and you don't have the keyboard and mouse"],
+    ["toggleBoard", true, "Show or hide the drawings", "viewer", ""],
     ["toggleHud", true, "Show or hide the overlay", "viewer", ""],
     ["toggleHudAlone", false, "Show or hide the overlay", "viewer", "while you aren't sending keys to the game"],
   ];

@@ -6,6 +6,8 @@
 //! - `audio.json`: the stream window's volume (P6).
 //! - `host-audio.json`: how loud guests hear our stream's sound (P7).
 //! - `stream-window.json`: how stream windows open: with the bar or not (P11).
+//! - `drawing.json`: whether sessions start with drawing on the stream on
+//!   (M27a).
 //! - `app.json`: whether the app keeps an icon in the notification area
 //!   (M25c).
 //!
@@ -47,6 +49,7 @@ const AUDIO_FILE: &str = "audio.json";
 const HOST_AUDIO_FILE: &str = "host-audio.json";
 const STREAM_WINDOW_FILE: &str = "stream-window.json";
 const APP_FILE: &str = "app.json";
+const DRAWING_FILE: &str = "drawing.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread. `CCR3` (M13) adds the chain of
@@ -71,7 +74,7 @@ pub enum StoreError {
 
 /// The settings files a backup carries, as they are (`crate::backup`).
 /// Not the webview's own storage (the room order, the last session setup).
-const BACKED_UP_FILES: [&str; 7] = [
+const BACKED_UP_FILES: [&str; 8] = [
     SETTINGS_FILE,
     SHORTCUTS_FILE,
     NETWORK_FILE,
@@ -79,6 +82,7 @@ const BACKED_UP_FILES: [&str; 7] = [
     HOST_AUDIO_FILE,
     STREAM_WINDOW_FILE,
     APP_FILE,
+    DRAWING_FILE,
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -518,6 +522,29 @@ pub(crate) fn save_stream_window(
 ) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
     write_atomic(&dir.join(STREAM_WINDOW_FILE), &bytes)
+}
+
+/// `drawing.json` (M27a): whether sessions start with drawing on the stream
+/// on. Off unless the user changes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DrawingSettings {
+    pub on: bool,
+}
+
+pub(crate) fn drawing(dir: &Path) -> DrawingSettings {
+    let path = dir.join(DRAWING_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            DrawingSettings::default()
+        }),
+        Err(_) => DrawingSettings::default(),
+    }
+}
+
+pub(crate) fn save_drawing(dir: &Path, settings: DrawingSettings) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
+    write_atomic(&dir.join(DRAWING_FILE), &bytes)
 }
 
 /// `app.json` (M25c): the app's own behaviour on this PC.

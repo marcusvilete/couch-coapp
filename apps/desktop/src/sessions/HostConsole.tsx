@@ -7,6 +7,7 @@
 // for 1 s.
 import {
   AppWindow,
+  Eraser,
   Eye,
   Gamepad2,
   MousePointer2,
@@ -25,11 +26,20 @@ import { useEffect, useRef, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { desktopBlocked, desktopCommand, desktopOffered, type RemoteTarget } from "../model/remote";
-import { hostIdleText, isLive, listed, nameOf, seatPhrase, waitsForGameAtPc } from "../model/sessions";
+import {
+  drawingSummary,
+  hostIdleText,
+  isLive,
+  listed,
+  nameOf,
+  seatPhrase,
+  waitsForGameAtPc,
+} from "../model/sessions";
 import type { Confirm } from "../rooms/dialogs";
 import { Avatar } from "../ui/Avatar";
 import { Button, IconButton } from "../ui/Button";
 import { Callout } from "../ui/Callout";
+import { Switch } from "../ui/Controls";
 import { Badge, Kbd, Spinner } from "../ui/Feedback";
 import { DropdownMenu } from "../ui/Menu";
 import { Why } from "../ui/Why";
@@ -252,9 +262,75 @@ export function HostConsole(props: {
           />
         </section>
       )}
+      <DrawingPanel room={room} session={s} busy={busy} run={run} />
       {remote && pcName && desktopOffered(room, remote) && (
         <DesktopPanel room={room} session={s} remote={remote} pc={pcName} busy={busy} run={run} />
       )}
+    </section>
+  );
+}
+
+/** Drawing on the stream (M27a): the switch, what is on the board, Clear,
+ * and whom the host stopped, in a line kept even when empty so nothing
+ * below moves. Stopping one member is on their menus (the players' plugs,
+ * the members panel). */
+function DrawingPanel(props: {
+  room: RoomView;
+  session: SessionView;
+  busy: string | null;
+  run: ReturnType<typeof useRun>["run"];
+}) {
+  const { room, session: s, busy, run } = props;
+  const d = s.drawing;
+  const stopped = d.stopped[0];
+  return (
+    <section className="panel" aria-label="Drawing on the stream">
+      <header className="panel-head">
+        <h3>Drawing on the stream</h3>
+        <span className="panel-why">
+          <Why>
+            Those watching draw on the picture in their stream window, and see each other's drawings: lines, arrows,
+            boxes, a laser pointer and pings. Whoever has the keyboard and mouse can't, since those are the game's.
+            Each erases only their own; you clear everything, or stop one person (which clears theirs). Drawings go
+            when the stream ends, and nothing is kept. Settings decides whether sessions start with it on.
+          </Why>
+        </span>
+      </header>
+      <div className="drawing-row">
+        <Switch
+          checked={d.on}
+          disabled={busy != null}
+          onChange={(on) => void run("drawing", { type: "setDrawing", on })}
+          label="Let those watching draw"
+          detail={d.on ? drawingSummary(room, d) : "Off: turning it off clears the board."}
+        />
+        <Button
+          icon={<Eraser />}
+          disabled={busy != null || d.elements === 0}
+          onClick={() => void run("clear-board", { type: "clearBoard" })}
+        >
+          Clear
+        </Button>
+      </div>
+      <p className="panel-foot drawing-stopped">
+        {stopped != null ? (
+          <>
+            You stopped {listed(d.stopped.map((m) => nameOf(room, m)))} drawing.{" "}
+            <button
+              type="button"
+              className="link-button"
+              disabled={busy != null}
+              onClick={() => void run(`draw-${stopped}`, { type: "stopDrawing", member: stopped, stopped: false })}
+            >
+              Let {nameOf(room, stopped)} draw again
+            </button>
+          </>
+        ) : d.on ? (
+          "Stop someone's drawing from their menu (⋯ or right-click)."
+        ) : (
+          " "
+        )}
+      </p>
     </section>
   );
 }

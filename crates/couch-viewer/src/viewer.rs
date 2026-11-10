@@ -14,27 +14,37 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use couch_codec_ffmpeg::{DecoderKind, FfmpegDecoder};
-use couch_input::shortcuts::{Shortcut, Shortcuts};
+use couch_input::{
+    HidUsage,
+    shortcuts::{Shortcut, Shortcuts, drawing_key},
+};
 use couch_media::{
     Codec, DecodedFrame, GpuNv12Frame, MediaError, Micros, Nv12Frame, VideoDecoder, barcode,
     mailbox::Mailbox,
 };
 use couch_proto::{
+    board::Refusal,
+    ids::MemberId,
     ipc::{
-        FrameTiming, HudRole, HudSeat, HudState, LocalInput, NetStats, StreamVolume, UserAction,
-        WindowRequest, WindowState,
+        BoardNews, Draw, FrameTiming, HudBoard, HudRole, HudSeat, HudState, LocalInput, NetStats,
+        StreamVolume, UserAction, WindowRequest, WindowState,
     },
     session::StreamState,
 };
 use sdl3::{
     event::{Event, WindowEvent},
+    keyboard::Mod,
+    mouse::{Cursor, MouseButton, SystemCursor},
     video::Window,
 };
 
 use crate::{
     audio::AudioOut,
-    clock, gpu,
-    hud::{Hud, HudAction},
+    clock,
+    draw_ui::{Drawing, MOVING_EVERY},
+    editor::Editor,
+    gpu,
+    hud::{DrawBar, Hud, HudAction},
     input::{InputCapture, button_code},
     now_us,
     pipe::{self, ForWindow, Incoming, Outgoing},
@@ -134,10 +144,13 @@ pub enum Preview {
     Choosing,
     /// A session to watch together: no seats (M24).
     Together,
+    /// Drawing on the stream (M27a): the toolbar, and a board with each
+    /// kind of element, a laser trail and a ping.
+    Drawing,
 }
 
 impl Preview {
-    pub const NAMES: [(&'static str, Preview); 14] = [
+    pub const NAMES: [(&'static str, Preview); 15] = [
         ("watching", Preview::Watching),
         ("asking", Preview::Asking),
         ("controlling", Preview::Controlling),
@@ -152,6 +165,7 @@ impl Preview {
         ("worst", Preview::Worst),
         ("choosing", Preview::Choosing),
         ("together", Preview::Together),
+        ("drawing", Preview::Drawing),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -314,6 +328,19 @@ pub fn run(options: WindowOptions) -> Result<()> {
         ];
         hud.ask(0);
     }
+    // Drawing on the stream (M27a): the board, our editor once the main
+    // process names us, what the host says of drawing, the crosshair and
+    // the arrow, and when the board last painted for something moving.
+    let mut drawing = Drawing::default();
+    let mut board_info = HudBoard::default();
+    let cursors = (
+        Cursor::from_system(SystemCursor::Crosshair).ok(),
+        Cursor::from_system(SystemCursor::Arrow).ok(),
+    );
+    let mut board_painted: Option<Instant> = None;
+    if options.preview == Some(Preview::Drawing) {
+        preview_board(&mut drawing, Instant::now());
+    }
     // A preview's pointer, sent once the bar has been laid out.
     let mut preview_pointer = options.preview_pointer;
     let mut title = String::new();
@@ -361,7 +388,15 @@ pub fn run(options: WindowOptions) -> Result<()> {
                         redraw = true;
                     }
                     WindowEvent::MouseLeave => hud.pointer_gone(),
-                    WindowEvent::FocusLost => hud.focus_lost(),
+                    WindowEvent::FocusLost => {
+                        hud.focus_lost();
+                        // A line half drawn ends where it was.
+                        if std::mem::take(&mut drawing.held)
+                            && let Some(editor) = &mut drawing.editor
+                        {
+                            editor.release(None, false, &mut drawing.board, Instant::now());
+                        }
+                    }
                     _ => {}
                 },
                 // A free pointer also drives the HUD; a click on its bar goes
@@ -398,7 +433,99 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 }
                 _ => {}
             }
-            match input.event(&event, &mut local) {
+            // Drawing (M27a): the keyboard and mouse are the board's, never
+            // the host's; pads and the window's own events go on as ever.
+            let board_event = matches!(
+                event,
+                Event::KeyDown { .. }
+                    | Event::KeyUp { .. }
+                    | Event::MouseButtonDown { .. }
+                    | Event::MouseButtonUp { .. }
+                    | Event::MouseMotion { .. }
+                    | Event::MouseWheel { .. }
+                    | Event::TextInput { .. }
+                    | Event::TextEditing { .. }
+            );
+            let shortcut = if drawing.on && board_event {
+                let now = Instant::now();
+                let held = |m: Mod, a: Mod, b: Mod| m.intersects(a | b);
+                let shift_now = || {
+                    let m = sdl.keyboard().mod_state();
+                    held(m, Mod::LSHIFTMOD, Mod::RSHIFTMOD)
+                };
+                let mut shortcut = None;
+                let mut leave = false;
+                match &event {
+                    Event::KeyDown {
+                        scancode: Some(scancode),
+                        keymod,
+                        ..
+                    } => {
+                        shortcut = input.chord_shortcut(&event);
+                        let alt = held(*keymod, Mod::LALTMOD, Mod::RALTMOD);
+                        if shortcut.is_none() && !alt {
+                            let ctrl = held(*keymod, Mod::LCTRLMOD, Mod::RCTRLMOD);
+                            let shift = held(*keymod, Mod::LSHIFTMOD, Mod::RSHIFTMOD);
+                            let usage = HidUsage(scancode.to_i32() as u16);
+                            if let Some(action) = drawing_key(usage, ctrl, shift) {
+                                leave = drawing.key(action, shift, now);
+                            }
+                        }
+                    }
+                    Event::MouseButtonDown {
+                        mouse_btn, x, y, ..
+                    } => {
+                        let at = drawing
+                            .to_picture(hud_point(&window, options.hud_scale, *x, *y), false);
+                        if let (Some(at), Some(editor)) = (at, &mut drawing.editor) {
+                            match mouse_btn {
+                                MouseButton::Left => {
+                                    editor.press(at, shift_now(), &mut drawing.board, now);
+                                    drawing.held = true;
+                                }
+                                MouseButton::Middle => editor.ping(at, &mut drawing.board, now),
+                                _ => {}
+                            }
+                        }
+                    }
+                    Event::MouseMotion { x, y, .. } if drawing.held => {
+                        let at =
+                            drawing.to_picture(hud_point(&window, options.hud_scale, *x, *y), true);
+                        if let (Some(at), Some(editor)) = (at, &mut drawing.editor) {
+                            editor.drag(at, shift_now(), &mut drawing.board, now);
+                        }
+                    }
+                    Event::MouseButtonUp {
+                        mouse_btn: MouseButton::Left,
+                        x,
+                        y,
+                        ..
+                    } if drawing.held => {
+                        drawing.held = false;
+                        let at =
+                            drawing.to_picture(hud_point(&window, options.hud_scale, *x, *y), true);
+                        if let Some(editor) = &mut drawing.editor {
+                            editor.release(at, shift_now(), &mut drawing.board, now);
+                        }
+                    }
+                    _ => {}
+                }
+                if leave {
+                    set_drawing_mode(
+                        false,
+                        &mut drawing,
+                        &mut input,
+                        &mut local,
+                        &cursors,
+                        &mut hud,
+                    );
+                }
+                redraw = true;
+                shortcut
+            } else {
+                input.event(&event, &mut local)
+            };
+            match shortcut {
                 Some(Shortcut::ToggleHud) => hud.visible = !hud.visible,
                 Some(Shortcut::ToggleControl) => toggle_control(&mut hud, &out_tx),
                 Some(Shortcut::Fullscreen) => toggle_fullscreen(&mut window, &mut hud),
@@ -417,6 +544,36 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     volume_unsaved = None;
                     let _ = out_tx.send(Outgoing::Volume(volume));
                     hud.note(volume_note(volume));
+                }
+                Some(Shortcut::ToggleDrawing) => {
+                    let refusal = drawing_refusal(
+                        &board_info,
+                        &input,
+                        hud.session(),
+                        drawing.picture.is_some(),
+                    );
+                    match refusal {
+                        Some(why) if !drawing.on => hud.note(why),
+                        _ => {
+                            let on = !drawing.on;
+                            set_drawing_mode(
+                                on,
+                                &mut drawing,
+                                &mut input,
+                                &mut local,
+                                &cursors,
+                                &mut hud,
+                            );
+                        }
+                    }
+                }
+                Some(Shortcut::ToggleBoard) => {
+                    drawing.hidden = !drawing.hidden;
+                    hud.note(if drawing.hidden {
+                        "Drawings hidden, here only"
+                    } else {
+                        "Drawings shown"
+                    });
                 }
                 // The host's keys are never the viewer's (scope Host).
                 Some(
@@ -439,6 +596,26 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     let _ = out_tx.send(Outgoing::Action(action));
                 }
                 HudAction::Fullscreen => toggle_fullscreen(&mut window, &mut hud),
+                HudAction::ToggleDrawing => {
+                    let refusal = drawing_refusal(
+                        &board_info,
+                        &input,
+                        hud.session(),
+                        drawing.picture.is_some(),
+                    );
+                    if refusal.is_none() || drawing.on {
+                        let on = !drawing.on;
+                        set_drawing_mode(
+                            on,
+                            &mut drawing,
+                            &mut input,
+                            &mut local,
+                            &cursors,
+                            &mut hud,
+                        );
+                    }
+                }
+                HudAction::ToggleBoard => drawing.hidden = !drawing.hidden,
                 // The mute button is remembered at once; the slider once
                 // the user lets it rest, not at every step of a drag.
                 HudAction::Volume(new) => {
@@ -486,7 +663,43 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     window_request(&mut window, &mut hud, request);
                     redraw = true;
                 }
+                ForWindow::Board(news) => {
+                    let now = Instant::now();
+                    // What the host cleared of ours (a snapshot replaces
+                    // everything) leaves our history and our outbox too.
+                    let ours_cleared = match &news {
+                        BoardNews::Cleared(c) => c.author.is_none() || c.author == board_info.me,
+                        BoardNews::Snapshot(s) => s.first,
+                        _ => false,
+                    };
+                    let refused = drawing.board.news(news, board_info.me, now);
+                    if let Some(editor) = &mut drawing.editor {
+                        if ours_cleared {
+                            editor.cleared(&drawing.board);
+                            editor.finish_strays(&mut drawing.board, now);
+                        } else {
+                            editor.sync(&drawing.board);
+                        }
+                    }
+                    // A batch from before a clear: the host sets ours right,
+                    // nothing to say.
+                    if let Some(why) = refused.filter(|w| *w != Refusal::Stale) {
+                        hud.note(why.message());
+                    }
+                    redraw = true;
+                }
                 ForWindow::Hud(state) => {
+                    // Who we are and who draws (M27a).
+                    drawing.names = state.board.names.clone();
+                    if drawing.editor.is_none()
+                        && let Some(me) = state.board.me
+                    {
+                        // In step with whatever the board heard first.
+                        let mut editor = Editor::new(me);
+                        editor.sync(&drawing.board);
+                        drawing.editor = Some(editor);
+                    }
+                    board_info = state.board.clone();
                     let wanted = format!("{} · {} · Couch Co-App", state.title, state.host);
                     if wanted != title {
                         if let Err(e) = window.set_title(&wanted) {
@@ -498,6 +711,58 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     redraw = true;
                 }
             }
+        }
+        // Drawing (M27a): ends the moment we may no longer draw (the host
+        // turned it off or stopped us, we were given the keyboard and
+        // mouse, the stream stopped); a preview draws on its test picture,
+        // its laser and ping going on.
+        if options.preview == Some(Preview::Drawing) {
+            hud.drawing = Some(DrawBar {
+                on: drawing.on,
+                hidden: drawing.hidden,
+                refusal: None,
+            });
+            if drawing.board.pings().is_empty() || drawing.board.lasers().is_empty() {
+                preview_marks(&mut drawing, Instant::now());
+            }
+        } else if options.preview.is_none() {
+            let refusal = drawing_refusal(
+                &board_info,
+                &input,
+                hud.session(),
+                drawing.picture.is_some(),
+            );
+            if drawing.on
+                && let Some(why) = refusal
+            {
+                set_drawing_mode(
+                    false,
+                    &mut drawing,
+                    &mut input,
+                    &mut local,
+                    &cursors,
+                    &mut hud,
+                );
+                hud.note(why);
+            }
+            hud.drawing = board_info.on.then_some(DrawBar {
+                on: drawing.on,
+                hidden: drawing.hidden,
+                refusal,
+            });
+        }
+        if let Some(editor) = &mut drawing.editor {
+            if let Some((generation, ops)) = editor.take_batch(Instant::now()) {
+                let _ = out_tx.send(Outgoing::Draw(Draw { generation, ops }));
+            }
+            if let Some(note) = editor.take_note() {
+                hud.note(note);
+            }
+        }
+        if drawing.moving(Instant::now())
+            && board_painted.is_none_or(|t| t.elapsed() >= MOVING_EVERY)
+        {
+            redraw = true;
         }
         redraw |= hud.needs_paint();
         input.sync_capture(&mouse, &mut window);
@@ -717,6 +982,25 @@ pub fn run(options: WindowOptions) -> Result<()> {
         hud.mouse_hint = input.mouse_hint();
         // A preview draws a test picture behind the HUD instead of waiting.
         hud.waiting = shown.is_none() && options.preview.is_none();
+        // The picture's place in points, for the board (M27a): the
+        // letterboxed frame, or a preview's whole window.
+        let per_point = hud_scale(&window, options.hud_scale);
+        let placed = match shown {
+            Some(frame) => Some((gpu::letterbox(frame, size), frame)),
+            None if options.preview.is_some() => {
+                Some(([0.0, 0.0, size.0 as f32, size.1 as f32], size))
+            }
+            None => None,
+        };
+        drawing.picture = placed.map(|([x, y, w, h], _)| {
+            egui::Rect::from_min_size(
+                egui::pos2(x / per_point, y / per_point),
+                egui::vec2(w / per_point, h / per_point),
+            )
+        });
+        if let (Some((_, frame)), Some(editor)) = (placed, &mut drawing.editor) {
+            editor.set_aspect(frame.0, frame.1);
+        }
         let mut buffers = hud.paint(
             &gpu.device,
             &gpu.queue,
@@ -724,10 +1008,22 @@ pub fn run(options: WindowOptions) -> Result<()> {
             &view,
             &egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [size.0, size.1],
-                pixels_per_point: hud_scale(&window, options.hud_scale),
+                pixels_per_point: per_point,
             },
             &stat_rows,
+            &mut drawing,
         );
+        board_painted = Some(Instant::now());
+        if drawing.apply_clicks(Instant::now()) {
+            set_drawing_mode(
+                false,
+                &mut drawing,
+                &mut input,
+                &mut local,
+                &cursors,
+                &mut hud,
+            );
+        }
         buffers.push(encoder.finish());
         gpu.queue.submit(buffers);
         gpu.queue.present(surface_texture);
@@ -813,6 +1109,7 @@ fn preview_session(preview: Preview) -> HudState {
         game_in_front: true,
         stream: StreamState::Live,
         note: String::new(),
+        board: Default::default(),
     };
     let bob = |seat: &mut HudSeat| {
         seat.holder = Some("Bob".into());
@@ -866,6 +1163,14 @@ fn preview_session(preview: Preview) -> HudState {
             s.seats = vec![seat("Controller", true, None, false, false)];
             s.viewers = 1;
         }
+        P::Drawing => {
+            s.board = HudBoard {
+                on: true,
+                stopped: false,
+                me: Some(PREVIEW_ME),
+                names: vec![(PREVIEW_ME, "Bob".into()), (PREVIEW_CAROL, "Carol".into())],
+            };
+        }
         P::Together => {
             s.title = "Movie night".into();
             s.host_on_seats = false;
@@ -916,6 +1221,170 @@ fn preview_session(preview: Preview) -> HudState {
         }
     }
     s
+}
+
+/// The preview's members who draw (M27a): this window's, and another.
+const PREVIEW_ME: MemberId = MemberId([1; 32]);
+const PREVIEW_CAROL: MemberId = MemberId([2; 32]);
+
+/// A board for `--hud-preview drawing`: one of each element, a laser trail
+/// and a ping, some of ours selected.
+fn preview_board(drawing: &mut Drawing, now: Instant) {
+    use couch_proto::board::{BoardOp, Element, ElementKind, Point};
+    let element = |id, kind, colour, width, points: Vec<(u16, u16)>| Element {
+        id,
+        kind,
+        colour,
+        width,
+        fades: false,
+        done: true,
+        points: points.into_iter().map(|(x, y)| Point::new(x, y)).collect(),
+    };
+    let wave: Vec<(u16, u16)> = (0..60)
+        .map(|i| {
+            let t = f32::from(i as u8) / 59.0;
+            (
+                (6_000.0 + t * 20_000.0) as u16,
+                (40_000.0 + (t * 12.0).sin() * 3_000.0) as u16,
+            )
+        })
+        .collect();
+    let mine = [
+        element(1, ElementKind::Pen, 0, 1, wave),
+        element(
+            2,
+            ElementKind::Arrow,
+            2,
+            2,
+            vec![(30_000, 50_000), (40_000, 36_000)],
+        ),
+        element(
+            3,
+            ElementKind::Rectangle,
+            4,
+            1,
+            vec![(41_000, 28_000), (55_000, 40_000)],
+        ),
+    ];
+    let theirs = [
+        element(
+            1,
+            ElementKind::Ellipse,
+            3,
+            1,
+            vec![(8_000, 10_000), (22_000, 22_000)],
+        ),
+        element(
+            2,
+            ElementKind::Highlighter,
+            1,
+            1,
+            vec![(30_000, 14_000), (52_000, 14_000)],
+        ),
+        element(
+            3,
+            ElementKind::Line,
+            7,
+            0,
+            vec![(30_000, 18_000), (52_000, 18_000)],
+        ),
+    ];
+    let put = |es: &[Element]| es.iter().cloned().map(BoardOp::Put).collect::<Vec<_>>();
+    drawing.board.apply(PREVIEW_ME, &put(&mine), now);
+    drawing.board.apply(PREVIEW_CAROL, &put(&theirs), now);
+    preview_marks(drawing, now);
+    let mut editor = Editor::new(PREVIEW_ME);
+    editor.key(
+        couch_input::shortcuts::DrawAction::Tool(couch_input::shortcuts::DrawTool::Select),
+        false,
+        &mut drawing.board,
+        now,
+    );
+    // Select the box by dragging around it.
+    editor.press(Point::new(40_000, 27_000), false, &mut drawing.board, now);
+    editor.drag(Point::new(56_000, 41_000), false, &mut drawing.board, now);
+    editor.release(
+        Some(Point::new(56_000, 41_000)),
+        false,
+        &mut drawing.board,
+        now,
+    );
+    drawing.editor = Some(editor);
+    drawing.on = true;
+}
+
+/// The preview's laser trail and ping, again each time they have gone.
+fn preview_marks(drawing: &mut Drawing, now: Instant) {
+    use couch_proto::board::{BoardOp, Point};
+    let trail: Vec<Point> = (0..20)
+        .map(|i| Point::new(44_000 + i * 700, 58_000 - i * 500))
+        .collect();
+    drawing.board.apply(
+        PREVIEW_CAROL,
+        &[
+            BoardOp::Laser {
+                points: trail,
+                start: true,
+                colour: 4,
+            },
+            BoardOp::Ping(Point::new(30_000, 30_000)),
+        ],
+        now,
+    );
+}
+
+/// Why this window can't draw now, if it can't (M27a).
+fn drawing_refusal(
+    info: &HudBoard,
+    input: &InputCapture,
+    session: Option<&HudState>,
+    picture: bool,
+) -> Option<&'static str> {
+    if !info.on {
+        Some("The host hasn't turned drawing on")
+    } else if info.stopped {
+        Some(Refusal::Stopped.message())
+    } else if input.has_keyboard() {
+        Some(Refusal::KeyboardSeat.message())
+    } else if !picture || session.is_none_or(|s| s.stream != StreamState::Live) {
+        Some("Nothing is streamed to draw on")
+    } else {
+        None
+    }
+}
+
+/// Drawing mode on or off (M27a): the keyboard and mouse go to the board
+/// rather than the host, and the pointer is a crosshair.
+fn set_drawing_mode(
+    on: bool,
+    drawing: &mut Drawing,
+    input: &mut InputCapture,
+    local: &mut Vec<LocalInput>,
+    cursors: &(Option<Cursor>, Option<Cursor>),
+    hud: &mut Hud,
+) {
+    if drawing.on == on {
+        return;
+    }
+    let now = Instant::now();
+    drawing.on = on;
+    drawing.held = false;
+    input.set_drawing(on, local);
+    if let Some(editor) = &mut drawing.editor {
+        if on {
+            editor.begin();
+        } else {
+            editor.end(&mut drawing.board, now);
+        }
+    }
+    let cursor = if on { &cursors.0 } else { &cursors.1 };
+    if let Some(cursor) = cursor {
+        cursor.set();
+    }
+    if on {
+        drawing.hidden = false;
+        hud.note("Drawing: Esc to go back to the game");
+    }
 }
 
 /// How often the stats card's rows are built again while it shows.

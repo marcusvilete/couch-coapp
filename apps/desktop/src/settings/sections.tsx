@@ -84,6 +84,54 @@ export function OverlaySection(props: { linux: boolean }) {
   );
 }
 
+// ---- Drawing on the stream (M27a) ----
+
+export function DrawingSection() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    request({ type: "getDrawingDefault" }, "drawing")
+      .then((v) => setOn(v.on))
+      .catch((e) => setError(errorText(e)));
+  }, []);
+  const change = (next: boolean) => {
+    const was = on;
+    setOn(next);
+    setError(null);
+    request({ type: "setDrawingDefault", on: next }, "drawing").catch((e) => {
+      setOn(was);
+      setError(errorText(e));
+    });
+  };
+  return (
+    <div className="settings-section">
+      <p className="settings-lead">
+        Those watching your stream can draw on the picture in their stream window: point at things with lines,
+        arrows, boxes, a laser pointer and pings, and see each other's drawings. You turn it on or off for each
+        session in its console, clear the board, and stop one person drawing.
+      </p>
+      <div className="settings-card">
+        <Switch
+          checked={on ?? false}
+          disabled={on == null}
+          onChange={change}
+          label="Let those watching draw when a session starts"
+          detail="A session running now keeps its own switch."
+        />
+      </div>
+      {error && (
+        <p className="field-error selectable" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="settings-note">
+        Whoever has the keyboard and mouse can't draw: those are your game's. Drawings are never kept: they go when
+        the stream ends.
+      </p>
+    </div>
+  );
+}
+
 // ---- Stream window ----
 
 export function StreamWindowSection() {

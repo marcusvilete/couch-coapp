@@ -16,7 +16,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 15;
+pub const IPC_VERSION: u16 = 16;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -49,6 +49,9 @@ pub mod kinds {
     /// main -> viewer: something the app asks of the window itself
     /// ([`super::WindowRequest`], P11).
     pub const WINDOW: u8 = 0x0B;
+    /// main -> viewer: what the host says of the board ([`super::BoardNews`],
+    /// M27a).
+    pub const BOARD: u8 = 0x0C;
 
     /// viewer -> main: a local input event for the host ([`super::LocalInput`]).
     pub const INPUT: u8 = 0x81;
@@ -70,6 +73,9 @@ pub mod kinds {
     /// P12), on each change of its controllers, just before the
     /// `ControllerSlots` input that says it.
     pub const CONTROLLER_NAMES: u8 = 0x88;
+    /// viewer -> main: the user's own operations on the board
+    /// ([`super::Draw`], M27a), for the host.
+    pub const DRAW: u8 = 0x89;
 }
 
 /// Header of a [`kinds::VIDEO_FRAME`] payload; the access unit follows it.
@@ -294,6 +300,39 @@ pub struct HudState {
     /// A short line to show for a few seconds, such as "request declined";
     /// empty for none.
     pub note: String,
+    /// Drawing on the stream (M27a).
+    pub board: HudBoard,
+}
+
+/// Drawing on the stream, as the window needs it (M27a).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HudBoard {
+    /// The host turned drawing on.
+    pub on: bool,
+    /// The host stopped this member drawing.
+    pub stopped: bool,
+    /// This member, whose elements are its own to change.
+    pub me: Option<crate::ids::MemberId>,
+    /// Who may have drawn, by member, for a ping's name.
+    pub names: Vec<(crate::ids::MemberId, String)>,
+}
+
+/// Payload of [`kinds::BOARD`] (postcard, M27a): what the host said of the
+/// board, as it said it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoardNews {
+    Snapshot(crate::board::BoardSnapshot),
+    Update(crate::board::BoardUpdate),
+    Cleared(crate::board::BoardCleared),
+    Refused(crate::board::Refusal),
+}
+
+/// Payload of [`kinds::DRAW`] (postcard, M27a): the user's own operations,
+/// made in the board's `generation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Draw {
+    pub generation: u32,
+    pub ops: Vec<crate::board::BoardOp>,
 }
 
 /// One seat as the HUD shows it.
@@ -728,8 +767,31 @@ mod tests {
             game_in_front: false,
             stream: crate::session::StreamState::Stopped(crate::session::EndReason::GameExited),
             note: "request declined".into(),
+            board: HudBoard {
+                on: true,
+                stopped: false,
+                me: Some(crate::ids::MemberId([1; 32])),
+                names: vec![(crate::ids::MemberId([2; 32]), "Bia".into())],
+            },
         };
         assert_eq!(from_payload(&to_payload(&hud)), Some(hud));
+        use crate::board::*;
+        let news = [
+            BoardNews::Refused(Refusal::TooFast),
+            BoardNews::Cleared(BoardCleared {
+                session: crate::ids::SessionId(1),
+                generation: 3,
+                author: None,
+            }),
+        ];
+        for n in news {
+            assert_eq!(from_payload(&to_payload(&n)), Some(n));
+        }
+        let draw = Draw {
+            generation: 9,
+            ops: vec![BoardOp::Ping(Point::new(1, 2))],
+        };
+        assert_eq!(from_payload(&to_payload(&draw)), Some(draw));
         for action in [
             UserAction::RequestControl {
                 seat: 1,

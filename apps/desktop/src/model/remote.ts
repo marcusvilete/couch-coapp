@@ -51,6 +51,13 @@ function actionOf(c: Command): RemoteAction | null {
       return { type: "takeBackControl", seat: c.seat };
     case "playSeat":
       return { type: "playSeat", seat: c.seat, controller: c.controller };
+    // Drawing on the stream (M27a).
+    case "setDrawing":
+      return { type: "setDrawing", on: c.on };
+    case "clearBoard":
+      return { type: "clearBoard" };
+    case "stopDrawing":
+      return { type: "stopDrawing", member: c.member, stopped: c.stopped };
     default:
       return null;
   }

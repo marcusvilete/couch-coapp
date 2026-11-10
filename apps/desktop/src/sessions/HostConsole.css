@@ -76,6 +76,19 @@
 }
 
 /* Desktop control (M25b): one line, its button at the end. */
+/* Drawing on the stream (M27a): the switch takes the row, Clear beside it. */
+.drawing-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 40px;
+}
+
+.drawing-row > .switch-row {
+  flex: 1;
+  min-width: 0;
+}
+
 .desktop-row {
   display: flex;
   align-items: center;

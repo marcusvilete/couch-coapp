@@ -60,6 +60,20 @@ pub enum HudAction {
     Fullscreen,
     /// The slider or the mute button (P6).
     Volume(StreamVolume),
+    /// The pen: drawing mode on or off (M27a).
+    ToggleDrawing,
+    /// The eye: the drawings shown or hidden here (M27a).
+    ToggleBoard,
+}
+
+/// Drawing on the stream, as the bar's buttons show it (M27a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawBar {
+    /// Drawing mode is on.
+    pub on: bool,
+    pub hidden: bool,
+    /// Why we can't draw now, if we can't.
+    pub refusal: Option<&'static str>,
 }
 
 /// One of this window's controllers, as the bar's choice shows it (P13).
@@ -105,6 +119,10 @@ pub struct Hud {
     /// The seat whose controller is being chosen (P13): the bar shows the
     /// choice below the seats until one is picked or it is cancelled.
     picking: Option<u8>,
+    /// Drawing's buttons on the bar, while the host lets anyone draw (M27a).
+    pub drawing: Option<DrawBar>,
+    /// Where the drawing toolbar was last drawn: presses there are its own.
+    toolbar_rect: Option<Rect>,
     session: Option<HudState>,
     note: Option<(String, Instant)>,
     changed_at: Option<Instant>,
@@ -158,6 +176,8 @@ impl Hud {
             changed_at: None,
             pointer_at: None,
             on_bar_since: None,
+            drawing: None,
+            toolbar_rect: None,
             captured_at: None,
             events: Vec::new(),
             bar_rect: None,
@@ -271,7 +291,8 @@ impl Hud {
     /// must not go anywhere else.
     pub fn pointer_button(&mut self, pos: Pos2, button: u8, pressed: bool) -> bool {
         let taken = if pressed {
-            self.bar_up(Instant::now()) && self.bar_rect.is_some_and(|r| r.contains(pos))
+            (self.bar_up(Instant::now()) && self.bar_rect.is_some_and(|r| r.contains(pos)))
+                || self.toolbar_rect.is_some_and(|r| r.contains(pos))
         } else {
             self.pressed.contains(&button)
         };
@@ -347,8 +368,13 @@ impl Hud {
     }
 
     /// Records the HUD into `encoder`, drawing over `view`, whose size and
-    /// pixels per point `screen` gives; `stats` are the stats card's rows.
+    /// pixels per point `screen` gives; `stats` are the stats card's rows,
+    /// and `drawing` the board painted under the HUD (M27a).
     /// Returns command buffers that must be submitted before `encoder`'s.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "wgpu's handles and what the pass paints, each its own; a struct would only rename them"
+    )]
     pub fn paint(
         &mut self,
         device: &wgpu::Device,
@@ -357,6 +383,7 @@ impl Hud {
         view: &wgpu::TextureView,
         screen: &egui_wgpu::ScreenDescriptor,
         stats: &[(String, String)],
+        drawing: &mut crate::draw_ui::Drawing,
     ) -> Vec<wgpu::CommandBuffer> {
         let [width, height] = screen.size_in_pixels;
         let scale = screen.pixels_per_point;
@@ -368,10 +395,17 @@ impl Hud {
         }
         let events = std::mem::take(&mut self.events);
         self.repaint_at = None;
+        // The drawings (M27a) belong with the picture: they show with the
+        // HUD hidden too, unless hidden themselves.
+        let board = drawing.picture.is_some() && (drawing.on || !drawing.hidden);
         if !self.visible {
             self.bar_rect = None;
+        }
+        if !self.visible && !board {
+            self.toolbar_rect = None;
             return Vec::new();
         }
+        let visible = self.visible;
         let size = vec2(width as f32 / scale, height as f32 / scale);
         let mut input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
@@ -401,6 +435,10 @@ impl Hud {
                     Rect::from_min_size(Pos2::ZERO, size),
                 );
             }
+            drawing.paint(&ctx, now, size);
+            if !visible {
+                return;
+            }
             if let Some(session) = &self.session
                 && let Some(lines) = centre_message(session, self.waiting)
             {
@@ -423,6 +461,7 @@ impl Hud {
                                 controllers: &self.controllers,
                                 picking: self.picking,
                                 icons: self.icons,
+                                drawing: self.drawing,
                                 // Narrower than its minimum only in a window narrower still:
                                 // the right end holds Leave.
                                 width: (size.x - 32.0)
@@ -436,7 +475,8 @@ impl Hud {
                     });
                 bar_rect = Some(shown.response.rect);
             }
-            if self.show_stats {
+            // Not while drawing (M27a): the toolbar needs the bottom.
+            if self.show_stats && !drawing.on {
                 let below_bar = bar_rect.map_or(0.0, |r| r.bottom() + 8.0);
                 let room = size.y - 12.0 - below_bar.max(12.0);
                 let hide = self.shortcuts.binding(Shortcut::ToggleHud).keys();
@@ -449,6 +489,7 @@ impl Hud {
             }
         });
         self.bar_rect = bar_rect;
+        self.toolbar_rect = drawing.toolbar;
         self.repaint_at = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
@@ -522,18 +563,18 @@ enum BarClick {
 
 // The palette: the main window's dark theme (`apps/desktop/src/styles/
 // tokens.css`), made to sit over any game.
-const BAR: Color32 = Color32::from_rgba_premultiplied(29, 28, 27, 248);
-const BORDER: Color32 = Color32::from_rgb(0x3a, 0x39, 0x36);
+pub(crate) const BAR: Color32 = Color32::from_rgba_premultiplied(29, 28, 27, 248);
+pub(crate) const BORDER: Color32 = Color32::from_rgb(0x3a, 0x39, 0x36);
 const CONTROL: Color32 = Color32::from_rgb(0x2b, 0x2a, 0x27);
-const CONTROL_HOVER: Color32 = Color32::from_rgb(0x36, 0x35, 0x31);
+pub(crate) const CONTROL_HOVER: Color32 = Color32::from_rgb(0x36, 0x35, 0x31);
 const CONTROL_ACTIVE: Color32 = Color32::from_rgb(0x41, 0x40, 0x3b);
 const CHIP_EDGE: Color32 = Color32::from_rgb(0x34, 0x33, 0x30);
-const TEXT: Color32 = Color32::from_rgb(0xfa, 0xf9, 0xf5);
+pub(crate) const TEXT: Color32 = Color32::from_rgb(0xfa, 0xf9, 0xf5);
 const MUTED: Color32 = Color32::from_rgb(0xc2, 0xc0, 0xb6);
-const FAINT: Color32 = Color32::from_rgb(0x9c, 0x9a, 0x92);
+pub(crate) const FAINT: Color32 = Color32::from_rgb(0x9c, 0x9a, 0x92);
 /// Interaction and this viewer's own seats.
-const BLUE: Color32 = Color32::from_rgb(0x4a, 0x9f, 0xf0);
-const BLUE_TINT: Color32 = Color32::from_rgb(0x1f, 0x33, 0x47);
+pub(crate) const BLUE: Color32 = Color32::from_rgb(0x4a, 0x9f, 0xf0);
+pub(crate) const BLUE_TINT: Color32 = Color32::from_rgb(0x1f, 0x33, 0x47);
 /// LIVE and Leave.
 const RED: Color32 = Color32::from_rgb(0xf1, 0x54, 0x4f);
 const RED_TINT: Color32 = Color32::from_rgb(0x3d, 0x22, 0x20);
@@ -811,6 +852,8 @@ struct BarView<'a> {
     controllers: &'a [HudController],
     picking: Option<u8>,
     icons: bool,
+    /// Drawing's buttons (M27a), while the host lets anyone draw.
+    drawing: Option<DrawBar>,
     /// The rows' width, in points.
     width: f32,
     /// Room for the volume slider.
@@ -908,6 +951,35 @@ fn header(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarCli
             clicks.push(BarClick::Action(HudAction::Session(UserAction::Leave)));
         }
         ui.separator();
+        // Drawing on the stream (M27a): the pen, and showing the drawings.
+        if let Some(d) = view.drawing {
+            let pen = crate::draw_ui::icon_button(ui, d.on, |p, r, c| {
+                let c = if d.refusal.is_some() { FAINT } else { c };
+                crate::draw_ui::pen_icon(p, r, c);
+            });
+            let tip = match d.refusal {
+                Some(why) => why.to_string(),
+                None if d.on => format!("Back to the game · {}", keys(Shortcut::ToggleDrawing)),
+                None => format!("Draw on the stream · {}", keys(Shortcut::ToggleDrawing)),
+            };
+            if pen.on_hover_text(tip).clicked() && d.refusal.is_none() {
+                clicks.push(BarClick::Action(HudAction::ToggleDrawing));
+            }
+            let eye = crate::draw_ui::icon_button(ui, false, |p, r, c| {
+                crate::draw_ui::eye_icon(p, r, c, d.hidden);
+            });
+            let tip = if d.hidden {
+                "Show the drawings"
+            } else {
+                "Hide the drawings, here only"
+            };
+            if eye
+                .on_hover_text(format!("{tip} · {}", keys(Shortcut::ToggleBoard)))
+                .clicked()
+            {
+                clicks.push(BarClick::Action(HudAction::ToggleBoard));
+            }
+        }
         let stats = icon_button(ui, view.icons, ICON_STATS, "Stats", view.stats);
         if stats
             .on_hover_text(if view.stats {
@@ -1646,6 +1718,7 @@ mod tests {
             game_in_front: true,
             stream: StreamState::Live,
             note: String::new(),
+            board: Default::default(),
         }
     }
 

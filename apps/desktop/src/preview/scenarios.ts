@@ -5,6 +5,7 @@ import type { MemberView } from "../bindings/MemberView";
 import type { RemoteAccessView } from "../bindings/RemoteAccessView";
 import type { SessionView } from "../bindings/SessionView";
 import type { StreamWindowView } from "../bindings/StreamWindowView";
+import { noDrawing } from "../model/sessions";
 import { defaultShortcuts, hostSession, seatsFor, type FakeRoom, type World } from "./fakeEngine";
 
 const ME = "a11ce000000000000000000000000001";
@@ -98,6 +99,7 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     operatedBy: [],
     desktop: null,
     guestsKeyboard: true,
+    drawing: noDrawing(),
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,
@@ -168,6 +170,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     sound: "game",
     streamWindowBar: true,
     tray: false,
+    drawingDefault: false,
     remotePlay: {
       on: false,
       pinSet: false,
@@ -619,6 +622,19 @@ export const SCENARIOS: Record<string, Scenario> = {
     world: () => base([sofa({ sessions: [hostSession(ME, "Game night", 4, { controllers: 1, keyboardMouse: "none" }, [])] })]),
   },
   "hosting-live": { title: "Hosting: live, five seats, two requests", world: () => base([sofa({ sessions: [hosting()] })]) },
+  "hosting-drawing": {
+    title: "Hosting: drawing on, Bia drawing, Dani stopped (M27a)",
+    world: () => {
+      const s = hosting({ requests: [] });
+      s.drawing = {
+        on: true,
+        elements: 5,
+        drawers: [{ member: bia.id, elements: 5 }],
+        stopped: [dani.id],
+      };
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
   "hosting-guest-controllers": {
     title: "Hosting: a guest's two controllers of one model on two seats (P12)",
     world: () => {

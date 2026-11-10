@@ -1,6 +1,6 @@
 // Settings, as a page over the room (Esc goes back): your name, the look,
 // the keyboard shortcuts (each can move to another key), the overlay, the
-// stream window (P11), the network (which relay, applied when the app
+// stream window (P11), drawing on the stream (M27a), the network (which relay, applied when the app
 // restarts), remote play (M25), the drivers, a backup of the profile (M13), and About. Each
 // section is mounted only while shown: a passphrase leaves with its page, and
 // nothing polls behind it.
@@ -14,6 +14,7 @@ import {
   Layers,
   Network,
   Palette,
+  Pencil,
   Router,
   UserRound,
 } from "lucide-react";
@@ -28,6 +29,7 @@ import {
   AboutSection,
   AppearanceSection,
   BackupSection,
+  DrawingSection,
   DriversSection,
   NetworkSection,
   OverlaySection,
@@ -43,6 +45,7 @@ export type SettingsSection =
   | "shortcuts"
   | "overlay"
   | "streamWindow"
+  | "drawing"
   | "network"
   | "remotePlay"
   | "drivers"
@@ -56,6 +59,7 @@ const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode; hostOnly?
   { id: "shortcuts", label: "Shortcuts", icon: <Keyboard /> },
   { id: "overlay", label: "Overlay and sounds", icon: <Layers />, hostOnly: true },
   { id: "streamWindow", label: "Stream window", icon: <AppWindow /> },
+  { id: "drawing", label: "Drawing", icon: <Pencil />, hostOnly: true },
   { id: "network", label: "Network", icon: <Network /> },
   { id: "remotePlay", label: "Remote play", icon: <Router /> },
   { id: "drivers", label: "Drivers", icon: <Cpu />, hostOnly: true },
@@ -133,6 +137,7 @@ export function SettingsPage(props: {
             {section.id === "shortcuts" && <ShortcutsSection onCapturing={props.onCapturing} canHost={canHost} linux={linux} />}
             {section.id === "overlay" && <OverlaySection linux={linux} />}
             {section.id === "streamWindow" && <StreamWindowSection />}
+            {section.id === "drawing" && <DrawingSection />}
             {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
             {section.id === "remotePlay" && <RemotePlaySection canHost={props.info?.homePc ?? true} linux={linux} />}
             {section.id === "drivers" && <DriversSection linux={linux} />}
