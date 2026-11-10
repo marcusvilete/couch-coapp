@@ -488,6 +488,20 @@ pub fn run(options: WindowOptions) -> Result<()> {
                             }
                         }
                     }
+                    // Over the fade button, the wheel steps how long drawings
+                    // stay (M27b); anywhere else it does nothing.
+                    Event::MouseWheel {
+                        y,
+                        direction,
+                        mouse_x,
+                        mouse_y,
+                        ..
+                    } if *y != 0.0 => {
+                        let flipped = *direction == sdl3::mouse::MouseWheelDirection::Flipped;
+                        let up = (*y > 0.0) != flipped;
+                        let at = hud_point(&window, options.hud_scale, *mouse_x, *mouse_y);
+                        drawing.wheel(at, up, now);
+                    }
                     Event::MouseMotion { x, y, .. } if drawing.held => {
                         let at =
                             drawing.to_picture(hud_point(&window, options.hud_scale, *x, *y), true);
@@ -580,7 +594,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     Shortcut::FreeMouse
                     | Shortcut::Panic
                     | Shortcut::AcceptRequest
-                    | Shortcut::DeclineRequest,
+                    | Shortcut::DeclineRequest
+                    | Shortcut::HostDrawing,
                 )
                 | None => continue,
             }
@@ -759,7 +774,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 hud.note(note);
             }
         }
-        if drawing.moving(Instant::now())
+        let now = Instant::now();
+        if (drawing.moving(now) || drawing.fade_due(board_painted, now))
             && board_painted.is_none_or(|t| t.elapsed() >= MOVING_EVERY)
         {
             redraw = true;
@@ -1237,6 +1253,7 @@ fn preview_board(drawing: &mut Drawing, now: Instant) {
         colour,
         width,
         fades: false,
+        stay: 4,
         done: true,
         points: points.into_iter().map(|(x, y)| Point::new(x, y)).collect(),
     };

@@ -20,7 +20,7 @@ use egui::{
 
 use crate::{
     board::{BoardView, LASER, PING, Shown},
-    editor::{Editor, Keyed, bounds},
+    editor::{Editor, FadeStep, Keyed, bounds},
     hud::{BAR, BLUE, BLUE_TINT, BORDER, CONTROL_HOVER, FAINT, TEXT},
 };
 
@@ -34,7 +34,7 @@ enum Click {
     Tool(DrawTool),
     Colour(u8),
     Width(u8),
-    Fades(bool),
+    Fade(FadeStep),
     Undo,
     Redo,
     Done,
@@ -54,6 +54,9 @@ pub struct Drawing {
     pub picture: Option<Rect>,
     /// The toolbar's place, as last painted: presses there are its own.
     pub toolbar: Option<Rect>,
+    /// The fade button's place, as last painted: the wheel over it steps
+    /// how long drawings stay.
+    pub fade_button: Option<Rect>,
     /// Who drew, for a ping's name.
     pub names: Vec<(MemberId, String)>,
     /// The main button is down for the editor.
@@ -82,6 +85,7 @@ impl Drawing {
     pub fn paint(&mut self, ctx: &egui::Context, now: Instant, size: egui::Vec2) {
         self.board.prune(now);
         self.toolbar = None;
+        self.fade_button = None;
         let Some(picture) = self.picture else {
             return;
         };
@@ -174,16 +178,24 @@ impl Drawing {
         }
         if self.on {
             let editor = self.editor.as_ref();
-            let state = editor.map(|e| (e.tool, e.colour, e.width, e.fades));
+            let state = editor.map(|e| (e.tool, e.colour, e.width, e.fades, e.stay));
             let mut clicks = Vec::new();
+            let mut fade_button = None;
             let shown = egui::Area::new(egui::Id::new("drawing"))
                 .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -14.0))
                 .show(ctx, |ui| {
                     if let Some(state) = state {
-                        toolbar(ui, state, (size.x - 40.0).max(120.0), &mut clicks);
+                        toolbar(
+                            ui,
+                            state,
+                            (size.x - 40.0).max(120.0),
+                            &mut clicks,
+                            &mut fade_button,
+                        );
                     }
                 });
             self.toolbar = Some(shown.response.rect);
+            self.fade_button = fade_button;
             self.clicks = clicks;
         }
     }
@@ -200,7 +212,7 @@ impl Drawing {
                 Click::Tool(tool) => editor.set_tool(tool, board, now),
                 Click::Colour(c) => editor.set_style(Some(c), None, None, board, now),
                 Click::Width(w) => editor.set_style(None, Some(w), None, board, now),
-                Click::Fades(f) => editor.set_style(None, None, Some(f), board, now),
+                Click::Fade(step) => editor.step_fade(step, board, now),
                 Click::Undo => {
                     editor.key(DrawAction::Undo, false, board, now);
                 }
@@ -214,6 +226,24 @@ impl Drawing {
     }
 
     /// A key the board takes; `true` if drawing mode must end.
+    /// The mouse wheel at `at` (the HUD's points), `up` away from the user:
+    /// over the fade button it steps how long drawings stay. Whether it did.
+    pub fn wheel(&mut self, at: Pos2, up: bool, now: Instant) -> bool {
+        let over = self.fade_button.is_some_and(|r| r.contains(at));
+        match &mut self.editor {
+            Some(editor) if over => {
+                let step = if up {
+                    FadeStep::Longer
+                } else {
+                    FadeStep::Shorter
+                };
+                editor.step_fade(step, &mut self.board, now);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn key(&mut self, action: DrawAction, shift: bool, now: Instant) -> bool {
         match &mut self.editor {
             Some(editor) => editor.key(action, shift, &mut self.board, now) == Keyed::LeaveDrawing,
@@ -224,6 +254,17 @@ impl Drawing {
     /// Whether something on the board moves by itself.
     pub fn moving(&self, now: Instant) -> bool {
         !self.hidden && self.picture.is_some() && self.board.moving(now)
+    }
+
+    /// Whether a fading element has started to fade since the board was
+    /// last painted at `painted`: nothing moved while it stayed, and a
+    /// still picture brings no frames (the author's run of M27b).
+    pub fn fade_due(&self, painted: Option<Instant>, now: Instant) -> bool {
+        !self.hidden
+            && self.picture.is_some()
+            && painted
+                .and_then(|p| self.board.next_fade(p))
+                .is_some_and(|at| at <= now)
     }
 }
 
@@ -306,9 +347,10 @@ fn element_shapes(
 /// its rows wrap in a narrow window.
 fn toolbar(
     ui: &mut Ui,
-    (tool, picked, width, fades): (DrawTool, u8, u8, bool),
+    (tool, picked, width, fades, stay): (DrawTool, u8, u8, bool, u8),
     max_width: f32,
     clicks: &mut Vec<Click>,
+    fade_button: &mut Option<Rect>,
 ) {
     egui::Frame::new()
         .fill(BAR)
@@ -355,16 +397,43 @@ fn toolbar(
                     }
                 }
                 ui.separator();
+                // Staying or fading, and how long: one button (the author's
+                // choice, M27b). A click goes round stays, 2, 4, 8, 15 s; the
+                // wheel over it steps up or down (`Drawing::wheel`).
                 let tip = if fades {
-                    "Fades away after a few seconds (click: stays)"
+                    format!(
+                        "Fades away after {stay} seconds · click: longer, then stays · wheel: longer or shorter"
+                    )
                 } else {
-                    "Stays until erased (click: fades away)"
+                    "Stays until erased · click: fades away · wheel: longer or shorter".to_string()
                 };
-                if icon_button(ui, fades, fade_icon)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    clicks.push(Click::Fades(!fades));
+                let (rect, response) = ui.allocate_exact_size(vec2(56.0, 30.0), Sense::click());
+                let fill = if fades {
+                    BLUE_TINT
+                } else if response.hovered() {
+                    CONTROL_HOVER
+                } else {
+                    Color32::TRANSPARENT
+                };
+                ui.painter().rect_filled(rect, 6.0, fill);
+                let c = if fades { BLUE } else { TEXT };
+                if fades {
+                    let icon = Rect::from_min_size(rect.min + vec2(5.0, 6.0), vec2(18.0, 18.0));
+                    fade_icon(ui.painter(), icon, c);
+                    ui.painter().text(
+                        pos2(rect.max.x - 6.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{stay}s"),
+                        FontId::proportional(12.0),
+                        c,
+                    );
+                } else {
+                    let icon = Rect::from_center_size(rect.center(), vec2(18.0, 18.0));
+                    fade_icon(ui.painter(), icon, c);
+                }
+                *fade_button = Some(rect);
+                if response.on_hover_text(tip).clicked() {
+                    clicks.push(Click::Fade(FadeStep::Next));
                 }
                 ui.separator();
                 if icon_button(ui, false, |p, r, c| turn_icon(p, r, c, false))

@@ -10,6 +10,7 @@
 //! ([`store`]), sealed with DPAPI on Windows ([`secrets`]).
 
 pub mod backup;
+pub mod board;
 pub mod build_config;
 pub mod pipeline;
 mod profile;
@@ -391,6 +392,26 @@ pub enum Command {
     StopDrawing {
         member: String,
         stopped: bool,
+    },
+    /// While hosting: the host's own operations from its board overlay over
+    /// the game (M27b), made in the board's `generation` as the overlay last
+    /// heard it. The same checks as a viewer's; a refusal comes back as
+    /// [`Event::HostBoard`]. Never from afar.
+    HostDraw {
+        generation: u32,
+        ops: Vec<board::BoardOpView>,
+    },
+    /// While hosting: the board whole, for the board overlay that just
+    /// loaded (M27b), as [`Event::HostBoard`] snapshots.
+    HostBoard,
+    /// While hosting: drawing over the game ends (M27b; the overlay's Esc or
+    /// Done), and the game comes back to the front. Only the host's own key
+    /// begins it.
+    EndHostDrawing,
+    /// While hosting: show what's drawn over the game, or not, for this
+    /// session (M27b). Drawing over the game shows it anyway.
+    ShowBoardOverlay {
+        on: bool,
     },
     /// Settings: whether sessions start with drawing on (M27a).
     GetDrawingDefault,
@@ -1176,6 +1197,26 @@ pub struct SessionView {
     /// afar, the board as the console shows it; for a viewer, whether the
     /// host lets us draw (no counts).
     pub drawing: DrawingView,
+    /// Our own session only: the board over the game at this PC (M27b).
+    pub board_overlay: Option<BoardOverlayView>,
+}
+
+/// The host's board overlay over the game (M27b), as the console shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct BoardOverlayView {
+    /// This PC can show drawings over the game (Windows).
+    pub available: bool,
+    /// The host's switch: drawings shown over the game.
+    pub shown: bool,
+    /// Drawing over the game now: the board has the mouse and the focus.
+    pub drawing: bool,
+    /// The host's drawing key, such as "Ctrl+Alt+Shift+D"; `None` if it
+    /// couldn't be hooked.
+    pub key: Option<String>,
+    /// Why the drawing key last did nothing.
+    pub note: Option<String>,
 }
 
 /// Drawing on the stream, as the console shows it (M27a).
@@ -1704,6 +1745,16 @@ impl fmt::Debug for Command {
                 .field("member", member)
                 .field("stopped", stopped)
                 .finish(),
+            Self::HostDraw { generation, ops } => f
+                .debug_struct("HostDraw")
+                .field("generation", generation)
+                .field("ops", &ops.len())
+                .finish(),
+            Self::HostBoard => f.write_str("HostBoard"),
+            Self::EndHostDrawing => f.write_str("EndHostDrawing"),
+            Self::ShowBoardOverlay { on } => {
+                f.debug_struct("ShowBoardOverlay").field("on", on).finish()
+            }
             Self::GetDrawingDefault => f.write_str("GetDrawingDefault"),
             Self::SetDrawingDefault { on } => {
                 f.debug_struct("SetDrawingDefault").field("on", on).finish()
@@ -2126,6 +2177,13 @@ pub enum Event {
         host: String,
         reason: WatchEnd,
     },
+    /// While hosting: what the board says to our board overlay over the
+    /// game (M27b), as a stream window hears it: others' drawings, clears,
+    /// our own refusals and resyncs.
+    HostBoard {
+        room: String,
+        news: board::BoardNewsView,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2258,6 +2316,9 @@ pub struct EngineOptions {
     /// The app's file dialogs for backups (M13); without them, backups are
     /// refused.
     pub backup_files: Option<Arc<dyn BackupFiles>>,
+    /// The app's board overlay window over the game (M27b); without it, the
+    /// host sees nothing drawn over the game.
+    pub board_windows: Option<Arc<dyn board::BoardWindows>>,
     /// Whether this app may start itself when the user signs in (M25c):
     /// Settings offers it only then.
     pub start_at_sign_in: bool,
@@ -2282,6 +2343,7 @@ impl EngineOptions {
             reconnect_wait: Duration::from_secs(30),
             relay_only: false,
             backup_files: None,
+            board_windows: None,
             start_at_sign_in: false,
         }
     }
@@ -2621,11 +2683,15 @@ impl Engine {
     }
 
     /// Every shortcut as the app lists it, with the user's keys.
-    fn shortcut_views(shortcuts: &Shortcuts) -> Response {
+    fn shortcut_views(&self, shortcuts: &Shortcuts) -> Response {
+        // The host's drawing key only where the host draws over the game
+        // (M27b, Windows): it is hooked nowhere else.
+        let draws = self.backend.draws_over_game();
         Response::Shortcuts {
             shortcuts: shortcuts
                 .rows()
                 .iter()
+                .filter(|b| draws || b.shortcut != couch_input::shortcuts::Shortcut::HostDrawing)
                 .map(|b| ShortcutView {
                     id: b.id.to_string(),
                     keys: b.keys(),
@@ -2656,7 +2722,7 @@ impl Engine {
         let mut shortcuts = store::shortcuts(dir);
         edit(&mut shortcuts)?;
         store::save_shortcuts(dir, &shortcuts)?;
-        Ok(Self::shortcut_views(&shortcuts))
+        Ok(self.shortcut_views(&shortcuts))
     }
 
     /// The host's panic key: every seat of our stream back to us at once,
@@ -2728,9 +2794,9 @@ impl Engine {
                     .unwrap_or_else(PoisonError::into_inner)
                     .take(),
             }),
-            Command::GetShortcuts => Ok(Self::shortcut_views(&store::shortcuts(
-                self.profile.data_dir(),
-            ))),
+            Command::GetShortcuts => {
+                Ok(self.shortcut_views(&store::shortcuts(self.profile.data_dir())))
+            }
             Command::SetShortcut { id, code } => self.edit_shortcuts(|s| {
                 let key = couch_input::shortcuts::key_for_code(&code)
                     .ok_or(ShortcutError::KeyNotAllowed)?;
@@ -3137,7 +3203,14 @@ mod tests {
         assert_eq!(shortcuts[0].keys, "Ctrl+Alt+Shift+Backspace");
         assert_eq!(shortcuts[0].scope, ShortcutScope::Host);
         assert!(shortcuts[0].is_default && shortcuts[0].chord);
-        assert_eq!(shortcuts.len(), couch_input::shortcuts::SHORTCUTS.len());
+        // The host's drawing key only where the host draws over the game
+        // (M27b, Windows): it is hooked nowhere else.
+        let drawing = shortcuts.iter().any(|s| s.id == "hostDrawing");
+        assert_eq!(drawing, cfg!(windows));
+        assert_eq!(
+            shortcuts.len() + usize::from(!drawing),
+            couch_input::shortcuts::SHORTCUTS.len()
+        );
         engine.shutdown().await;
     }
 

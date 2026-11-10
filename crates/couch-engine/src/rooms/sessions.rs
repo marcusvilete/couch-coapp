@@ -10,6 +10,8 @@
 //! module decides who gets them. Who holds the seat is the seat router's
 //! call; `couch_room::session` mirrors it.
 
+mod board_overlay;
+
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
@@ -132,6 +134,8 @@ struct Hosting {
     pads_since: Option<Instant>,
     /// The seats left without a pad for the session.
     pads_missing: Vec<SeatId>,
+    /// What is drawn on the stream, over the game at this PC (M27b).
+    overlay: board_overlay::BoardOverlay,
 }
 
 struct Watching {
@@ -1119,11 +1123,23 @@ impl Actor {
                     });
                 }
                 SessionEffect::Changed => changed = true,
+                // Our board overlay hears the board as a stream window does
+                // (M27b), while its window is there: one that opens asks for
+                // the board whole.
+                SessionEffect::HostBoard(news) if self.board_window_open() => {
+                    let _ = self.events.send(Event::HostBoard {
+                        room: room.to_hex(),
+                        news: (&news).into(),
+                    });
+                }
+                SessionEffect::HostBoard(_) => {}
             }
         }
         if !more.is_empty() {
             self.apply_session(room, more, now);
         }
+        // What's drawn over the game follows every change (M27b).
+        self.sync_board_overlay(now);
         // Every change to the requests goes through here: note when the
         // oldest became the oldest.
         if let Some(h) = self.sessions.hosting.as_mut() {
@@ -1259,6 +1275,10 @@ impl Actor {
             host_controllers: controllers.len() as u8,
         };
         let mut host_session = HostSession::new(session, config)?;
+        // The host draws over the game as itself (M27b), where it can.
+        if self.backend.draws_over_game() && self.board_windows.is_some() {
+            host_session.set_me(self.me);
+        }
         // Drawing on the stream starts as Settings says (M27a), before
         // anyone hears of the session: nobody to tell yet.
         let drawing = crate::store::drawing(&self.data_dir).on;
@@ -1319,6 +1339,7 @@ impl Actor {
             pads_setting_up: Vec::new(),
             pads_since: None,
             pads_missing: Vec::new(),
+            overlay: board_overlay::BoardOverlay::default(),
         });
         Ok((session, options))
     }
@@ -1364,6 +1385,7 @@ impl Actor {
                         session,
                         accept: key == Shortcut::AcceptRequest,
                     },
+                    HostKeyEvent::Pressed(Shortcut::HostDrawing) => Input::HostDrawKey(session),
                     HostKeyEvent::Pressed(_) => return,
                     HostKeyEvent::Bound(keys) => Input::HostKeysBound { session, keys },
                     HostKeyEvent::Lost(error) => Input::HostKeysLost { session, error },
@@ -1377,10 +1399,16 @@ impl Actor {
         // The user's keys, read now: a change made while live applies at
         // the next Go live.
         let shortcuts = crate::store::shortcuts(&self.data_dir);
-        let keys: Vec<_> = Shortcut::HOST
+        let mut keys: Vec<_> = Shortcut::HOST
             .iter()
             .map(|&s| (shortcuts.binding(s).key, s))
             .collect();
+        // The drawing key too, where the host draws over the game (M27b).
+        let draws = self.backend.draws_over_game() && self.board_windows.is_some();
+        let draw_key = shortcuts.binding(Shortcut::HostDrawing);
+        if draws {
+            keys.push((draw_key.key, Shortcut::HostDrawing));
+        }
         let on_press = std::sync::Arc::new(on_press);
         let unattended = h.from_afar;
         let hook = |keys: &[(HidUsage, Shortcut)]| {
@@ -1399,6 +1427,9 @@ impl Actor {
                     shortcuts.binding(Shortcut::AcceptRequest).keys(),
                     shortcuts.binding(Shortcut::DeclineRequest).keys(),
                 ));
+                if draws {
+                    h.overlay.key = Some(draw_key.keys());
+                }
                 Some((guard, panic.keys()))
             }
             // Never the panic key lost for an answer key's sake: it alone.
@@ -1673,6 +1704,9 @@ impl Actor {
         h.overlay_area = overlay_area;
         h.in_front = None;
         h.game_window = None;
+        // What the board overlay lies over (M27b).
+        h.overlay.source = Some(options.source.clone());
+        h.overlay.failed = false;
         // Viewers are told it stopped, for the moment of the switch.
         let fx = h.session.set_stream(match h.session.stream() {
             StreamState::Live => StreamState::Stopped(EndReason::HostStopped),
@@ -2300,6 +2334,8 @@ impl Actor {
     /// Every tick: fading drawings whose time is up leave our board, refused
     /// members get their own back, and the console hears the count.
     pub(super) fn board_tick(&mut self, now: Instant) {
+        // The game's window may have been swapped, a mark's time be up.
+        self.sync_board_overlay(now);
         let fx = self
             .hosting_mut()
             .filter(|h| h.pipeline.is_some())
@@ -2333,6 +2369,8 @@ impl Actor {
         }
         let fx = h.session.panic();
         self.apply_session(room, fx, now);
+        // Drawing over the game ends with it, the game back in front (M27b).
+        self.panic_ends_drawing(now);
         // Whoever is at the PC stops our devices too: the PIN again (M25).
         self.remote_lock_all(couch_proto::remote::LockReason::Panic, now);
     }
@@ -3267,6 +3305,7 @@ impl Actor {
                 game_window: h.game_window.clone(),
                 warn_hot_corner: self.backend.warns_hot_corner(),
                 drawing: DrawingView::of(&remote_drawing(s.board())),
+                board_overlay: Some(self.board_overlay_view(&h.overlay)),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -3463,6 +3502,7 @@ impl Actor {
                     },
                     (None, None) => DrawingView::default(),
                 },
+                board_overlay: None,
             });
         }
         views

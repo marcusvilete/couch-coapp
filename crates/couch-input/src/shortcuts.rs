@@ -43,12 +43,25 @@ pub enum Shortcut {
     AcceptRequest,
     /// Host: decline the oldest request for a seat.
     DeclineRequest,
+    /// Host: drawing over the game on or off (M27b, Windows): the board
+    /// overlay takes the mouse and the focus, then gives the game back.
+    HostDrawing,
 }
 
 impl Shortcut {
     /// The host's shortcuts, which the host-keys hook watches for while
     /// streaming (the panic key first).
     pub const HOST: [Self; 3] = [Self::Panic, Self::AcceptRequest, Self::DeclineRequest];
+
+    /// Two rows that may share a key: the same thing in two places. The
+    /// host's drawing key and the stream window's both mean "draw" (M27b):
+    /// one works anywhere while hosting, the other in a stream window.
+    fn same_meaning(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::HostDrawing, Self::ToggleDrawing) | (Self::ToggleDrawing, Self::HostDrawing)
+        )
+    }
 }
 
 /// Where a shortcut works.
@@ -248,6 +261,15 @@ pub const SHORTCUTS: &[Binding] = &[
         action: "Decline the oldest request for a seat",
         scope: Scope::Host,
         condition: "while you stream and someone asks; the game never sees it",
+    },
+    Binding {
+        id: "hostDrawing",
+        shortcut: Shortcut::HostDrawing,
+        chord: true,
+        key: KEY_D,
+        action: "Draw over the game, or back to the game",
+        scope: Scope::Host,
+        condition: "while you stream on Windows with drawing on; the game never sees it",
     },
     Binding {
         id: "toggleControl",
@@ -745,7 +767,7 @@ impl Shortcuts {
             Self::allowed(row, row.key).is_ok()
                 && self.rows[..i]
                     .iter()
-                    .all(|other| !Self::clash(other, row.chord, row.key))
+                    .all(|other| !Self::clash(other, row, row.key))
         })
     }
 
@@ -757,9 +779,11 @@ impl Shortcuts {
         Ok(())
     }
 
-    /// Two rows clash when they would answer the same key press.
-    fn clash(row: &Binding, chord: bool, usage: HidUsage) -> bool {
-        row.chord == chord && row.key == usage
+    /// Two rows clash when they would answer the same key press, unless
+    /// they mean the same thing ([`Shortcut::same_meaning`]): `other` on
+    /// `usage` against `row`.
+    fn clash(other: &Binding, row: &Binding, usage: HidUsage) -> bool {
+        other.chord == row.chord && other.key == usage && !other.shortcut.same_meaning(row.shortcut)
     }
 
     /// Moves row `id` to `usage`.
@@ -775,7 +799,7 @@ impl Shortcuts {
             .rows
             .iter()
             .enumerate()
-            .find(|&(j, other)| j != i && Self::clash(other, row.chord, usage))
+            .find(|&(j, other)| j != i && Self::clash(other, &row, usage))
             .map(|(_, other)| other)
         {
             return Err(ShortcutError::Taken {
@@ -866,9 +890,36 @@ mod tests {
             Shortcut::Panic,
             Shortcut::AcceptRequest,
             Shortcut::DeclineRequest,
+            Shortcut::HostDrawing,
         ] {
             assert_eq!(table.binding(s).shortcut, s);
         }
+    }
+
+    #[test]
+    fn the_two_drawing_keys_may_share_a_key_and_nothing_else_may() {
+        let mut table = Shortcuts::default();
+        let host = *table.binding(Shortcut::HostDrawing);
+        assert_eq!(host.keys(), "Ctrl+Alt+Shift+D");
+        assert_eq!(host.scope, Scope::Host);
+        assert_eq!(table.binding(Shortcut::ToggleDrawing).key, host.key);
+        // Each moves alone, and back onto the other's key.
+        table.set("hostDrawing", HidUsage(0x0A)).unwrap(); // G
+        assert_eq!(table.binding(Shortcut::ToggleDrawing).key, KEY_D);
+        table.set("toggleDrawing", HidUsage(0x0A)).unwrap();
+        assert_eq!(table.changed().len(), 2);
+        // Any other row on a drawing key is refused.
+        assert!(matches!(
+            table.set("mute", HidUsage(0x0A)),
+            Err(ShortcutError::Taken { .. })
+        ));
+        assert!(matches!(
+            table.set("hostDrawing", KEY_B),
+            Err(ShortcutError::Taken { .. })
+        ));
+        let (loaded, skipped) = Shortcuts::with_keys(&table.changed());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(loaded, table);
     }
 
     #[test]

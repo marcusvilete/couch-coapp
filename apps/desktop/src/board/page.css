@@ -1,0 +1,12 @@
+/* The board overlay window's page: transparent, so only what's drawn shows
+   over the game. */
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}

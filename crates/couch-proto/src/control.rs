@@ -957,6 +957,7 @@ mod tests {
             colour: 1,
             width: 2,
             fades: true,
+            stay: 4,
             done: true,
             points: vec![Point::new(0, 0), Point::new(u16::MAX, 40)],
         };

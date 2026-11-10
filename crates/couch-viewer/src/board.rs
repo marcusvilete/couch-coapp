@@ -9,12 +9,11 @@ use std::{
 };
 
 use couch_proto::{
-    board::{BoardOp, Element, FADE_OUT_MS, FADE_STAY_MS, LASER_MS, PING_MS, Point, Refusal},
+    board::{BoardOp, Element, FADE_OUT_MS, LASER_MS, PING_MS, Point, Refusal},
     ids::MemberId,
     ipc::BoardNews,
 };
 
-pub const FADE_STAY: Duration = Duration::from_millis(FADE_STAY_MS);
 pub const FADE_OUT: Duration = Duration::from_millis(FADE_OUT_MS);
 pub const LASER: Duration = Duration::from_millis(LASER_MS);
 pub const PING: Duration = Duration::from_millis(PING_MS);
@@ -29,6 +28,11 @@ pub struct Shown {
 }
 
 impl Shown {
+    /// How long it stays once finished, before fading: its author's pick.
+    pub fn stay(&self) -> Duration {
+        Duration::from_millis(self.element.stay_ms())
+    }
+
     /// How opaque it is now: 1 until a fading one has stayed its while,
     /// then down to 0 over the fade.
     pub fn alpha(&self, now: Instant) -> f32 {
@@ -36,10 +40,11 @@ impl Shown {
             return 1.0;
         };
         let age = now.saturating_duration_since(done);
-        if age <= FADE_STAY {
+        let stay = self.stay();
+        if age <= stay {
             1.0
         } else {
-            let out = (age - FADE_STAY).as_secs_f32() / FADE_OUT.as_secs_f32();
+            let out = (age - stay).as_secs_f32() / FADE_OUT.as_secs_f32();
             (1.0 - out).max(0.0)
         }
     }
@@ -230,8 +235,20 @@ impl BoardView {
             || self.elements.iter().any(|s| {
                 s.element.fades
                     && s.done_at
-                        .is_some_and(|d| now.saturating_duration_since(d) > FADE_STAY)
+                        .is_some_and(|d| now.saturating_duration_since(d) > s.stay())
             })
+    }
+
+    /// When the next fading element starts to fade, if one is still staying:
+    /// nothing moves until then, and a still picture brings no frames, so
+    /// the window must wake itself then (the author's run of M27b).
+    pub fn next_fade(&self, now: Instant) -> Option<Instant> {
+        self.elements
+            .iter()
+            .filter(|s| s.element.fades)
+            .filter_map(|s| s.done_at.map(|d| d + s.stay()))
+            .filter(|at| *at > now)
+            .min()
     }
 }
 
@@ -252,6 +269,7 @@ mod tests {
             colour: 0,
             width: 0,
             fades,
+            stay: 4,
             done,
             points: vec![Point::new(1, 1)],
         }
@@ -277,12 +295,45 @@ mod tests {
             done,
         );
         let s = &board.elements()[0];
+        const FADE_STAY: Duration = Duration::from_secs(4);
+        assert_eq!(s.stay(), FADE_STAY, "the default");
+        // Nothing moves while it stays: the window wakes when it fades.
+        assert_eq!(
+            board.next_fade(done + Duration::from_secs(1)),
+            Some(done + FADE_STAY)
+        );
+        assert_eq!(board.next_fade(done + FADE_STAY), None);
         assert_eq!(s.alpha(done + FADE_STAY), 1.0);
         let half = s.alpha(done + FADE_STAY + FADE_OUT / 2);
         assert!((half - 0.5).abs() < 0.01, "{half}");
         assert!(!board.moving(done + FADE_STAY), "staying: nothing to paint");
         assert!(board.moving(done + FADE_STAY + FADE_OUT / 2), "fading");
         board.prune(done + FADE_STAY + FADE_OUT);
+        assert!(board.elements().is_empty());
+    }
+
+    #[test]
+    fn each_element_fades_after_its_own_stay() {
+        let now = Instant::now();
+        let mut board = BoardView::default();
+        let long = Element {
+            stay: 15,
+            ..stroke(1, true, true)
+        };
+        board.apply(
+            ANA,
+            &[BoardOp::Put(stroke(2, true, true)), BoardOp::Put(long)],
+            now,
+        );
+        assert_eq!(board.next_fade(now), Some(now + Duration::from_secs(4)));
+        board.prune(now + Duration::from_secs(5));
+        assert_eq!(board.elements().len(), 1, "the 4 s one gone");
+        assert_eq!(board.elements()[0].element.id, 1);
+        assert_eq!(
+            board.next_fade(now + Duration::from_secs(5)),
+            Some(now + Duration::from_secs(15))
+        );
+        board.prune(now + Duration::from_secs(16));
         assert!(board.elements().is_empty());
     }
 

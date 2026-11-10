@@ -174,6 +174,7 @@ fn a_refused_author_gets_its_own_back_at_the_tick() {
         colour: 0,
         width: 0,
         fades: true,
+        stay: 4,
         done: false,
         points: vec![Point::new(1, 1)],
     };
@@ -266,6 +267,7 @@ fn many_open_strokes_are_finished_in_batches_the_checks_allow() {
                     colour: 0,
                     width: 0,
                     fades: true,
+                    stay: 4,
                     done: false,
                     points: vec![Point::new(1, 1)],
                 })
@@ -284,6 +286,100 @@ fn many_open_strokes_are_finished_in_batches_the_checks_allow() {
     assert!(updates.len() >= 4, "{}", updates.len());
     assert!(updates.iter().all(|u| valid_batch(&u.ops)));
     assert_eq!(updates.iter().map(|u| u.ops.len()).sum::<usize>(), 200);
+}
+
+// ---- The host draws over the game (M27b) ----
+
+/// What `fx` says to the host's own overlay, in order.
+fn to_host(fx: &[Effect]) -> Vec<&couch_proto::ipc::BoardNews> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::HostBoard(news) => Some(news),
+            _ => None,
+        })
+        .collect()
+}
+
+fn host_drawing_session() -> HostSession {
+    let mut s = drawing_session();
+    s.set_me(HOST);
+    s
+}
+
+#[test]
+fn the_host_draws_as_itself_to_every_viewer() {
+    use couch_proto::ipc::BoardNews;
+    let mut s = host_drawing_session();
+    // Off: refused, to its own overlay, never on the wire.
+    let fx = draw_box(&mut s, HOST, 1);
+    assert!(matches!(
+        to_host(&fx)[..],
+        [BoardNews::Refused(Refusal::Off)]
+    ));
+    assert!(sent_to(&fx, HOST).is_empty());
+    // On: its overlay gets the board, in a generation of its own.
+    let fx = s.set_drawing(true);
+    assert!(matches!(to_host(&fx)[..], [BoardNews::Snapshot(p)] if p.first));
+    let fx = draw_box(&mut s, HOST, 1);
+    for viewer in [ANA, BIA] {
+        assert!(matches!(
+            sent_to(&fx, viewer)[..],
+            [ControlMessage::BoardUpdate(u)] if u.author == HOST
+        ));
+    }
+    assert!(to_host(&fx).is_empty(), "its own drawing doesn't come back");
+    assert!(s.board().element(HOST, 1).is_some());
+    // A viewer's drawing reaches the host's overlay too.
+    let fx = draw_box(&mut s, ANA, 1);
+    assert!(matches!(to_host(&fx)[..], [BoardNews::Update(u)] if u.author == ANA));
+    // The host can't stop itself, nor watch its own stream.
+    assert!(s.stop_drawing(HOST, true).is_empty());
+    assert!(s.join(HOST).is_empty());
+    assert!(!s.is_viewer(HOST));
+    // A clear reaches its overlay.
+    let fx = s.clear_board();
+    assert!(matches!(to_host(&fx)[..], [BoardNews::Cleared(c)] if c.author.is_none()));
+}
+
+#[test]
+fn the_host_draws_nothing_during_desktop_control() {
+    use couch_proto::ipc::BoardNews;
+    let mut s = host_drawing_session();
+    s.set_drawing(true);
+    s.set_desktop(Some(BIA)).unwrap();
+    let fx = draw_box(&mut s, HOST, 1);
+    assert!(matches!(
+        to_host(&fx)[..],
+        [BoardNews::Refused(Refusal::KeyboardSeat)]
+    ));
+    assert!(s.board().is_empty());
+    // Refused, it gets its own back at the next tick, as a viewer does.
+    let fx = s.board_tick(Instant::now() + RESYNC_EVERY);
+    assert!(matches!(to_host(&fx)[..], [BoardNews::Cleared(c)] if c.author == Some(HOST)));
+    assert!(sent_to(&fx, HOST).is_empty());
+    s.set_desktop(None).unwrap();
+    draw_box(&mut s, HOST, 2);
+    assert_eq!(s.board().len(), 1);
+}
+
+#[test]
+fn the_overlay_shows_while_something_is_drawn_or_passing() {
+    use couch_proto::board::{BoardOp, Point};
+    let mut s = host_drawing_session();
+    let t0 = Instant::now();
+    s.set_drawing(true);
+    assert!(!s.board_shows(t0), "nothing on the board");
+    let g = s.board().generation_of(ANA);
+    s.draw(ANA, g, vec![BoardOp::Ping(Point::new(5, 5))], t0);
+    assert!(s.board_shows(t0 + Duration::from_millis(1500)));
+    assert!(
+        !s.board_shows(t0 + Duration::from_secs(3)),
+        "the ping is over"
+    );
+    draw_box(&mut s, ANA, 1);
+    assert!(s.board_shows(t0 + Duration::from_secs(60)));
+    s.set_drawing(false);
+    assert!(!s.board_shows(t0));
 }
 
 #[test]
@@ -310,6 +406,7 @@ fn a_viewer_leaving_mid_stroke_has_it_finished() {
         colour: 0,
         width: 0,
         fades: true,
+        stay: 4,
         done: false,
         points: vec![Point::new(1, 1)],
     };
@@ -1849,6 +1946,8 @@ enum Op {
     Drawing(bool),
     /// The host stops a member drawing, or lets it again (M27a).
     StopDrawing(u8, bool),
+    /// The host draws a box over the game, as itself (M27b).
+    HostDraw,
     Wait(u64),
     End,
 }
@@ -1886,6 +1985,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => (0u8..5).prop_map(Op::Draw),
         1 => any::<bool>().prop_map(Op::Drawing),
         1 => (0u8..5, any::<bool>()).prop_map(|(w, s)| Op::StopDrawing(w, s)),
+        1 => Just(Op::HostDraw),
     ]
 }
 
@@ -1898,6 +1998,7 @@ fn a_box(id: u32) -> couch_proto::board::BoardOp {
         colour: 0,
         width: 0,
         fades: false,
+        stay: 4,
         done: true,
         points: vec![Point::new(0, 0), Point::new(10, 10)],
     })
@@ -2043,6 +2144,8 @@ proptest! {
         router.apply(&fx);
         // Something streamed, so the drawing ops can draw (M27a).
         s.set_stream(StreamState::Live);
+        // The host draws as itself (M27b).
+        s.set_me(HOST);
         // What the host did with each controller's seat, from the ops alone:
         // the seat it last played, and whether they passed it on or took it
         // back to leave it empty.
@@ -2061,6 +2164,7 @@ proptest! {
         let mut stopped: BTreeSet<MemberId> = BTreeSet::new();
         let mut drawn: u32 = 0;
         let mut viewer_drew = false;
+        let mut host_drew = false;
 
         for op in ops {
             let paused_before = s.control_paused();
@@ -2165,6 +2269,36 @@ proptest! {
                     }
                     fx
                 }
+                Op::HostDraw => {
+                    drawn += 1;
+                    let desktop_on = s.desktop.is_some();
+                    let generation = s.board().generation_of(HOST);
+                    let fx = s.draw(HOST, generation, vec![a_box(drawn)], now);
+                    let taken = s.board().element(HOST, drawn).is_some();
+                    host_drew |= taken;
+                    if taken {
+                        prop_assert!(drawing_on && !ended_before);
+                        prop_assert!(!desktop_on, "the host drew during desktop control");
+                        let told: BTreeSet<MemberId> = fx
+                            .iter()
+                            .filter_map(|e| match e {
+                                Effect::Send { to, message: ControlMessage::BoardUpdate(u) }
+                                    if u.author == HOST => Some(*to),
+                                _ => None,
+                            })
+                            .collect();
+                        let viewers: BTreeSet<MemberId> = s.viewers().iter().copied().collect();
+                        prop_assert_eq!(told, viewers, "the host's drawing to every viewer");
+                    }
+                    for e in &fx {
+                        // Its own drawing never comes back to it.
+                        prop_assert!(!matches!(
+                            e,
+                            Effect::HostBoard(couch_proto::ipc::BoardNews::Update(_))
+                        ));
+                    }
+                    fx
+                }
                 Op::Drawing(on) => {
                     if !ended_before {
                         drawing_on = on;
@@ -2230,6 +2364,10 @@ proptest! {
             }
 
             for effect in &fx {
+                // The host hears the board only as its own (M27b).
+                if let Effect::Send { to, message } = effect {
+                    prop_assert!(*to != HOST || news_of(message).is_none(), "the board to the host on the wire");
+                }
                 if let Effect::Grant { seat, member, permissions, .. } = effect {
                     prop_assert!(!ended_before, "a grant after the end");
                     if *member == HOST {
@@ -2350,7 +2488,8 @@ proptest! {
         // To check the ops still reach the host on two seats (M23) and a
         // viewer on two pad seats (M18), make one of these fail for a
         // moment: `prop_assert!(!host_held_two)` or `!viewer_two` must fail;
-        // and `!viewer_drew`, for a viewer's drawing taken (M27a).
-        let _ = (host_held_two, viewer_two, viewer_drew);
+        // and `!viewer_drew`, for a viewer's drawing taken (M27a), and
+        // `!host_drew` for the host's (M27b).
+        let _ = (host_held_two, viewer_two, viewer_drew, host_drew);
     }
 }

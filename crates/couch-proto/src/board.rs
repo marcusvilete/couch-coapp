@@ -56,14 +56,20 @@ pub const MAX_LASER_POINTS: usize = 64;
 pub const MAX_BATCHES_PER_SEC: u32 = 40;
 pub const MAX_MARKS_PER_SEC: u32 = 60;
 
-/// A fading element stays this long after it is finished...
-pub const FADE_STAY_MS: u64 = 4_000;
-/// ...then fades out over this long. Each window times it from when the
+/// How long a fading element may stay after it is finished, in seconds: its
+/// author picks one per element (wire revision 16, the author's request in
+/// M27b's run)...
+pub const FADE_STAYS: [u8; 4] = [2, 4, 8, 15];
+/// ...this one unless they pick another (M27a's fixed stay).
+pub const DEFAULT_STAY: u8 = 4;
+/// ...then it fades out over this long. Each window times it from when the
 /// element arrived there: no clocks to agree on.
 pub const FADE_OUT_MS: u64 = 1_000;
 /// The host drops a finished fading element this long after it arrived, a
 /// little after every window has faded it, so a newcomer never gets it.
-pub const FADE_DROP_MS: u64 = FADE_STAY_MS + FADE_OUT_MS + 2_000;
+pub fn fade_drop_ms(stay: u8) -> u64 {
+    u64::from(stay) * 1_000 + FADE_OUT_MS + 2_000
+}
 /// A laser trail's points fade within this long.
 pub const LASER_MS: u64 = 1_000;
 /// A ping pulses this long.
@@ -125,23 +131,35 @@ pub struct Element {
     pub colour: u8,
     /// An index into the widths ([`WIDTHS`]).
     pub width: u8,
-    /// It fades away once finished ([`FADE_STAY_MS`]), rather than staying.
+    /// It fades away once finished, rather than staying.
     pub fades: bool,
+    /// How long it stays before it fades, in seconds: one of
+    /// [`FADE_STAYS`], whether it fades or not (wire revision 16).
+    pub stay: u8,
     /// Finished: no more points come. A shape is always finished.
     pub done: bool,
     pub points: Vec<Point>,
 }
 
 impl Element {
-    /// Well formed on its own: a colour and width that exist, a stroke of 1
-    /// to [`MAX_STROKE_POINTS`] points, a shape of exactly two, finished.
+    /// Well formed on its own: a colour, width and stay that exist, a stroke
+    /// of 1 to [`MAX_STROKE_POINTS`] points, a shape of exactly two,
+    /// finished.
     pub fn is_valid(&self) -> bool {
         let points = if self.kind.is_stroke() {
             (1..=MAX_STROKE_POINTS).contains(&self.points.len())
         } else {
             self.points.len() == 2 && self.done
         };
-        usize::from(self.colour) < PALETTE.len() && usize::from(self.width) < WIDTHS && points
+        usize::from(self.colour) < PALETTE.len()
+            && usize::from(self.width) < WIDTHS
+            && FADE_STAYS.contains(&self.stay)
+            && points
+    }
+
+    /// How long it stays once finished, before fading, in milliseconds.
+    pub fn stay_ms(&self) -> u64 {
+        u64::from(self.stay) * 1_000
     }
 }
 
@@ -419,6 +437,7 @@ mod tests {
             colour: 7,
             width: 2,
             fades: true,
+            stay: 4,
             done: true,
             points: (0..points)
                 .map(|i| Point::new(u16::MAX - (i as u16), u16::MAX))

@@ -550,3 +550,9 @@
   display: grid;
   visibility: hidden;
 }
+
+/* The board over the game (M27b): a line kept even when empty, for why the
+   drawing key did nothing or a game in exclusive full screen. */
+.drawing-note.warn {
+  color: var(--warn);
+}

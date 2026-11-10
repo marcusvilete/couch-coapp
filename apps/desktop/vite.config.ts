@@ -8,12 +8,14 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [react()],
 
-  // Two pages: the app, and the host overlay's window (M8).
+  // Three pages: the app, the host overlay's window (M8), and the host's
+  // board over the game (M27b).
   build: {
     rolldownOptions: {
       input: {
         main: "index.html",
         overlay: "overlay.html",
+        board: "board.html",
       },
     },
   },

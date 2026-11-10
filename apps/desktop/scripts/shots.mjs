@@ -97,7 +97,7 @@ try {
         const page = await context.newPage();
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
-        const which = scenario === "sheet" ? "sheet" : `scenario=${scenario}`;
+        const which = scenario === "sheet" || scenario === "board" ? scenario : `scenario=${scenario}`;
         await page.goto(`${base}?${which}&bare&nosplash&latency=0&theme=system`);
         await page.waitForLoadState("networkidle");
         await page.waitForTimeout(250);

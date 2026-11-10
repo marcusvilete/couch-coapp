@@ -8,6 +8,7 @@ import { request } from "../engine";
 import { hosted } from "../model/overlay";
 import { moved, ordered, owner } from "../model/rooms";
 import { busyIn } from "../model/sessions";
+import { useBoardOverlay } from "../board/useBoardOverlay";
 import { useOverlay } from "../overlay/useOverlay";
 import { platform } from "../platform";
 import { roomActions, type AppDialog, type Context } from "../rooms/actions";
@@ -76,6 +77,8 @@ export default function App() {
   const linux = lobby.info?.platform === "linux";
   // While we stream: requests and session notes over the game.
   useOverlay(rooms, linux ? "notices" : "overlay");
+  // And what's drawn on the stream, over the game (M27b, Windows).
+  useBoardOverlay(rooms);
 
   useEffect(() => {
     if (room) writeStored(KEYS.selectedRoom, room.id);

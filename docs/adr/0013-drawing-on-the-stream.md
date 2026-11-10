@@ -1,6 +1,12 @@
 # ADR 0013: Drawing on the stream
 
-**Status:** accepted (2026-11-10), for M27; nothing built yet. The author's choices:
+**Status:** accepted (2026-11-10), for M27. M27a built (0.28.0, [results](../m27a-results.md)), M27b built (0.29.0, [results](../m27b-results.md)). Settled while building M27b:
+- **the board overlay's window is the engine's to place and switch** (`couch_platform_win::board_window`), the app's only to make (`couch_engine::board::BoardWindows`): laid over the capture's exact rectangle every 33 ms (polling, not a WinEvent hook), parked off screen rather than hidden, its styles changed in place with `SetWindowLongPtr`, never through Tauri's setters (they `ShowWindow`), focused with Bring to front's F24 tap. It is shown only once its page has loaded, and only while something is drawn (or the host draws), so no transparent window lies over a game for nothing;
+- **the host is an author like any other** (`HostSession::set_me`), with no wire change;
+- **sessions to watch together** (M24, no hook at all) get a hook with the drawing key alone while drawing is on: the author's choice, 2026-11-10;
+- **the host's drawing key shares Ctrl+Alt+Shift+D with the stream window's**: the one pair of rows allowed one key.
+
+The author's choices:
 - those watching **and the host** draw, write and erase on the picture; a remote-play device too, as itself;
 - **anyone but the keyboard-and-mouse seat's holder** draws (2026-11-10: a guest on a controller seat has a free mouse);
 - each erases only what they made; the host clears the board, and stops one guest drawing;
@@ -40,7 +46,7 @@ Each part is a release of its own. M27a carries the wire revision; a later part 
   - an id: its author (a member) and a number the author picked. The host keys elements by **the connection's member**, never by a member named in the message, so nobody can touch another's element;
   - a colour from a fixed palette of 8, a width of 3, and whether it **fades**;
   - points in **the picture's own coordinates**, 0 to 65,535 on each axis, so every window places them alike, whatever its size. Widths and text sizes are fractions of the picture's height.
-- **Fading:** a fading element stays 4 s after it is finished, then fades out over 1 s. Each window times it from when it arrived (no clocks to agree on). The host drops it from the board a little later, so a newcomer never gets it.
+- **Fading:** a fading element stays a while after it is finished (M27b: its author picks 2, 4, 8 or 15 s, 4 by default; the author's request, 2026-11-10), then fades out over 1 s. Each window times it from when it arrived (no clocks to agree on). The host drops it from the board a little later, so a newcomer never gets it.
 - **Passing marks are never on the board:**
   - the **laser pointer** is a trail that fades within 1 s;
   - a **ping** is a ring pulsing for 2 s, with its author's name, where they middle-clicked.

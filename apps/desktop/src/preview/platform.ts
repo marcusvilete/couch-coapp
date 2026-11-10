@@ -45,5 +45,14 @@ export function previewPlatform(options: { release: boolean; splash: boolean }):
       send: (toasts) => setOverlayState({ toasts }),
       onReady: async () => () => {},
     },
+    // The board overlay's page isn't in the preview's app (its surface has
+    // a mode of its own, `?board`).
+    board: {
+      onReady: async () => () => {},
+      sendState: () => {},
+      sendNews: () => {},
+      onOps: async () => () => {},
+      onDone: async () => () => {},
+    },
   };
 }

@@ -20,6 +20,7 @@ use couch_media::{
 };
 use couch_platform_win::{
     audio::{LoopbackCapture, LoopbackTarget},
+    board_window,
     capture::{self, CaptureOptions, CaptureSource, FrameOutput, MonitorId, WgcCapturer},
     clock::QpcClock,
     drivers,
@@ -392,6 +393,45 @@ impl Backend for WindowsBackend {
             width: area.width,
             height: area.height,
         })
+    }
+
+    fn draws_over_game(&self) -> bool {
+        true
+    }
+
+    fn board_area(&self, source: &Source) -> Option<ScreenArea> {
+        let area = match source {
+            Source::Window(window) => board_window::window_area(WindowId(*window)),
+            Source::Screen(screen) => monitor::whole(*screen),
+            Source::PrimaryScreen => monitor::whole(monitor::primary_handle()),
+            Source::WindowTitle(_) | Source::TestPattern { .. } => None,
+        }?;
+        Some(ScreenArea {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        })
+    }
+
+    fn place_board(&self, board: NativeId, area: Option<ScreenArea>) {
+        let area = area.map(|a| monitor::Area {
+            x: a.x,
+            y: a.y,
+            width: a.width,
+            height: a.height,
+        });
+        if !board_window::place(WindowId(board), area) {
+            tracing::debug!("the board overlay couldn't be placed");
+        }
+    }
+
+    fn board_interactive(&self, board: NativeId, on: bool) -> bool {
+        board_window::set_interactive(WindowId(board), on)
+    }
+
+    fn foreground_window(&self) -> Option<NativeId> {
+        foreground::foreground_window().map(|w| w.0)
     }
 
     fn decodes(&self) -> u8 {

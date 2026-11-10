@@ -26,13 +26,14 @@ The wire protocol between room members, and the pipe between the main process an
 - M16c tells the device what its home PC can host (a Linux PC: controller seats, no keyboard seat or desktop control then; desktop control since M16c-2 and a keyboard seat for guests since its second part, on the same wire): `RemoteState.capabilities` (wire revision 13).
 - M16c's Linux home PC ends a stream whose screen-sharing dialog got no answer, or was dismissed, with `EndReason::NothingShared` (wire revision 14, viewer IPC v15).
 - M27a adds drawing on the stream: the board's `0x08xx` messages, the console's drawing ops in `RemoteOp` and its board in `RemoteSession` (wire revision 15), and viewer IPC v16 (`BOARD`, `DRAW`, the board in the HUD's state).
+- M27b adds a fading drawing's stay, its author's pick: `Element.stay` (wire revision 16, viewer IPC v17); the host draws as itself, with no message of its own.
 - The rest is a draft for later milestones.
 
 ## Versioning
 
 - ALPN `couch-coapp/0`. There is no public binary release ([ADR 0009](adr/0009-source-only-releases.md)), so it stays; incompatible changes are caught by the wire revision below.
 - Both sides send `Hello { proto_minor, app_version, features }` first on the control stream. Optional behaviour is negotiated through `features` bits: send a message type only if the peer advertised it.
-- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 15, for M27a's drawing on the stream). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
+- **`proto_minor` is the wire revision** (`couch_proto::PROTOCOL_MINOR`, M10a; now 16, for M27b's fade times). Payloads change in place (for good, ADR 0009), so it is bumped with every change to what members exchange, and builds of different revisions don't talk: right after the two `Hello`s, the side that sees another revision closes with the `version` code, before admission or anything about a room. The acceptor still sends its `Hello` before refusing, and waits up to 2 s for the dialer to close, so both learn the other's `app_version` (kept to letters, digits, `.`, `+` and `-`, at most 32, before it is logged or shown: anyone can dial). Only a member of a room we share is remembered and shown; the app shows it ("needs update" in the member list, or the join error), with which side is newer. Builds before revision 1 sent 0 and didn't check. `features` stays reserved: different revisions never interoperate.
 - **Payloads may change in place** (ADR 0009: no public binary release, so nothing is frozen), with the wire revision bumped. Decoders reject trailing bytes, so a change that forgets the bump fails loudly.
 
 ## Control-stream envelope
@@ -573,7 +574,9 @@ M27a ([ADR 0013](adr/0013-drawing-on-the-stream.md)): those watching draw on the
 
 **The board is the host's,** in memory only: it belongs to the session, is cleared whenever a stream ends (a new stream is a new picture) and is gone at the session's end.
 
-**An element** is `{ id u32, kind: Pen | Highlighter | Line | Arrow | Rectangle | Ellipse, colour u8 (of 8), width u8 (of 3), fades bool, done bool, points [{ x u16, y u16 }] }`:
+**The host draws too** (M27b, from its board over the game): as itself, its own member id the author, under the same checks as a viewer's batch (and refused while desktop control lasts, as the keyboard seat's holder is); what it draws reaches every viewer as any author's `BoardUpdate`. Nothing of the board goes to the host on the wire: its own overlay hears the board inside the host. No message changed for it.
+
+**An element** is `{ id u32, kind: Pen | Highlighter | Line | Arrow | Rectangle | Ellipse, colour u8 (of 8), width u8 (of 3), fades bool, stay u8 (seconds: 2, 4, 8 or 15), done bool, points [{ x u16, y u16 }] }`:
 - its key is its author, the member whose connection sent it, and `id`, the author's own number: **nobody names another member's element**;
 - points are in the picture's own coordinates, 0 to 65,535 each way, whatever the window's size; widths are fractions of the picture's height (`board::line_width`);
 - a stroke (pen, highlighter) has 1 to 2,000 points and grows while not `done`; a shape has exactly two (start and end, a box's corners) and is always `done`.
@@ -607,7 +610,7 @@ The console's count is told at the tick, never per batch.
 
 Like every session fact, the host sends them straight to each viewer, never relayed, and a member acts on them only from the host it watches, on the current connection.
 
-**Fading:** a finished fading element stays 4 s, then fades out over 1 s, each window timing it from when it finished arriving there (no clocks to agree on). The host drops it from its board 7 s after it finished, so a newcomer never gets it.
+**Fading:** a finished fading element stays its `stay` (its author's pick of 2, 4, 8 or 15 s, 4 by default; any other value makes the element invalid, the batch refused), then fades out over 1 s, each window timing it from when it finished arriving there (no clocks to agree on). The host drops it from its board 3 s after it has faded (its stay plus 3 s after it finished), so a newcomer never gets it.
 
 **The host's switches** are `Command::SetDrawing { on }` (off clears the board; a session starts as Settings says, `drawing.json`), `ClearBoard`, and `StopDrawing { member, stopped }` (stopping clears theirs). A device running the session from afar has them as `RemoteOp`s, through the same checks. The host draws nothing in M27a: its own board overlay (M27b) and stream window (M27d) come later, through the same checks.
 
@@ -668,7 +671,7 @@ Framing is `u32 len (big-endian) | u8 kind | payload`. `len` counts the kind byt
 
 | `0x89` | viewer to main | Draw (postcard `Draw`, M27a): `{generation, ops}`, the user's own operations, sent on as `BoardOps` once joined |
 
-`IPC_VERSION` (now 16: the board, M27a; 15 was `EndReason::NothingShared` in the HUD's state, M16c) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
+`IPC_VERSION` (now 17: an element's stay, M27b; 16 the board, M27a; 15 was `EndReason::NothingShared` in the HUD's state, M16c) changes with any payload change. The viewer always ships with the app, so a mismatch means a broken install.
 
 **Shortcuts.** Every shortcut is in one table, `couch_input::shortcuts`, which the viewer and the host-keys hook read and the app lists (`GetShortcuts`). Shortcut keys are never forwarded. The defaults, in the viewer with Ctrl+Alt+Shift held:
 - C asks for a seat (the first nobody holds, controllers first), withdraws the request, or gives the seat back (a `USER_ACTION`); the HUD's bar has an Ask button per seat;

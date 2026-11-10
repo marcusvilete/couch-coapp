@@ -4,11 +4,13 @@
 // (`platform/tauri.ts`); the preview's entry installs a fake one
 // (`preview/`). Chosen by the entry at build time, never as a fallback: the
 // app never runs on the fake, and the preview never reaches Tauri.
+import type { BoardNewsView } from "./bindings/BoardNewsView";
 import type { Command } from "./bindings/Command";
 import type { Event as EngineEvent } from "./bindings/Event";
 import type { Response } from "./bindings/Response";
 import type { ScreenArea } from "./bindings/ScreenArea";
 import type { Toast } from "./model/overlay";
+import type { BoardBatch, BoardState } from "./board/events";
 
 export type Unlisten = () => void;
 
@@ -33,6 +35,20 @@ export interface Platform {
   /** The splash at start; the preview's screenshots go without it. */
   splash: boolean;
   overlay: OverlayHost;
+  board: BoardHost;
+}
+
+/** The host's board overlay over the game (M27b): the engine makes, places
+ * and focuses its window; the main window only talks to its page. */
+export interface BoardHost {
+  /** Its page has loaded: it wants the state and the board. */
+  onReady(handler: () => void): Promise<Unlisten>;
+  sendState(state: BoardState): void;
+  sendNews(news: BoardNewsView): void;
+  /** The host's own drawing, to pass on to the engine. */
+  onOps(handler: (batch: BoardBatch) => void): Promise<Unlisten>;
+  /** Esc or Done in the page: back to the game. */
+  onDone(handler: () => void): Promise<Unlisten>;
 }
 
 /** The host overlay's window (M8). It must never take the focus from the

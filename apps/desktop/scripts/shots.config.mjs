@@ -31,6 +31,11 @@ const member = (name) => async (page) => {
   await page.locator(".member", { hasText: name }).first().click({ button: "right" });
   await menuOpens(page);
 };
+/** The console's drawing panel, in view. */
+const drawingPanel = async (page) => {
+  await page.getByRole("region", { name: "Drawing on the stream" }).evaluate((el) => el.scrollIntoView({ block: "center" }));
+  await page.waitForTimeout(150);
+};
 const settings = (section) => async (page) => {
   await page.getByRole("button", { name: "Settings (Ctrl+,)" }).click();
   if (section) await page.getByRole("button", { name: section, exact: true }).click();
@@ -42,6 +47,13 @@ export const SHOTS = [
   ["sheet", "sheet", null],
   ["sheet-menu", "sheet", async (page) => page.getByText("Right-click me").click({ button: "right" })],
   ["sheet-dialog", "sheet", click("Open a dialog")],
+  // The host's board overlay while drawing (M27b), over a stand-in game.
+  ["board-drawing", "board", null],
+  ["board-drawing-fades", "board", async (page) => {
+    // Twice round: fading, 4 s.
+    await page.getByRole("button", { name: "Stays until erased" }).click();
+    await page.getByRole("button", { name: "Fades away after 2 seconds" }).click();
+  }],
 
   // Rooms
   ["dialog-add", "lobby", click("Create or join a room")],
@@ -136,6 +148,9 @@ export const SHOTS = [
       await page.waitForTimeout(150);
     },
   ],
+  // The board over the game (M27b): drawing there, and the key refused.
+  ["drawing-over-game", "hosting-drawing-over-game", drawingPanel],
+  ["drawing-refused", "hosting-drawing-refused", drawingPanel],
   [
     "drawing-menu",
     "hosting-drawing",

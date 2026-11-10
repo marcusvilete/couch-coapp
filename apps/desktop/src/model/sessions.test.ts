@@ -75,6 +75,7 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     desktop: null,
     guestsKeyboard: true,
     drawing: noDrawing(),
+    boardOverlay: null,
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,
@@ -243,6 +244,9 @@ describe("drawing on the stream", () => {
     expect(drawingSummary(room, { ...d, elements: 1, drawers: [{ member: "b", elements: 1 }] })).toBe(
       "1 drawing by Bia.",
     );
+    // Our own, as the host drawing over the game (M27b).
+    const ours = { members: [...room.members, { id: "h", name: "Hana", link: "me" }] } as unknown as RoomView;
+    expect(drawingSummary(ours, { ...d, elements: 2, drawers: [{ member: "h", elements: 2 }] })).toBe("2 drawings by you.");
   });
 
   it("knows whom the host stopped", () => {

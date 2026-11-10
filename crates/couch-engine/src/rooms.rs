@@ -195,6 +195,23 @@ pub(crate) enum Input {
         session: SessionId,
         error: String,
     },
+    /// The host's drawing key (M27b), physically pressed at the PC.
+    HostDrawKey(SessionId),
+    /// The board overlay's window for this session was made, or not.
+    BoardWindowOpened {
+        session: SessionId,
+        window: Option<crate::pipeline::NativeId>,
+    },
+    /// Drawing over the game lost the focus to another window (M27b).
+    BoardFocusLost(SessionId),
+    /// Drawing over the game, and the board can't show: the game off
+    /// screen, or a game in exclusive full screen (M27b).
+    BoardHidden(SessionId),
+    /// The board overlay's window is gone (closed, its webview crashed).
+    BoardWindowGone {
+        session: SessionId,
+        window: crate::pipeline::NativeId,
+    },
     /// Remote play (M25): a device's PIN, checked off this thread.
     RemotePinChecked {
         conn: ConnId,
@@ -324,6 +341,8 @@ struct Actor {
     next_addr_check: Instant,
     next_path_check: Instant,
     backend: Arc<dyn Backend>,
+    /// The app's board overlay window over the game (M27b).
+    board_windows: Option<Arc<dyn crate::board::BoardWindows>>,
     join_wait: Duration,
     replace_grace: Duration,
     reconnect_wait: Duration,
@@ -442,6 +461,7 @@ pub(crate) async fn start(
         invite_valid_for: options.invite_valid_for,
         next_addr_check: now + ADDR_CHECK_EVERY,
         next_path_check: now + PATH_CHECK_EVERY,
+        board_windows: options.board_windows.clone(),
         backend: options.backend,
         join_wait: options.join_wait,
         replace_grace: options.replace_grace,
@@ -712,6 +732,15 @@ impl Actor {
             Input::AnswerFirst { session, accept } => self.answer_first(session, accept, now),
             Input::HostKeysBound { session, keys } => self.host_keys_bound(session, keys, now),
             Input::HostKeysLost { session, error } => self.host_keys_lost(session, error, now),
+            Input::HostDrawKey(session) => self.host_draw_key(session, now),
+            Input::BoardWindowOpened { session, window } => {
+                self.board_window_opened(session, window, now)
+            }
+            Input::BoardFocusLost(session) => self.board_focus_lost(session, now),
+            Input::BoardHidden(session) => self.board_hidden(session, now),
+            Input::BoardWindowGone { session, window } => {
+                self.board_window_gone(session, window, now)
+            }
             Input::RemotePinChecked {
                 conn,
                 peer,
@@ -912,6 +941,10 @@ impl Actor {
             Command::SetDrawing { on } => self.set_drawing(on, now),
             Command::ClearBoard => self.clear_board(now),
             Command::StopDrawing { member, stopped } => self.stop_drawing(&member, stopped, now),
+            Command::HostDraw { generation, ops } => self.host_draw(generation, &ops, now),
+            Command::HostBoard => self.host_board(now),
+            Command::EndHostDrawing => self.end_host_drawing(now),
+            Command::ShowBoardOverlay { on } => self.show_board_overlay(on, now),
             Command::SetStreamVolume { percent, muted } => {
                 self.set_stream_volume(StreamVolume { percent, muted }, now)
             }

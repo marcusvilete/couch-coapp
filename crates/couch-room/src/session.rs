@@ -51,6 +51,7 @@ use couch_proto::{
     board::{BoardCleared, BoardOp, BoardRefused, BoardSnapshot, BoardState, BoardUpdate, Refusal},
     control::ControlMessage,
     ids::{MemberId, Permissions, SeatId, SessionId},
+    ipc::BoardNews,
     room::valid_name,
     session::{
         ControlDeclined, EndReason, JoinResult, SeatKind, SessionAnnounce, SessionEnded,
@@ -59,6 +60,19 @@ use couch_proto::{
 };
 
 use crate::board::Board;
+
+/// What a board message says to a window ([`BoardNews`]), for the host's
+/// own overlay (M27b): updates, snapshots, clears and refusals. The board's
+/// state (on, whom the host stopped) the host knows already.
+fn news_of(message: &ControlMessage) -> Option<BoardNews> {
+    Some(match message {
+        ControlMessage::BoardUpdate(u) => BoardNews::Update(u.clone()),
+        ControlMessage::BoardSnapshot(s) => BoardNews::Snapshot(s.clone()),
+        ControlMessage::BoardCleared(c) => BoardNews::Cleared(c.clone()),
+        ControlMessage::BoardRefused(r) => BoardNews::Refused(r.why),
+        _ => return None,
+    })
+}
 
 /// Viewers a session takes unless its host chooses otherwise.
 pub const DEFAULT_MAX_VIEWERS: u8 = 4;
@@ -163,6 +177,10 @@ pub enum Effect {
     Requested(MemberId, SeatId),
     /// Something the host's UI shows changed.
     Changed,
+    /// What the board says to the host's own board overlay (M27b): what
+    /// viewers drew, clears, and the host's own refusals and resyncs, as a
+    /// viewer's window hears them. Never on the wire.
+    HostBoard(BoardNews),
 }
 
 /// One host controller's seat (M23): the seat it last played, which comes
@@ -241,6 +259,12 @@ pub struct HostSession {
     /// The time the board last heard (a batch, a tick): for finishing the
     /// strokes of a viewer that leaves, which comes with no time.
     board_now: Option<Instant>,
+    /// The host's own id, as the engine gave it (M27b): the host draws as
+    /// itself, and hears the board as [`Effect::HostBoard`].
+    me: Option<MemberId>,
+    /// When a laser point or ping last passed: the host's overlay shows it
+    /// a while, though nothing is on the board.
+    last_mark: Option<Instant>,
 }
 
 /// A refused member gets its own elements back at most this often (M27a).
@@ -311,7 +335,16 @@ impl HostSession {
             resync_due: BTreeMap::new(),
             resynced: BTreeMap::new(),
             board_now: None,
+            me: None,
+            last_mark: None,
         })
+    }
+
+    /// The host's own id (M27b), which it draws as. Never a viewer's.
+    pub fn set_me(&mut self, me: MemberId) {
+        if !self.is_viewer(me) {
+            self.me = Some(me);
+        }
     }
 
     // ---- Queries ----
@@ -645,7 +678,7 @@ impl HostSession {
             return vec![reply(JoinResult::Ended)];
         }
         // The host plays; they never watch their own stream.
-        if self.is_host(member) {
+        if self.is_host(member) || self.me == Some(member) {
             return Vec::new();
         }
         if self.is_viewer(member) {
@@ -1267,7 +1300,10 @@ impl HostSession {
     /// (a new stream is a new picture: nothing drawn between two may carry
     /// over onto the next).
     fn drawing_blocked(&self, member: MemberId) -> Option<Refusal> {
-        if self.on_keyboard_seat(member) {
+        // The host draws nothing while desktop control lasts (M27b): the
+        // device's injected mouse would draw as the host.
+        let host_held = self.me == Some(member) && self.desktop.is_some();
+        if self.on_keyboard_seat(member) || host_held {
             Some(Refusal::KeyboardSeat)
         } else if self.stream != StreamState::Live {
             Some(Refusal::NoStream)
@@ -1286,6 +1322,36 @@ impl HostSession {
                 message: message.clone(),
             })
             .collect()
+    }
+
+    /// What the board says, to every viewer but `except`, and to the host's
+    /// own overlay unless the host is `except` (M27b).
+    fn to_board(&self, message: &ControlMessage, except: Option<MemberId>) -> Vec<Effect> {
+        let mut fx = self.to_viewers(message, except);
+        if self.me.is_some()
+            && self.me != except
+            && let Some(news) = news_of(message)
+        {
+            fx.push(Effect::HostBoard(news));
+        }
+        fx
+    }
+
+    /// `message` to one member: to the host's own overlay if it is the host
+    /// (M27b), otherwise on the wire.
+    fn to_member(&self, member: MemberId, message: ControlMessage) -> Effect {
+        match news_of(&message) {
+            Some(news) if self.me == Some(member) => Effect::HostBoard(news),
+            _ => Effect::Send {
+                to: member,
+                message,
+            },
+        }
+    }
+
+    /// Whether `member` draws on this board: a viewer, or the host itself.
+    fn draws_here(&self, member: MemberId) -> bool {
+        self.is_viewer(member) || self.me == Some(member)
     }
 
     fn board_state(&self) -> ControlMessage {
@@ -1318,9 +1384,44 @@ impl HostSession {
                     author,
                     ops,
                 });
-                self.to_viewers(&update, Some(author))
+                self.to_board(&update, Some(author))
             })
             .collect()
+    }
+
+    /// The board whole, to the host's own overlay (M27b): as it opens, and
+    /// as drawing is turned on. In a new generation of the host's own, as a
+    /// viewer's snapshot is.
+    pub fn host_board(&mut self) -> Vec<Effect> {
+        let Some(me) = self.me.filter(|_| !self.ended) else {
+            return Vec::new();
+        };
+        self.board.new_generation(me);
+        BoardSnapshot::parts(self.id, self.board.generation_of(me), self.board.snapshot())
+            .into_iter()
+            .map(|part| Effect::HostBoard(BoardNews::Snapshot(part)))
+            .collect()
+    }
+
+    /// Whether the host's overlay has anything to show (M27b): something on
+    /// the board, or a laser point or ping still passing. While it hasn't,
+    /// the overlay keeps off the game.
+    pub fn board_shows(&self, now: Instant) -> bool {
+        self.board_has_elements() || self.marks_until().is_some_and(|t| now < t)
+    }
+
+    /// Whether drawing is on with something on the board (M27b).
+    pub fn board_has_elements(&self) -> bool {
+        !self.ended && self.board.is_on() && !self.board.is_empty()
+    }
+
+    /// Until when the last laser point or ping passing shows (M27b).
+    pub fn marks_until(&self) -> Option<Instant> {
+        let mark =
+            Duration::from_millis(couch_proto::board::PING_MS.max(couch_proto::board::LASER_MS));
+        self.last_mark
+            .filter(|_| !self.ended && self.board.is_on())
+            .map(|t| t + mark)
     }
 
     /// The board's state and the board whole, to one viewer: as it starts
@@ -1360,6 +1461,10 @@ impl HostSession {
     ///   host send a member's whole drawing over and over), in a new
     ///   generation of its own, so what it sent meanwhile is dropped and
     ///   what it shows of its own is the host's again.
+    ///
+    /// **The host draws through here too** (M27b), as itself ([`Self::set_me`]),
+    /// from its board overlay: the same checks, its batches to every viewer,
+    /// its refusals and resyncs to its own overlay ([`Effect::HostBoard`]).
     pub fn draw(
         &mut self,
         member: MemberId,
@@ -1367,13 +1472,16 @@ impl HostSession {
         ops: Vec<BoardOp>,
         now: Instant,
     ) -> Vec<Effect> {
-        if self.ended || !self.is_viewer(member) {
+        if self.ended || !self.draws_here(member) {
             return Vec::new();
         }
         self.board_now = Some(now);
         let blocked = self.drawing_blocked(member);
         match self.board.apply(member, generation, &ops, now, blocked) {
             Ok(taken) => {
+                if ops.iter().any(BoardOp::is_mark) {
+                    self.last_mark = Some(now);
+                }
                 let update = ControlMessage::BoardUpdate(BoardUpdate {
                     session: self.id,
                     author: member,
@@ -1382,18 +1490,16 @@ impl HostSession {
                 // The console's count, at the next tick: never a view per
                 // batch.
                 self.board_changed |= taken.counts_changed;
-                self.to_viewers(&update, Some(member))
+                self.to_board(&update, Some(member))
             }
             Err(Refusal::Stale) => Vec::new(),
             Err(why) => {
                 self.resync_due.entry(member).or_insert(now);
-                vec![Effect::Send {
-                    to: member,
-                    message: ControlMessage::BoardRefused(BoardRefused {
-                        session: self.id,
-                        why,
-                    }),
-                }]
+                let refused = ControlMessage::BoardRefused(BoardRefused {
+                    session: self.id,
+                    why,
+                });
+                vec![self.to_member(member, refused)]
             }
         }
     }
@@ -1405,28 +1511,21 @@ impl HostSession {
         let finished = self.board.finish_open(member, now);
         let mut fx = self.updates_to_others(member, finished);
         self.board.new_generation(member);
-        fx.push(Effect::Send {
-            to: member,
-            message: self.board_cleared(Some(member)),
-        });
+        fx.push(self.to_member(member, self.board_cleared(Some(member))));
         let own: Vec<BoardOp> = self
             .board
             .of(member)
             .into_iter()
             .map(BoardOp::Put)
             .collect();
-        fx.extend(
-            couch_proto::board::batches(own)
-                .into_iter()
-                .map(|ops| Effect::Send {
-                    to: member,
-                    message: ControlMessage::BoardUpdate(BoardUpdate {
-                        session: self.id,
-                        author: member,
-                        ops,
-                    }),
-                }),
-        );
+        for ops in couch_proto::board::batches(own) {
+            let update = ControlMessage::BoardUpdate(BoardUpdate {
+                session: self.id,
+                author: member,
+                ops,
+            });
+            fx.push(self.to_member(member, update));
+        }
         self.resynced.insert(member, now);
         fx
     }
@@ -1442,8 +1541,9 @@ impl HostSession {
             for viewer in self.viewers.clone() {
                 fx.extend(self.board_for(viewer).into_iter().skip(1));
             }
+            fx.extend(self.host_board());
         } else {
-            fx.extend(self.to_viewers(&self.board_cleared(None), None));
+            fx.extend(self.to_board(&self.board_cleared(None), None));
         }
         fx.push(Effect::Changed);
         fx
@@ -1455,7 +1555,8 @@ impl HostSession {
             return Vec::new();
         }
         self.board.clear();
-        let mut fx = self.to_viewers(&self.board_cleared(None), None);
+        self.last_mark = None;
+        let mut fx = self.to_board(&self.board_cleared(None), None);
         fx.push(Effect::Changed);
         fx
     }
@@ -1463,7 +1564,7 @@ impl HostSession {
     /// Stops `member` drawing, clearing what it drew, or lets it draw again.
     /// The host can't stop themself: they draw at their own PC.
     pub fn stop_drawing(&mut self, member: MemberId, stopped: bool) -> Vec<Effect> {
-        if self.ended || self.config.host == Some(member) {
+        if self.ended || self.config.host == Some(member) || self.me == Some(member) {
             return Vec::new();
         }
         // Whom the host stopped stays within a room's size: those no longer
@@ -1478,7 +1579,7 @@ impl HostSession {
         let mut fx = Vec::new();
         if stopped {
             self.resync_due.remove(&member);
-            fx.extend(self.to_viewers(&self.board_cleared(Some(member)), None));
+            fx.extend(self.to_board(&self.board_cleared(Some(member)), None));
         }
         fx.extend(self.to_viewers(&self.board_state(), None));
         fx.push(Effect::Changed);
@@ -1505,7 +1606,7 @@ impl HostSession {
             .collect();
         for member in due {
             self.resync_due.remove(&member);
-            if !self.ended && self.is_viewer(member) {
+            if !self.ended && self.draws_here(member) {
                 fx.extend(self.resync(member, now));
             }
         }

@@ -20,15 +20,17 @@ use std::{
 
 use couch_proto::{
     board::{
-        Authored, BoardOp, Element, FADE_DROP_MS, MAX_BATCHES_PER_SEC, MAX_BOARD_ELEMENTS,
-        MAX_BOARD_POINTS, MAX_MARKS_PER_SEC, MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, Refusal,
-        valid_batch,
+        Authored, BoardOp, Element, MAX_BATCHES_PER_SEC, MAX_BOARD_ELEMENTS, MAX_BOARD_POINTS,
+        MAX_MARKS_PER_SEC, MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, Refusal, valid_batch,
     },
     ids::MemberId,
 };
 
-/// How long a fading element stays on the host's board once finished.
-pub const FADE_DROP: Duration = Duration::from_millis(FADE_DROP_MS);
+/// How long a fading element stays on the host's board once finished: a
+/// little past its own stay and fade (wire revision 16: its author picks).
+pub fn fade_drop(e: &Element) -> Duration {
+    Duration::from_millis(couch_proto::board::fade_drop_ms(e.stay))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Stored {
@@ -269,7 +271,7 @@ impl Board {
             if !s.element.done {
                 s.element.done = true;
                 if s.element.fades {
-                    s.drop_at = Some(now + FADE_DROP);
+                    s.drop_at = Some(now + fade_drop(&s.element));
                 }
                 ops.push(BoardOp::Append {
                     id: *id,
@@ -368,7 +370,7 @@ impl Board {
         // The author's elements as the batch leaves them, beside the board.
         let mut changes: BTreeMap<u32, Option<Stored>> = BTreeMap::new();
         let mut seq = self.next_seq;
-        let drop_at = |e: &Element| (e.done && e.fades).then(|| now + FADE_DROP);
+        let drop_at = |e: &Element| (e.done && e.fades).then(|| now + fade_drop(e));
         for op in ops {
             let current = |changes: &BTreeMap<u32, Option<Stored>>, id: u32| match changes.get(&id)
             {
@@ -566,6 +568,9 @@ mod tests {
 
     use super::*;
 
+    /// When the host drops a finished fading element of the default stay.
+    const FADE_DROP: Duration = Duration::from_millis(7_000);
+
     const BIA: MemberId = MemberId([1; 32]);
     const CAI: MemberId = MemberId([2; 32]);
 
@@ -662,6 +667,7 @@ mod tests {
             colour: 0,
             width: 1,
             fades,
+            stay: 4,
             done,
             points: (0..points).map(|i| Point::new(i as u16, 7)).collect(),
         }
@@ -674,6 +680,7 @@ mod tests {
             colour: 3,
             width: 0,
             fades: false,
+            stay: 4,
             done: true,
             points: vec![Point::new(1, 1), Point::new(9, 9)],
         }
@@ -908,6 +915,29 @@ mod tests {
     }
 
     #[test]
+    fn a_longer_stay_is_kept_longer() {
+        let now = Instant::now();
+        let mut board = Board::new(true);
+        let long = Element {
+            stay: 15,
+            ..pen(1, 2, true, true)
+        };
+        board.go(BIA, &[BoardOp::Put(long)], now).unwrap();
+        assert_eq!(
+            fade_drop(board.element(BIA, 1).unwrap()),
+            Duration::from_secs(18)
+        );
+        assert!(!board.expire(now + FADE_DROP));
+        assert!(board.expire(now + Duration::from_secs(18)));
+        // A stay that isn't offered is refused.
+        let odd = Element {
+            stay: 5,
+            ..pen(2, 2, true, true)
+        };
+        assert!(board.go(BIA, &[BoardOp::Put(odd)], now).is_err());
+    }
+
+    #[test]
     fn a_snapshot_keeps_the_drawing_order() {
         let now = Instant::now();
         let mut board = Board::new(true);
@@ -958,6 +988,7 @@ mod tests {
                 colour: (id % 8) as u8,
                 width: (id % 3) as u8,
                 fades,
+                stay: 4,
                 done: done || !kind.is_stroke(),
                 points: (0..if kind.is_stroke() { n } else { 2 })
                     .map(|i| Point::new(i as u16 * 100, id as u16))
