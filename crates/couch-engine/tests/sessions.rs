@@ -4854,8 +4854,24 @@ async fn the_hosts_stream_level_scales_the_sound_and_is_remembered() {
     })
     .await;
     a.ok(Command::SetStreamLevel { percent: 0 }).await;
-    // Silence from then on: the next second of windows all read -90.
-    loudest(&mut a, &room, -90..=-90, "silence").await;
+    // Silence from then on. One silent window proves nothing: the clicks
+    // come every 500 ms and the meter every 250 ms, so every other window
+    // is silent at any level, and windows from before the change may still
+    // be queued (under load, this failed). Of two windows in a row, one
+    // holds a click unless the level is 0: two silent ones in a row are the
+    // change; then the next second of windows all read -90.
+    let mut silent_in_a_row = 0;
+    while silent_in_a_row < 2 {
+        let peak = a
+            .event("silence", |e| match e {
+                Event::StreamLevel {
+                    room: r, peak_db, ..
+                } if *r == room => Some(*peak_db),
+                _ => None,
+            })
+            .await;
+        silent_in_a_row = if peak == -90 { silent_in_a_row + 1 } else { 0 };
+    }
     for _ in 0..4 {
         let peak = a
             .event("the next level", |e| match e {
