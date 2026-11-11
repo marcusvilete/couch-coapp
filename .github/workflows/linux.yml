@@ -27,7 +27,10 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v7
+      # A runner that can't reach Ubuntu's archive fails here in minutes, not
+      # at the job's hour (M27c's run hung 40 minutes on a DNS failure).
       - name: System packages
+        timeout-minutes: 10
         run: sudo bash scripts/linux-deps.sh
       - name: Rust (the version in rust-toolchain.toml)
         run: rustup toolchain install

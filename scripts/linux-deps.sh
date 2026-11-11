@@ -6,7 +6,11 @@
 # repository's rust-toolchain.toml picks the version), Node 24 from NodeSource.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+# Retries and a time limit per fetch, so an unreachable mirror fails instead
+# of hanging; and an update that couldn't fetch a list fails too (apt only
+# warns by default, then installs from stale lists or not at all).
+apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+apt-get "${apt_options[@]}" update -qq --error-on=any
 packages=(
   # Building: C for libopus and SDL3, clang for regenerating FFmpeg's bindings.
   build-essential cmake ninja-build pkg-config clang libclang-dev curl file xz-utils
@@ -21,4 +25,4 @@ packages=(
   libpipewire-0.3-dev libpulse-dev libasound2-dev
   libudev-dev libdbus-1-dev libibus-1.0-dev libusb-1.0-0-dev
 )
-apt-get install -y -qq --no-install-recommends "${packages[@]}"
+apt-get "${apt_options[@]}" install -y -qq --no-install-recommends "${packages[@]}"
