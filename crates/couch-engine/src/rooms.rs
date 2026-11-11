@@ -206,6 +206,23 @@ pub(crate) enum Input {
     },
     /// The host's drawing key (M27b), physically pressed at the PC.
     HostDrawKey(SessionId),
+    /// A viewer's picture read from `conn` (M27e), and its bytes if they
+    /// are a picture the board takes, checked off this thread.
+    PictureUp {
+        conn: ConnId,
+        peer: MemberId,
+        upload: couch_proto::board::PictureUpload,
+        bytes: Option<Vec<u8>>,
+    },
+    /// The host's own picture, checked off this thread (M27e): from its own
+    /// stream window (`own`), or its board over the game.
+    HostPictureChecked {
+        session: SessionId,
+        own: bool,
+        generation: u32,
+        element: couch_proto::board::Element,
+        bytes: Option<Vec<u8>>,
+    },
     /// The board overlay's window for this session was made, or not.
     BoardWindowOpened {
         session: SessionId,
@@ -747,6 +764,26 @@ impl Actor {
             Input::HostKeysBound { session, keys } => self.host_keys_bound(session, keys, now),
             Input::HostKeysLost { session, error } => self.host_keys_lost(session, error, now),
             Input::HostDrawKey(session) => self.host_draw_key(session, now),
+            Input::PictureUp {
+                conn,
+                peer,
+                upload,
+                bytes,
+            } => self.picture_up(conn, peer, upload, bytes, now),
+            Input::HostPictureChecked {
+                session,
+                own,
+                generation,
+                element,
+                bytes,
+            } => {
+                let from = if own {
+                    sessions::Editor::Own
+                } else {
+                    sessions::Editor::Overlay
+                };
+                self.host_picture_checked(session, from, generation, element, bytes, now);
+            }
             Input::BoardWindowOpened { session, window } => {
                 self.board_window_opened(session, window, now)
             }
@@ -956,6 +993,12 @@ impl Actor {
             Command::ClearBoard => self.clear_board(now),
             Command::StopDrawing { member, stopped } => self.stop_drawing(&member, stopped, now),
             Command::HostDraw { generation, ops } => self.host_draw(generation, &ops, now),
+            Command::SetPictures { on } => self.set_pictures(on, now),
+            Command::HostPicture {
+                generation,
+                element,
+                data,
+            } => self.overlay_picture(generation, &element, &data, now),
             Command::HostBoard => self.host_board(now),
             Command::EndHostDrawing => self.end_host_drawing(now),
             Command::ShowBoardOverlay { on } => self.show_board_overlay(on, now),

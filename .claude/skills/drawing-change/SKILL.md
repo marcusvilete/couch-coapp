@@ -5,7 +5,7 @@ description: Change drawing on the stream (M27, ADR 0013) without the two editor
 
 # A change to drawing on the stream
 
-Drawing on the stream is ADR 0013's, built in parts: M27a the board between stream windows (`docs/m27a-results.md`), M27b the host's board over the game (`docs/m27b-results.md`), M27c text boxes (`docs/m27c-results.md`), M27d the host's own stream window (`docs/m27d-results.md`); M27e pictures to come. The wire is `docs/protocol.md`'s "Drawing on the stream"; CLAUDE.md's Sessions rules ("Drawing on the stream", "The host's board over the game") are the law.
+Drawing on the stream is ADR 0013's, built in parts: M27a the board between stream windows (`docs/m27a-results.md`), M27b the host's board over the game (`docs/m27b-results.md`), M27c text boxes (`docs/m27c-results.md`), M27d the host's own stream window (`docs/m27d-results.md`), M27e pictures (`docs/m27e-results.md`). The wire is `docs/protocol.md`'s "Drawing on the stream"; CLAUDE.md's Sessions rules ("Drawing on the stream", "The host's board over the game") are the law.
 
 ## Where it lives
 
@@ -20,6 +20,7 @@ Drawing on the stream is ADR 0013's, built in parts: M27a the board between stre
 | The shared cases | `couch-viewer/src/editor/tests.rs` | `model/editor.test.ts` (and `board.test.ts` for `board.rs`'s) |
 | The host's board over the game (M27b, Windows) | `rooms::sessions::board_overlay` (window life, follower, drawing mode), `couch_platform_win::board_window`, `Backend::board_area`, `place_board`, `board_interactive`; `src-tauri`'s `BoardWindow` | `board/main.tsx` (the page), `board/useBoardOverlay.ts` (the main window's relay), `sessions/HostConsole.tsx`'s `OverGame` |
 | The host's own stream window (M27d) | `rooms::sessions::own_window` (opening, its events, `host_drew` and `to_host_windows` for the host's two windows), `pipeline::own_window` (the window's task), `HostPipeline::open_own` (its own encoder), `couch-viewer --own-stream` (`WindowOptions::own_stream`, `Hud::own`, `Drawing::own`) | `sessions/HostConsole.tsx`'s `OwnWindow` |
+| Pictures (M27e) | `couch_proto::board` (`PictureUpload`, `PictureHeader`, `PictureAnswer`, limits), `couch_media::picture` (`prepare`, `check`, `decode`), `couch_net::pictures` (the streams), `couch_room::board::put_picture` and `HostSession::put_picture`, `rooms::sessions::pictures` (readers, `Gate`, the host's own), `pipeline::watch`'s `receive_pictures` and `Pictures`, `couch-viewer`'s `pictures.rs` (store, clipboard, drops) and the editor's `Out`, `take_picture`, `paste_picture`, `handles`, `resized` | `board/pictures.ts` (`prepare` on a canvas, `PictureStore`), `model/editor.ts`'s same names, `board/paint.ts`'s `paintPicture`, `BoardSurface`'s paste and drop, `useBoardOverlay` (`Event::HostPicture`, `Command::HostPicture`) |
 
 ## The two editors stay alike
 
@@ -41,7 +42,8 @@ Port by translation, not by rewrite: keep the function names (`press`, `drag`, `
 - **The host's two windows are one author** (M27d): the board over the game and the host's own stream window both draw as the host. A taken batch of the host's comes back from the session as `Effect::HostDrew`, which `host_drew` sends only to the window that didn't draw it (back to its own, a stroke's appended points would double); whatever the session tells the host (`Effect::HostBoard`) goes to both (`to_host_windows`), so a snapshot asked by either puts both in the same generation. Both editors bump their next id past what they hear (`sync`), so ids made in one don't collide with the other's, except for batches from both within the echo's moment (one mouse makes it unlikely; the M27d review's kept finding). A refusal goes to the window that drew alone; the own window gets the board as it opens in the generation as it is (`HostSession::host_snapshot`), so the other's batch on its way still counts. The own window has no seat and no input path: only its drawing, keyframe asks, its state and its closing are read.
 - **Typing has every key** (M27c): while a text box is typed in, the stream window routes keys to `text_key` and text to `type_text` (SDL's text input on only then), the board page lets characters into its hidden field and nothing reaches a drawing key; Esc finishes the box before it leaves anything. Points are a stroke's alone: the host refuses `Append` on a text box, so whatever finishes one (`finish_strays`, `finish_open`) sends the box again with `done`. Its editing is a text field's (a selection `mark` beside the caret, word moves by `class`/`charClass`, kept alike in both editors); the TypeScript `textKey` takes Shift and Ctrl last (`shift`, `word`), the Rust one before the board.
 - **The toolbar's hiding is the window's** (`DrawAction::ToggleToolbar`, Tab; `Keyed::ToggleToolbar` from the editor, which changes nothing of its own): the stream window's `Drawing::tools_hidden` and the page's `toolsHidden`. Hidden, the pill is all the toolbar's area (`Drawing::toolbar`, which the HUD hit-tests); shown, that area includes the handle above it.
-- **A wire change** (a new op, element kind, message or field) is a new wire revision: the `protocol-change` skill. Pictures (M27e) go on a stream of their own kind, never the control stream.
+- **A wire change** (a new op, element kind, message or field) is a new wire revision: the `protocol-change` skill.
+- **Pictures go only by their upload** (M27e): an editor's `emit` queues a `Put` of a picture as an upload (`Out::Picture`) whenever the board doesn't show that id with that hash yet (a paste, a copy, an undo of an erase, a redo), and `take_batch` stops before it, so it goes after what came before; the host refuses a batch's `Put` that would bring one in. Bytes are the window's, kept by id; a window sends an upload only with them. The engines hold a window's later batches until its picture is answered (`Gate`): never send a batch around it.
 
 ## Checks
 
@@ -52,11 +54,15 @@ Port by translation, not by rewrite: keep the function names (`press`, `drag`, `
 | The stream window's drawing mode, the host's drawing mode, the drawing keys | the `input-safety-checks` skill (its drawing paragraphs), its live checks with the author's go-ahead |
 | The engine's commands, events or the board window | `cargo test -p couch-engine` (rooms and sessions three times: `drawings_go_through_the_host_to_every_window`, `the_host_draws_over_the_game`, `watching_together_hooks_the_drawing_key_alone_while_drawing_is_on`, `the_hosts_own_stream_window`), the regenerated bindings committed |
 | The console's panels, Settings | the `front-end-change` skill, `npm run shots` (`drawing-panel`, `drawing-over-game`, `drawing-refused`, `drawing-menu`, `settings-drawing`, `own-window`, `own-window-linux`) |
+| Pictures | `cargo test -p couch-media picture` (the decode bomb among them), `cargo test -p couch-engine --test sessions pictures`, the board's and session's property tests (temporary asserts: an upload and a move taken, `pictured`), `cargo deny check` and `cargo xtask notices` after any change to `image`'s features |
 | Anything | Linux through the `linux-checks` skill (CI runs it) |
 
 **What only a person can check:** the host's drawing key (the hook ignores injected keys), the board's look over a real game, and two PCs. The `app-manual-run` skill's "Drawing on the stream" lists what to ask for.
 
 ## Pitfalls already met
+
+- **A picture's bytes sent once per viewer** (M27e): `pictures_sent` must be pruned of pictures gone from the board **before** an upload is taken, or a picture erased and put back counts as sent (the session test caught it).
+- **The TypeScript `DrawAction` is an object** (`{ type: "undo" }`), not a string, in the shared cases.
 
 - **A swallowed shortcut key across drawing mode** (M27a review): the window swallows a shortcut's key so its release stays in the window; in drawing mode that release went to the board, and the key later stuck down on the host. Entering or leaving drawing mode forgets every swallowed key and button.
 - **Sharing in TypeScript where Rust clones:** an op queued in the outbox and the element on the board must be separate objects (`cloneElement`, `copyOp`), or `merge` growing an outbox stroke also grows the shown one twice. Tests that replay sent ops must replay copies (`hostsCopy`).

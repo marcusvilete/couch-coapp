@@ -1483,6 +1483,7 @@ fn command_for(room: RoomId, op: RemoteOp) -> Option<Command> {
         RemoteOp::BringToFront => Command::BringToFront,
         RemoteOp::SetDrawing { on } => Command::SetDrawing { on },
         RemoteOp::ClearBoard => Command::ClearBoard,
+        RemoteOp::SetPictures { on } => Command::SetPictures { on },
         RemoteOp::StopDrawing { member, stopped } => Command::StopDrawing {
             member: member.to_hex(),
             stopped,
@@ -1557,6 +1558,7 @@ fn op_for(action: RemoteAction) -> Result<RemoteOp, EngineError> {
         RemoteAction::BringToFront => RemoteOp::BringToFront,
         RemoteAction::SetDrawing { on } => RemoteOp::SetDrawing { on },
         RemoteAction::ClearBoard => RemoteOp::ClearBoard,
+        RemoteAction::SetPictures { on } => RemoteOp::SetPictures { on },
         RemoteAction::StopDrawing { member: m, stopped } => RemoteOp::StopDrawing {
             member: member(&m)?,
             stopped,

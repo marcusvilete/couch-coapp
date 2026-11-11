@@ -58,6 +58,9 @@ function actionOf(c: Command): RemoteAction | null {
       return { type: "clearBoard" };
     case "stopDrawing":
       return { type: "stopDrawing", member: c.member, stopped: c.stopped };
+    // Pictures on the board (M27e).
+    case "setPictures":
+      return { type: "setPictures", on: c.on };
     default:
       return null;
   }

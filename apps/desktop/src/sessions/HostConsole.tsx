@@ -326,6 +326,19 @@ function DrawingPanel(props: {
           Clear
         </Button>
       </div>
+      <div className="drawing-row">
+        <Switch
+          checked={d.pictures}
+          disabled={busy != null || !d.on}
+          onChange={(on) => void run("pictures", { type: "setPictures", on })}
+          label="Let them put pictures on the board"
+          detail={
+            d.pictures
+              ? "Pasted or dropped onto the stream, made smaller, at most 3 each."
+              : "Off: turning it off takes them off the board."
+          }
+        />
+      </div>
       <p className="panel-foot drawing-stopped">
         {stopped != null ? (
           <>

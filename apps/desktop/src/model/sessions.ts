@@ -295,7 +295,7 @@ export function waitsForGameAtPc(s: SessionView): boolean {
 
 /** A board with nothing on it, drawing off: a session's view before any. */
 export function noDrawing(): DrawingView {
-  return { on: false, elements: 0, drawers: [], stopped: [] };
+  return { on: false, elements: 0, drawers: [], stopped: [], pictures: false };
 }
 
 /** What the console says of the board: "Nothing drawn yet", "4 drawings by

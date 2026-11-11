@@ -998,6 +998,8 @@ struct FakeViewer {
     /// The board as the window keeps it (M27a), and the host's refusals.
     board: Arc<Mutex<Replica>>,
     refusals: Arc<Mutex<Vec<Refusal>>>,
+    /// The pictures' bytes the window was given (M27e), by id.
+    pictures: Arc<Mutex<std::collections::BTreeMap<couch_proto::board::PictureId, Vec<u8>>>>,
 }
 
 /// A fake power request: gone from the list when dropped.
@@ -1104,6 +1106,10 @@ impl FakeViewer {
                                     BoardNews::Refused(why) => v.refusals.lock().unwrap().push(why),
                                 }
                             }
+                            couch_proto::ipc::kinds::PICTURE => {
+                                let Some(p) = couch_proto::ipc::from_payload::<couch_proto::ipc::Picture>(&frame.payload) else { continue };
+                                v.pictures.lock().unwrap().insert(p.picture, p.bytes);
+                            }
                             couch_proto::ipc::kinds::VOLUME => {
                                 *v.volume.lock().unwrap() = couch_proto::ipc::from_payload(&frame.payload);
                             }
@@ -1190,6 +1196,40 @@ impl FakeViewer {
             couch_proto::ipc::kinds::DRAW,
             couch_proto::ipc::to_payload(&Draw { generation, ops }),
         );
+    }
+
+    /// The user pastes a picture (M27e): the window keeps it as its own, as
+    /// the real one does, and sends it on with its bytes.
+    fn put_picture(&self, me: &Member, element: Element, bytes: Vec<u8>) {
+        let generation = {
+            let mut board = self.board.lock().unwrap();
+            board.heard(member_id(me), &[BoardOp::Put(element.clone())]);
+            board.generation()
+        };
+        self.say(
+            couch_proto::ipc::kinds::PICTURE_UP,
+            couch_proto::ipc::to_payload(&couch_proto::ipc::PictureUp {
+                generation,
+                element,
+                bytes,
+            }),
+        );
+    }
+
+    /// A picture's bytes, if the window was given them (M27e).
+    fn picture(&self, id: &couch_proto::board::PictureId) -> Option<Vec<u8>> {
+        self.pictures.lock().unwrap().get(id).cloned()
+    }
+
+    /// The board's elements as this window has them, whole.
+    fn elements(&self) -> Vec<Element> {
+        self.board
+            .lock()
+            .unwrap()
+            .snapshot()
+            .into_iter()
+            .map(|a| a.element)
+            .collect()
     }
 
     /// The board as this window has it: (author, element id) in drawing
@@ -6504,6 +6544,7 @@ fn member_id(m: &Member) -> MemberId {
 /// A box, as element `id` of whoever draws it.
 fn a_box(id: u32) -> BoardOp {
     BoardOp::Put(Element {
+        picture: None,
         id,
         kind: ElementKind::Rectangle,
         colour: 0,
@@ -6516,9 +6557,94 @@ fn a_box(id: u32) -> BoardOp {
     })
 }
 
+/// A picture (M27e): element `id`, a 1-by-1 PNG, or `bytes` named as it is.
+fn a_picture(id: u32, bytes: Option<Vec<u8>>) -> (Element, Vec<u8>) {
+    let png = data_encoding::BASE64
+        .decode(b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        .unwrap();
+    let bytes = bytes.unwrap_or(png);
+    let BoardOp::Put(mut e) = a_box(id) else {
+        unreachable!()
+    };
+    e.kind = ElementKind::Picture;
+    e.picture = Some(couch_media::picture::picture_id(&bytes));
+    (e, bytes)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pictures_go_through_the_host_with_their_bytes() {
+    let (a, b, c, room) = three().await;
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let bid = b.id();
+    a.ok(Command::SetDrawing { on: true }).await;
+    wait("B hears drawing is on", || drawing_on(&b_window, true)).await;
+
+    // Pictures off, as by default: refused, and nothing of it stays.
+    let (picture, bytes) = a_picture(1, None);
+    let id = picture.picture.unwrap();
+    b_window.put_picture(&b, picture.clone(), bytes.clone());
+    wait("refused while pictures are off", || {
+        b_window.refused().last() == Some(&Refusal::PicturesOff)
+    })
+    .await;
+    wait("B's own back as the host has it", || {
+        b_window.board().is_empty()
+    })
+    .await;
+
+    a.ok(Command::SetPictures { on: true }).await;
+    wait("B hears pictures are on", || {
+        b_window.hud().is_some_and(|h| h.board.pictures)
+    })
+    .await;
+    // Pasted, then moved at once: the move waits for the picture's answer,
+    // so the host takes both, in order.
+    b_window.put_picture(&b, picture.clone(), bytes.clone());
+    let moved = Element {
+        points: vec![
+            couch_proto::board::Point::new(100, 200),
+            couch_proto::board::Point::new(110, 210),
+        ],
+        ..picture.clone()
+    };
+    b_window.draw(&b, vec![BoardOp::Put(moved.clone())]);
+    a.wait_session(&room, &a, "B's picture on the board", |s| {
+        s.is_some_and(|s| s.drawing.pictures && s.drawing.elements == 1)
+    })
+    .await;
+
+    // A newcomer gets the element and its bytes.
+    let c_window = watching(&room, &a, &c).await;
+    wait("C gets B's picture, moved, and its bytes", || {
+        c_window.elements() == [moved.clone()] && c_window.picture(&id).as_ref() == Some(&bytes)
+    })
+    .await;
+    assert_eq!(c_window.board(), [(bid.clone(), 1)]);
+    assert!(
+        b_window.refused().len() == 1,
+        "nothing refused but the first"
+    );
+
+    // Bytes that aren't a picture: refused, never sent on.
+    let (junk, junk_bytes) = a_picture(2, Some(b"not a picture".to_vec()));
+    b_window.put_picture(&b, junk.clone(), junk_bytes);
+    wait("refused, not a picture", || {
+        b_window.refused().last() == Some(&Refusal::BadPicture)
+    })
+    .await;
+    assert!(c_window.picture(&junk.picture.unwrap()).is_none());
+
+    // Pictures off: off everyone's board.
+    a.ok(Command::SetPictures { on: false }).await;
+    wait("off C's board", || c_window.board().is_empty()).await;
+    wait("off B's board", || b_window.board().is_empty()).await;
+}
+
 /// A text box, as element `id` of whoever types it (M27c).
 fn a_note(id: u32, text: &str, done: bool) -> BoardOp {
     BoardOp::Put(Element {
+        picture: None,
         id,
         kind: ElementKind::Text,
         colour: 7,
@@ -6672,7 +6798,11 @@ async fn drawings_go_through_the_host_to_every_window() {
         panic!("the default");
     };
     assert!(!d.on, "off by default");
-    a.ok(Command::SetDrawingDefault { on: true }).await;
+    a.ok(Command::SetDrawingDefault {
+        on: true,
+        pictures: false,
+    })
+    .await;
     a.ok(Command::EndSession).await;
     a.ok(go_live(&room, 4)).await;
     a.wait_session(&room, &a, "drawing on from the start", |s| {
@@ -6905,6 +7035,7 @@ async fn the_host_draws_over_the_game() {
     // The host draws, as itself, to every viewer.
     let stroke = BoardOpView::Put {
         element: BoardElement {
+            picture: None,
             id: 1,
             kind: BoardElementKind::Pen,
             colour: 2,

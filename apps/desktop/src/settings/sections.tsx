@@ -87,22 +87,23 @@ export function OverlaySection(props: { linux: boolean }) {
 // ---- Drawing on the stream (M27a) ----
 
 export function DrawingSection() {
-  const [on, setOn] = useState<boolean | null>(null);
+  const [settings, setSettings] = useState<{ on: boolean; pictures: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     request({ type: "getDrawingDefault" }, "drawing")
-      .then((v) => setOn(v.on))
+      .then((v) => setSettings({ on: v.on, pictures: v.pictures }))
       .catch((e) => setError(errorText(e)));
   }, []);
-  const change = (next: boolean) => {
-    const was = on;
-    setOn(next);
+  const change = (next: { on: boolean; pictures: boolean }) => {
+    const was = settings;
+    setSettings(next);
     setError(null);
-    request({ type: "setDrawingDefault", on: next }, "drawing").catch((e) => {
-      setOn(was);
+    request({ type: "setDrawingDefault", ...next }, "drawing").catch((e) => {
+      setSettings(was);
       setError(errorText(e));
     });
   };
+  const on = settings?.on ?? null;
   return (
     <div className="settings-section">
       <p className="settings-lead">
@@ -114,9 +115,16 @@ export function DrawingSection() {
         <Switch
           checked={on ?? false}
           disabled={on == null}
-          onChange={change}
+          onChange={(next) => settings && change({ ...settings, on: next })}
           label="Let those watching draw when a session starts"
           detail="A session running now keeps its own switch."
+        />
+        <Switch
+          checked={settings?.pictures ?? false}
+          disabled={settings == null}
+          onChange={(next) => settings && change({ ...settings, pictures: next })}
+          label="Let them put pictures on the board too"
+          detail="Pasted or dropped onto the stream: each made smaller, and what a photo carries, such as where it was taken, left out."
         />
       </div>
       {error && (

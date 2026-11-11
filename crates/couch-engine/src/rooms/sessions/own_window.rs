@@ -197,6 +197,14 @@ impl Actor {
         for news in h.session.host_snapshot() {
             window.board(news);
         }
+        // And its pictures (M27e): a window that opens has none.
+        for (picture, bytes) in h.session.host_pictures() {
+            window.picture(couch_proto::ipc::Picture {
+                picture,
+                bytes: bytes.to_vec(),
+            });
+        }
+        h.own_gate.reset();
         h.own = Some(Own {
             window,
             number,
@@ -284,6 +292,11 @@ impl Actor {
                     tracing::debug!("the host's own window's drawing: {e}");
                 }
             }
+            OwnEvent::Picture(up) => {
+                if let Err(e) = self.host_picture(Editor::Own, up, now) {
+                    tracing::debug!("the host's own window's picture: {e}");
+                }
+            }
             OwnEvent::KeyframeNeeded => {
                 if let Some(pipeline) = &h.pipeline {
                     pipeline.own_keyframe();
@@ -354,8 +367,32 @@ impl Actor {
             .as_mut()
             .filter(|h| h.pipeline.is_some())
             .ok_or(EngineError::NotLive)?;
-        let room = h.room;
+        // Behind a picture of this window's on its way (M27e): after it.
+        let gate = h.gate_mut(from);
+        if gate.busy() {
+            gate.hold(super::pictures::Held::Draw(couch_proto::ipc::Draw {
+                generation,
+                ops,
+            }));
+            return Ok(Response::Done);
+        }
         let fx = h.session.draw(me, generation, ops, now);
+        self.host_effects(from, fx, now);
+        Ok(Response::Done)
+    }
+
+    /// What the session says of a batch or picture of the host's, from
+    /// window `from`: taken, the other window hears it, never `from`;
+    /// refused, `from` alone hears why; the rest as any session effect.
+    pub(in crate::rooms) fn host_effects(
+        &mut self,
+        from: Editor,
+        fx: Vec<SessionEffect>,
+        now: Instant,
+    ) {
+        let Some(room) = self.sessions.hosting.as_ref().map(|h| h.room) else {
+            return;
+        };
         let mut rest = Vec::new();
         for effect in fx {
             match effect {
@@ -376,7 +413,6 @@ impl Actor {
             }
         }
         self.apply_session(room, rest, now);
-        Ok(Response::Done)
     }
 
     /// To one of the host's two windows.
@@ -388,6 +424,28 @@ impl Actor {
                 }
             }
             Editor::Overlay => self.to_overlay(room, news),
+        }
+    }
+
+    /// A picture on the board, to both of the host's windows (M27e).
+    pub(in crate::rooms) fn to_host_windows_picture(
+        &self,
+        room: RoomId,
+        picture: couch_proto::board::PictureId,
+        bytes: &[u8],
+    ) {
+        if let Some(own) = self.sessions.hosting.as_ref().and_then(|h| h.own.as_ref()) {
+            own.window.picture(couch_proto::ipc::Picture {
+                picture,
+                bytes: bytes.to_vec(),
+            });
+        }
+        if self.board_window_open() {
+            let _ = self.events.send(Event::HostPicture {
+                room: room.to_hex(),
+                picture: crate::board::picture_hex(&picture),
+                data: data_encoding::BASE64.encode(bytes),
+            });
         }
     }
 
@@ -434,6 +492,7 @@ impl Actor {
             note: String::new(),
             board: HudBoard {
                 on: s.board().is_on(),
+                pictures: s.board().pictures_on(),
                 // The host draws nothing while desktop control lasts (the
                 // device's mouse would draw as the host): the window refuses
                 // up front, with its own words for it.

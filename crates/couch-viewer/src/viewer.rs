@@ -23,11 +23,11 @@ use couch_media::{
     mailbox::Mailbox,
 };
 use couch_proto::{
-    board::Refusal,
+    board::{BoardOp, Refusal},
     ids::MemberId,
     ipc::{
         BoardNews, Draw, FrameTiming, HudBoard, HudRole, HudSeat, HudState, LocalInput, NetStats,
-        StreamVolume, UserAction, WindowRequest, WindowState,
+        PictureUp, StreamVolume, UserAction, WindowRequest, WindowState,
     },
     session::StreamState,
 };
@@ -414,6 +414,22 @@ pub fn run(options: WindowOptions) -> Result<()> {
     'running: loop {
         for event in events.poll_iter() {
             match event {
+                // A picture file dropped on the window while drawing (M27e),
+                // where the pointer was.
+                Event::DropFile { ref filename, .. } => {
+                    if drawing.on && drawing.editor.is_some() {
+                        if !board_info.pictures {
+                            hud.note(Refusal::PicturesOff.message());
+                        } else if let Some(raw) =
+                            crate::pictures::read_dropped(std::path::Path::new(filename))
+                        {
+                            let at = drawing.pointer.and_then(|p| drawing.to_picture(p, false));
+                            drawing.pictures.prepare(raw, at);
+                        } else {
+                            hud.note(Refusal::BadPicture.message());
+                        }
+                    }
+                }
                 Event::Quit { .. } => {
                     // A volume change not yet remembered goes first.
                     if volume_unsaved.take().is_some() {
@@ -514,9 +530,40 @@ pub fn run(options: WindowOptions) -> Result<()> {
                         let alt = held(*keymod, Mod::LALTMOD, Mod::RALTMOD);
                         let ctrl = held(*keymod, Mod::LCTRLMOD, Mod::RCTRLMOD);
                         let shift = held(*keymod, Mod::LSHIFTMOD, Mod::RSHIFTMOD);
-                        let paste = |drawing: &mut Drawing| {
+                        let board_pictures = board_info.pictures;
+                        let paste = |drawing: &mut Drawing, hud: &mut Hud| {
                             let system = video.clipboard().clipboard_text().ok();
                             let at = drawing.pointer.and_then(|p| drawing.to_picture(p, false));
+                            // A picture copied elsewhere (M27e): our own copy
+                            // puts text (or nothing) on the clipboard, so a
+                            // picture there is newer than it.
+                            let no_text = system.as_deref().is_none_or(|t| t.trim().is_empty());
+                            // A picture file copied (Explorer's or a file
+                            // manager's Ctrl+C) comes first: on Linux its
+                            // path comes as text too.
+                            let picture = if drawing.typing() {
+                                None
+                            } else if let Some(file) = crate::pictures::clipboard_picture_file() {
+                                match crate::pictures::read_dropped(&file) {
+                                    Some(raw) => Some(raw),
+                                    None => {
+                                        hud.note(Refusal::BadPicture.message());
+                                        return;
+                                    }
+                                }
+                            } else if no_text {
+                                crate::pictures::clipboard_image()
+                            } else {
+                                None
+                            };
+                            if let Some(raw) = picture {
+                                if board_pictures {
+                                    drawing.pictures.prepare(raw, at);
+                                } else {
+                                    hud.note(Refusal::PicturesOff.message());
+                                }
+                                return;
+                            }
                             drawing.paste(system.as_deref(), at, now);
                         };
                         if shortcut.is_some() || alt {
@@ -530,7 +577,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
                                 if let Some(key) = text_key(*scancode, ctrl) {
                                     drawing.text_key(key, shift, ctrl, now);
                                 } else if ctrl && *scancode == Scancode::V {
-                                    paste(&mut drawing);
+                                    paste(&mut drawing, &mut hud);
                                 } else if ctrl && matches!(*scancode, Scancode::C | Scancode::X) {
                                     let cut = *scancode == Scancode::X;
                                     if let Some(text) = drawing.copy_text(cut, now)
@@ -550,7 +597,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
                                         tracing::debug!("copying drawings: {e}");
                                     }
                                 }
-                                Some(DrawAction::Paste) => paste(&mut drawing),
+                                Some(DrawAction::Paste) => paste(&mut drawing, &mut hud),
                                 // Tab held repeats: the toolbar folds once.
                                 Some(DrawAction::ToggleToolbar) if *repeat => {}
                                 Some(action) => leave = drawing.key(action, shift, now),
@@ -849,6 +896,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     window_request(&mut window, &mut hud, request);
                     redraw = true;
                 }
+                ForWindow::Picture(p) => {
+                    let shown = drawing.shown_pictures();
+                    drawing.pictures.add(p.picture, p.bytes, &shown);
+                }
                 ForWindow::Board(news) => {
                     let now = Instant::now();
                     // What the host cleared of ours (a snapshot replaces
@@ -967,9 +1018,45 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 refusal,
             });
         }
+        // A picture made from the clipboard or a file (M27e): ours, pasted.
+        match drawing.pictures.poll_prepared() {
+            Some(Ok(ready)) => drawing.paste_picture(ready, Instant::now()),
+            Some(Err(e)) => {
+                tracing::info!("a picture couldn't be pasted: {e}");
+                hud.note(Refusal::BadPicture.message());
+            }
+            None => {}
+        }
+        if drawing.pictures.poll_decoded() {
+            redraw = true;
+        }
         if let Some(editor) = &mut drawing.editor {
-            if let Some((generation, ops)) = editor.take_batch(Instant::now()) {
-                let _ = out_tx.send(Outgoing::Draw(Draw { generation, ops }));
+            // Batches and pictures in the order made: a picture goes once
+            // the operations before it have (M27e).
+            loop {
+                if let Some((generation, ops)) = editor.take_batch(Instant::now()) {
+                    let _ = out_tx.send(Outgoing::Draw(Draw { generation, ops }));
+                    continue;
+                }
+                let Some((generation, element)) = editor.take_picture() else {
+                    break;
+                };
+                // Bytes let go meanwhile (long after an erase), or a copy of
+                // a picture this window never had: nothing to send, so off
+                // our own board too, rather than shown here alone.
+                if let Some(bytes) = element.picture.and_then(|id| drawing.pictures.bytes(&id)) {
+                    let up = PictureUp {
+                        generation,
+                        element,
+                        bytes: bytes.to_vec(),
+                    };
+                    let _ = out_tx.send(Outgoing::PictureUp(up));
+                } else {
+                    let gone = BoardOp::Remove(vec![element.id]);
+                    drawing.board.apply(editor.me(), &[gone], Instant::now());
+                    editor.sync(&drawing.board);
+                    hud.note(Refusal::BadPicture.message());
+                }
             }
             if let Some(note) = editor.take_note() {
                 hud.note(note);
@@ -1388,6 +1475,7 @@ fn preview_session(preview: Preview) -> HudState {
         }
         P::Drawing | P::Typing | P::DrawingHidden => {
             s.board = HudBoard {
+                pictures: true,
                 on: true,
                 stopped: false,
                 me: Some(PREVIEW_ME),
@@ -1399,6 +1487,7 @@ fn preview_session(preview: Preview) -> HudState {
         P::Own => {
             s.seats = Vec::new();
             s.board = HudBoard {
+                pictures: true,
                 on: true,
                 stopped: false,
                 me: Some(PREVIEW_ME),
@@ -1469,6 +1558,7 @@ const PREVIEW_CAROL: MemberId = MemberId([2; 32]);
 fn preview_board(drawing: &mut Drawing, now: Instant, typing: bool) {
     use couch_proto::board::{BoardOp, Element, ElementKind, Point};
     let element = |id, kind, colour, width, points: Vec<(u16, u16)>| Element {
+        picture: None,
         id,
         kind,
         colour,

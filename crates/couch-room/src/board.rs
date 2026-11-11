@@ -15,16 +15,24 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use couch_proto::{
     board::{
-        Authored, BoardOp, Element, MAX_BATCHES_PER_SEC, MAX_BOARD_ELEMENTS, MAX_BOARD_POINTS,
-        MAX_MARKS_PER_SEC, MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, Refusal, valid_batch,
+        Authored, BoardOp, Element, MAX_BATCHES_PER_SEC, MAX_BOARD_ELEMENTS,
+        MAX_BOARD_PICTURE_BYTES, MAX_BOARD_PICTURES, MAX_BOARD_POINTS, MAX_MARKS_PER_SEC,
+        MAX_MEMBER_ELEMENTS, MAX_MEMBER_PICTURES, MAX_PICTURE_BYTES, MAX_STROKE_POINTS, PictureId,
+        Refusal, valid_batch,
     },
     ids::MemberId,
 };
+use sha2::{Digest, Sha256};
+
+/// A picture's bytes as the board holds them (M27e): shared, never copied
+/// per viewer.
+pub type PictureBytes = Arc<[u8]>;
 
 /// How long a fading element stays on the host's board once finished: a
 /// little past its own stay and fade (wire revision 16: its author picks).
@@ -97,6 +105,15 @@ pub struct Board {
     points: usize,
     next_seq: u64,
     rates: BTreeMap<MemberId, Rates>,
+    /// The host allows pictures (M27e).
+    pictures_on: bool,
+    /// The pictures' bytes, by id, with how many elements show each: a
+    /// picture is kept exactly while an element shows it.
+    pictures: BTreeMap<PictureId, (PictureBytes, usize)>,
+    /// Their bytes, everyone's.
+    picture_bytes: usize,
+    /// Picture elements, by author.
+    pictures_of: BTreeMap<MemberId, usize>,
 }
 
 impl Board {
@@ -112,6 +129,10 @@ impl Board {
             points: 0,
             next_seq: 0,
             rates: BTreeMap::new(),
+            pictures_on: false,
+            pictures: BTreeMap::new(),
+            picture_bytes: 0,
+            pictures_of: BTreeMap::new(),
         }
     }
 
@@ -119,6 +140,26 @@ impl Board {
 
     pub fn is_on(&self) -> bool {
         self.on
+    }
+
+    /// Whether the host allows pictures (M27e).
+    pub fn pictures_on(&self) -> bool {
+        self.pictures_on
+    }
+
+    /// A picture's bytes, while an element on the board shows it.
+    pub fn picture(&self, id: &PictureId) -> Option<&PictureBytes> {
+        self.pictures.get(id).map(|(bytes, _)| bytes)
+    }
+
+    /// The pictures on the board, by id.
+    pub fn picture_ids(&self) -> Vec<PictureId> {
+        self.pictures.keys().copied().collect()
+    }
+
+    /// Pictures' bytes on the board, everyone's.
+    pub fn picture_bytes(&self) -> usize {
+        self.picture_bytes
     }
 
     /// The generation `member`'s batches must name.
@@ -213,6 +254,9 @@ impl Board {
         self.elements.clear();
         self.per_member.clear();
         self.points = 0;
+        self.pictures.clear();
+        self.picture_bytes = 0;
+        self.pictures_of.clear();
         self.counter = self.counter.wrapping_add(1);
         self.everyone = self.counter;
         self.own.clear();
@@ -319,6 +363,9 @@ impl Board {
     fn remove(&mut self, key: (MemberId, u32)) {
         if let Some(old) = self.elements.remove(&key) {
             self.points -= old.element.load();
+            if let Some(id) = old.element.picture {
+                self.unshow(key.0, id);
+            }
             if let Some(n) = self.per_member.get_mut(&key.0) {
                 *n -= 1;
                 if *n == 0 {
@@ -336,6 +383,10 @@ impl Board {
     /// as the member hears of the clear), then `blocked`, drawing on, the
     /// author not stopped, the batch well formed, touching only the
     /// author's own elements, and the limits.
+    ///
+    /// **A picture comes into being only by [`Self::put_picture`]:** a
+    /// `Put` of one here only moves or resizes a picture element of the
+    /// author's already there with the same picture.
     pub fn apply(
         &mut self,
         author: MemberId,
@@ -343,6 +394,39 @@ impl Board {
         ops: &[BoardOp],
         now: Instant,
         blocked: Option<Refusal>,
+    ) -> Result<Taken, Refusal> {
+        self.take(author, generation, ops, now, blocked, None)
+    }
+
+    /// `author`'s picture, made in `generation` (M27e): `element` (a picture
+    /// element, new or replacing one of its own) with `bytes`, which the
+    /// caller has checked decode as a picture within the limits
+    /// (`couch_media::picture::check`). Taken as a batch of that one `Put`,
+    /// under the same checks as [`Self::apply`] and these: pictures on, the
+    /// bytes what the element names and within their limit, and room for
+    /// them ([`MAX_MEMBER_PICTURES`], [`MAX_BOARD_PICTURES`],
+    /// [`MAX_BOARD_PICTURE_BYTES`]).
+    pub fn put_picture(
+        &mut self,
+        author: MemberId,
+        generation: u32,
+        element: Element,
+        bytes: &PictureBytes,
+        now: Instant,
+        blocked: Option<Refusal>,
+    ) -> Result<Taken, Refusal> {
+        let ops = [BoardOp::Put(element)];
+        self.take(author, generation, &ops, now, blocked, Some(bytes))
+    }
+
+    fn take(
+        &mut self,
+        author: MemberId,
+        generation: u32,
+        ops: &[BoardOp],
+        now: Instant,
+        blocked: Option<Refusal>,
+        upload: Option<&PictureBytes>,
     ) -> Result<Taken, Refusal> {
         let rates = self.rates.entry(author).or_insert_with(|| Rates {
             batches: Bucket::new(MAX_BATCHES_PER_SEC, now),
@@ -373,6 +457,21 @@ impl Board {
         if !valid_batch(ops) {
             return Err(Refusal::Invalid);
         }
+        if let Some(bytes) = upload {
+            if !self.pictures_on {
+                return Err(Refusal::PicturesOff);
+            }
+            let named = match ops {
+                [BoardOp::Put(e)] => e.picture,
+                _ => None,
+            };
+            if bytes.is_empty()
+                || bytes.len() > MAX_PICTURE_BYTES
+                || named != Some(PictureId(Sha256::digest(bytes).into()))
+            {
+                return Err(Refusal::BadPicture);
+            }
+        }
 
         // The author's elements as the batch leaves them, beside the board.
         let mut changes: BTreeMap<u32, Option<Stored>> = BTreeMap::new();
@@ -386,7 +485,18 @@ impl Board {
             };
             match op {
                 BoardOp::Put(element) => {
-                    let place = match current(&changes, element.id) {
+                    let current = current(&changes, element.id);
+                    // A picture only by its upload, or moved: the same
+                    // picture already there as this element.
+                    if element.picture.is_some()
+                        && upload.is_none()
+                        && current
+                            .as_ref()
+                            .is_none_or(|old| old.element.picture != element.picture)
+                    {
+                        return Err(Refusal::Invalid);
+                    }
+                    let place = match current {
                         Some(old) => old.seq,
                         None => {
                             seq += 1;
@@ -452,11 +562,37 @@ impl Board {
         {
             return Err(Refusal::BoardFull);
         }
+        // Pictures: the author's, the board's, and their bytes. Only an
+        // upload adds one, so only an upload can be refused for room.
+        if let (Some(bytes), [BoardOp::Put(e)]) = (upload, ops) {
+            let replaced = self
+                .elements
+                .get(&(author, e.id))
+                .is_some_and(|old| old.element.picture.is_some());
+            let added = usize::from(!replaced);
+            let new_bytes = match e.picture {
+                Some(id) if !self.pictures.contains_key(&id) => bytes.len(),
+                _ => 0,
+            };
+            let mine = self.pictures_of.get(&author).copied().unwrap_or(0);
+            let all: usize = self.pictures_of.values().sum();
+            if mine + added > MAX_MEMBER_PICTURES
+                || all + added > MAX_BOARD_PICTURES
+                || self.picture_bytes + new_bytes > MAX_BOARD_PICTURE_BYTES
+            {
+                return Err(Refusal::TooManyPictures);
+            }
+        }
 
         // Taken: apply it.
         let counts_changed = mine != before_mine as isize;
         self.next_seq = seq;
         for (id, change) in changes {
+            // A picture shown again before the element showing it goes, so a
+            // picture moved is never dropped between the two.
+            if let Some(picture) = change.as_ref().and_then(|s| s.element.picture) {
+                self.show(author, picture, upload);
+            }
             self.remove((author, id));
             if let Some(stored) = change {
                 self.points += stored.element.load();
@@ -465,6 +601,63 @@ impl Board {
             }
         }
         Ok(Taken { counts_changed })
+    }
+
+    /// An element shows `id`, `author`'s: held while one does. A picture
+    /// new to the board comes with its bytes.
+    fn show(&mut self, author: MemberId, id: PictureId, bytes: Option<&PictureBytes>) {
+        match self.pictures.get_mut(&id) {
+            Some((_, n)) => *n += 1,
+            None => {
+                let bytes = bytes.expect("a new picture comes with its bytes").clone();
+                self.picture_bytes += bytes.len();
+                self.pictures.insert(id, (bytes, 1));
+            }
+        }
+        *self.pictures_of.entry(author).or_default() += 1;
+    }
+
+    /// An element of `author`'s showing `id` went: the picture goes with the
+    /// last one.
+    fn unshow(&mut self, author: MemberId, id: PictureId) {
+        if let Some((bytes, n)) = self.pictures.get_mut(&id) {
+            *n -= 1;
+            if *n == 0 {
+                self.picture_bytes -= bytes.len();
+                self.pictures.remove(&id);
+            }
+        }
+        if let Some(n) = self.pictures_of.get_mut(&author) {
+            *n -= 1;
+            if *n == 0 {
+                self.pictures_of.remove(&author);
+            }
+        }
+    }
+
+    /// Pictures allowed or not (M27e). Off removes every picture element
+    /// from the board; returns them by author, for windows to hear, and
+    /// whether the setting changed.
+    pub fn set_pictures(&mut self, on: bool) -> (bool, Vec<(MemberId, Vec<u32>)>) {
+        if self.pictures_on == on {
+            return (false, Vec::new());
+        }
+        self.pictures_on = on;
+        if on {
+            return (true, Vec::new());
+        }
+        let keys: Vec<(MemberId, u32)> = self
+            .elements
+            .iter()
+            .filter(|(_, s)| s.element.picture.is_some())
+            .map(|(k, _)| *k)
+            .collect();
+        let mut removed: BTreeMap<MemberId, Vec<u32>> = BTreeMap::new();
+        for key in keys {
+            self.remove(key);
+            removed.entry(key.0).or_default().push(key.1);
+        }
+        (true, removed.into_iter().collect())
     }
 }
 
@@ -667,6 +860,7 @@ mod tests {
 
     fn pen(id: u32, points: usize, done: bool, fades: bool) -> Element {
         Element {
+            picture: None,
             id,
             kind: ElementKind::Pen,
             colour: 0,
@@ -681,6 +875,7 @@ mod tests {
 
     fn rect(id: u32) -> Element {
         Element {
+            picture: None,
             id,
             kind: ElementKind::Rectangle,
             colour: 3,
@@ -1036,6 +1231,178 @@ mod tests {
         assert_eq!(order, [(CAI, 9), (BIA, 1)]);
     }
 
+    #[test]
+    fn a_picture_comes_only_by_its_upload_and_is_kept_while_shown() {
+        let now = Instant::now();
+        let mut board = Board::new(true);
+        let bytes = test_picture(1);
+        let id = picture_of(&bytes);
+        let generation = board.generation_of(BIA);
+        assert_eq!(
+            board.put_picture(BIA, generation, picture_element(1, id), &bytes, now, None),
+            Err(Refusal::PicturesOff),
+            "off by default"
+        );
+        board.set_pictures(true);
+        assert_eq!(
+            board.go(BIA, &[BoardOp::Put(picture_element(1, id))], now),
+            Err(Refusal::Invalid),
+            "never by a batch"
+        );
+        assert_eq!(
+            board.put_picture(
+                BIA,
+                generation,
+                picture_element(1, picture_of(&test_picture(2))),
+                &bytes,
+                now,
+                None
+            ),
+            Err(Refusal::BadPicture),
+            "the bytes must be what it names"
+        );
+        board
+            .put_picture(BIA, generation, picture_element(1, id), &bytes, now, None)
+            .unwrap();
+        assert_eq!(board.picture(&id), Some(&bytes));
+        assert_eq!(board.picture_bytes(), bytes.len());
+
+        // Moved by a batch: the same picture, kept.
+        let mut moved = picture_element(1, id);
+        moved.points = vec![Point::new(5, 5), Point::new(600, 400)];
+        board.go(BIA, &[BoardOp::Put(moved.clone())], now).unwrap();
+        assert_eq!(board.element(BIA, 1), Some(&moved));
+        assert_eq!(board.picture(&id), Some(&bytes));
+        // Another picture by a batch, or another's: refused.
+        let other = picture_of(&test_picture(3));
+        assert_eq!(
+            board.go(BIA, &[BoardOp::Put(picture_element(1, other))], now),
+            Err(Refusal::Invalid)
+        );
+        assert_eq!(
+            board.go(CAI, &[BoardOp::Put(picture_element(1, id))], now),
+            Err(Refusal::Invalid),
+            "another's picture isn't Cai's to show"
+        );
+        // Shown twice (Cai uploads the same picture), it stays until both go.
+        let generation_cai = board.generation_of(CAI);
+        board
+            .put_picture(
+                CAI,
+                generation_cai,
+                picture_element(7, id),
+                &bytes,
+                now,
+                None,
+            )
+            .unwrap();
+        assert_eq!(board.picture_bytes(), bytes.len(), "held once");
+        board.go(BIA, &[BoardOp::Remove(vec![1])], now).unwrap();
+        assert_eq!(board.picture(&id), Some(&bytes));
+        board.go(CAI, &[BoardOp::Remove(vec![7])], now).unwrap();
+        assert_eq!(board.picture(&id), None);
+        assert_eq!(board.picture_bytes(), 0);
+
+        // Fading, it goes when its time is up, and its bytes with it.
+        let fading = Element {
+            fades: true,
+            ..picture_element(2, id)
+        };
+        board
+            .put_picture(BIA, generation, fading, &bytes, now, None)
+            .unwrap();
+        board.expire(now + FADE_DROP);
+        assert!(board.is_empty() && board.picture_ids().is_empty());
+    }
+
+    #[test]
+    fn pictures_have_limits_of_their_own() {
+        let now = Instant::now();
+        let mut board = Board::new(true);
+        board.set_pictures(true);
+        let mut later = now;
+        let mut put = |board: &mut Board, author: MemberId, id: u32, which: usize, len: usize| {
+            later += Duration::from_secs(1);
+            let mut bytes = vec![which as u8; len];
+            bytes[0] = (which >> 8) as u8;
+            let bytes: PictureBytes = Arc::from(bytes);
+            let element = picture_element(id, picture_of(&bytes));
+            let generation = board.generation_of(author);
+            board.put_picture(author, generation, element, &bytes, later, None)
+        };
+        // Three each.
+        for id in 0..3 {
+            put(&mut board, BIA, id, id as usize, 10).unwrap();
+        }
+        assert_eq!(
+            put(&mut board, BIA, 3, 3, 10),
+            Err(Refusal::TooManyPictures)
+        );
+        // Replacing one of its own is no more.
+        put(&mut board, BIA, 2, 4, 10).unwrap();
+        // The board's bytes: 8 MB.
+        let mb = MAX_PICTURE_BYTES;
+        let mut which = 10;
+        let mut taken = 0;
+        'members: for m in 3..20u8 {
+            for id in 0..3 {
+                which += 1;
+                match put(&mut board, MemberId([m; 32]), id, which, mb) {
+                    Ok(_) => taken += 1,
+                    Err(Refusal::TooManyPictures) => break 'members,
+                    Err(e) => panic!("{e:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            taken,
+            MAX_BOARD_PICTURE_BYTES / mb - 1,
+            "30 bytes of Bia's too"
+        );
+        assert!(board.picture_bytes() <= MAX_BOARD_PICTURE_BYTES);
+        // ...and its count: 16, small ones too.
+        let mut board = Board::new(true);
+        board.set_pictures(true);
+        let mut taken = 0;
+        'count: for m in 3..20u8 {
+            for id in 0..3 {
+                which += 1;
+                match put(&mut board, MemberId([m; 32]), id, which, 10) {
+                    Ok(_) => taken += 1,
+                    Err(Refusal::TooManyPictures) => break 'count,
+                    Err(e) => panic!("{e:?}"),
+                }
+            }
+        }
+        assert_eq!(taken, MAX_BOARD_PICTURES);
+    }
+
+    #[test]
+    fn pictures_off_takes_them_off_the_board() {
+        let now = Instant::now();
+        let mut board = Board::new(true);
+        assert_eq!(board.set_pictures(true), (true, Vec::new()));
+        let bytes = test_picture(1);
+        let generation = board.generation_of(BIA);
+        board
+            .put_picture(
+                BIA,
+                generation,
+                picture_element(4, picture_of(&bytes)),
+                &bytes,
+                now,
+                None,
+            )
+            .unwrap();
+        board.go(BIA, &[BoardOp::Put(rect(1))], now).unwrap();
+        let (changed, removed) = board.set_pictures(false);
+        assert!(changed);
+        assert_eq!(removed, [(BIA, vec![4])]);
+        assert_eq!(board.len(), 1, "the rest stays");
+        assert!(board.picture_ids().is_empty() && board.picture_bytes() == 0);
+        assert_eq!(board.set_pictures(false), (false, Vec::new()));
+    }
+
     // ---- The property test ----
 
     fn keys(snapshot: &[Authored]) -> BTreeSet<(MemberId, u32)> {
@@ -1052,6 +1419,30 @@ mod tests {
         Expire,
         /// The member is gone: the host finishes what it left open.
         Finish(u8),
+        /// A member's picture (M27e): element id, which picture, maybe stale,
+        /// maybe bytes that aren't what it names.
+        Picture(u8, bool, u32, usize, bool),
+        /// Pictures allowed or not.
+        Pictures(bool),
+    }
+
+    /// The pictures the property test puts, small: the byte limits have
+    /// tests of their own.
+    fn test_picture(which: usize) -> PictureBytes {
+        Arc::from(vec![which as u8; 10 + which * 7])
+    }
+
+    fn picture_of(bytes: &PictureBytes) -> PictureId {
+        PictureId(Sha256::digest(bytes).into())
+    }
+
+    fn picture_element(id: u32, picture: PictureId) -> Element {
+        Element {
+            kind: ElementKind::Picture,
+            points: vec![Point::new(id as u16, 10), Point::new(id as u16 + 500, 900)],
+            picture: Some(picture),
+            ..rect(id)
+        }
     }
 
     fn element() -> impl Strategy<Value = Element> {
@@ -1063,13 +1454,15 @@ mod tests {
                 Just(ElementKind::Arrow),
                 Just(ElementKind::Rectangle),
                 Just(ElementKind::Text),
+                Just(ElementKind::Picture),
             ],
             any::<bool>(),
             any::<bool>(),
             1usize..6,
             prop_oneof![Just("Hi"), Just("Olá\nali"), Just("😀 x"), Just("")],
+            0usize..4,
         )
-            .prop_map(|(id, kind, fades, done, n, text)| Element {
+            .prop_map(|(id, kind, fades, done, n, text, which)| Element {
                 id,
                 kind,
                 colour: (id % 8) as u8,
@@ -1086,6 +1479,15 @@ mod tests {
                 } else {
                     String::new()
                 },
+                // A picture moved: taken only if it is already there.
+                picture: (kind == ElementKind::Picture).then(|| picture_of(&test_picture(which))),
+            })
+            .prop_map(|e| match e.kind {
+                ElementKind::Picture => Element {
+                    points: vec![Point::new(0, 0), Point::new(e.id as u16 + 1, 7)],
+                    ..e
+                },
+                _ => e,
             })
     }
 
@@ -1111,6 +1513,9 @@ mod tests {
             1 => Just(Step::Clear),
             2 => Just(Step::Expire),
             1 => (0u8..3).prop_map(Step::Finish),
+            4 => (0u8..3, prop::bool::weighted(0.1), 0u32..12, 0usize..4, prop::bool::weighted(0.1))
+                .prop_map(|(m, stale, id, which, wrong)| Step::Picture(m, stale, id, which, wrong)),
+            1 => any::<bool>().prop_map(Step::Pictures),
         ]
     }
 
@@ -1123,6 +1528,7 @@ mod tests {
         fn the_board_holds(steps in prop::collection::vec(step(), 1..80)) {
             let mut now = Instant::now();
             let mut board = Board::new(true);
+            board.set_pictures(true);
             let mut viewer = Replica::default();
             for step in steps {
                 match step {
@@ -1176,6 +1582,29 @@ mod tests {
                         viewer.heard(member, &ops);
                         prop_assert!(board.snapshot().iter().all(|a| a.author != member || a.element.done));
                     }
+                    Step::Picture(m, stale, id, which, wrong) => {
+                        let author = MemberId([m; 32]);
+                        let before = board.snapshot();
+                        let generation =
+                            board.generation_of(author).wrapping_sub(u32::from(stale));
+                        let bytes = test_picture(which);
+                        let named = if wrong { picture_of(&test_picture(which + 1)) } else { picture_of(&bytes) };
+                        let element = picture_element(id, named);
+                        match board.put_picture(author, generation, element.clone(), &bytes, now, None) {
+                            Ok(_) => {
+                                prop_assert!(!stale && !wrong && board.pictures_on());
+                                prop_assert!(!board.is_stopped(author));
+                                viewer.heard(author, &[BoardOp::Put(element)]);
+                            }
+                            Err(_) => prop_assert_eq!(board.snapshot(), before),
+                        }
+                    }
+                    Step::Pictures(on) => {
+                        let (_, removed) = board.set_pictures(on);
+                        for (author, ids) in removed {
+                            viewer.heard(author, &[BoardOp::Remove(ids)]);
+                        }
+                    }
                 }
                 // The counts are the board's.
                 let snapshot = board.snapshot();
@@ -1191,6 +1620,29 @@ mod tests {
                     prop_assert_eq!(n, snapshot.iter().filter(|a| a.author == member).count());
                 }
                 prop_assert!(snapshot.iter().all(|a| a.element.is_valid()));
+                // Each picture is held exactly while an element shows it, and
+                // the counts are the board's.
+                let shown: BTreeSet<PictureId> =
+                    snapshot.iter().filter_map(|a| a.element.picture).collect();
+                prop_assert_eq!(&board.picture_ids().into_iter().collect::<BTreeSet<_>>(), &shown);
+                prop_assert_eq!(
+                    board.picture_bytes(),
+                    shown.iter().map(|id| board.picture(id).unwrap().len()).sum::<usize>()
+                );
+                for (_, n) in board.pictures.values() {
+                    prop_assert!(*n > 0);
+                }
+                prop_assert_eq!(
+                    board.pictures_of.values().sum::<usize>(),
+                    snapshot.iter().filter(|a| a.element.picture.is_some()).count()
+                );
+                for (member, n) in &board.pictures_of {
+                    prop_assert!(*n <= MAX_MEMBER_PICTURES);
+                    prop_assert_eq!(*n, snapshot.iter().filter(|a| a.author == *member && a.element.picture.is_some()).count());
+                }
+                if !board.pictures_on() {
+                    prop_assert!(shown.is_empty());
+                }
                 // A viewer that heard every update, and a newcomer, agree,
                 // in the drawing order too.
                 let mut newcomer = Replica::default();

@@ -52,6 +52,8 @@ export function previewPlatform(options: { release: boolean; splash: boolean }):
       sendState: () => {},
       sendNews: () => {},
       onOps: async () => () => {},
+      sendPicture: () => {},
+      onPicture: async () => () => {},
       onDone: async () => () => {},
     },
   };

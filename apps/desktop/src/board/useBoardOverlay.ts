@@ -19,6 +19,7 @@ export function useBoardOverlay(rooms: RoomView[]) {
           me: host.session.host,
           drawing: overlay.drawing,
           names: host.room.members.map((m): [string, string] => [m.id, m.name]),
+          pictures: host.session.drawing.pictures,
         }
       : null;
   const latest = useRef(state);
@@ -43,6 +44,11 @@ export function useBoardOverlay(rooms: RoomView[]) {
           .command({ type: "hostDraw", generation: batch.generation, ops: batch.ops })
           .catch(() => {});
       }),
+      board.onPicture((up) => {
+        void platform()
+          .command({ type: "hostPicture", generation: up.generation, element: up.element, data: up.data })
+          .catch(() => {});
+      }),
       board.onDone(() => {
         void platform()
           .command({ type: "endHostDrawing" })
@@ -50,6 +56,9 @@ export function useBoardOverlay(rooms: RoomView[]) {
       }),
       platform().onEvent((event) => {
         if (event.type === "hostBoard" && event.room === roomRef.current) board.sendNews(event.news);
+        if (event.type === "hostPicture" && event.room === roomRef.current) {
+          board.sendPicture({ picture: event.picture, data: event.data });
+        }
       }),
     ];
     return () => {

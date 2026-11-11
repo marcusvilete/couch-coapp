@@ -9,6 +9,7 @@ import type { BoardPoint } from "../bindings/BoardPoint";
 import { LASER_MS, LINE_HEIGHT, PALETTE, PING_MS } from "../bindings/boardRules";
 import { alpha, type BoardView } from "../model/board";
 import { bounds, type Editor, lineWidth, type Measure, textSize } from "../model/editor";
+import type { PictureStore } from "./pictures";
 
 const FULL = 65535;
 const BLUE = "#4a9ff0";
@@ -35,6 +36,8 @@ export interface Painting {
   /** Ours, while drawing: the selection and the marquee show. */
   editor: Editor | null;
   names: Map<string, string>;
+  /** The board's pictures, by id (M27e). */
+  pictures?: PictureStore;
   now: number;
   /** What an input method is composing into the text box, not yet typed. */
   preedit?: string;
@@ -47,6 +50,10 @@ export function paintBoard(ctx: CanvasRenderingContext2D, width: number, height:
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   for (const shown of p.board.elements) {
+    if (shown.element.kind === "picture") {
+      paintPicture(ctx, shown.element, alpha(shown, p.now), p.pictures, place);
+      continue;
+    }
     element(ctx, shown.element, alpha(shown, p.now), height, place);
   }
   if (p.editor) {
@@ -100,6 +107,13 @@ export function paintBoard(ctx: CanvasRenderingContext2D, width: number, height:
       const [a, b] = bounds(s.element).map(place);
       roundRect(ctx, Math.min(a[0], b[0]) - 6, Math.min(a[1], b[1]) - 6, Math.abs(b[0] - a[0]) + 12, Math.abs(b[1] - a[1]) + 12, 3);
       ctx.stroke();
+    }
+    // The selected element's resize handles (M27e).
+    for (const c of p.editor.handles(p.board)) {
+      const [x, y] = place(c);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(x - 5, y - 5, 10, 10);
+      ctx.strokeRect(x - 5, y - 5, 10, 10);
     }
     const marquee = p.editor.marquee();
     if (marquee) {
@@ -162,6 +176,32 @@ export function paintBoard(ctx: CanvasRenderingContext2D, width: number, height:
     ctx.fillText(p.names.get(ping.author) ?? "Someone", x, y + height * 0.06);
     ctx.shadowBlur = 0;
   }
+}
+
+/** A picture on the board (M27e), stretched over its box, fading as any
+ * element; while it isn't decoded yet, a faint frame where it goes
+ * (`draw_ui.rs`'s `paint_picture`). */
+function paintPicture(
+  ctx: CanvasRenderingContext2D,
+  e: BoardElement,
+  a: number,
+  pictures: PictureStore | undefined,
+  place: (q: BoardPoint) => [number, number],
+) {
+  if (a <= 0 || e.points.length !== 2) return;
+  const [x0, y0] = place(e.points[0]);
+  const [x1, y1] = place(e.points[1]);
+  const image = e.picture ? pictures?.image(e.picture) : undefined;
+  ctx.save();
+  if (image) {
+    ctx.globalAlpha = a;
+    ctx.drawImage(image, x0, y0, x1 - x0, y1 - y0);
+  } else {
+    ctx.strokeStyle = `rgba(255, 255, 255, ${(a * 90) / 255})`;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0 - 1, y1 - y0 - 1);
+  }
+  ctx.restore();
 }
 
 function element(

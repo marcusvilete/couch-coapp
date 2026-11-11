@@ -7,4 +7,8 @@ export type DrawingSettingsView = {
 /**
  * Sessions start with drawing on.
  */
-on: boolean, };
+on: boolean, 
+/**
+ * ...and with pictures allowed (M27e).
+ */
+pictures: boolean, };

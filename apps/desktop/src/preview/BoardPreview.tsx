@@ -17,6 +17,7 @@ const CAIO = "cc".repeat(32);
 const NOW = 10_000;
 
 const el = (id: number, kind: BoardElement["kind"], colour: number, points: [number, number][]): BoardElement => ({
+  picture: null,
   id,
   kind,
   colour,
@@ -66,6 +67,7 @@ const NEWS: BoardNewsView[] = [
 const STATE: BoardState = {
   me: ME,
   drawing: true,
+  pictures: true,
   names: [
     [ME, "Ana"],
     [BIA, "Bia"],

@@ -15,7 +15,7 @@ use couch_proto::{
         Authored, BoardOp, COLOUR_NAMES, DEFAULT_STAY, Element, ElementKind, FADE_OUT_MS,
         FADE_STAYS, LASER_MS, LINE_HEIGHT, MAX_BATCH_ITEMS, MAX_BATCH_OPS, MAX_LASER_POINTS,
         MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, MAX_TEXT_CHARS, MAX_TEXT_LINES, PALETTE, PING_MS,
-        Point, TEXT_SIZE_NAMES, WIDTH_NAMES, WIDTHS, line_width, text_size,
+        PictureId, Point, TEXT_SIZE_NAMES, WIDTH_NAMES, WIDTHS, line_width, text_size,
     },
     ids::MemberId,
     ipc::BoardNews,
@@ -58,6 +58,7 @@ pub enum BoardElementKind {
     Rectangle,
     Ellipse,
     Text,
+    Picture,
 }
 
 /// One element on the board (`couch_proto::board::Element`).
@@ -76,6 +77,26 @@ pub struct BoardElement {
     pub points: Vec<BoardPoint>,
     /// A text box's text; empty for every other kind (M27c).
     pub text: String,
+    /// A picture's id, in hex ([`picture_hex`]); `None` for every other
+    /// kind (M27e).
+    pub picture: Option<String>,
+}
+
+/// A picture's id as the front end names it: its SHA-256 in hex.
+pub fn picture_hex(id: &PictureId) -> String {
+    id.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A picture's id from its hex; `None` if it isn't one.
+pub fn picture_from_hex(hex: &str) -> Option<PictureId> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(PictureId(id))
 }
 
 /// One thing the host does on the board, to its own elements only
@@ -163,6 +184,7 @@ impl From<ElementKind> for BoardElementKind {
             ElementKind::Rectangle => Self::Rectangle,
             ElementKind::Ellipse => Self::Ellipse,
             ElementKind::Text => Self::Text,
+            ElementKind::Picture => Self::Picture,
         }
     }
 }
@@ -177,6 +199,7 @@ impl From<BoardElementKind> for ElementKind {
             BoardElementKind::Rectangle => Self::Rectangle,
             BoardElementKind::Ellipse => Self::Ellipse,
             BoardElementKind::Text => Self::Text,
+            BoardElementKind::Picture => Self::Picture,
         }
     }
 }
@@ -193,6 +216,7 @@ impl From<&Element> for BoardElement {
             done: e.done,
             points: points(&e.points),
             text: e.text.clone(),
+            picture: e.picture.as_ref().map(picture_hex),
         }
     }
 }
@@ -209,6 +233,8 @@ impl From<&BoardElement> for Element {
             done: e.done,
             points: from_points(&e.points),
             text: e.text.clone(),
+            // A picture that names none isn't valid, and is refused.
+            picture: e.picture.as_deref().and_then(picture_from_hex),
         }
     }
 }
@@ -397,6 +423,18 @@ export const DEFAULT_STAY = {DEFAULT_STAY};
     for (name, value) in [
         ("MAX_TEXT_CHARS", MAX_TEXT_CHARS as u64),
         ("MAX_TEXT_LINES", MAX_TEXT_LINES as u64),
+        (
+            "MAX_PICTURE_BYTES",
+            couch_proto::board::MAX_PICTURE_BYTES as u64,
+        ),
+        (
+            "MAX_PICTURE_SIDE",
+            u64::from(couch_proto::board::MAX_PICTURE_SIDE),
+        ),
+        (
+            "MAX_BOARD_PICTURES",
+            couch_proto::board::MAX_BOARD_PICTURES as u64,
+        ),
         ("MAX_STROKE_POINTS", MAX_STROKE_POINTS as u64),
         ("MAX_MEMBER_ELEMENTS", MAX_MEMBER_ELEMENTS as u64),
         ("MAX_BATCH_OPS", MAX_BATCH_OPS as u64),
@@ -467,6 +505,7 @@ mod tests {
     fn ops_cross_the_boundary_unchanged() {
         let ops = vec![
             BoardOp::Put(Element {
+                picture: None,
                 id: 3,
                 kind: ElementKind::Arrow,
                 colour: 4,
@@ -478,6 +517,7 @@ mod tests {
                 text: String::new(),
             }),
             BoardOp::Put(Element {
+                picture: None,
                 id: 4,
                 kind: ElementKind::Text,
                 colour: 7,

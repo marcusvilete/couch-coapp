@@ -12,6 +12,10 @@ use crate::bytes::{Reader, Writer};
 pub mod stream_kind {
     pub const VIDEO_EPOCH: u8 = 0x01;
     pub const INPUT: u8 = 0x02;
+    /// A member's picture for the host's board (M27e, `board::PictureUpload`).
+    pub const PICTURE_UP: u8 = 0x03;
+    /// A picture's bytes from the host (M27e, `board::PictureHeader`).
+    pub const PICTURE: u8 = 0x04;
 }
 
 /// Largest access unit accepted from a peer.

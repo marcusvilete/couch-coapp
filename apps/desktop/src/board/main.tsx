@@ -9,7 +9,19 @@ import { StrictMode, useCallback, useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import type { BoardNewsView } from "../bindings/BoardNewsView";
 import { BoardSurface } from "./BoardSurface";
-import { BOARD_DONE, BOARD_NEWS, BOARD_OPS, BOARD_READY, BOARD_STATE, type BoardBatch, type BoardState } from "./events";
+import {
+  BOARD_DONE,
+  BOARD_NEWS,
+  BOARD_OPS,
+  BOARD_PICTURE,
+  BOARD_PICTURE_UP,
+  BOARD_READY,
+  BOARD_STATE,
+  type BoardBatch,
+  type BoardPicture,
+  type BoardPictureUp,
+  type BoardState,
+} from "./events";
 import "./board.css";
 import "./page.css";
 
@@ -18,6 +30,20 @@ let pending: BoardNewsView[] = [];
 let handler: ((news: BoardNewsView) => void) | null = null;
 let showState: (state: BoardState) => void = () => {};
 let lastState: BoardState | null = null;
+
+/** Pictures that came before the surface listened (M27e). */
+let pendingPictures: BoardPicture[] = [];
+let pictureHandler: ((picture: BoardPicture) => void) | null = null;
+
+function subscribePictures(next: (picture: BoardPicture) => void) {
+  pictureHandler = next;
+  const queued = pendingPictures;
+  pendingPictures = [];
+  for (const picture of queued) next(picture);
+  return () => {
+    if (pictureHandler === next) pictureHandler = null;
+  };
+}
 
 function subscribe(next: (news: BoardNewsView) => void) {
   handler = next;
@@ -31,6 +57,7 @@ function subscribe(next: (news: BoardNewsView) => void) {
 
 const send = (batch: BoardBatch) => void emit(BOARD_OPS, batch).catch(() => {});
 const done = () => void emit(BOARD_DONE).catch(() => {});
+const sendPicture = (up: BoardPictureUp) => void emit(BOARD_PICTURE_UP, up).catch(() => {});
 
 function Board() {
   const [state, setState] = useState<BoardState | null>(lastState);
@@ -39,7 +66,17 @@ function Board() {
     if (lastState) setState(lastState);
   }, []);
   const sub = useCallback(subscribe, []);
-  return <BoardSurface state={state} subscribe={sub} send={send} done={done} />;
+  const subPictures = useCallback(subscribePictures, []);
+  return (
+    <BoardSurface
+      state={state}
+      subscribe={sub}
+      send={send}
+      done={done}
+      subscribePictures={subPictures}
+      sendPicture={sendPicture}
+    />
+  );
 }
 
 // Listening first, then asking: what the main window sends isn't missed.
@@ -51,6 +88,10 @@ void Promise.all([
   listen<BoardNewsView>(BOARD_NEWS, (e) => {
     if (handler) handler(e.payload);
     else pending.push(e.payload);
+  }),
+  listen<BoardPicture>(BOARD_PICTURE, (e) => {
+    if (pictureHandler) pictureHandler(e.payload);
+    else pendingPictures.push(e.payload);
   }),
 ]).then(() => {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

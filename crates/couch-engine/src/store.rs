@@ -525,10 +525,13 @@ pub(crate) fn save_stream_window(
 }
 
 /// `drawing.json` (M27a): whether sessions start with drawing on the stream
-/// on. Off unless the user changes it.
+/// on, and with pictures allowed (M27e). Both off unless the user changes
+/// them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DrawingSettings {
     pub on: bool,
+    #[serde(default)]
+    pub pictures: bool,
 }
 
 pub(crate) fn drawing(dir: &Path) -> DrawingSettings {

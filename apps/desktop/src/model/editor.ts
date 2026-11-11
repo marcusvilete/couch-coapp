@@ -60,6 +60,13 @@ const FULL = 65535;
 const TEXT_AT: BoardPoint = { x: 6554, y: 6554 };
 export const TOO_MANY = "You've drawn all you may: erase some first";
 export const TOO_LONG = "A text box holds at most 500 characters and 50 lines";
+/** A picture's resize handles: how near a corner a press takes it, in
+ * picture heights (M27e). */
+export const HANDLE = 0.018;
+/** A picture pasted fits this share of the picture's height and width. */
+const PICTURE_FITS = 0.4;
+/** A picture resized is at least this tall and wide, in picture heights. */
+const PICTURE_LEAST = 0.03;
 
 /** How wide a line of text is, in ems of its font: a text box is that times
  * its size wide. The page measures with its own font; until it says, and in
@@ -216,7 +223,20 @@ type Gesture =
   | { kind: "move"; from: BoardPoint; originals: BoardElement[] }
   | { kind: "marquee"; from: BoardPoint; to: BoardPoint; kept: Set<number> }
   /** Dragging inside the text box being typed in: selecting. */
-  | { kind: "textSelect" };
+  | { kind: "textSelect" }
+  /** Dragging a picture's corner (M27e): the opposite corner stays, and its
+   * shape too. */
+  | { kind: "resize"; original: BoardElement; end: number; fixed: BoardPoint };
+
+/** What waits to go out, in order: operations, and pictures (M27e), which go
+ * on a stream of their own (`takePicture`), never in a batch. */
+type Out = { op: BoardOpView } | { picture: BoardElement };
+
+/** A picture element well formed: two corners, top-left then bottom-right
+ * (`Element::is_valid`'s rule for pictures). */
+function validPicture(e: BoardElement): boolean {
+  return e.points.length === 2 && e.points[0].x < e.points[1].x && e.points[0].y < e.points[1].y;
+}
 
 /** A line's width as a fraction of the picture's height. */
 export function lineWidth(kind: BoardElementKind, width: number): number {
@@ -321,7 +341,7 @@ export class Editor {
   private pastes = 0;
   private typingBox: Typing | null = null;
   private measure: Measure = estimate;
-  private outbox: BoardOpView[] = [];
+  private outbox: Out[] = [];
   /** The board's generation as last heard, and the one the queued
    * operations were made in. */
   private generation = 0;
@@ -541,6 +561,11 @@ export class Editor {
         return;
       }
       case "select": {
+        const handle = this.handleAt(at, board);
+        if (handle) {
+          this.gesture = { kind: "resize", original: handle.original, end: handle.end, fixed: handle.fixed };
+          return;
+        }
         const id = this.hit(at, board);
         if (id !== null) {
           if (shift) {
@@ -616,6 +641,12 @@ export class Editor {
         this.selected = new Set([...g.kept, ...inside]);
         return;
       }
+      case "resize": {
+        // Shown resizing here only; sent once let go.
+        const resized = this.resized(g.original, g.end, g.fixed, at, shift);
+        board.apply(this.me, [{ type: "put", element: resized }], now);
+        return;
+      }
       case "textSelect": {
         const t = this.typingBox;
         if (t) moveTo(t, this.caretAt(t, at), true);
@@ -645,6 +676,14 @@ export class Editor {
       case "laser":
       case "marquee":
       case "textSelect":
+        return;
+      case "resize":
+        if (at) {
+          this.replaceFrom([g.original], [this.resized(g.original, g.end, g.fixed, at, shift)], board, now);
+        } else {
+          // Back as it was, as shown.
+          board.apply(this.me, [{ type: "put", element: g.original }], now);
+        }
         return;
       case "erase":
         if (g.removed.length > 0) {
@@ -1005,12 +1044,27 @@ export class Editor {
    * `BATCH_EVERY_MS`), with the generation it was made in. */
   takeBatch(now: number): { generation: number; ops: BoardOpView[] } | null {
     const early = this.sentAt !== null && now - this.sentAt < BATCH_EVERY_MS;
-    if (this.outbox.length === 0 || early) return null;
+    // The operations before the first picture: it goes after them.
+    let ops = 0;
+    while (ops < this.outbox.length && "op" in this.outbox[ops]) ops++;
+    if (ops === 0 || early) return null;
     this.sentAt = now;
-    const parts = batches(this.outbox);
+    const taken = this.outbox.slice(0, ops).map((o) => ("op" in o ? o.op : null)) as BoardOpView[];
+    const rest = this.outbox.slice(ops);
+    const parts = batches(taken);
     const first = parts.shift() ?? [];
-    this.outbox = parts.flat();
+    this.outbox = [...parts.flat().map((op) => ({ op })), ...rest];
     return { generation: this.outboxGeneration, ops: first };
+  }
+
+  /** The next picture to send (M27e), with the generation it was made in,
+   * once every operation before it has gone: its bytes are the window's, by
+   * its id. */
+  takePicture(): { generation: number; element: BoardElement } | null {
+    const first = this.outbox[0];
+    if (!first || !("picture" in first)) return null;
+    this.outbox.shift();
+    return { generation: this.outboxGeneration, element: first.picture };
   }
 
   /** Whether operations wait to go out. */
@@ -1031,6 +1085,7 @@ export class Editor {
       done,
       points: [...points],
       text: "",
+      picture: null,
     };
   }
 
@@ -1211,11 +1266,21 @@ export class Editor {
   /** Applies `op` to our board and queues it, merged with the one before
    * when that is the same element's. */
   private emit(op: BoardOpView, board: BoardView, now: number) {
+    // A picture the board doesn't show as this element yet goes with its
+    // bytes (M27e); one moved or resized, as any element.
+    const upload =
+      op.type === "put" &&
+      op.element.picture !== null &&
+      board.get(this.me, op.element.id)?.element.picture !== op.element.picture;
     board.apply(this.me, [op], now);
     if (this.outbox.length === 0) this.outboxGeneration = this.generation;
+    if (upload && op.type === "put") {
+      this.outbox.push({ picture: cloneElement(op.element) });
+      return;
+    }
     const last = this.outbox[this.outbox.length - 1];
-    if (last && merge(last, op)) return;
-    this.outbox.push(copyOp(op));
+    if (last && "op" in last && merge(last.op, op)) return;
+    this.outbox.push({ op: copyOp(op) });
   }
 
   private laser(g: Gesture, at: BoardPoint, board: BoardView, now: number) {
@@ -1423,7 +1488,134 @@ export class Editor {
       // anywhere in it.
       case "text":
         return this.nearBox([e.points[0], e.points[1]], at);
+      // A picture is all of its box, for the eraser too (M27e).
+      case "picture": {
+        const [lo, hi] = bounds(e);
+        return at.x >= lo.x && at.x <= hi.x && at.y >= lo.y && at.y <= hi.y;
+      }
     }
+  }
+
+  // ---- Pictures (M27e) ----
+
+  /** A picture pasted or dropped: a new picture of ours, `width` by `height`
+   * pixels, centred at `at` (the picture's middle without it), fitting
+   * `PICTURE_FITS` of the picture each way, finished and selected. Its bytes
+   * are the window's, by `picture`. */
+  pastePicture(
+    picture: string,
+    width: number,
+    height: number,
+    at: BoardPoint | null,
+    board: BoardView,
+    now: number,
+  ) {
+    if (width <= 0 || height <= 0) return;
+    this.release(null, false, board, now);
+    this.finishTyping(board, now);
+    const id = this.newId(board);
+    if (id === null) return;
+    const ratio = width / height;
+    let [w, h] = [PICTURE_FITS * ratio, PICTURE_FITS];
+    if (w > PICTURE_FITS * this.aspect) {
+      w = PICTURE_FITS * this.aspect;
+      h = w / ratio;
+    }
+    const [cx, cy] = this.uniform(at ?? { x: 32768, y: 32768 });
+    const x = Math.max(Math.min(cx - w / 2, this.aspect - w), 0);
+    const y = Math.max(Math.min(cy - h / 2, 1 - h), 0);
+    const e = this.element(id, "picture", [this.picture(x, y), this.picture(x + w, y + h)], true);
+    e.picture = picture;
+    if (!validPicture(e)) return;
+    this.selected = new Set([id]);
+    this.tool = "select";
+    this.perform([{ id, before: null, after: e }], board, now);
+  }
+
+  /** The resize handles of our one selected element: a picture's, a
+   * rectangle's or an ellipse's corners (top-left, top-right, bottom-left,
+   * bottom-right), a line's or an arrow's two ends; none for anything else
+   * (a stroke, a text box) or a selection of several. */
+  handles(board: BoardView): BoardPoint[] {
+    if (this.selected.size !== 1) return [];
+    const [id] = [...this.selected];
+    const e = board.get(this.me, id)?.element;
+    if (!e) return [];
+    switch (e.kind) {
+      case "picture":
+      case "rectangle":
+      case "ellipse": {
+        const [lo, hi] = bounds(e);
+        return [lo, { x: hi.x, y: lo.y }, { x: lo.x, y: hi.y }, hi];
+      }
+      case "line":
+      case "arrow":
+        return e.points.map((q) => ({ x: q.x, y: q.y }));
+      default:
+        return [];
+    }
+  }
+
+  /** A press on one of those handles: the element, which handle, and the
+   * point that stays (the corner across, or the line's other end). */
+  private handleAt(
+    at: BoardPoint,
+    board: BoardView,
+  ): { original: BoardElement; end: number; fixed: BoardPoint } | null {
+    const handles = this.handles(board);
+    const pressed = handles.findIndex((c) => this.distance(c, at) <= HANDLE);
+    if (pressed < 0) return null;
+    const [id] = [...this.selected];
+    const e = board.get(this.me, id)?.element;
+    if (!e) return null;
+    return { original: cloneElement(e), end: pressed, fixed: handles[handles.length - 1 - pressed] };
+  }
+
+  /** `original` with handle `end` dragged to `at`, `fixed` staying: a
+   * picture keeps its shape (`resizedPicture`); a rectangle or an ellipse
+   * takes the box from `fixed` to `at`, a line or an arrow its new end,
+   * Shift making squares, circles and 15° steps as when drawn. */
+  private resized(original: BoardElement, end: number, fixed: BoardPoint, at: BoardPoint, shift: boolean): BoardElement {
+    const e = cloneElement(original);
+    switch (original.kind) {
+      case "picture":
+        return this.resizedPicture(original, fixed, at);
+      case "rectangle":
+      case "ellipse":
+        e.points = [{ ...fixed }, this.constrained(e.kind, fixed, at, shift)];
+        break;
+      case "line":
+      case "arrow": {
+        const moved = this.constrained(e.kind, fixed, at, shift);
+        e.points = end === 0 ? [moved, { ...fixed }] : [{ ...fixed }, moved];
+        break;
+      }
+    }
+    return e;
+  }
+
+  /** A picture with the corner across from `fixed` dragged to `at`, its
+   * shape kept, at least `PICTURE_LEAST` each way and inside the picture. */
+  private resizedPicture(original: BoardElement, fixed: BoardPoint, at: BoardPoint): BoardElement {
+    const [lo, hi] = bounds(original);
+    const [l, h] = [this.uniform(lo), this.uniform(hi)];
+    const ratio = Math.max((h[0] - l[0]) / Math.max(h[1] - l[1], 1e-7), 1e-7);
+    const [fx, fy] = this.uniform(fixed);
+    const [ax, ay] = this.uniform(at);
+    const sx = ax < fx ? -1 : 1;
+    const sy = ay < fy ? -1 : 1;
+    // As tall as the pointer asks, or as wide, whichever is more.
+    let tall = Math.max(Math.abs(ay - fy), Math.abs(ax - fx) / ratio);
+    tall = Math.max(tall, PICTURE_LEAST, PICTURE_LEAST / ratio);
+    // Inside the picture: no taller, nor wider, than there is room for.
+    const roomY = sy < 0 ? fy : 1 - fy;
+    const roomX = sx < 0 ? fx : this.aspect - fx;
+    tall = Math.min(tall, roomY, roomX / ratio);
+    const [ex, ey] = [fx + sx * tall * ratio, fy + sy * tall];
+    const e = cloneElement(original);
+    e.points = [this.picture(Math.min(fx, ex), Math.min(fy, ey)), this.picture(Math.max(fx, ex), Math.max(fy, ey))];
+    // Too small to be a box (against the picture's edge): as it was.
+    return validPicture(e) ? e : cloneElement(original);
   }
 }
 

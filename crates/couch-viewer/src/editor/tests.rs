@@ -18,6 +18,9 @@ struct Desk {
     board: BoardView,
     now: Instant,
     sent: Vec<BoardOp>,
+    /// Pictures that went with their bytes (M27e), in order, and where each
+    /// fell among the batches (the number of operations sent before it).
+    uploaded: Vec<(usize, Element)>,
 }
 
 impl Desk {
@@ -29,6 +32,7 @@ impl Desk {
             board: BoardView::default(),
             now: Instant::now(),
             sent: Vec::new(),
+            uploaded: Vec::new(),
         }
     }
 
@@ -65,10 +69,24 @@ impl Desk {
                     assert!(valid_batch(&batch), "{batch:?}");
                     self.sent.extend(batch);
                 }
-                None if !self.editor.pending() => break,
-                None => {}
+                None => match self.editor.take_picture() {
+                    // On the host it is a `Put`, taken before what follows.
+                    Some((_, e)) => {
+                        self.uploaded.push((self.sent.len(), e.clone()));
+                        self.sent.push(BoardOp::Put(e));
+                    }
+                    None if !self.editor.pending() => break,
+                    None => {}
+                },
             }
         }
+    }
+
+    /// A picture `w` by `h` pixels pasted at `at` (M27e).
+    fn paste_picture(&mut self, seed: u8, w: u32, h: u32, at: Point) {
+        let id = couch_proto::board::PictureId([seed; 32]);
+        self.editor
+            .paste_picture(id, w, h, Some(at), &mut self.board, self.now);
     }
 
     fn mine(&self) -> Vec<Element> {
@@ -174,6 +192,7 @@ fn the_eraser_takes_only_ours_and_undoes() {
     let mut d = Desk::new();
     // Bia's box, under ours.
     let theirs = Element {
+        picture: None,
         id: 1,
         kind: ElementKind::Rectangle,
         colour: 0,
@@ -228,6 +247,167 @@ fn selecting_moving_and_nudging_keep_inside_the_picture() {
     assert_eq!(d.key(DrawAction::Leave), Keyed::Done);
     assert!(d.editor.selection().is_empty());
     assert_eq!(d.key(DrawAction::Leave), Keyed::LeaveDrawing);
+}
+
+// ---- Pictures (M27e) ----
+
+/// A picture's box in picture heights, at 16:9: its width over its height.
+fn shape(e: &Element) -> f32 {
+    let w = f32::from(e.points[1].x - e.points[0].x) / 65_535.0 * 16.0 / 9.0;
+    let h = f32::from(e.points[1].y - e.points[0].y) / 65_535.0;
+    w / h
+}
+
+#[test]
+fn a_picture_goes_with_its_bytes_once_and_moves_as_any_element() {
+    let mut d = Desk::new();
+    d.tool(DrawTool::Pen);
+    d.stroke(&[p(1_000, 1_000), p(2_000, 1_500)], false);
+    d.paste_picture(7, 400, 200, p(32_768, 32_768));
+    let mine = d.mine();
+    let pic = mine.last().unwrap().clone();
+    assert_eq!(pic.kind, ElementKind::Picture);
+    assert!(pic.is_valid());
+    assert!((shape(&pic) - 2.0).abs() < 0.01, "its shape kept");
+    // Wide: 40% of the picture's width, centred where it was pasted.
+    assert_eq!(pic.points[1].x - pic.points[0].x, 26_214);
+    assert_eq!(pic.points[1].y - pic.points[0].y, 23_302);
+    assert_eq!(d.editor.selection(), &BTreeSet::from([pic.id]));
+    assert_eq!(d.editor.tool, DrawTool::Select);
+    d.send();
+    assert_eq!(d.uploaded.len(), 1);
+    assert_eq!(d.uploaded[0].1, pic);
+    assert!(d.uploaded[0].0 > 0, "after the stroke drawn before it");
+    // Moved: an ordinary `Put`, no bytes again.
+    let centre = p(32_768, 32_768);
+    d.stroke(&[centre, p(36_768, 30_768)], false);
+    d.send();
+    assert_eq!(d.uploaded.len(), 1);
+    assert_ne!(d.mine().last().unwrap().points, pic.points);
+    // Undone: back where it was, still no bytes; undone again: gone; then
+    // redone: it comes back with its bytes.
+    d.key(DrawAction::Undo);
+    d.key(DrawAction::Undo);
+    assert!(d.mine().iter().all(|e| e.kind != ElementKind::Picture));
+    d.key(DrawAction::Redo);
+    d.send();
+    assert_eq!(d.uploaded.len(), 2, "back on the board with its bytes");
+    assert_eq!(d.hosts_copy(), d.mine());
+}
+
+#[test]
+fn a_pictures_corner_resizes_it_keeping_its_shape_inside_the_picture() {
+    let mut d = Desk::new();
+    d.paste_picture(3, 300, 300, p(32_768, 32_768));
+    let pic = d.mine()[0].clone();
+    let (lo, hi) = (pic.points[0], pic.points[1]);
+    // Its bottom-right corner, dragged out: the top-left stays.
+    d.stroke(&[hi, p(hi.x + 3_000, hi.y + 9_000)], false);
+    let big = d.mine()[0].clone();
+    assert_eq!(big.points[0], lo, "the corner across stays");
+    assert!(big.points[1].y > hi.y + 8_000);
+    assert!((shape(&big) - 1.0).abs() < 0.01, "still square");
+    // Its top-left, dragged past the picture's corner: only as far as fits.
+    let big_hi = big.points[1];
+    d.stroke(&[big.points[0], p(0, 0)], false);
+    let most = d.mine()[0].clone();
+    assert_eq!(most.points[1], big_hi);
+    assert!(
+        most.points[0].x == 0 || most.points[0].y == 0,
+        "at the edge"
+    );
+    assert!((shape(&most) - 1.0).abs() < 0.01);
+    // Dragged through its fixed corner: as small as a picture may be, never
+    // turned inside out.
+    d.stroke(
+        &[most.points[0], p(big_hi.x + 2_000, big_hi.y + 2_000)],
+        false,
+    );
+    let small = d.mine()[0].clone();
+    assert!(small.is_valid());
+    d.send();
+    assert_eq!(d.uploaded.len(), 1, "resizing sends no bytes");
+    // One step each.
+    d.key(DrawAction::Undo);
+    assert_eq!(d.mine()[0], most);
+    d.send();
+    assert_eq!(d.hosts_copy(), d.mine());
+}
+
+#[test]
+fn a_boxs_corner_resizes_it_freely_and_shift_makes_it_square() {
+    let mut d = Desk::new();
+    d.tool(DrawTool::Rectangle);
+    d.stroke(&[p(10_000, 10_000), p(20_000, 16_000)], false);
+    d.tool(DrawTool::Select);
+    d.stroke(&[p(15_000, 10_000)], false);
+    assert_eq!(d.editor.handles(&d.board).len(), 4, "its four corners");
+    // The bottom-right corner, dragged: the top-left stays, any shape.
+    d.stroke(&[p(20_000, 16_000), p(30_000, 18_000)], false);
+    let e = d.mine()[0].clone();
+    assert_eq!(e.points, [p(10_000, 10_000), p(30_000, 18_000)]);
+    // The top-left, with Shift: a square from the bottom-right.
+    d.stroke(&[p(10_000, 10_000), p(25_000, 5_000)], true);
+    let e = d.mine()[0].clone();
+    assert_eq!(e.points[0], p(30_000, 18_000), "the corner across stays");
+    let w = f32::from(e.points[0].x - e.points[1].x) / 65_535.0 * 16.0 / 9.0;
+    let h = f32::from(e.points[0].y - e.points[1].y) / 65_535.0;
+    assert!((w - h).abs() < 0.001, "square: {w} by {h}");
+    // A stroke and a text box have none.
+    d.tool(DrawTool::Pen);
+    d.stroke(&[p(40_000, 40_000), p(42_000, 41_000)], false);
+    d.key(DrawAction::SelectAll);
+    assert!(d.editor.handles(&d.board).is_empty(), "several selected");
+    d.send();
+    assert_eq!(d.hosts_copy(), d.mine());
+}
+
+#[test]
+fn a_lines_ends_move_by_their_handles_and_shift_steps_the_angle() {
+    let mut d = Desk::new();
+    d.tool(DrawTool::Arrow);
+    d.stroke(&[p(10_000, 30_000), p(30_000, 30_000)], false);
+    d.tool(DrawTool::Select);
+    d.stroke(&[p(20_000, 30_000)], false);
+    assert_eq!(
+        d.editor.handles(&d.board),
+        [p(10_000, 30_000), p(30_000, 30_000)],
+        "its two ends"
+    );
+    // Its end moved: its start stays, and it is still an arrow from it.
+    d.stroke(&[p(30_000, 30_000), p(31_000, 20_000)], false);
+    let e = d.mine()[0].clone();
+    assert_eq!(e.points, [p(10_000, 30_000), p(31_000, 20_000)]);
+    // Its start, with Shift: level with its end (0° from it).
+    d.stroke(&[p(10_000, 30_000), p(12_000, 20_500)], true);
+    let e = d.mine()[0].clone();
+    assert_eq!(e.points[1], p(31_000, 20_000), "the other end stays");
+    assert!(e.points[0].y.abs_diff(20_000) <= 1, "{:?}", e.points[0]);
+    // One step each.
+    d.key(DrawAction::Undo);
+    assert_eq!(d.mine()[0].points, [p(10_000, 30_000), p(31_000, 20_000)]);
+    d.send();
+    assert_eq!(d.hosts_copy(), d.mine());
+}
+
+#[test]
+fn the_eraser_takes_a_picture_anywhere_in_it_and_an_undo_brings_its_bytes() {
+    let mut d = Desk::new();
+    d.paste_picture(5, 640, 480, p(20_000, 20_000));
+    let pic = d.mine()[0].clone();
+    d.send();
+    d.tool(DrawTool::Eraser);
+    let inside = p(
+        (pic.points[0].x + pic.points[1].x) / 2,
+        (pic.points[0].y + pic.points[1].y) / 2,
+    );
+    d.stroke(&[inside], false);
+    assert!(d.mine().is_empty());
+    d.key(DrawAction::Undo);
+    assert_eq!(d.mine(), vec![pic]);
+    d.send();
+    assert_eq!(d.uploaded.len(), 2);
+    assert_eq!(d.hosts_copy(), d.mine());
 }
 
 #[test]
@@ -395,6 +575,7 @@ fn what_was_made_before_a_clear_goes_with_the_generation_it_was_made_in() {
 fn a_stroke_left_open_by_a_crash_is_finished() {
     let mut d = Desk::new();
     let open = Element {
+        picture: None,
         id: 5,
         kind: ElementKind::Pen,
         colour: 0,
@@ -466,6 +647,7 @@ fn what_the_host_cleared_leaves_the_history() {
     d.board.apply(
         ME,
         &[BoardOp::Put(Element {
+            picture: None,
             id: 41,
             kind: ElementKind::Line,
             colour: 0,
@@ -739,6 +921,7 @@ fn editing_a_box_changes_it_as_one_step() {
     assert_eq!(d.mine()[0].text, ">Hello!");
     // The Text tool's click on our box edits it too; on theirs, a new one.
     let theirs = Element {
+        picture: None,
         id: 9,
         kind: ElementKind::Text,
         colour: 0,
@@ -851,6 +1034,7 @@ fn a_text_box_left_open_is_finished_whole_and_a_clear_ends_typing() {
     let mut d = Desk::new();
     // As a window started again finds it: being typed.
     let open = Element {
+        picture: None,
         id: 3,
         kind: ElementKind::Text,
         colour: 0,

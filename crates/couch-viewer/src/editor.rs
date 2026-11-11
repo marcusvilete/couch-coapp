@@ -25,8 +25,8 @@ use couch_input::shortcuts::{DrawAction, DrawTool};
 use couch_proto::{
     board::{
         BoardOp, DEFAULT_STAY, Element, ElementKind, FADE_STAYS, LINE_HEIGHT, MAX_LASER_POINTS,
-        MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, MAX_TEXT_CHARS, MAX_TEXT_LINES, PALETTE, Point,
-        WIDTHS, batches, clean_text, line_width, text_size, valid_text,
+        MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, MAX_TEXT_CHARS, MAX_TEXT_LINES, PALETTE, PictureId,
+        Point, WIDTHS, batches, clean_text, line_width, text_size, valid_text,
     },
     ids::MemberId,
 };
@@ -52,6 +52,13 @@ const PASTE_STEP: i32 = 1_300;
 const TEXT_AT: Point = Point::new(6_554, 6_554);
 pub const TOO_MANY: &str = "You've drawn all you may: erase some first";
 pub const TOO_LONG: &str = "A text box holds at most 500 characters and 50 lines";
+/// A picture's resize handles: how near a corner a press takes it, in
+/// picture heights (M27e).
+pub const HANDLE: f32 = 0.018;
+/// A picture pasted fits this share of the picture's height and width.
+const PICTURE_FITS: f32 = 0.4;
+/// A picture resized is at least this tall and wide, in picture heights.
+const PICTURE_LEAST: f32 = 0.03;
 
 /// How wide a line of text is, in ems of its font: a text box is that times
 /// its size wide. The window measures with its own font; until it says, and
@@ -219,6 +226,22 @@ enum Gesture {
     },
     /// Dragging inside the text box being typed in: selecting.
     TextSelect,
+    /// Dragging a handle (M27e): a picture's, a box's or an ellipse's corner,
+    /// or a line's end; `fixed`, across from it, stays.
+    Resize {
+        original: Element,
+        end: usize,
+        fixed: Point,
+    },
+}
+
+/// What waits to go out, in order: operations, and pictures (M27e), which
+/// go on a stream of their own (`take_picture`), never in a batch.
+#[derive(Debug, Clone, PartialEq)]
+enum Out {
+    Op(BoardOp),
+    /// A picture put on the board: new, or back (an undo, a redo, a copy).
+    Picture(Element),
 }
 
 #[derive(Debug)]
@@ -248,7 +271,7 @@ pub struct Editor {
     pastes: i32,
     typing: Option<Typing>,
     measure: Measure,
-    outbox: Vec<BoardOp>,
+    outbox: Vec<Out>,
     /// The board's generation as last heard, and the one the queued
     /// operations were made in: sent with it, so ops made before a clear
     /// are refused by the host (and our own set right), never taken after.
@@ -569,6 +592,13 @@ impl Editor {
                 Some(Gesture::Erase { removed })
             }
             DrawTool::Text => None,
+            DrawTool::Select if let Some((original, end, fixed)) = self.handle_at(at, board) => {
+                Some(Gesture::Resize {
+                    original,
+                    end,
+                    fixed,
+                })
+            }
             DrawTool::Select => match self.hit(at, board) {
                 Some(id) => {
                     if shift {
@@ -679,6 +709,15 @@ impl Editor {
                     .collect();
                 self.selection = kept.union(&inside).copied().collect();
             }
+            Gesture::Resize {
+                original,
+                end,
+                fixed,
+            } => {
+                // Shown resizing here only; sent once let go.
+                let resized = self.resized(original, *end, *fixed, at, shift);
+                board.apply(self.me, &[BoardOp::Put(resized)], now);
+            }
             Gesture::TextSelect => {
                 let caret = self.typing.as_ref().map(|t| self.caret_at(t, at));
                 if let (Some(caret), Some(t)) = (caret, &mut self.typing) {
@@ -717,6 +756,18 @@ impl Editor {
                 self.finish(vec![id], board);
             }
             Gesture::Laser { .. } | Gesture::Marquee { .. } | Gesture::TextSelect => {}
+            Gesture::Resize {
+                original,
+                end,
+                fixed,
+            } => match at {
+                Some(at) => {
+                    let resized = self.resized(&original, end, fixed, at, shift);
+                    self.replace_from(vec![original], vec![resized], board, now);
+                }
+                // Back as it was, as shown.
+                None => board.apply(self.me, &[BoardOp::Put(original)], now),
+            },
             Gesture::Erase { removed } => {
                 if !removed.is_empty() {
                     self.record(
@@ -1219,14 +1270,42 @@ impl Editor {
         let early = self
             .sent_at
             .is_some_and(|t| now.saturating_duration_since(t) < BATCH_EVERY);
-        if self.outbox.is_empty() || early {
+        // The operations before the first picture: it goes after them.
+        let ops = self
+            .outbox
+            .iter()
+            .take_while(|o| matches!(o, Out::Op(_)))
+            .count();
+        if ops == 0 || early {
             return None;
         }
         self.sent_at = Some(now);
-        let mut parts = batches(std::mem::take(&mut self.outbox));
+        let rest = self.outbox.split_off(ops);
+        let taken: Vec<BoardOp> = std::mem::take(&mut self.outbox)
+            .into_iter()
+            .filter_map(|o| match o {
+                Out::Op(op) => Some(op),
+                Out::Picture(_) => None,
+            })
+            .collect();
+        let mut parts = batches(taken);
         let first = parts.remove(0);
-        self.outbox = parts.concat();
+        self.outbox = parts.concat().into_iter().map(Out::Op).collect();
+        self.outbox.extend(rest);
         Some((self.outbox_generation, first))
+    }
+
+    /// The next picture to send (M27e), with the generation it was made in,
+    /// once every operation before it has gone: its bytes are the window's,
+    /// by its id.
+    pub fn take_picture(&mut self) -> Option<(u32, Element)> {
+        if !matches!(self.outbox.first(), Some(Out::Picture(_))) {
+            return None;
+        }
+        match self.outbox.remove(0) {
+            Out::Picture(e) => Some((self.outbox_generation, e)),
+            Out::Op(_) => None,
+        }
     }
 
     /// Whether operations wait to go out.
@@ -1239,6 +1318,7 @@ impl Editor {
 
     fn element(&self, id: u32, kind: ElementKind, points: Vec<Point>, done: bool) -> Element {
         Element {
+            picture: None,
             id,
             kind,
             colour: self.colour,
@@ -1478,16 +1558,29 @@ impl Editor {
     /// Applies `op` to our board and queues it, merged with the one before
     /// when that is the same element's.
     fn emit(&mut self, op: BoardOp, board: &mut BoardView, now: Instant) {
+        // A picture the board doesn't show as this element yet goes with
+        // its bytes (M27e); one moved or resized, as any element.
+        let upload = match &op {
+            BoardOp::Put(e) if e.picture.is_some() => board
+                .get(self.me, e.id)
+                .is_none_or(|s| s.element.picture != e.picture),
+            _ => false,
+        };
         board.apply(self.me, std::slice::from_ref(&op), now);
         if self.outbox.is_empty() {
             self.outbox_generation = self.generation;
         }
-        if let Some(last) = self.outbox.last_mut()
+        if upload {
+            let BoardOp::Put(e) = op else { unreachable!() };
+            self.outbox.push(Out::Picture(e));
+            return;
+        }
+        if let Some(Out::Op(last)) = self.outbox.last_mut()
             && merge(last, &op)
         {
             return;
         }
-        self.outbox.push(op);
+        self.outbox.push(Out::Op(op));
     }
 
     fn laser(&mut self, gesture: &mut Gesture, at: Point, board: &mut BoardView, now: Instant) {
@@ -1779,7 +1872,169 @@ impl Editor {
             // Its box, as its author measured it: the eraser too touches
             // text anywhere in it.
             ElementKind::Text => self.near_box((e.points[0], e.points[1]), at),
+            // A picture is all of its box, for the eraser too (M27e).
+            ElementKind::Picture => {
+                let (lo, hi) = bounds(e);
+                at.x >= lo.x && at.x <= hi.x && at.y >= lo.y && at.y <= hi.y
+            }
         }
+    }
+
+    // ---- Pictures (M27e) ----
+
+    /// A picture pasted or dropped: a new picture of ours, `width` by
+    /// `height` pixels, centred at `at` (the picture's middle without it),
+    /// fitting [`PICTURE_FITS`] of the picture each way, finished and
+    /// selected. Its bytes are the window's, by `picture`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paste_picture(
+        &mut self,
+        picture: PictureId,
+        width: u32,
+        height: u32,
+        at: Option<Point>,
+        board: &mut BoardView,
+        now: Instant,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.release(None, false, board, now);
+        self.finish_typing(board, now);
+        let Some(id) = self.new_id(board) else {
+            return;
+        };
+        let ratio = width as f32 / height as f32;
+        let (mut w, mut h) = (PICTURE_FITS * ratio, PICTURE_FITS);
+        if w > PICTURE_FITS * self.aspect {
+            w = PICTURE_FITS * self.aspect;
+            h = w / ratio;
+        }
+        let (cx, cy) = self.uniform(at.unwrap_or(Point::new(32_768, 32_768)));
+        let x = (cx - w / 2.0).min(self.aspect - w).max(0.0);
+        let y = (cy - h / 2.0).min(1.0 - h).max(0.0);
+        let mut e = self.element(
+            id,
+            ElementKind::Picture,
+            vec![self.picture(x, y), self.picture(x + w, y + h)],
+            true,
+        );
+        e.picture = Some(picture);
+        if !e.is_valid() {
+            return;
+        }
+        self.selection = BTreeSet::from([id]);
+        self.tool = DrawTool::Select;
+        self.perform(
+            vec![Change {
+                id,
+                before: None,
+                after: Some(e),
+            }],
+            board,
+            now,
+        );
+    }
+
+    /// The resize handles of our one selected element: a picture's, a
+    /// rectangle's or an ellipse's corners (top-left, top-right, bottom-left,
+    /// bottom-right), a line's or an arrow's two ends; none for anything else
+    /// (a stroke, a text box) or a selection of several.
+    pub fn handles(&self, board: &BoardView) -> Vec<Point> {
+        if self.selection.len() != 1 {
+            return Vec::new();
+        }
+        let Some(e) = self
+            .selection
+            .first()
+            .and_then(|id| board.get(self.me, *id))
+            .map(|s| &s.element)
+        else {
+            return Vec::new();
+        };
+        match e.kind {
+            ElementKind::Picture | ElementKind::Rectangle | ElementKind::Ellipse => {
+                let (lo, hi) = bounds(e);
+                vec![lo, Point::new(hi.x, lo.y), Point::new(lo.x, hi.y), hi]
+            }
+            ElementKind::Line | ElementKind::Arrow => e.points.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A press on one of those handles: the element, which handle, and the
+    /// point that stays (the corner across, or the line's other end).
+    fn handle_at(&self, at: Point, board: &BoardView) -> Option<(Element, usize, Point)> {
+        let handles = self.handles(board);
+        let pressed = handles
+            .iter()
+            .position(|c| self.distance(*c, at) <= HANDLE)?;
+        let id = *self.selection.first()?;
+        let original = board.get(self.me, id)?.element.clone();
+        let fixed = handles[handles.len() - 1 - pressed];
+        Some((original, pressed, fixed))
+    }
+
+    /// `original` with handle `end` dragged to `at`, `fixed` staying: a
+    /// picture keeps its shape ([`Self::resized_picture`]); a rectangle or
+    /// an ellipse takes the box from `fixed` to `at`, a line or an arrow its
+    /// new end, Shift making squares, circles and 15° steps as when drawn.
+    fn resized(
+        &self,
+        original: &Element,
+        end: usize,
+        fixed: Point,
+        at: Point,
+        shift: bool,
+    ) -> Element {
+        let mut e = original.clone();
+        match original.kind {
+            ElementKind::Picture => return self.resized_picture(original, fixed, at),
+            ElementKind::Rectangle | ElementKind::Ellipse => {
+                e.points = vec![fixed, self.constrained(e.kind, fixed, at, shift)];
+            }
+            ElementKind::Line | ElementKind::Arrow => {
+                let moved = self.constrained(e.kind, fixed, at, shift);
+                e.points = if end == 0 {
+                    vec![moved, fixed]
+                } else {
+                    vec![fixed, moved]
+                };
+            }
+            _ => {}
+        }
+        e
+    }
+
+    /// A picture with the corner across from `fixed` dragged to `at`, its
+    /// shape kept, at least [`PICTURE_LEAST`] each way and inside the
+    /// picture.
+    fn resized_picture(&self, original: &Element, fixed: Point, at: Point) -> Element {
+        let (lo, hi) = bounds(original);
+        let (l, h) = (self.uniform(lo), self.uniform(hi));
+        let ratio = ((h.0 - l.0) / (h.1 - l.1).max(f32::EPSILON)).max(f32::EPSILON);
+        let (fx, fy) = self.uniform(fixed);
+        let (ax, ay) = self.uniform(at);
+        let sx = if ax < fx { -1.0 } else { 1.0 };
+        let sy = if ay < fy { -1.0 } else { 1.0 };
+        // As tall as the pointer asks, or as wide, whichever is more.
+        let mut tall = (ay - fy).abs().max((ax - fx).abs() / ratio);
+        tall = tall.max(PICTURE_LEAST).max(PICTURE_LEAST / ratio);
+        // Inside the picture: no taller, nor wider, than there is room for.
+        let room_y = if sy < 0.0 { fy } else { 1.0 - fy };
+        let room_x = if sx < 0.0 { fx } else { self.aspect - fx };
+        tall = tall.min(room_y).min(room_x / ratio);
+        let (ex, ey) = (fx + sx * tall * ratio, fy + sy * tall);
+        let mut e = original.clone();
+        e.points = vec![
+            self.picture(fx.min(ex), fy.min(ey)),
+            self.picture(fx.max(ex), fy.max(ey)),
+        ];
+        // Too small to be a box (against the picture's edge): as it was.
+        if !e.is_valid() {
+            return original.clone();
+        }
+        e
     }
 }
 

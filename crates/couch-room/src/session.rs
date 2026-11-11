@@ -48,7 +48,10 @@ use std::{
 };
 
 use couch_proto::{
-    board::{BoardCleared, BoardOp, BoardRefused, BoardSnapshot, BoardState, BoardUpdate, Refusal},
+    board::{
+        BoardCleared, BoardOp, BoardRefused, BoardSnapshot, BoardState, BoardUpdate, Element,
+        PictureAnswer, PictureId, Refusal,
+    },
     control::ControlMessage,
     ids::{MemberId, Permissions, SeatId, SessionId},
     ipc::BoardNews,
@@ -59,7 +62,7 @@ use couch_proto::{
     },
 };
 
-use crate::board::Board;
+use crate::board::{Board, PictureBytes};
 
 /// What a board message says to a window ([`BoardNews`]), for the host's
 /// own overlay (M27b): updates, snapshots, clears and refusals. The board's
@@ -186,6 +189,20 @@ pub enum Effect {
     /// it, since both draw as the host. Never on the wire, and never back to
     /// the window that drew it (its points would be added twice).
     HostDrew(BoardNews),
+    /// A picture's bytes for `to` (M27e), on a picture stream of its own:
+    /// each viewer gets each picture on the board once, as it is put there
+    /// or the viewer starts watching. Never through the control stream.
+    SendPicture {
+        to: MemberId,
+        picture: PictureId,
+        bytes: PictureBytes,
+    },
+    /// A picture's bytes for the host's own windows (M27e): never on the
+    /// wire.
+    HostPicture {
+        picture: PictureId,
+        bytes: PictureBytes,
+    },
 }
 
 /// One host controller's seat (M23): the seat it last played, which comes
@@ -270,6 +287,10 @@ pub struct HostSession {
     /// When a laser point or ping last passed: the host's overlay shows it
     /// a while, though nothing is on the board.
     last_mark: Option<Instant>,
+    /// The pictures each viewer has, sent or its own (M27e), and the host's
+    /// windows' under its own id: each gets a picture once while it is on
+    /// the board.
+    pictures_sent: BTreeMap<MemberId, BTreeSet<PictureId>>,
 }
 
 /// A refused member gets its own elements back at most this often (M27a).
@@ -342,6 +363,7 @@ impl HostSession {
             board_now: None,
             me: None,
             last_mark: None,
+            pictures_sent: BTreeMap::new(),
         })
     }
 
@@ -741,6 +763,7 @@ impl HostSession {
         // What it drew stays until the host clears it; a stroke it was
         // drawing is finished for the others, so a fading one fades.
         self.board.forget_rates(member);
+        self.pictures_sent.remove(&member);
         self.resync_due.remove(&member);
         self.resynced.remove(&member);
         // No clock here: the time last heard (a stroke is only open after a
@@ -1364,6 +1387,7 @@ impl HostSession {
             session: self.id,
             on: self.board.is_on(),
             stopped: self.board.stopped(),
+            pictures: self.board.pictures_on(),
         })
     }
 
@@ -1402,10 +1426,21 @@ impl HostSession {
             return Vec::new();
         };
         self.board.new_generation(me);
-        BoardSnapshot::parts(self.id, self.board.generation_of(me), self.board.snapshot())
+        let mut fx: Vec<Effect> =
+            BoardSnapshot::parts(self.id, self.board.generation_of(me), self.board.snapshot())
+                .into_iter()
+                .map(|part| Effect::HostBoard(BoardNews::Snapshot(part)))
+                .collect();
+        // Its pictures, every one: a window that opens has none (M27e).
+        self.pictures_sent.remove(&me);
+        let all: Vec<Element> = self
+            .board
+            .snapshot()
             .into_iter()
-            .map(|part| Effect::HostBoard(BoardNews::Snapshot(part)))
-            .collect()
+            .map(|a| a.element)
+            .collect();
+        fx.extend(self.pictures_for(me, &all));
+        fx
     }
 
     /// The board whole, in the host's generation as it is (M27d): for the
@@ -1448,6 +1483,8 @@ impl HostSession {
     /// must be dropped here too, not taken).
     fn board_for(&mut self, member: MemberId) -> Vec<Effect> {
         self.board.new_generation(member);
+        // A snapshot: the window starts afresh, its pictures too.
+        self.pictures_sent.remove(&member);
         let mut fx = vec![Effect::Send {
             to: member,
             message: self.board_state(),
@@ -1464,7 +1501,54 @@ impl HostSession {
                 message: ControlMessage::BoardSnapshot(part),
             }),
         );
+        let all: Vec<Element> = self
+            .board
+            .snapshot()
+            .into_iter()
+            .map(|a| a.element)
+            .collect();
+        fx.extend(self.pictures_for(member, &all));
         fx
+    }
+
+    /// The pictures `elements` show that `member` hasn't got yet (M27e): to
+    /// a viewer on picture streams, to the host's own windows as
+    /// [`Effect::HostPicture`].
+    fn pictures_for(&mut self, member: MemberId, elements: &[Element]) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        for picture in elements.iter().filter_map(|e| e.picture) {
+            let Some(bytes) = self.board.picture(&picture).cloned() else {
+                continue;
+            };
+            if !self
+                .pictures_sent
+                .entry(member)
+                .or_default()
+                .insert(picture)
+            {
+                continue;
+            }
+            fx.push(if self.me == Some(member) {
+                Effect::HostPicture { picture, bytes }
+            } else {
+                Effect::SendPicture {
+                    to: member,
+                    picture,
+                    bytes,
+                }
+            });
+        }
+        fx
+    }
+
+    /// Every picture on the board, for a window of the host's that opens
+    /// (M27e): it has none yet.
+    pub fn host_pictures(&self) -> Vec<(PictureId, PictureBytes)> {
+        self.board
+            .picture_ids()
+            .into_iter()
+            .filter_map(|id| self.board.picture(&id).map(|b| (id, b.clone())))
+            .collect()
     }
 
     /// A viewer's batch of its own operations, made in `generation`: taken
@@ -1527,6 +1611,159 @@ impl HostSession {
                 vec![self.to_member(member, refused)]
             }
         }
+    }
+
+    /// A member's picture, made in `generation` (M27e): `element` with
+    /// `bytes`, which the engine has checked decode as a picture within the
+    /// limits. Taken under the same checks as [`Self::draw`] and the
+    /// pictures' own (`Board::put_picture`).
+    ///
+    /// A viewer is always answered ([`PictureAnswer`], stale ones too): its
+    /// engine holds its later batches until then. Taken, the element goes to
+    /// everyone else as a `Put`, and its bytes to each who hasn't got them;
+    /// refused, it gets its own elements back as after a refused batch. The
+    /// host's own picture is answered by the engine, which called this; its
+    /// refusal goes to its windows as any refusal does.
+    pub fn put_picture(
+        &mut self,
+        member: MemberId,
+        generation: u32,
+        element: Element,
+        bytes: &PictureBytes,
+        now: Instant,
+    ) -> Vec<Effect> {
+        if self.ended || !self.draws_here(member) {
+            return Vec::new();
+        }
+        self.board_now = Some(now);
+        let id = element.id;
+        let blocked = self.drawing_blocked(member);
+        let answer = |refusal| Effect::Send {
+            to: member,
+            message: ControlMessage::PictureAnswer(PictureAnswer {
+                session: self.id,
+                id,
+                refusal,
+            }),
+        };
+        let host = self.me == Some(member);
+        // Pictures gone from the board since they were sent are sent again
+        // if this brings them back.
+        let on_board: BTreeSet<PictureId> = self.board.picture_ids().into_iter().collect();
+        for sent in self.pictures_sent.values_mut() {
+            sent.retain(|p| on_board.contains(p));
+        }
+        match self
+            .board
+            .put_picture(member, generation, element.clone(), bytes, now, blocked)
+        {
+            Ok(taken) => {
+                self.board_changed |= taken.counts_changed;
+                // The author has its own; the host's other window hasn't.
+                if !host {
+                    self.pictures_sent
+                        .entry(member)
+                        .or_default()
+                        .extend(element.picture);
+                }
+                let update = ControlMessage::BoardUpdate(BoardUpdate {
+                    session: self.id,
+                    author: member,
+                    ops: vec![BoardOp::Put(element.clone())],
+                });
+                let mut fx = Vec::new();
+                if !host {
+                    fx.push(answer(None));
+                }
+                // The bytes before the element that shows them: a window
+                // shows the element once both are there, in either order.
+                let shown = [element];
+                for viewer in self.viewers.clone() {
+                    if viewer != member {
+                        fx.extend(self.pictures_for(viewer, &shown));
+                    }
+                }
+                if let Some(me) = self.me {
+                    fx.extend(self.pictures_for(me, &shown));
+                }
+                fx.extend(self.to_board(&update, Some(member)));
+                if host && let Some(news) = news_of(&update) {
+                    fx.push(Effect::HostDrew(news));
+                }
+                fx
+            }
+            Err(Refusal::Stale) if host => Vec::new(),
+            Err(Refusal::Stale) => vec![answer(Some(Refusal::Stale))],
+            Err(why) => {
+                self.resync_due.entry(member).or_insert(now);
+                if host {
+                    let refused = ControlMessage::BoardRefused(BoardRefused {
+                        session: self.id,
+                        why,
+                    });
+                    vec![self.to_member(member, refused)]
+                } else {
+                    vec![answer(Some(why))]
+                }
+            }
+        }
+    }
+
+    /// A member's picture refused before the board saw it (M27e): bytes that
+    /// aren't a picture the board takes. Answered as any refused picture:
+    /// a viewer on the wire, the host's windows as a refusal; its own
+    /// elements back at the next tick.
+    pub fn refuse_picture(
+        &mut self,
+        member: MemberId,
+        id: u32,
+        why: Refusal,
+        now: Instant,
+    ) -> Vec<Effect> {
+        if self.ended || !self.draws_here(member) {
+            return Vec::new();
+        }
+        self.resync_due.entry(member).or_insert(now);
+        if self.me == Some(member) {
+            let refused = ControlMessage::BoardRefused(BoardRefused {
+                session: self.id,
+                why,
+            });
+            vec![self.to_member(member, refused)]
+        } else {
+            vec![Effect::Send {
+                to: member,
+                message: ControlMessage::PictureAnswer(PictureAnswer {
+                    session: self.id,
+                    id,
+                    refusal: Some(why),
+                }),
+            }]
+        }
+    }
+
+    /// Pictures allowed or not (M27e), a switch of the host's, off by
+    /// default. Off takes every picture off the board, for everyone, its
+    /// author included.
+    pub fn set_pictures(&mut self, on: bool) -> Vec<Effect> {
+        if self.ended {
+            return Vec::new();
+        }
+        let (changed, removed) = self.board.set_pictures(on);
+        if !changed {
+            return Vec::new();
+        }
+        let mut fx = self.to_viewers(&self.board_state(), None);
+        for (author, ids) in removed {
+            let update = ControlMessage::BoardUpdate(BoardUpdate {
+                session: self.id,
+                author,
+                ops: vec![BoardOp::Remove(ids)],
+            });
+            fx.extend(self.to_board(&update, None));
+        }
+        fx.push(Effect::Changed);
+        fx
     }
 
     /// `member`'s own elements back to it, as the host has them, in a new

@@ -57,6 +57,21 @@ pub const MAX_LASER_POINTS: usize = 64;
 pub const MAX_BATCHES_PER_SEC: u32 = 40;
 pub const MAX_MARKS_PER_SEC: u32 = 60;
 
+/// A picture's encoded bytes at most (M27e): the sender re-encodes to stay
+/// under ([`MAX_PICTURE_SIDE`], PNG or JPEG).
+pub const MAX_PICTURE_BYTES: usize = 1024 * 1024;
+/// A picture's longer side at most, in pixels; the sender scales down to it.
+pub const MAX_PICTURE_SIDE: u32 = 1_280;
+/// Pictures' bytes on the board, everyone's.
+pub const MAX_BOARD_PICTURE_BYTES: usize = 8 * 1024 * 1024;
+/// Pictures one member may have on the board.
+pub const MAX_MEMBER_PICTURES: usize = 3;
+/// Pictures on the board, everyone's: what every window holds decoded (at
+/// most 6.5 MB each).
+pub const MAX_BOARD_PICTURES: usize = 16;
+/// A picture stream's header at most ([`write_header`]).
+pub const MAX_PICTURE_HEADER: usize = 512;
+
 /// How long a fading element may stay after it is finished, in seconds: its
 /// author picks one per element (wire revision 16, the author's request in
 /// M27b's run)...
@@ -89,8 +104,24 @@ impl Point {
     }
 }
 
+/// A picture's id: the SHA-256 of its encoded bytes (M27e). Windows keep
+/// pictures by it, so the bytes and the elements showing them may arrive in
+/// any order, and whoever receives the bytes checks them against it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PictureId(pub [u8; 32]);
+
+impl std::fmt::Debug for PictureId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PictureId(")?;
+        for b in &self.0[..4] {
+            write!(f, "{b:02x}")?;
+        }
+        write!(f, "..)")
+    }
+}
+
 /// What an element is (M27a; text boxes M27c, wire revision 17; pictures
-/// come later, with a revision of their own).
+/// M27e, wire revision 18).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ElementKind {
     /// A freehand line, drawn as it goes: points may follow ([`BoardOp::Append`]).
@@ -108,6 +139,11 @@ pub enum ElementKind {
     /// other windows' fonts may differ a little, so it says where the box
     /// is for picking and moving, never how the text is laid out.
     Text,
+    /// A picture (M27e, wire revision 18): its [`Element::picture`], shown
+    /// stretched from its first point, the top-left corner, to its second,
+    /// the bottom-right one. Its bytes travel on picture streams of their
+    /// own ([`PictureUpload`], [`PictureHeader`]), never the control stream.
+    Picture,
 }
 
 impl ElementKind {
@@ -196,23 +232,36 @@ pub struct Element {
     /// A text box's text ([`valid_text`]); empty for every other kind
     /// (wire revision 17).
     pub text: String,
+    /// A picture's bytes, by their hash; `None` for every other kind (wire
+    /// revision 18).
+    pub picture: Option<PictureId>,
 }
 
 impl Element {
     /// Well formed on its own: a colour, width and stay that exist, a stroke
     /// of 1 to [`MAX_STROKE_POINTS`] points, a shape of exactly two,
-    /// finished, a text box of two with its text; text only in a text box.
+    /// finished, a text box of two with its text; text only in a text box;
+    /// a picture of two corners, top-left then bottom-right, finished, with
+    /// its picture, and a picture only there.
     pub fn is_valid(&self) -> bool {
         let shape = match self.kind {
             ElementKind::Pen | ElementKind::Highlighter => {
                 (1..=MAX_STROKE_POINTS).contains(&self.points.len()) && self.text.is_empty()
             }
             ElementKind::Text => self.points.len() == 2 && valid_text(&self.text),
+            ElementKind::Picture => {
+                self.points.len() == 2
+                    && self.points[0].x < self.points[1].x
+                    && self.points[0].y < self.points[1].y
+                    && self.done
+                    && self.text.is_empty()
+            }
             _ => self.points.len() == 2 && self.done && self.text.is_empty(),
         };
         usize::from(self.colour) < PALETTE.len()
             && usize::from(self.width) < WIDTHS
             && FADE_STAYS.contains(&self.stay)
+            && (self.kind == ElementKind::Picture) == self.picture.is_some()
             && shape
     }
 
@@ -431,6 +480,8 @@ pub struct BoardState {
     pub session: SessionId,
     pub on: bool,
     pub stopped: Vec<MemberId>,
+    /// The host allows pictures on the board (M27e, wire revision 18).
+    pub pictures: bool,
 }
 
 impl BoardState {
@@ -465,6 +516,13 @@ pub enum Refusal {
     Stale,
     /// Nothing is streamed: no picture to draw on.
     NoStream,
+    /// The host doesn't allow pictures (M27e).
+    PicturesOff,
+    /// A picture that isn't one the board takes: not PNG or JPEG, too
+    /// large, or not what its id says.
+    BadPicture,
+    /// This member has all the pictures it may, or the board all it takes.
+    TooManyPictures,
 }
 
 impl Refusal {
@@ -481,6 +539,9 @@ impl Refusal {
             Self::Invalid => "The host couldn't take that drawing",
             Self::Stale => "The board was cleared",
             Self::NoStream => "Nothing is streamed to draw on",
+            Self::PicturesOff => "The host doesn't allow pictures",
+            Self::BadPicture => "That picture can't go on the board",
+            Self::TooManyPictures => "No room for more pictures: erase one first",
         }
     }
 }
@@ -492,12 +553,87 @@ pub struct BoardRefused {
     pub why: Refusal,
 }
 
+/// The header of a member's picture stream to the host
+/// (`media::stream_kind::PICTURE_UP`, M27e), its bytes after it: a picture
+/// put on the board whole, the element with its bytes. The host takes it as
+/// a batch of that one `Put`, under the same checks and more, and answers
+/// with [`PictureAnswer`] on the control stream; the member's later
+/// batches wait for that answer, so they come after it in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PictureUpload {
+    pub session: SessionId,
+    /// As a batch's ([`BoardOps::generation`]).
+    pub generation: u32,
+    /// A picture ([`ElementKind::Picture`]) naming the bytes that follow.
+    pub element: Element,
+    /// How many bytes follow: then the stream ends.
+    pub len: u32,
+}
+
+impl PictureUpload {
+    /// Well formed: a valid picture element, and bytes within the limit.
+    pub fn is_valid(&self) -> bool {
+        self.element.kind == ElementKind::Picture
+            && self.element.is_valid()
+            && (1..=MAX_PICTURE_BYTES).contains(&(self.len as usize))
+    }
+}
+
+/// The header of the host's picture stream to a viewer
+/// (`media::stream_kind::PICTURE`, M27e), the picture's bytes after it.
+/// The host sends each picture on the board to each viewer once, as it is
+/// put there or the viewer starts watching; the elements showing it come on
+/// the control stream as any other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PictureHeader {
+    pub session: SessionId,
+    pub picture: PictureId,
+    /// How many bytes follow: then the stream ends.
+    pub len: u32,
+}
+
+impl PictureHeader {
+    pub fn is_valid(&self) -> bool {
+        (1..=MAX_PICTURE_BYTES).contains(&(self.len as usize))
+    }
+}
+
+/// A picture stream's header as it goes on the stream, after the kind byte:
+/// its length (`u16`, big-endian, at most [`MAX_PICTURE_HEADER`]) and the
+/// header in postcard.
+pub fn write_header<T: Serialize>(header: &T) -> Vec<u8> {
+    let body = postcard::to_stdvec(header).expect("a header encodes");
+    debug_assert!(body.len() <= MAX_PICTURE_HEADER);
+    let mut out = Vec::with_capacity(2 + body.len());
+    out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// The header's length from its first two bytes, if within the limit.
+pub fn header_len(prefix: [u8; 2]) -> Option<usize> {
+    let len = usize::from(u16::from_be_bytes(prefix));
+    (1..=MAX_PICTURE_HEADER).contains(&len).then_some(len)
+}
+
+/// Host to the member who sent a picture, optional (M27e): taken, or why
+/// not. The member's engine sends its next batches only after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PictureAnswer {
+    pub session: SessionId,
+    /// The picture element's id.
+    pub id: u32,
+    /// `None`: on the board.
+    pub refusal: Option<Refusal>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn stroke(id: u32, points: usize) -> Element {
         Element {
+            picture: None,
             id,
             kind: ElementKind::Pen,
             colour: 7,
@@ -520,6 +656,130 @@ mod tests {
             text: std::iter::repeat_n(c, chars).collect(),
             ..stroke(id, 2)
         }
+    }
+
+    /// A picture of the whole board.
+    fn picture(id: u32) -> Element {
+        Element {
+            kind: ElementKind::Picture,
+            points: vec![Point::new(0, 0), Point::new(u16::MAX, u16::MAX)],
+            picture: Some(PictureId([0xff; 32])),
+            ..stroke(id, 2)
+        }
+    }
+
+    #[test]
+    fn pictures_are_checked() {
+        assert!(picture(1).is_valid());
+        assert!(
+            !Element {
+                picture: None,
+                ..picture(1)
+            }
+            .is_valid(),
+            "a picture names its bytes"
+        );
+        assert!(
+            !Element {
+                picture: Some(PictureId([0; 32])),
+                ..stroke(1, 2)
+            }
+            .is_valid(),
+            "and only a picture does"
+        );
+        assert!(
+            !Element {
+                done: false,
+                ..picture(1)
+            }
+            .is_valid()
+        );
+        assert!(
+            !Element {
+                text: "x".into(),
+                ..picture(1)
+            }
+            .is_valid()
+        );
+        for points in [
+            vec![Point::new(0, 0)],
+            vec![Point::new(9, 0), Point::new(3, 5)],
+            vec![Point::new(0, 5), Point::new(3, 5)],
+            vec![Point::new(0, 0), Point::new(1, 1), Point::new(2, 2)],
+        ] {
+            let e = Element {
+                points: points.clone(),
+                ..picture(1)
+            };
+            assert!(!e.is_valid(), "{points:?}: top-left, then bottom-right");
+        }
+        let upload = |len: usize| PictureUpload {
+            session: SessionId(1),
+            generation: 0,
+            element: picture(1),
+            len: len as u32,
+        };
+        assert!(upload(MAX_PICTURE_BYTES).is_valid());
+        assert!(!upload(MAX_PICTURE_BYTES + 1).is_valid());
+        assert!(!upload(0).is_valid());
+        assert!(
+            !PictureUpload {
+                element: stroke(1, 2),
+                ..upload(1)
+            }
+            .is_valid(),
+            "only a picture comes on a picture stream"
+        );
+        let header = |len: usize| PictureHeader {
+            session: SessionId(1),
+            picture: PictureId([1; 32]),
+            len: len as u32,
+        };
+        assert!(header(1).is_valid() && header(MAX_PICTURE_BYTES).is_valid());
+        assert!(!header(0).is_valid() && !header(MAX_PICTURE_BYTES + 1).is_valid());
+    }
+
+    /// A picture stream's header at its fullest fits its limit, reads back
+    /// as written, and a header with bytes after it is refused.
+    #[test]
+    fn picture_headers_roundtrip_within_their_limit() {
+        let upload = PictureUpload {
+            session: SessionId(u64::MAX),
+            generation: u32::MAX,
+            element: Element {
+                id: u32::MAX,
+                points: vec![
+                    Point::new(u16::MAX - 1, u16::MAX - 1),
+                    Point::new(u16::MAX, u16::MAX),
+                ],
+                ..picture(1)
+            },
+            len: MAX_PICTURE_BYTES as u32,
+        };
+        let bytes = write_header(&upload);
+        let len = header_len([bytes[0], bytes[1]]).expect("within the limit");
+        assert_eq!(len, bytes.len() - 2);
+        assert!(len <= MAX_PICTURE_HEADER / 2, "{len} bytes: room to spare");
+        let back: PictureUpload = crate::media::decode_payload(&bytes[2..]).unwrap();
+        assert_eq!(back, upload);
+        let mut longer = bytes[2..].to_vec();
+        longer.push(0);
+        assert!(crate::media::decode_payload::<PictureUpload>(&longer).is_none());
+
+        let header = PictureHeader {
+            session: SessionId(u64::MAX),
+            picture: PictureId([0xff; 32]),
+            len: MAX_PICTURE_BYTES as u32,
+        };
+        let bytes = write_header(&header);
+        let back: PictureHeader = crate::media::decode_payload(&bytes[2..]).unwrap();
+        assert_eq!(back, header);
+
+        assert_eq!(header_len([0, 0]), None, "empty");
+        assert_eq!(
+            header_len(((MAX_PICTURE_HEADER + 1) as u16).to_be_bytes()),
+            None
+        );
     }
 
     #[test]

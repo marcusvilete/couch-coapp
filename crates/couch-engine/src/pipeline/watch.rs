@@ -36,13 +36,13 @@ use couch_net::{
     video::{VideoFrameIn, ViewerVideo},
 };
 use couch_proto::{
-    board::BoardSnapshot,
+    board::{BoardSnapshot, PictureId},
     control::{SeatAssigned, SeatController, SeatReleased},
     input::RumbleDatagram,
     ipc::{
         self, AudioPacket, AudioStats, BoardNews, ControllerNames, Draw, FrameTiming, HudState,
-        IpcFrame, LocalInput, NetStats, RumbleState, ShortcutKeys, StreamVolume, UserAction,
-        VideoFrameHeader, WindowRequest, WindowState,
+        IpcFrame, LocalInput, NetStats, Picture, PictureUp, RumbleState, ShortcutKeys,
+        StreamVolume, UserAction, VideoFrameHeader, WindowRequest, WindowState,
     },
     media::{AudioDatagram, datagram, decode_payload},
     session::ControllerReport,
@@ -116,6 +116,8 @@ pub enum WatchEvent {
     ConnectionLost { link: u32 },
     /// The user drew on the stream (M27a): for the host (`BoardOps`).
     Draw(Draw),
+    /// The user's picture (M27e): for the host, on a picture stream.
+    Picture(PictureUp),
 }
 
 enum WatchCmd {
@@ -177,6 +179,7 @@ impl Watch {
             last_restart: None,
             reported: ControllerReport::default(),
             board: Replica::default(),
+            pictures: Pictures::default(),
         };
         let task = tokio::spawn(run(ctx, cmds_rx));
         Ok((
@@ -262,6 +265,9 @@ struct Link {
     audio: mpsc::Receiver<AudioDatagram>,
     rumbles: mpsc::Receiver<Bytes>,
     input: InputSender,
+    /// Pictures on the board from the host (M27e), read and checked.
+    pictures: mpsc::Receiver<Picture>,
+    _pictures: PictureReader,
 }
 
 impl Link {
@@ -272,11 +278,14 @@ impl Link {
         session: Option<u64>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        let (reader, pictures_rx) = receive_pictures(streams, session);
         Self {
             video: ViewerVideo::start(conn.clone(), streams, session, clock),
             audio: receive_audio(datagrams),
             rumbles: datagrams.subscribe(datagram::RUMBLE),
             input: InputSender::start(conn.clone()),
+            pictures: pictures_rx,
+            _pictures: reader,
             conn,
         }
     }
@@ -286,6 +295,7 @@ enum FromHost {
     Frame(VideoFrameIn),
     Audio(AudioDatagram),
     Rumble(Bytes),
+    Picture(Picture),
     Lost,
 }
 
@@ -298,6 +308,7 @@ async fn from_host(link: &mut Option<Link>) -> FromHost {
         frame = l.video.frames.recv() => frame.map_or(FromHost::Lost, FromHost::Frame),
         Some(packet) = l.audio.recv() => FromHost::Audio(packet),
         Some(rumble) = l.rumbles.recv() => FromHost::Rumble(rumble),
+        Some(picture) = l.pictures.recv() => FromHost::Picture(picture),
         _ = l.conn.closed() => FromHost::Lost,
     }
 }
@@ -388,6 +399,8 @@ struct Ctx {
     reported: ControllerReport,
     /// The board as the window has it (M27a), for a restarted window.
     board: Replica,
+    /// Its pictures (M27e), for a restarted window.
+    pictures: Pictures,
 }
 
 impl Ctx {
@@ -487,6 +500,15 @@ async fn hello(ctx: &mut Ctx, forwarder: &Forwarder) -> bool {
             return false;
         }
     }
+    // Its pictures (M27e).
+    for picture in ctx.pictures.shown(&ctx.board) {
+        if !to
+            .send(ipc::kinds::PICTURE, &ipc::to_payload(&picture))
+            .await
+        {
+            return false;
+        }
+    }
     if !forwarder.holding().is_empty() {
         return send_seat(to, forwarder).await;
     }
@@ -547,6 +569,10 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
                         packet: packet.packet,
                     });
                     ctx.window.to.send(ipc::kinds::AUDIO_PACKET, &packet).await
+                }
+                FromHost::Picture(picture) => {
+                    ctx.pictures.keep(picture.picture, &picture.bytes, &ctx.board);
+                    ctx.window.to.send(ipc::kinds::PICTURE, &ipc::to_payload(&picture)).await
                 }
                 FromHost::Rumble(rumble) => {
                     let Some(r) = decode_payload::<RumbleDatagram>(&rumble) else {
@@ -779,6 +805,22 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
                 ctx.event(WatchEvent::Draw(draw));
             }
         }
+        // The user's picture (M27e), as the window made it: ours too, as
+        // its drawing is, and kept for a restarted window.
+        ipc::kinds::PICTURE_UP => {
+            if let Some(up) = ipc::from_payload::<PictureUp>(&frame.payload)
+                && let Some(picture) = up.element.picture
+            {
+                if let Some(me) = ctx.last_hud.as_ref().and_then(|h| h.board.me)
+                    && up.generation == ctx.board.generation()
+                {
+                    ctx.board
+                        .heard(me, &[couch_proto::board::BoardOp::Put(up.element.clone())]);
+                }
+                ctx.pictures.keep(picture, &up.bytes, &ctx.board);
+                ctx.event(WatchEvent::Picture(up));
+            }
+        }
         ipc::kinds::USER_ACTION => {
             if let Some(action) = ipc::from_payload::<UserAction>(&frame.payload) {
                 if matches!(action, UserAction::Leave) {
@@ -790,4 +832,136 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
         _ => {}
     }
     false
+}
+
+// ---- Pictures on the board (M27e) ----
+
+/// Reads the host's pictures as they come, until dropped.
+struct PictureReader(JoinHandle<()>);
+
+impl Drop for PictureReader {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The host's pictures on `streams`: each read whole within its limits, of
+/// our session, and what its id says (the SHA-256 of its bytes), or
+/// dropped. The window decodes it, with limits of its own.
+fn receive_pictures(
+    streams: &Streams,
+    session: Option<u64>,
+) -> (PictureReader, mpsc::Receiver<Picture>) {
+    /// Pictures read at once: the most a newcomer gets is the board's.
+    const AT_ONCE: usize = 4;
+    let mut incoming = streams.subscribe(couch_proto::media::stream_kind::PICTURE);
+    let (tx, rx) = mpsc::channel(couch_proto::board::MAX_BOARD_PICTURES);
+    let task = tokio::spawn(async move {
+        let permits = Arc::new(tokio::sync::Semaphore::new(AT_ONCE));
+        let mut readers = tokio::task::JoinSet::new();
+        // Each stream taken at once, then read as a permit frees: one left
+        // waiting in the acceptor's queue could be stopped, and the host
+        // sends each picture once.
+        while let Some(recv) = incoming.recv().await {
+            let permits = permits.clone();
+            let tx = tx.clone();
+            readers.spawn(async move {
+                let Ok(_permit) = permits.acquire_owned().await else {
+                    return;
+                };
+                let Some((header, bytes)) = couch_net::pictures::read_picture(recv).await else {
+                    return;
+                };
+                if session.is_some_and(|s| header.session.0 != s) {
+                    return;
+                }
+                let bytes = tokio::task::spawn_blocking(move || {
+                    (couch_media::picture::picture_id(&bytes) == header.picture).then_some(bytes)
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(bytes) = bytes {
+                    let _ = tx
+                        .send(Picture {
+                            picture: header.picture,
+                            bytes,
+                        })
+                        .await;
+                }
+            });
+            // Finished readers go as they finish.
+            while readers.try_join_next().is_some() {}
+        }
+    });
+    (PictureReader(task), rx)
+}
+
+/// The pictures the window has (M27e), for a restarted one: every one the
+/// board shows, and a few more lately gone (an element put back by an undo
+/// shows its picture again), within [`Pictures::KEEP`].
+#[derive(Default)]
+struct Pictures {
+    /// Oldest first.
+    order: std::collections::VecDeque<PictureId>,
+    bytes: std::collections::HashMap<PictureId, Vec<u8>>,
+    total: usize,
+}
+
+impl Pictures {
+    /// Bytes kept at most, but for those the board shows.
+    const KEEP: usize = 2 * couch_proto::board::MAX_BOARD_PICTURE_BYTES;
+    /// Pictures kept at most, but for those the board shows.
+    const KEEP_COUNT: usize = 2 * couch_proto::board::MAX_BOARD_PICTURES;
+
+    fn keep(&mut self, id: PictureId, bytes: &[u8], board: &Replica) {
+        if self.bytes.contains_key(&id) {
+            return;
+        }
+        self.total += bytes.len();
+        self.bytes.insert(id, bytes.to_vec());
+        self.order.push_back(id);
+        if self.total <= Self::KEEP && self.order.len() <= Self::KEEP_COUNT {
+            return;
+        }
+        // Those shown are kept, but never more than the board holds: a host
+        // naming more can't make us keep them all.
+        let shown: std::collections::BTreeSet<PictureId> = shown_by(board)
+            .into_iter()
+            .take(couch_proto::board::MAX_BOARD_PICTURES)
+            .collect();
+        let mut kept = std::collections::VecDeque::new();
+        while let Some(old) = self.order.pop_front() {
+            let over = self.total > Self::KEEP || self.order.len() + kept.len() >= Self::KEEP_COUNT;
+            if over && old != id && !shown.contains(&old) {
+                if let Some(b) = self.bytes.remove(&old) {
+                    self.total -= b.len();
+                }
+            } else {
+                kept.push_back(old);
+            }
+        }
+        self.order = kept;
+    }
+
+    /// Those the board shows, for a new window.
+    fn shown(&self, board: &Replica) -> Vec<Picture> {
+        shown_by(board)
+            .into_iter()
+            .filter_map(|id| {
+                self.bytes.get(&id).map(|bytes| Picture {
+                    picture: id,
+                    bytes: bytes.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
+fn shown_by(board: &Replica) -> std::collections::BTreeSet<PictureId> {
+    board
+        .snapshot()
+        .into_iter()
+        .filter_map(|a| a.element.picture)
+        .collect()
 }
