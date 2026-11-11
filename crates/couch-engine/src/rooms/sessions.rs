@@ -11,6 +11,7 @@
 //! call; `couch_room::session` mirrors it.
 
 mod board_overlay;
+mod own_window;
 
 use std::{
     any::Any,
@@ -136,6 +137,10 @@ struct Hosting {
     pads_missing: Vec<SeatId>,
     /// What is drawn on the stream, over the game at this PC (M27b).
     overlay: board_overlay::BoardOverlay,
+    /// The host's own stream window (M27d), while open.
+    own: Option<own_window::Own>,
+    /// Own windows opened so far in this session, to tell their words apart.
+    own_windows: u32,
 }
 
 struct Watching {
@@ -1125,14 +1130,11 @@ impl Actor {
                 SessionEffect::Changed => changed = true,
                 // Our board overlay hears the board as a stream window does
                 // (M27b), while its window is there: one that opens asks for
-                // the board whole.
-                SessionEffect::HostBoard(news) if self.board_window_open() => {
-                    let _ = self.events.send(Event::HostBoard {
-                        room: room.to_hex(),
-                        news: (&news).into(),
-                    });
-                }
-                SessionEffect::HostBoard(_) => {}
+                // the board whole. So does our own stream window (M27d).
+                SessionEffect::HostBoard(news) => self.to_host_windows(room, news),
+                // Routed by whoever passed the host's batch on: only to the
+                // window that didn't draw it (`own_window::host_drew`).
+                SessionEffect::HostDrew(_) => {}
             }
         }
         if !more.is_empty() {
@@ -1340,6 +1342,8 @@ impl Actor {
             pads_since: None,
             pads_missing: Vec::new(),
             overlay: board_overlay::BoardOverlay::default(),
+            own: None,
+            own_windows: 0,
         });
         Ok((session, options))
     }
@@ -2142,6 +2146,9 @@ impl Actor {
                 self.broadcast(h.room, &message);
             }
         }
+        // Our own stream window (M27d), once input is released and the end
+        // sent: drawing the key began there gives the game back the front.
+        own_window::close_own_in(&mut h, &*self.backend);
         tracing::info!(room = ?h.room, ?reason, "session ended");
         self.announce(h.room, now);
         h.pipeline
@@ -3306,6 +3313,7 @@ impl Actor {
                 warn_hot_corner: self.backend.warns_hot_corner(),
                 drawing: DrawingView::of(&remote_drawing(s.board())),
                 board_overlay: Some(self.board_overlay_view(&h.overlay)),
+                own_window: Some(self.own_window_view(h)),
             });
         }
         for (host, listing) in self.sessions.directory.get(&room).into_iter().flatten() {
@@ -3503,6 +3511,7 @@ impl Actor {
                     (None, None) => DrawingView::default(),
                 },
                 board_overlay: None,
+                own_window: None,
             });
         }
         views

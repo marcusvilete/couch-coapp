@@ -99,6 +99,11 @@ pub struct WindowOptions {
     /// A preview's pointer, in points, to see hovers and tooltips
     /// (`--hud-preview-pointer`).
     pub preview_pointer: Option<(f32, f32)>,
+    /// The host's own window of its stream (M27d, `--own-stream`): no
+    /// controllers, no sound, no input sent (only drawing, as the host),
+    /// and left out of captures on Windows, so a screen streamed doesn't
+    /// stream it.
+    pub own_stream: bool,
 }
 
 impl Default for WindowOptions {
@@ -111,6 +116,7 @@ impl Default for WindowOptions {
             hide_stats: false,
             preview: None,
             hud_scale: None,
+            own_stream: false,
             preview_pointer: None,
         }
     }
@@ -152,10 +158,13 @@ pub enum Preview {
     Typing,
     /// The drawing preview with its toolbar hidden to a pill (M27c).
     DrawingHidden,
+    /// The host's own window of its stream, drawing (M27d): no seats, no
+    /// volume, Close.
+    Own,
 }
 
 impl Preview {
-    pub const NAMES: [(&'static str, Preview); 17] = [
+    pub const NAMES: [(&'static str, Preview); 18] = [
         ("watching", Preview::Watching),
         ("asking", Preview::Asking),
         ("controlling", Preview::Controlling),
@@ -173,6 +182,7 @@ impl Preview {
         ("drawing", Preview::Drawing),
         ("typing", Preview::Typing),
         ("drawing-hidden", Preview::DrawingHidden),
+        ("own", Preview::Own),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -202,14 +212,22 @@ fn hud_scale(window: &Window, scale: Option<f32>) -> f32 {
 pub fn run(options: WindowOptions) -> Result<()> {
     // Before any library loads (`pipe::ipc_output`); a preview has no pipe.
     let ipc_out = options.preview.is_none().then(pipe::ipc_output);
-    InputCapture::allow_background_pads();
+    let own = options.own_stream;
+    if !own {
+        InputCapture::allow_background_pads();
+    }
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
-    // Audio first, so the pipe reader has somewhere to put packets.
-    let (audio, audio_feed) = match AudioOut::open(&sdl) {
-        Ok((out, feed)) => (Some(out), Some(feed)),
-        Err(e) => {
-            tracing::warn!("no audio: {e:#}");
-            (None, None)
+    // Audio first, so the pipe reader has somewhere to put packets. The
+    // host's own window has none: the host hears the game itself.
+    let (audio, audio_feed) = if own {
+        (None, None)
+    } else {
+        match AudioOut::open(&sdl) {
+            Ok((out, feed)) => (Some(out), Some(feed)),
+            Err(e) => {
+                tracing::warn!("no audio: {e:#}");
+                (None, None)
+            }
         }
     };
 
@@ -232,7 +250,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
 
     let video = sdl.video().map_err(|e| anyhow!("SDL video: {e}"))?;
     let mouse = sdl.mouse();
-    let mut input = InputCapture::new(&sdl)?;
+    let mut input = InputCapture::new(&sdl, !own)?;
     let mut local = Vec::new();
     // Proof of life for the main process, from the thread that pumps input.
     const ALIVE_EVERY: Duration = Duration::from_millis(100);
@@ -245,6 +263,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
         None => builder.position_centered(),
     };
     let mut window = builder.resizable().high_pixel_density().build()?;
+    // The host's own window (M27d) stays out of what is streamed: a host
+    // sharing its whole screen would otherwise stream it, inside itself.
+    #[cfg(windows)]
+    if own {
+        exclude_from_capture(&window);
+    }
     // SAFETY: `gpu` is dropped at the end of this function, before `window`
     // (locals drop in reverse declaration order).
     let mut gpu = unsafe { gpu::Gpu::new(&window)? };
@@ -314,6 +338,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     hud.show_bar = !options.hide_bar;
     hud.show_stats = !options.hide_stats;
     hud.preview = options.preview.is_some();
+    hud.own = own || options.preview == Some(Preview::Own);
     if options.preview == Some(Preview::Muted) {
         hud.volume = StreamVolume {
             percent: 40,
@@ -339,6 +364,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     // process names us, what the host says of drawing, the crosshair and
     // the arrow, and when the board last painted for something moving.
     let mut drawing = Drawing::default();
+    drawing.own = hud.own;
     let mut board_info = HudBoard::default();
     let cursors = (
         Cursor::from_system(SystemCursor::Crosshair).ok(),
@@ -347,7 +373,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let mut board_painted: Option<Instant> = None;
     if matches!(
         options.preview,
-        Some(Preview::Drawing | Preview::Typing | Preview::DrawingHidden)
+        Some(Preview::Drawing | Preview::Typing | Preview::DrawingHidden | Preview::Own)
     ) {
         preview_board(
             &mut drawing,
@@ -382,6 +408,8 @@ pub fn run(options: WindowOptions) -> Result<()> {
     // SDL's text input, on while a text box is typed in (M27c), with the
     // area last given for an input method's candidates.
     let mut text_input: Option<Option<(i32, i32, u32, i32)>> = None;
+    // Drawing mode asked of the window (M27d), and since when.
+    let mut drawing_asked: Option<Instant> = None;
 
     'running: loop {
         for event in events.poll_iter() {
@@ -612,7 +640,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
             };
             match shortcut {
                 Some(Shortcut::ToggleHud) => hud.visible = !hud.visible,
-                Some(Shortcut::ToggleControl) => toggle_control(&mut hud, &out_tx),
+                // The host's own window asks for nothing (M27d).
+                Some(Shortcut::ToggleControl) => {
+                    if !own {
+                        toggle_control(&mut hud, &out_tx);
+                    }
+                }
                 Some(Shortcut::Fullscreen) => toggle_fullscreen(&mut window, &mut hud),
                 Some(shortcut @ (Shortcut::VolumeDown | Shortcut::VolumeUp | Shortcut::Mute)) => {
                     let new = match shortcut {
@@ -633,6 +666,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 Some(Shortcut::ToggleDrawing) => {
                     let refusal = drawing_refusal(
                         &board_info,
+                        drawing.own,
                         &input,
                         hud.session(),
                         drawing.picture.is_some(),
@@ -685,6 +719,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 HudAction::ToggleDrawing => {
                     let refusal = drawing_refusal(
                         &board_info,
+                        drawing.own,
                         &input,
                         hud.session(),
                         drawing.picture.is_some(),
@@ -777,6 +812,39 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     change_volume(&mut volume, saved, audio.as_ref(), &mut hud);
                     redraw = true;
                 }
+                // The host's drawing key, for its own window (M27d): as the
+                // window's own key would, refused for the same reasons.
+                // On waits for what it needs (the window may have just
+                // opened, with no picture yet) for a moment, below.
+                ForWindow::Window(WindowRequest::Drawing(on)) => {
+                    // With a picture already, there is nothing to wait for:
+                    // a refusal is said at once.
+                    let refusal = drawing_refusal(
+                        &board_info,
+                        drawing.own,
+                        &input,
+                        hud.session(),
+                        drawing.picture.is_some(),
+                    );
+                    drawing_asked = match refusal {
+                        Some(why) if on && drawing.picture.is_some() => {
+                            hud.note(why);
+                            None
+                        }
+                        _ => on.then(Instant::now),
+                    };
+                    if !on && drawing.on {
+                        set_drawing_mode(
+                            false,
+                            &mut drawing,
+                            &mut input,
+                            &mut local,
+                            &cursors,
+                            &mut hud,
+                        );
+                    }
+                    redraw = true;
+                }
                 ForWindow::Window(request) => {
                     window_request(&mut window, &mut hud, request);
                     redraw = true;
@@ -836,7 +904,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
         // its laser and ping going on.
         if matches!(
             options.preview,
-            Some(Preview::Drawing | Preview::Typing | Preview::DrawingHidden)
+            Some(Preview::Drawing | Preview::Typing | Preview::DrawingHidden | Preview::Own)
         ) {
             hud.drawing = Some(DrawBar {
                 on: drawing.on,
@@ -849,6 +917,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
         } else if options.preview.is_none() {
             let refusal = drawing_refusal(
                 &board_info,
+                drawing.own,
                 &input,
                 hud.session(),
                 drawing.picture.is_some(),
@@ -865,6 +934,32 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     &mut hud,
                 );
                 hud.note(why);
+            }
+            // Drawing asked of the window by the host's key (M27d): on as
+            // soon as it may be, or the reason why not.
+            if let Some(asked) = drawing_asked {
+                match refusal {
+                    None => {
+                        drawing_asked = None;
+                        if !drawing.on {
+                            set_drawing_mode(
+                                true,
+                                &mut drawing,
+                                &mut input,
+                                &mut local,
+                                &cursors,
+                                &mut hud,
+                            );
+                            redraw = true;
+                        }
+                    }
+                    Some(why) if asked.elapsed() >= DRAWING_ASK_WAIT => {
+                        drawing_asked = None;
+                        hud.note(why);
+                        redraw = true;
+                    }
+                    Some(_) => {}
+                }
             }
             hud.drawing = board_info.on.then_some(DrawBar {
                 on: drawing.on,
@@ -904,6 +999,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
             fullscreen: hud.fullscreen,
             bar: hud.show_bar,
             stats: hud.show_stats,
+            drawing: drawing.on,
         };
         if reported != Some(state) {
             reported = Some(state);
@@ -912,6 +1008,11 @@ pub fn run(options: WindowOptions) -> Result<()> {
         if last_alive.elapsed() >= ALIVE_EVERY {
             last_alive = Instant::now();
             local.push(LocalInput::Alive);
+        }
+        // The host's own window sends no input at all (M27d): it has no
+        // seat, and the main process would drop it anyway.
+        if own {
+            local.clear();
         }
         for event in local.drain(..) {
             // The controllers' names go just before the slots (P12), so the
@@ -1293,6 +1394,20 @@ fn preview_session(preview: Preview) -> HudState {
                 names: vec![(PREVIEW_ME, "Bob".into()), (PREVIEW_CAROL, "Carol".into())],
             };
         }
+        // The host's own window (M27d): what the engine sends it, no seats,
+        // the host drawing as itself.
+        P::Own => {
+            s.seats = Vec::new();
+            s.board = HudBoard {
+                on: true,
+                stopped: false,
+                me: Some(PREVIEW_ME),
+                names: vec![
+                    (PREVIEW_ME, "Alice".into()),
+                    (PREVIEW_CAROL, "Carol".into()),
+                ],
+            };
+        }
         P::Together => {
             s.title = "Movie night".into();
             s.host_on_seats = false;
@@ -1484,12 +1599,16 @@ fn preview_marks(drawing: &mut Drawing, now: Instant) {
 /// Why this window can't draw now, if it can't (M27a).
 fn drawing_refusal(
     info: &HudBoard,
+    own: bool,
     input: &InputCapture,
     session: Option<&HudState>,
     picture: bool,
 ) -> Option<&'static str> {
     if !info.on {
         Some("The host hasn't turned drawing on")
+    } else if info.stopped && own {
+        // The host's own window (M27d) is stopped only by desktop control.
+        Some("Not while a device of yours controls this PC's desktop")
     } else if info.stopped {
         Some(Refusal::Stopped.message())
     } else if input.has_keyboard() {
@@ -1550,7 +1669,11 @@ fn set_drawing_mode(
     }
     if on {
         drawing.hidden = false;
-        hud.note("Drawing: Esc to go back to the game");
+        hud.note(if drawing.own {
+            "Drawing: Esc to stop"
+        } else {
+            "Drawing: Esc to go back to the game"
+        });
     }
 }
 
@@ -1561,6 +1684,9 @@ const STATS_EVERY: Duration = Duration::from_millis(250);
 const VOLUME_STEP: i8 = 10;
 /// A volume change is remembered once nothing has changed it for this long.
 const VOLUME_SAVE_AFTER: Duration = Duration::from_millis(500);
+/// Drawing mode asked of the window (M27d: the host's key, as the window
+/// opens) waits this long for what it needs, its first picture above all.
+const DRAWING_ASK_WAIT: Duration = Duration::from_secs(3);
 
 /// Plays at `new` from now on and shows it on the bar.
 fn change_volume(
@@ -1642,6 +1768,24 @@ fn window_request(window: &mut Window, hud: &mut Hud, request: WindowRequest) {
                 tracing::debug!("the window couldn't come to the front");
             }
         }
+        // Handled in the loop, which holds the board.
+        WindowRequest::Drawing(_) => {}
+    }
+}
+
+/// Leaves the window out of every capture (M27d, the host's own window).
+#[cfg(windows)]
+fn exclude_from_capture(window: &Window) {
+    use wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().map(|h| h.as_raw());
+    match handle {
+        Ok(RawWindowHandle::Win32(h)) => {
+            let id = couch_platform_win::foreground::WindowId(h.hwnd.get());
+            if couch_platform_win::board_window::exclude_from_capture(id) {
+                tracing::info!("the window is left out of captures");
+            }
+        }
+        _ => tracing::warn!("no window handle to leave out of captures"),
     }
 }
 

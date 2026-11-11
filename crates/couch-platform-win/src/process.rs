@@ -156,6 +156,21 @@ pub fn freeze(pid: u32) -> io::Result<Frozen> {
 /// Posts WM_CLOSE to `pid`'s visible top-level windows, as their close
 /// button would. Returns how many it closed.
 pub fn close_windows(pid: u32) -> usize {
+    visible_windows(pid)
+        .into_iter()
+        // SAFETY: posting a message never dereferences anything of ours.
+        .filter(|&hwnd| unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok())
+        .count()
+}
+
+/// The first of `pid`'s visible top-level windows, by its handle value (M27d:
+/// the host's own stream window, brought forward from the engine).
+pub fn window_of(pid: u32) -> Option<isize> {
+    visible_windows(pid).first().map(|hwnd| hwnd.0 as isize)
+}
+
+/// `pid`'s visible top-level windows, in Windows' order (front first).
+fn visible_windows(pid: u32) -> Vec<HWND> {
     struct Search {
         pid: u32,
         found: Vec<HWND>,
@@ -178,14 +193,7 @@ pub fn close_windows(pid: u32) -> usize {
     };
     // SAFETY: the callback only touches `search`, which outlives the call.
     let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize)) };
-    search
-        .found
-        .iter()
-        // SAFETY: posting a message never dereferences anything of ours.
-        .filter(|&&hwnd| {
-            unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok()
-        })
-        .count()
+    search.found
 }
 
 /// Sends Ctrl+Break to a process group: a child started with

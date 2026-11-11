@@ -106,6 +106,9 @@ pub struct Hud {
     /// A made-up session (`--hud-preview`): the bar stays up, over a test
     /// picture.
     pub preview: bool,
+    /// The host's own window of its stream (M27d): no sound, no seats to
+    /// ask for, and Close rather than Leave.
+    pub own: bool,
     /// The keys the bar's hint names.
     pub shortcuts: Shortcuts,
     /// The stream volume the bar shows (P6).
@@ -166,6 +169,7 @@ impl Hud {
             fullscreen: false,
             waiting: false,
             preview: false,
+            own: false,
             shortcuts: Shortcuts::default(),
             volume: StreamVolume::default(),
             mouse_hint: None,
@@ -440,7 +444,7 @@ impl Hud {
                 return;
             }
             if let Some(session) = &self.session
-                && let Some(lines) = centre_message(session, self.waiting)
+                && let Some(lines) = centre_message(session, self.waiting, self.own)
             {
                 centre_card(&ctx, session, &lines, self.icons, size);
             }
@@ -462,6 +466,7 @@ impl Hud {
                                 picking: self.picking,
                                 icons: self.icons,
                                 drawing: self.drawing,
+                                own: self.own,
                                 // Narrower than its minimum only in a window narrower still:
                                 // the right end holds Leave.
                                 width: (size.x - 32.0)
@@ -854,6 +859,8 @@ struct BarView<'a> {
     icons: bool,
     /// Drawing's buttons (M27a), while the host lets anyone draw.
     drawing: Option<DrawBar>,
+    /// The host's own window (M27d).
+    own: bool,
     /// The rows' width, in points.
     width: f32,
     /// Room for the volume slider.
@@ -940,14 +947,16 @@ fn icon_button(ui: &mut Ui, icons: bool, icon: char, word: &str, on: bool) -> eg
 fn header(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarClick>) {
     let keys = |shortcut| view.shortcuts.binding(shortcut).keys();
     row(ui, HEADER_H, |ui| {
-        let leave = egui::Button::new(RichText::new("Leave").color(RED))
+        // The host's own window (M27d) only closes: the session goes on.
+        let (word, tip) = if view.own {
+            ("Close", "Close your stream window; the session goes on")
+        } else {
+            ("Leave", "Stop watching and close this window")
+        };
+        let leave = egui::Button::new(RichText::new(word).color(RED))
             .fill(RED_TINT)
             .min_size(vec2(0.0, 26.0));
-        if ui
-            .add(leave)
-            .on_hover_text("Stop watching and close this window")
-            .clicked()
-        {
+        if ui.add(leave).on_hover_text(tip).clicked() {
             clicks.push(BarClick::Action(HudAction::Session(UserAction::Leave)));
         }
         ui.separator();
@@ -959,6 +968,9 @@ fn header(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarCli
             });
             let tip = match d.refusal {
                 Some(why) => why.to_string(),
+                None if d.on && view.own => {
+                    format!("Stop drawing · {}", keys(Shortcut::ToggleDrawing))
+                }
                 None if d.on => format!("Back to the game · {}", keys(Shortcut::ToggleDrawing)),
                 None => format!("Draw on the stream · {}", keys(Shortcut::ToggleDrawing)),
             };
@@ -1004,8 +1016,9 @@ fn header(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarCli
         }
         // The stream's volume, here only (P6): never louder than the host
         // sent it. No value box: it would take typing.
+        // The host's own window has no sound (M27d): no volume.
         let volume = view.volume;
-        if view.wide {
+        if view.wide && !view.own {
             let percent_colour = if volume.muted { FAINT } else { MUTED };
             ui.add_sized(
                 [34.0, 20.0],
@@ -1057,9 +1070,10 @@ fn header(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarCli
                 keys(Shortcut::Mute)
             )
         };
-        if icon_button(ui, view.icons, icon, word, false)
-            .on_hover_text(tip)
-            .clicked()
+        if !view.own
+            && icon_button(ui, view.icons, icon, word, false)
+                .on_hover_text(tip)
+                .clicked()
         {
             clicks.push(BarClick::Action(HudAction::Volume(StreamVolume {
                 muted: !volume.muted,
@@ -1390,6 +1404,10 @@ fn status(ui: &mut Ui, s: &HudState, view: &BarView<'_>, clicks: &mut Vec<BarCli
             }
             (line, GREEN)
         }
+        _ if view.own => (
+            "Your own stream, as those watching see it".to_string(),
+            FAINT,
+        ),
         _ if s.control_paused => (format!("{} paused control for now", s.host), FAINT),
         _ if s.seats.is_empty() => ("Watching together: nobody plays".to_string(), FAINT),
         _ => ("You're watching".to_string(), FAINT),
@@ -1462,7 +1480,7 @@ fn dot_label(ui: &mut Ui, dot: Color32, text: RichText) {
 /// only where there are seats to ask for.
 fn hints(ui: &mut Ui, s: &HudState, view: &BarView<'_>) {
     let shortcuts = view.shortcuts;
-    let ask = if s.seats.is_empty() {
+    let ask = if s.seats.is_empty() || view.own {
         String::new()
     } else {
         format!(
@@ -1470,13 +1488,20 @@ fn hints(ui: &mut Ui, s: &HudState, view: &BarView<'_>) {
             shortcuts.binding(Shortcut::ToggleControl).keys()
         )
     };
+    let volume = if view.own {
+        String::new()
+    } else {
+        format!(
+            " · {} {} {}: volume down, up, mute",
+            shortcuts.binding(Shortcut::VolumeDown).key_name(),
+            shortcuts.binding(Shortcut::VolumeUp).key_name(),
+            shortcuts.binding(Shortcut::Mute).key_name(),
+        )
+    };
     let keys = format!(
-        "{ask}{}: full screen · {}: hide · {} {} {}: volume down, up, mute",
+        "{ask}{}: full screen · {}: hide{volume}",
         shortcuts.binding(Shortcut::Fullscreen).key_name(),
         shortcuts.binding(Shortcut::ToggleHud).key_name(),
-        shortcuts.binding(Shortcut::VolumeDown).key_name(),
-        shortcuts.binding(Shortcut::VolumeUp).key_name(),
-        shortcuts.binding(Shortcut::Mute).key_name(),
     );
     let small = FontId::proportional(11.5);
     let mut job = LayoutJob::default();
@@ -1494,16 +1519,23 @@ fn hints(ui: &mut Ui, s: &HudState, view: &BarView<'_>) {
 
 /// What the middle of the window says, if anything: why nothing is shown
 /// (M19: nothing streamed, or the last stream ended), or that the picture
-/// hasn't come yet. A second, smaller line with it.
-fn centre_message(s: &HudState, waiting: bool) -> Option<(String, Option<&'static str>)> {
-    let wait = if s.seats.is_empty() {
+/// hasn't come yet. A second, smaller line with it. In the host's own
+/// window (`own`, M27d) the host is "you".
+fn centre_message(
+    s: &HudState,
+    waiting: bool,
+    own: bool,
+) -> Option<(String, Option<&'static str>)> {
+    let wait = if s.seats.is_empty() || own {
         "The next stream shows here."
     } else {
         "Your seat stays yours; the next stream shows here."
     };
     let first = match s.stream {
+        StreamState::Live if waiting && own => "Waiting for the picture…".into(),
         StreamState::Live if waiting => format!("Waiting for {}'s picture…", s.host),
         StreamState::Live => return None,
+        StreamState::Waiting if own => "You aren't streaming anything yet".into(),
         StreamState::Waiting => format!("{} isn't streaming anything yet", s.host),
         StreamState::Stopped(EndReason::GameExited) => "The game closed".into(),
         StreamState::Stopped(EndReason::SourceLost) => {
@@ -1511,6 +1543,7 @@ fn centre_message(s: &HudState, waiting: bool) -> Option<(String, Option<&'stati
         }
         StreamState::Stopped(EndReason::Error) => "The stream failed".into(),
         StreamState::Stopped(EndReason::NothingShared) => "Nothing was chosen to share".into(),
+        StreamState::Stopped(_) if own => "You stopped streaming".into(),
         StreamState::Stopped(_) => format!("{} stopped streaming", s.host),
     };
     let more = (s.stream != StreamState::Live).then_some(wait);
@@ -1735,19 +1768,44 @@ mod tests {
     #[test]
     fn the_window_says_why_nothing_is_shown() {
         let mut s = session(vec![seat("Controller 1", None, false)], false);
-        assert_eq!(centre_message(&s, false), None, "a picture is shown");
+        assert_eq!(centre_message(&s, false, false), None, "a picture is shown");
         assert_eq!(
-            centre_message(&s, true).map(|m| m.0),
+            centre_message(&s, true, false).map(|m| m.0),
             Some("Waiting for Ana's picture…".into())
         );
         s.stream = StreamState::Waiting;
-        let (first, more) = centre_message(&s, true).unwrap();
+        let (first, more) = centre_message(&s, true, false).unwrap();
         assert_eq!(first, "Ana isn't streaming anything yet");
         assert!(more.is_some(), "and the seat stays");
         s.stream = StreamState::Stopped(EndReason::GameExited);
-        assert_eq!(centre_message(&s, true).unwrap().0, "The game closed");
+        assert_eq!(
+            centre_message(&s, true, false).unwrap().0,
+            "The game closed"
+        );
         s.stream = StreamState::Stopped(EndReason::HostStopped);
-        assert_eq!(centre_message(&s, true).unwrap().0, "Ana stopped streaming");
+        assert_eq!(
+            centre_message(&s, true, false).unwrap().0,
+            "Ana stopped streaming"
+        );
+    }
+
+    /// M27d: the host's own window speaks to the host.
+    #[test]
+    fn the_hosts_own_window_says_you() {
+        let mut s = session(vec![seat("Controller 1", None, false)], false);
+        assert_eq!(
+            centre_message(&s, true, true).map(|m| m.0),
+            Some("Waiting for the picture…".into())
+        );
+        s.stream = StreamState::Waiting;
+        let (first, more) = centre_message(&s, true, true).unwrap();
+        assert_eq!(first, "You aren't streaming anything yet");
+        assert_eq!(more, Some("The next stream shows here."));
+        s.stream = StreamState::Stopped(EndReason::HostStopped);
+        assert_eq!(
+            centre_message(&s, true, true).unwrap().0,
+            "You stopped streaming"
+        );
     }
 
     #[test]

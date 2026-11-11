@@ -5,6 +5,8 @@
 //!
 //! Modes:
 //! - no arguments: show the stream arriving on the IPC pipe until it closes;
+//!   with `--own-stream`, as the host's own window of its stream (M27d): no
+//!   controllers, sound or input, left out of captures, only drawing;
 //! - `--hud-preview STATE [--hud-preview-pointer X Y] [--hud-scale S]`: no
 //!   pipe, a made-up session in one of `viewer::Preview::NAMES`, to check the
 //!   HUD by eye (`scripts/viewer-shots.ps1` shoots them all);
@@ -73,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             | "--no-hud"
             | "--no-bar"
             | "--hide-stats"
+            | "--own-stream"
             | "--hud-preview"
             | "--hud-preview-pointer"
             | "--hud-scale",
@@ -116,8 +119,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// `--pos X Y` and `--size W H` for the stream window, `--no-hud`,
-/// `--no-bar` (the session bar alone, P11), `--hide-stats`, `--hud-preview
-/// STATE`, `--hud-preview-pointer X Y` and `--hud-scale S`.
+/// `--no-bar` (the session bar alone, P11), `--hide-stats`, `--own-stream`
+/// (M27d), `--hud-preview STATE`, `--hud-preview-pointer X Y` and
+/// `--hud-scale S`.
 fn window_options(args: &[String]) -> anyhow::Result<viewer::WindowOptions> {
     let mut options = viewer::WindowOptions::default();
     let mut rest = args.iter();
@@ -133,6 +137,7 @@ fn window_options(args: &[String]) -> anyhow::Result<viewer::WindowOptions> {
             "--no-hud" => options.hide_hud = true,
             "--no-bar" => options.hide_bar = true,
             "--hide-stats" => options.hide_stats = true,
+            "--own-stream" => options.own_stream = true,
             "--hud-preview" => {
                 let name = rest.next().map(String::as_str).unwrap_or_default();
                 options.preview = Some(viewer::Preview::named(name).ok_or_else(|| {

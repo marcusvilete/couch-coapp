@@ -64,6 +64,7 @@ use crate::{
     pipeline::{
         Backend,
         host::{HostEvent, HostPipeline, PanicHandle},
+        own_window::OwnEvent,
         watch::WatchEvent,
     },
     store::{RememberedRoom, Settings, Store, StoreError},
@@ -170,6 +171,14 @@ pub(crate) enum Input {
     Host(SessionId, HostEvent),
     /// Something the session we watch reports.
     Watch(SessionId, WatchEvent),
+    /// Something the host's own stream window of our session reports
+    /// (M27d); `window` counts the windows opened, so a late word from a
+    /// closed one counts for nothing.
+    Own {
+        session: SessionId,
+        window: u32,
+        event: OwnEvent,
+    },
     /// The host we asked to watch hasn't answered in time.
     JoinTimeout(SessionId, u32),
     /// The connection to the host we watch hasn't come back in time (for
@@ -724,6 +733,11 @@ impl Actor {
             } => self.stream_ready(session, request, stream, reply, now),
             Input::Host(session, event) => self.host_event(session, event, now),
             Input::Watch(session, event) => self.watch_event(session, event, now),
+            Input::Own {
+                session,
+                window,
+                event,
+            } => self.own_event(session, window, event, now),
             Input::JoinTimeout(session, attempt) => self.join_timeout(session, attempt, now),
             Input::ReconnectTimeout(session, attempt) => {
                 self.reconnect_timeout(session, attempt, now);
@@ -945,6 +959,7 @@ impl Actor {
             Command::HostBoard => self.host_board(now),
             Command::EndHostDrawing => self.end_host_drawing(now),
             Command::ShowBoardOverlay { on } => self.show_board_overlay(on, now),
+            Command::OwnStreamWindow { open } => self.own_stream_window(open, from_afar, now),
             Command::SetStreamVolume { percent, muted } => {
                 self.set_stream_volume(StreamVolume { percent, muted }, now)
             }
@@ -1737,6 +1752,8 @@ impl Actor {
         }
         // Our devices running our session hear what changed too (M25).
         self.remote_push();
+        // So does our own stream window (M27d), if anything it shows did.
+        self.send_own_hud();
     }
 
     /// What the UI shows of a room; nothing for one we are leaving.

@@ -1,6 +1,12 @@
 # ADR 0013: Drawing on the stream
 
-**Status:** accepted (2026-11-10), for M27. M27a built (0.28.0, [results](../m27a-results.md)), M27b built (0.29.0, [results](../m27b-results.md)), M27c built (0.30.0, [results](../m27c-results.md)). Settled while building M27b:
+**Status:** accepted (2026-11-10), for M27. M27a built (0.28.0, [results](../m27a-results.md)), M27b built (0.29.0, [results](../m27b-results.md)), M27c built (0.30.0, [results](../m27c-results.md)), M27d built (0.31.0, [results](../m27d-results.md)). Settled while building M27d:
+- **the author's choices (2026-11-11):** over a game in exclusive full screen, the drawing key opens the host's own stream window **in front, in drawing mode** (the game leaves full screen), and as that drawing ends the game is brought back; on a Linux host the window opens from the console only (no drawing key through the portal yet);
+- **its frames are a feed of the host pipeline's own** (`HostPipeline::open_own`): H.264 at 30 fps at most and a fixed bitrate by the picture's size, no rate control, never on the network; it keeps the capture running as a viewer would;
+- **the host's two windows are one author:** each hears the other's taken batches (`Effect::HostDrew`), never its own (a stroke's points would be added twice), and both hear what the session tells the host;
+- **opened beside the game:** on a monitor other than the captured one when there is one; no seats in its HUD, no sound, Close for Leave; a crashed one isn't started again (the console opens another).
+
+Settled while building M27b:
 - **the board overlay's window is the engine's to place and switch** (`couch_platform_win::board_window`), the app's only to make (`couch_engine::board::BoardWindows`): laid over the capture's exact rectangle every 33 ms (polling, not a WinEvent hook), parked off screen rather than hidden, its styles changed in place with `SetWindowLongPtr`, never through Tauri's setters (they `ShowWindow`), focused with Bring to front's F24 tap. It is shown only once its page has loaded, and only while something is drawn (or the host draws), so no transparent window lies over a game for nothing;
 - **the host is an author like any other** (`HostSession::set_me`), with no wire change;
 - **sessions to watch together** (M24, no hook at all) get a hook with the drawing key alone while drawing is on: the author's choice, 2026-11-10;

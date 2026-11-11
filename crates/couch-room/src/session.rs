@@ -181,6 +181,11 @@ pub enum Effect {
     /// viewers drew, clears, and the host's own refusals and resyncs, as a
     /// viewer's window hears them. Never on the wire.
     HostBoard(BoardNews),
+    /// A batch of the host's own, taken (M27d): for whichever of its two
+    /// windows (the board over the game, its own stream window) didn't draw
+    /// it, since both draw as the host. Never on the wire, and never back to
+    /// the window that drew it (its points would be added twice).
+    HostDrew(BoardNews),
 }
 
 /// One host controller's seat (M23): the seat it last played, which comes
@@ -1403,6 +1408,19 @@ impl HostSession {
             .collect()
     }
 
+    /// The board whole, in the host's generation as it is (M27d): for the
+    /// host's second window as it opens, which must not make the first
+    /// one's batch on its way stale, as a new generation would.
+    pub fn host_snapshot(&self) -> Vec<BoardNews> {
+        let Some(me) = self.me.filter(|_| !self.ended) else {
+            return Vec::new();
+        };
+        BoardSnapshot::parts(self.id, self.board.generation_of(me), self.board.snapshot())
+            .into_iter()
+            .map(BoardNews::Snapshot)
+            .collect()
+    }
+
     /// Whether the host's overlay has anything to show (M27b): something on
     /// the board, or a laser point or ping still passing. While it hasn't,
     /// the overlay keeps off the game.
@@ -1490,7 +1508,14 @@ impl HostSession {
                 // The console's count, at the next tick: never a view per
                 // batch.
                 self.board_changed |= taken.counts_changed;
-                self.to_board(&update, Some(member))
+                let mut fx = self.to_board(&update, Some(member));
+                // The host's own batch, for its other window (M27d).
+                if self.me == Some(member)
+                    && let Some(news) = news_of(&update)
+                {
+                    fx.push(Effect::HostDrew(news));
+                }
+                fx
             }
             Err(Refusal::Stale) => Vec::new(),
             Err(why) => {

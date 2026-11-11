@@ -101,6 +101,7 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     guestsKeyboard: true,
     drawing: noDrawing(),
     boardOverlay: null,
+    ownWindow: null,
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,
@@ -660,6 +661,22 @@ export const SCENARIOS: Record<string, Scenario> = {
       return base([sofa({ sessions: [s] })]);
     },
   },
+  "hosting-own-window": {
+    title: "Hosting: your own stream window open, drawing in it over a game in exclusive full screen (M27d)",
+    world: () => {
+      const s = hosting({ requests: [] });
+      s.drawing = { on: true, elements: 2, drawers: [{ member: ME, elements: 2 }], stopped: [] };
+      s.boardOverlay = {
+        available: true,
+        shown: true,
+        drawing: false,
+        key: "Ctrl+Alt+Shift+D",
+        note: "Drawings can't show over a game in exclusive full screen: you draw in your stream window, or set the game to borderless",
+      };
+      s.ownWindow = { open: true, drawing: true, leftOut: true };
+      return base([sofa({ sessions: [s] })]);
+    },
+  },
   "hosting-guest-controllers": {
     title: "Hosting: a guest's two controllers of one model on two seats (P12)",
     world: () => {
@@ -779,7 +796,12 @@ export const SCENARIOS: Record<string, Scenario> = {
           sofa({
             sessions: [
               // No board over the game on Linux (M27b).
-              { ...hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []), boardOverlay: null },
+              // Its own stream window can't be left out of what is shared (M27d).
+              {
+                ...hostSession(ME, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []),
+                boardOverlay: null,
+                ownWindow: { open: false, drawing: false, leftOut: false },
+              },
             ],
           }),
         ],

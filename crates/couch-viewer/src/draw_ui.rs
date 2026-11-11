@@ -83,6 +83,8 @@ pub struct Drawing {
     /// The toolbar is hidden to a small pill (its handle or Tab), for this
     /// window's life: what it covered can be drawn on and picked.
     pub tools_hidden: bool,
+    /// The host's own window (M27d): no game to go back to.
+    pub own: bool,
     clicks: Vec<Click>,
 }
 
@@ -262,6 +264,7 @@ impl Drawing {
             let mut clicks = Vec::new();
             let mut fade_button = None;
             let hidden = self.tools_hidden;
+            let own = self.own;
             let shown = egui::Area::new(egui::Id::new(if hidden {
                 "drawing-pill"
             } else {
@@ -277,6 +280,7 @@ impl Drawing {
                             ui,
                             state,
                             (size.x - 40.0).max(120.0),
+                            own,
                             &mut clicks,
                             &mut fade_button,
                         );
@@ -595,9 +599,12 @@ fn toolbar(
     ui: &mut Ui,
     (tool, picked, width, fades, stay): (DrawTool, u8, u8, bool, u8),
     max_width: f32,
+    own: bool,
     clicks: &mut Vec<Click>,
     fade_button: &mut Option<Rect>,
 ) {
+    // The host's own window (M27d) has no game to go back to.
+    let back = if own { "done" } else { "back to the game" };
     egui::Frame::new()
         .fill(BAR)
         .stroke(Stroke::new(1.0, BORDER))
@@ -713,15 +720,23 @@ fn toolbar(
                 let done = egui::Button::new(egui::RichText::new("Done").color(TEXT))
                     .fill(BLUE_TINT)
                     .min_size(vec2(0.0, 28.0));
-                if ui.add(done).on_hover_text("Back to the game · Esc").clicked() {
+                let tip = if own {
+                    "Stop drawing · Esc"
+                } else {
+                    "Back to the game · Esc"
+                };
+                if ui.add(done).on_hover_text(tip).clicked() {
                     clicks.push(Click::Done);
                 }
             });
             if max_width >= 480.0 {
                 let hint = if tool == DrawTool::Text {
                     "Click to write, or on your text to change it · double click: a word · Esc: done"
+                        .to_string()
                 } else {
-                    "Shift: straight lines, squares and circles · middle click: ping · Tab: hide the tools · Esc: back to the game"
+                    format!(
+                        "Shift: straight lines, squares and circles · middle click: ping · Tab: hide the tools · Esc: {back}"
+                    )
                 };
                 ui.label(
                     egui::RichText::new(hint)

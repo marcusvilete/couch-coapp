@@ -174,6 +174,10 @@ export const SHOTS = [
   // The board over the game (M27b): drawing there, and the key refused.
   ["drawing-over-game", "hosting-drawing-over-game", drawingPanel],
   ["drawing-refused", "hosting-drawing-refused", drawingPanel],
+  // The host's own stream window (M27d): open and drawn in; on Linux, the
+  // line saying it shows in a shared screen.
+  ["own-window", "hosting-own-window", drawingPanel],
+  ["own-window-linux", "linux-host", drawingPanel],
   [
     "drawing-menu",
     "hosting-drawing",

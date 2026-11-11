@@ -38,6 +38,9 @@ const RUMBLE_MS: u32 = 1_000;
 pub struct InputCapture {
     gamepads: GamepadSubsystem,
     pads: HashMap<JoystickId, Gamepad>,
+    /// Controllers are opened at all: never in the host's own window (M27d),
+    /// which plays nothing.
+    with_pads: bool,
     /// Open pads with Xbox 360 ids, our pads' ids, opened while no host here
     /// had pads: looked at every second, closed if one turns out a host's,
     /// settled (dropped from here) once proven not to be.
@@ -122,11 +125,14 @@ impl InputCapture {
         sdl3::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     }
 
-    pub fn new(sdl: &sdl3::Sdl) -> Result<Self> {
+    /// Without `with_pads`, no controller is ever opened (the host's own
+    /// window, M27d).
+    pub fn new(sdl: &sdl3::Sdl, with_pads: bool) -> Result<Self> {
         let gamepads = sdl.gamepad().map_err(|e| anyhow!("SDL gamepads: {e}"))?;
         Ok(Self {
             gamepads,
             pads: HashMap::new(),
+            with_pads,
             xbox_360: BTreeSet::new(),
             held_back: BTreeSet::new(),
             slots: [None; MAX_LOCAL_CONTROLLERS],
@@ -372,7 +378,7 @@ impl InputCapture {
                 }
             }
             Event::GamepadAdded { which, .. } => {
-                if self.open_pad(*which) {
+                if self.with_pads && self.open_pad(*which) {
                     out.push(self.controller_slots());
                 }
             }

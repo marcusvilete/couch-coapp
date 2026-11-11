@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { BoardOverlayView } from "../bindings/BoardOverlayView";
+import type { OwnWindowView } from "../bindings/OwnWindowView";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { desktopBlocked, desktopCommand, desktopOffered, type RemoteTarget } from "../model/remote";
@@ -300,9 +301,12 @@ function DrawingPanel(props: {
                 {" "}
                 On this PC the drawings show over the game (unless you hide them), and your drawing key lets you draw
                 there too: it takes the mouse and the keyboard from the game until Esc or Done, so whoever has the
-                keyboard and mouse waits meanwhile. A game in exclusive full screen can't have anything over it.
+                keyboard and mouse waits meanwhile. A game in exclusive full screen can't have anything over it: there
+                the key opens your stream window instead.
               </>
-            )}
+            )}{" "}
+            Your stream window shows your stream as those watching see it, on this PC: you see and draw on the
+            drawings there too.
           </Why>
         </span>
       </header>
@@ -342,7 +346,46 @@ function DrawingPanel(props: {
         )}
       </p>
       {s.boardOverlay?.available && <OverGame overlay={s.boardOverlay} on={d.on} busy={busy} run={run} />}
+      {s.ownWindow != null && <OwnWindow own={s.ownWindow} on={d.on} busy={busy} run={run} />}
     </section>
+  );
+}
+
+/** The host's own stream window (M27d): the stream as those watching see it,
+ * where the host sees and draws on the board when nothing can be over the
+ * game (exclusive full screen, a Linux PC). A switch, so nothing moves; on
+ * Linux, a line kept for good saying it shows in a shared screen. */
+function OwnWindow(props: {
+  own: OwnWindowView;
+  on: boolean;
+  busy: string | null;
+  run: ReturnType<typeof useRun>["run"];
+}) {
+  const { own, on, busy, run } = props;
+  const detail = !own.open
+    ? "Your stream as those watching see it, in a window of its own: put it on another screen."
+    : own.drawing
+      ? "You're drawing in it: Esc to stop."
+      : on
+        ? "Open: draw there with its pen, as those watching do."
+        : "Open: you can draw in it once drawing is on.";
+  return (
+    <>
+      <div className="drawing-row">
+        <Switch
+          checked={own.open}
+          disabled={busy != null}
+          onChange={(open) => void run("own-window", { type: "ownStreamWindow", open })}
+          label="Your stream window"
+          detail={detail}
+        />
+      </div>
+      {!own.leftOut && (
+        <p className="panel-foot drawing-note">
+          It shows in your stream if it's on the screen you share: keep it on another screen, or share a window.
+        </p>
+      )}
+    </>
   );
 }
 
@@ -390,7 +433,7 @@ function OverGame(props: {
       : "Once drawing is on.";
   const warn = fullScreen || o.note != null;
   const note = fullScreen
-    ? "Drawings can't show over a game in exclusive full screen. Set the game to borderless or windowed full screen to see them."
+    ? `Drawings can't show over a game in exclusive full screen: ${key} opens your stream window to draw in, or set the game to borderless.`
     : (o.note ?? " ");
   return (
     <>

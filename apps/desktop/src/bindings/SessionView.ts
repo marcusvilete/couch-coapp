@@ -5,6 +5,7 @@ import type { DrawingView } from "./DrawingView";
 import type { GameWindowView } from "./GameWindowView";
 import type { GuestControllerView } from "./GuestControllerView";
 import type { OurControllerView } from "./OurControllerView";
+import type { OwnWindowView } from "./OwnWindowView";
 import type { RequestView } from "./RequestView";
 import type { ScreenArea } from "./ScreenArea";
 import type { SeatView } from "./SeatView";
@@ -186,4 +187,8 @@ drawing: DrawingView,
 /**
  * Our own session only: the board over the game at this PC (M27b).
  */
-boardOverlay: BoardOverlayView | null, };
+boardOverlay: BoardOverlayView | null, 
+/**
+ * Our own session only: the host's own stream window (M27d).
+ */
+ownWindow: OwnWindowView | null, };

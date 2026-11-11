@@ -41,6 +41,9 @@ pub fn launch(options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
     if options.hide_stats {
         command.arg("--hide-stats");
     }
+    if options.own_stream {
+        command.arg("--own-stream");
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

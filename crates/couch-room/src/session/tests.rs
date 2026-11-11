@@ -331,13 +331,38 @@ fn the_host_draws_as_itself_to_every_viewer() {
     }
     assert!(to_host(&fx).is_empty(), "its own drawing doesn't come back");
     assert!(s.board().element(HOST, 1).is_some());
-    // A viewer's drawing reaches the host's overlay too.
+    // Its other window hears it once (M27d).
+    let drew: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::HostDrew(news) => Some(news),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(drew[..], [BoardNews::Update(u)] if u.author == HOST));
+    // A viewer's drawing reaches the host's overlay too, and is no batch of
+    // the host's.
     let fx = draw_box(&mut s, ANA, 1);
     assert!(matches!(to_host(&fx)[..], [BoardNews::Update(u)] if u.author == ANA));
+    assert!(!fx.iter().any(|e| matches!(e, Effect::HostDrew(_))));
     // The host can't stop itself, nor watch its own stream.
     assert!(s.stop_drawing(HOST, true).is_empty());
     assert!(s.join(HOST).is_empty());
     assert!(!s.is_viewer(HOST));
+    // Its second window's board (M27d): whole, in the same generation, so
+    // what the first has on its way still counts.
+    let generation = s.board().generation_of(HOST);
+    let snapshot = s.host_snapshot();
+    assert!(matches!(
+        snapshot[..],
+        [BoardNews::Snapshot(ref p)] if p.first && p.generation == generation && p.elements.len() == 2
+    ));
+    assert_eq!(s.board().generation_of(HOST), generation);
+    assert!(
+        !draw_box(&mut s, HOST, 3)
+            .iter()
+            .any(|e| matches!(e, Effect::HostBoard(BoardNews::Refused(_))))
+    );
     // A clear reaches its overlay.
     let fx = s.clear_board();
     assert!(matches!(to_host(&fx)[..], [BoardNews::Cleared(c)] if c.author.is_none()));
@@ -2294,6 +2319,9 @@ proptest! {
                         let viewers: BTreeSet<MemberId> = s.viewers().iter().copied().collect();
                         prop_assert_eq!(told, viewers, "the host's drawing to every viewer");
                     }
+                    // Its other window hears exactly what was taken (M27d).
+                    let echoed = fx.iter().any(|e| matches!(e, Effect::HostDrew(_)));
+                    prop_assert_eq!(echoed, taken, "the host's other window hears what was taken");
                     for e in &fx {
                         // Its own drawing never comes back to it.
                         prop_assert!(!matches!(
