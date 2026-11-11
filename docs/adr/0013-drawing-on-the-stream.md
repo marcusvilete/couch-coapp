@@ -190,6 +190,14 @@ Each part is a release of its own. M27a carries the wire revision; a later part 
 
   Windows decode with limits too (Rust's `image` crate, MIT or Apache-2.0, in the stream window; the browser in the overlay).
 
+**As built (M27e, wire revision 18; the author's choices of 2026-11-11):**
+- **A picture is an element** (`ElementKind::Picture`): two corners and its picture's id, the SHA-256 of its bytes. Windows keep pictures by id, so the element (on the control stream, as any) and its bytes (on a stream of their own) may arrive in either order.
+- **Two stream kinds,** `0x03` member to host and `0x04` host to member: one kind can't serve both, since two members hosting each other share a connection and a kind has one subscriber there.
+- **A picture's upload is a `Put` with its bytes,** answered by the host on the control stream (`PictureAnswer`); the member's engine holds what its window draws next until then, so a picture pasted and moved arrives in that order. A `Put` in a batch only moves or resizes a picture already there with the same id: whatever brings one back (an undo, a redo, a copy) uploads it again.
+- **Sized by resize handles** (the author's choice over the width buttons): the one picture selected has a handle at each corner, its shape kept. Pasted, it fits 40% of the picture each way. After their run, the author asked for the same on shapes: a rectangle's or an ellipse's corners resize it freely (Shift: a square, a circle), a line's or an arrow's ends move (Shift: 15° steps); strokes and text boxes have none (text's size is the width buttons').
+- **Pictures off takes them off the board,** for everyone (the author's choice); they fade as any element (the author's choice); and they come by paste (when the clipboard holds no text) and by dropping a file.
+- **Also 16 pictures on the board at most,** whatever their size: every window holds each decoded.
+
 ## Consequences
 
 - **The control stream carries drawing traffic,** a few kilobytes a second per drawer at most, under the host's limits. Session control is ordered with it. A burst could delay a seat's message by milliseconds, which input never notices: input has its own channels.

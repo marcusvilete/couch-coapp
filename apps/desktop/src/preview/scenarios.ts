@@ -173,6 +173,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     streamWindowBar: true,
     tray: false,
     drawingDefault: false,
+    picturesDefault: false,
     remotePlay: {
       on: false,
       pinSet: false,
@@ -629,6 +630,7 @@ export const SCENARIOS: Record<string, Scenario> = {
     world: () => {
       const s = hosting({ requests: [] });
       s.drawing = {
+        pictures: false,
         on: true,
         elements: 5,
         drawers: [{ member: bia.id, elements: 5 }],
@@ -641,7 +643,7 @@ export const SCENARIOS: Record<string, Scenario> = {
     title: "Hosting: drawing over the game yourself, the drawings shown there (M27b)",
     world: () => {
       const s = hosting({ requests: [] });
-      s.drawing = { on: true, elements: 3, drawers: [{ member: ME, elements: 3 }], stopped: [] };
+      s.drawing = { on: true, elements: 3, drawers: [{ member: ME, elements: 3 }], stopped: [], pictures: false };
       s.boardOverlay = { available: true, shown: true, drawing: true, key: "Ctrl+Alt+Shift+D", note: null };
       return base([sofa({ sessions: [s] })]);
     },
@@ -650,7 +652,7 @@ export const SCENARIOS: Record<string, Scenario> = {
     title: "Hosting: the drawing key refused, the drawings hidden over the game (M27b)",
     world: () => {
       const s = hosting({ requests: [] });
-      s.drawing = { on: true, elements: 0, drawers: [], stopped: [] };
+      s.drawing = { on: true, elements: 0, drawers: [], stopped: [], pictures: false };
       s.boardOverlay = {
         available: true,
         shown: false,
@@ -665,7 +667,7 @@ export const SCENARIOS: Record<string, Scenario> = {
     title: "Hosting: your own stream window open, drawing in it over a game in exclusive full screen (M27d)",
     world: () => {
       const s = hosting({ requests: [] });
-      s.drawing = { on: true, elements: 2, drawers: [{ member: ME, elements: 2 }], stopped: [] };
+      s.drawing = { on: true, elements: 2, drawers: [{ member: ME, elements: 2 }], stopped: [], pictures: false };
       s.boardOverlay = {
         available: true,
         shown: true,

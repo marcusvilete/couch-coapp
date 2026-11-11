@@ -12,6 +12,7 @@ const ANA = "01".repeat(32);
 const BIA = "02".repeat(32);
 
 const stroke = (id: number, done: boolean, fades: boolean): BoardElement => ({
+  picture: null,
   id,
   kind: "pen",
   colour: 0,

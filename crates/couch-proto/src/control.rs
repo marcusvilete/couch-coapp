@@ -9,7 +9,9 @@ use thiserror::Error;
 
 use crate::{
     admission::{AdmitConfirm, AdmitReply, JoinStart, MemberHello},
-    board::{BoardCleared, BoardOps, BoardRefused, BoardSnapshot, BoardState, BoardUpdate},
+    board::{
+        BoardCleared, BoardOps, BoardRefused, BoardSnapshot, BoardState, BoardUpdate, PictureAnswer,
+    },
     envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND},
     ids::{Permissions, SeatEpoch, SeatId},
     remote::{
@@ -88,6 +90,8 @@ pub mod type_ids {
     pub const BOARD_CLEARED: u16 = 0x0804;
     pub const BOARD_STATE: u16 = 0x0805;
     pub const BOARD_REFUSED: u16 = 0x0806;
+    /// M27e: the answer to a member's picture.
+    pub const PICTURE_ANSWER: u16 = 0x0807;
 }
 
 /// QUIC application close codes for connections between members.
@@ -226,6 +230,7 @@ pub enum ControlMessage {
     BoardCleared(BoardCleared),
     BoardState(BoardState),
     BoardRefused(BoardRefused),
+    PictureAnswer(PictureAnswer),
 }
 
 impl ControlMessage {
@@ -270,6 +275,7 @@ impl ControlMessage {
                 | Self::BoardCleared(_)
                 | Self::BoardState(_)
                 | Self::BoardRefused(_)
+                | Self::PictureAnswer(_)
         )
     }
 }
@@ -343,6 +349,7 @@ impl ControlMessage {
             Self::BoardCleared(_) => type_ids::BOARD_CLEARED,
             Self::BoardState(_) => type_ids::BOARD_STATE,
             Self::BoardRefused(_) => type_ids::BOARD_REFUSED,
+            Self::PictureAnswer(_) => type_ids::PICTURE_ANSWER,
         }
     }
 
@@ -391,6 +398,7 @@ impl ControlMessage {
             Self::BoardCleared(m) => postcard::to_stdvec(m)?,
             Self::BoardState(m) => postcard::to_stdvec(m)?,
             Self::BoardRefused(m) => postcard::to_stdvec(m)?,
+            Self::PictureAnswer(m) => postcard::to_stdvec(m)?,
         };
         envelope::encode(self.type_id(), &payload, out)?;
         Ok(())
@@ -441,6 +449,7 @@ impl ControlMessage {
             type_ids::BOARD_CLEARED => Self::BoardCleared(payload(frame)?),
             type_ids::BOARD_STATE => Self::BoardState(payload(frame)?),
             type_ids::BOARD_REFUSED => Self::BoardRefused(payload(frame)?),
+            type_ids::PICTURE_ANSWER => Self::PictureAnswer(payload(frame)?),
             other if frame.must_understand() => return Err(DecodeError::UnknownRequired(other)),
             other => return Ok(Decoded::SkippedOptional(other)),
         };
@@ -789,6 +798,7 @@ mod tests {
                     desktop: Some(MemberId([6; 32])),
                     in_front: Some(false),
                     drawing: RemoteDrawing {
+                        pictures: false,
                         on: true,
                         elements: 3,
                         drawers: vec![(MemberId([7; 32]), 3)],
@@ -816,6 +826,10 @@ mod tests {
             ControlMessage::RemoteCommand(RemoteCommand {
                 id: 12,
                 op: RemoteOp::ClearBoard,
+            }),
+            ControlMessage::RemoteCommand(RemoteCommand {
+                id: 14,
+                op: RemoteOp::SetPictures { on: false },
             }),
             ControlMessage::RemoteCommand(RemoteCommand {
                 id: 13,
@@ -895,6 +909,7 @@ mod tests {
                 desktop: Some(MemberId([u8::MAX; 32])),
                 in_front: Some(true),
                 drawing: RemoteDrawing {
+                    pictures: false,
                     on: true,
                     elements: u32::MAX,
                     drawers: (0..MAX_REMOTE_LISTED)
@@ -952,6 +967,7 @@ mod tests {
         };
         let session = SessionId(7);
         let element = Element {
+            picture: None,
             id: 3,
             kind: ElementKind::Arrow,
             colour: 1,
@@ -1014,6 +1030,7 @@ mod tests {
                 author: Some(MemberId([4; 32])),
             }),
             ControlMessage::BoardState(BoardState {
+                pictures: false,
                 session,
                 on: true,
                 stopped: vec![MemberId([5; 32])],
@@ -1021,6 +1038,16 @@ mod tests {
             ControlMessage::BoardRefused(BoardRefused {
                 session,
                 why: Refusal::BoardFull,
+            }),
+            ControlMessage::PictureAnswer(crate::board::PictureAnswer {
+                session,
+                id: 7,
+                refusal: Some(Refusal::TooManyPictures),
+            }),
+            ControlMessage::PictureAnswer(crate::board::PictureAnswer {
+                session,
+                id: 8,
+                refusal: None,
             }),
         ] {
             assert!(message.is_session());

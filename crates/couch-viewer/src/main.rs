@@ -27,6 +27,7 @@ mod editor;
 mod gpu;
 mod hud;
 mod input;
+mod pictures;
 mod pipe;
 mod sink;
 mod viewer;

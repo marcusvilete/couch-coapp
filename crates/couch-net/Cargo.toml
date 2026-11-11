@@ -23,6 +23,7 @@ hkdf.workspace = true
 hmac.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
+serde.workspace = true
 sha2.workspace = true
 spake2.workspace = true
 unicode-normalization.workspace = true

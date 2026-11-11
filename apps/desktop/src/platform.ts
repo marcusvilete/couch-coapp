@@ -10,7 +10,7 @@ import type { Event as EngineEvent } from "./bindings/Event";
 import type { Response } from "./bindings/Response";
 import type { ScreenArea } from "./bindings/ScreenArea";
 import type { Toast } from "./model/overlay";
-import type { BoardBatch, BoardState } from "./board/events";
+import type { BoardBatch, BoardPicture, BoardPictureUp, BoardState } from "./board/events";
 
 export type Unlisten = () => void;
 
@@ -47,6 +47,10 @@ export interface BoardHost {
   sendNews(news: BoardNewsView): void;
   /** The host's own drawing, to pass on to the engine. */
   onOps(handler: (batch: BoardBatch) => void): Promise<Unlisten>;
+  /** A picture on the board, for the page (M27e). */
+  sendPicture(picture: BoardPicture): void;
+  /** The host's own picture, to pass on to the engine (M27e). */
+  onPicture(handler: (up: BoardPictureUp) => void): Promise<Unlisten>;
   /** Esc or Done in the page: back to the game. */
   onDone(handler: () => void): Promise<Unlisten>;
 }

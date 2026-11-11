@@ -32,12 +32,16 @@ pub enum ForWindow {
     Window(WindowRequest),
     /// What the host said of the board (M27a).
     Board(BoardNews),
+    /// A picture on the board (M27e), not yet decoded.
+    Picture(couch_proto::ipc::Picture),
 }
 
 /// What the viewer sends back.
 pub enum Outgoing {
     /// The user's own drawing (M27a).
     Draw(Draw),
+    /// The user's picture (M27e).
+    PictureUp(couch_proto::ipc::PictureUp),
     Timing(FrameTiming),
     KeyframeRequest,
     Input(LocalInput),
@@ -106,7 +110,8 @@ pub fn spawn_reader(
                     | ipc::kinds::SHORTCUTS
                     | ipc::kinds::VOLUME
                     | ipc::kinds::WINDOW
-                    | ipc::kinds::BOARD => {
+                    | ipc::kinds::BOARD
+                    | ipc::kinds::PICTURE => {
                         let message = match frame.kind {
                             ipc::kinds::SEAT => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Seat)
@@ -132,6 +137,9 @@ pub fn spawn_reader(
                             }
                             ipc::kinds::BOARD => {
                                 ipc::from_payload(&frame.payload).map(ForWindow::Board)
+                            }
+                            ipc::kinds::PICTURE => {
+                                ipc::from_payload(&frame.payload).map(ForWindow::Picture)
                             }
                             _ => ipc::from_payload(&frame.payload).map(ForWindow::Hud),
                         };
@@ -232,6 +240,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>, out: Box<dyn Write + Send>) ->
                     Outgoing::Draw(draw) => {
                         payload = ipc::to_payload(&draw);
                         ipc::kinds::DRAW
+                    }
+                    Outgoing::PictureUp(up) => {
+                        payload = ipc::to_payload(&up);
+                        ipc::kinds::PICTURE_UP
                     }
                     Outgoing::Close => break,
                 };

@@ -87,7 +87,7 @@ describe("commands for a home PC run from afar", () => {
       stopped: true,
     });
     // Settings stay the device's own.
-    const setting = { type: "setDrawingDefault", on: true } as const;
+    const setting = { type: "setDrawingDefault", on: true, pictures: false } as const;
     expect(viaRemote(target, setting)).toBe(setting);
   });
 });

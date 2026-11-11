@@ -29,6 +29,8 @@ use super::{
 pub enum OwnEvent {
     /// The host drew (as itself).
     Draw(Draw),
+    /// The host's picture (M27e), for the board.
+    Picture(couch_proto::ipc::PictureUp),
     /// Its decoder needs a keyframe.
     KeyframeNeeded,
     /// Its full screen, bar, stats and drawing mode, as they are now.
@@ -43,6 +45,7 @@ pub enum OwnEvent {
 enum OwnCmd {
     Hud(HudState),
     Board(BoardNews),
+    Picture(couch_proto::ipc::Picture),
     Window(WindowRequest),
     Stop,
 }
@@ -106,6 +109,11 @@ impl OwnWindow {
     /// What the session says of the board, to the host.
     pub fn board(&self, news: BoardNews) {
         let _ = self.cmds.send(OwnCmd::Board(news));
+    }
+
+    /// A picture on the board (M27e).
+    pub fn picture(&self, picture: couch_proto::ipc::Picture) {
+        let _ = self.cmds.send(OwnCmd::Picture(picture));
     }
 
     /// Something asked of the window: drawing mode from the host's key, to
@@ -235,6 +243,9 @@ async fn serve(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<OwnCmd>) -> Opt
                 Some(OwnCmd::Board(news)) => {
                     send(&mut ctx.window.to, ipc::kinds::BOARD, &ipc::to_payload(&news), limit).await
                 }
+                Some(OwnCmd::Picture(picture)) => {
+                    send(&mut ctx.window.to, ipc::kinds::PICTURE, &ipc::to_payload(&picture), limit).await
+                }
                 Some(OwnCmd::Window(request)) => {
                     // Windows lets a background process take the foreground
                     // only if the one in front allows it first.
@@ -267,6 +278,7 @@ fn said_event(window: &mut Window, frame: IpcFrame) -> Option<OwnEvent> {
         ipc::kinds::KEYFRAME_REQUEST => Some(OwnEvent::KeyframeNeeded),
         ipc::kinds::WINDOW_STATE => ipc::from_payload(&frame.payload).map(OwnEvent::Window),
         ipc::kinds::DRAW => ipc::from_payload(&frame.payload).map(OwnEvent::Draw),
+        ipc::kinds::PICTURE_UP => ipc::from_payload(&frame.payload).map(OwnEvent::Picture),
         ipc::kinds::USER_ACTION => match ipc::from_payload::<UserAction>(&frame.payload)? {
             UserAction::Leave => {
                 window.left = true;

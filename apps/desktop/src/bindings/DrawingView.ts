@@ -20,4 +20,8 @@ drawers: Array<DrawerView>,
 /**
  * Members the host stopped drawing, by id.
  */
-stopped: Array<string>, };
+stopped: Array<string>, 
+/**
+ * The host lets them put pictures on the board (M27e).
+ */
+pictures: boolean, };

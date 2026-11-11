@@ -28,6 +28,9 @@ class Desk {
   board = new BoardView();
   now = 1_000;
   sent: BoardOpView[] = [];
+  /** Pictures that went with their bytes (M27e), in order, and where each
+   * fell among the batches (the number of operations sent before it). */
+  uploaded: [number, BoardElement][] = [];
 
   constructor() {
     this.editor.setAspect(1920, 1080);
@@ -64,10 +67,24 @@ class Desk {
       if (batch) {
         expect(validBatch(batch.ops)).toBe(true);
         this.sent.push(...JSON.parse(JSON.stringify(batch.ops)));
+        continue;
+      }
+      // On the host it is a `put`, taken before what follows.
+      const picture = this.editor.takePicture();
+      if (picture) {
+        const e = JSON.parse(JSON.stringify(picture.element)) as BoardElement;
+        this.uploaded.push([this.sent.length, e]);
+        this.sent.push({ type: "put", element: e });
       } else if (!this.editor.pending()) {
         break;
       }
     }
+  }
+
+  /** A picture `w` by `h` pixels pasted at `at` (M27e). */
+  pastePicture(seed: number, w: number, h: number, at: BoardPoint) {
+    const id = seed.toString(16).padStart(2, "0").repeat(32);
+    this.editor.pastePicture(id, w, h, at, this.board, this.now);
   }
 
   mine(): BoardElement[] {
@@ -101,6 +118,145 @@ class Desk {
 
 /** Elements compared as plain data. */
 const plain = (es: BoardElement[]) => JSON.parse(JSON.stringify(es));
+
+/** A picture's box in picture heights, at 16:9: its width over its height. */
+function shape(e: BoardElement): number {
+  const w = ((e.points[1].x - e.points[0].x) / 65535) * (16 / 9);
+  const h = (e.points[1].y - e.points[0].y) / 65535;
+  return w / h;
+}
+
+describe("the drawing editor's shared cases: pictures (M27e)", () => {
+  it("a picture goes with its bytes once and moves as any element", () => {
+    const d = new Desk();
+    d.tool("pen");
+    d.stroke([p(1_000, 1_000), p(2_000, 1_500)], false);
+    d.pastePicture(7, 400, 200, p(32_768, 32_768));
+    const mine = d.mine();
+    const pic = plain([mine[mine.length - 1]])[0] as BoardElement;
+    expect(pic.kind).toBe("picture");
+    expect(Math.abs(shape(pic) - 2)).toBeLessThan(0.01);
+    // Wide: 40% of the picture's width, centred where it was pasted.
+    expect(pic.points[1].x - pic.points[0].x).toBe(26_214);
+    expect(pic.points[1].y - pic.points[0].y).toBe(23_302);
+    expect([...d.editor.selection()]).toEqual([pic.id]);
+    expect(d.editor.tool).toBe("select");
+    d.send();
+    expect(d.uploaded.length).toBe(1);
+    expect(d.uploaded[0][1]).toEqual(pic);
+    expect(d.uploaded[0][0]).toBeGreaterThan(0);
+    // Moved: an ordinary `put`, no bytes again.
+    d.stroke([p(32_768, 32_768), p(36_768, 30_768)], false);
+    d.send();
+    expect(d.uploaded.length).toBe(1);
+    expect(d.mine()[d.mine().length - 1].points).not.toEqual(pic.points);
+    // Undone: back where it was, still no bytes; undone again: gone; then
+    // redone: it comes back with its bytes.
+    d.key({ type: "undo" });
+    d.key({ type: "undo" });
+    expect(d.mine().every((e) => e.kind !== "picture")).toBe(true);
+    d.key({ type: "redo" });
+    d.send();
+    expect(d.uploaded.length).toBe(2);
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("a box's corner resizes it freely and Shift makes it square", () => {
+    const d = new Desk();
+    d.tool("rectangle");
+    d.stroke([p(10_000, 10_000), p(20_000, 16_000)], false);
+    d.tool("select");
+    d.stroke([p(15_000, 10_000)], false);
+    expect(d.editor.handles(d.board).length).toBe(4);
+    // The bottom-right corner, dragged: the top-left stays, any shape.
+    d.stroke([p(20_000, 16_000), p(30_000, 18_000)], false);
+    expect(plain(d.mine())[0].points).toEqual([p(10_000, 10_000), p(30_000, 18_000)]);
+    // The top-left, with Shift: a square from the bottom-right.
+    d.stroke([p(10_000, 10_000), p(25_000, 5_000)], true);
+    const e = plain(d.mine())[0] as BoardElement;
+    expect(e.points[0]).toEqual(p(30_000, 18_000));
+    const w = ((e.points[0].x - e.points[1].x) / 65535) * (16 / 9);
+    const h = (e.points[0].y - e.points[1].y) / 65535;
+    expect(Math.abs(w - h)).toBeLessThan(0.001);
+    // A stroke and a text box have none; nor have several selected.
+    d.tool("pen");
+    d.stroke([p(40_000, 40_000), p(42_000, 41_000)], false);
+    d.key({ type: "selectAll" });
+    expect(d.editor.handles(d.board)).toEqual([]);
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("a line's ends move by their handles and Shift steps the angle", () => {
+    const d = new Desk();
+    d.tool("arrow");
+    d.stroke([p(10_000, 30_000), p(30_000, 30_000)], false);
+    d.tool("select");
+    d.stroke([p(20_000, 30_000)], false);
+    expect(d.editor.handles(d.board)).toEqual([p(10_000, 30_000), p(30_000, 30_000)]);
+    // Its end moved: its start stays, and it is still an arrow from it.
+    d.stroke([p(30_000, 30_000), p(31_000, 20_000)], false);
+    expect(plain(d.mine())[0].points).toEqual([p(10_000, 30_000), p(31_000, 20_000)]);
+    // Its start, with Shift: level with its end (0° from it).
+    d.stroke([p(10_000, 30_000), p(12_000, 20_500)], true);
+    const e = plain(d.mine())[0] as BoardElement;
+    expect(e.points[1]).toEqual(p(31_000, 20_000));
+    expect(Math.abs(e.points[0].y - 20_000)).toBeLessThanOrEqual(1);
+    // One step each.
+    d.key({ type: "undo" });
+    expect(plain(d.mine())[0].points).toEqual([p(10_000, 30_000), p(31_000, 20_000)]);
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("a picture's corner resizes it keeping its shape inside the picture", () => {
+    const d = new Desk();
+    d.pastePicture(3, 300, 300, p(32_768, 32_768));
+    const pic = plain(d.mine())[0] as BoardElement;
+    const [lo, hi] = pic.points;
+    // Its bottom-right corner, dragged out: the top-left stays.
+    d.stroke([hi, p(hi.x + 3_000, hi.y + 9_000)], false);
+    const big = plain(d.mine())[0] as BoardElement;
+    expect(big.points[0]).toEqual(lo);
+    expect(big.points[1].y).toBeGreaterThan(hi.y + 8_000);
+    expect(Math.abs(shape(big) - 1)).toBeLessThan(0.01);
+    // Its top-left, dragged past the picture's corner: only as far as fits.
+    const bigHi = big.points[1];
+    d.stroke([big.points[0], p(0, 0)], false);
+    const most = plain(d.mine())[0] as BoardElement;
+    expect(most.points[1]).toEqual(bigHi);
+    expect(most.points[0].x === 0 || most.points[0].y === 0).toBe(true);
+    expect(Math.abs(shape(most) - 1)).toBeLessThan(0.01);
+    // Dragged through its fixed corner: as small as a picture may be, never
+    // turned inside out.
+    d.stroke([most.points[0], p(bigHi.x + 2_000, bigHi.y + 2_000)], false);
+    const small = d.mine()[0];
+    expect(small.points[0].x < small.points[1].x && small.points[0].y < small.points[1].y).toBe(true);
+    d.send();
+    expect(d.uploaded.length).toBe(1);
+    // One step each.
+    d.key({ type: "undo" });
+    expect(plain(d.mine())[0]).toEqual(most);
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("the eraser takes a picture anywhere in it and an undo brings its bytes", () => {
+    const d = new Desk();
+    d.pastePicture(5, 640, 480, p(20_000, 20_000));
+    const pic = plain(d.mine())[0] as BoardElement;
+    d.send();
+    d.tool("eraser");
+    const inside = p(Math.floor((pic.points[0].x + pic.points[1].x) / 2), Math.floor((pic.points[0].y + pic.points[1].y) / 2));
+    d.stroke([inside], false);
+    expect(d.mine()).toEqual([]);
+    d.key({ type: "undo" });
+    expect(plain(d.mine())).toEqual([pic]);
+    d.send();
+    expect(d.uploaded.length).toBe(2);
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+});
 
 describe("the drawing editor's shared cases", () => {
   it("a pen stroke goes as it is drawn and undoes whole", () => {
@@ -156,6 +312,7 @@ describe("the drawing editor's shared cases", () => {
   it("the eraser takes only ours and undoes", () => {
     const d = new Desk();
     const theirs: BoardElement = {
+      picture: null,
       id: 1,
       kind: "rectangle",
       colour: 0,
@@ -334,6 +491,7 @@ describe("the drawing editor's shared cases", () => {
   it("a stroke left open by a reload is finished", () => {
     const d = new Desk();
     const open: BoardElement = {
+      picture: null,
       id: 5,
       kind: "pen",
       colour: 0,
@@ -382,7 +540,7 @@ describe("the drawing editor's shared cases", () => {
       [
         {
           type: "put",
-          element: { id: 41, kind: "line", colour: 0, width: 0, fades: false, stay: 4, done: true, points: [p(0, 0), p(1, 1)], text: "" },
+          element: { id: 41, kind: "line", colour: 0, width: 0, fades: false, stay: 4, done: true, points: [p(0, 0), p(1, 1)], text: "", picture: null },
         },
       ],
       d.now,
@@ -624,6 +782,7 @@ describe("the drawing editor's shared cases: text boxes", () => {
     expect(d.mine()[0].text).toBe(">Hello!");
     // The Text tool's click on our box edits it too; on theirs, a new one.
     const theirs: BoardElement = {
+      picture: null,
       id: 9,
       kind: "text",
       colour: 0,
@@ -715,6 +874,7 @@ describe("the drawing editor's shared cases: text boxes", () => {
     const d = new TextDesk();
     // As a page loaded again finds it: being typed.
     const open: BoardElement = {
+      picture: null,
       id: 3,
       kind: "text",
       colour: 0,

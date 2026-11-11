@@ -169,6 +169,7 @@ fn a_refused_author_gets_its_own_back_at_the_tick() {
     // A stroke Ana is drawing.
     let g = s.board().generation_of(ANA);
     let open = couch_proto::board::Element {
+        picture: None,
         id: 2,
         kind: couch_proto::board::ElementKind::Pen,
         colour: 0,
@@ -263,6 +264,7 @@ fn many_open_strokes_are_finished_in_batches_the_checks_allow() {
         let ops = (0..50)
             .map(|i| {
                 BoardOp::Put(Element {
+                    picture: None,
                     id: k * 50 + i,
                     kind: ElementKind::Pen,
                     colour: 0,
@@ -368,6 +370,137 @@ fn the_host_draws_as_itself_to_every_viewer() {
     assert!(matches!(to_host(&fx)[..], [BoardNews::Cleared(c)] if c.author.is_none()));
 }
 
+// ---- Pictures (M27e) ----
+
+/// `who`'s picture `id`, of bytes `seed`, in its current generation.
+fn put_picture(s: &mut HostSession, who: MemberId, id: u32, seed: u8) -> Vec<Effect> {
+    use couch_proto::board::{BoardOp, ElementKind, PictureId};
+    let bytes: crate::board::PictureBytes = std::sync::Arc::from(vec![seed; 20]);
+    let BoardOp::Put(mut element) = a_box(id) else {
+        unreachable!()
+    };
+    element.kind = ElementKind::Picture;
+    element.picture = Some(PictureId(
+        <sha2::Sha256 as sha2::Digest>::digest(&bytes).into(),
+    ));
+    let generation = s.board().generation_of(who);
+    s.put_picture(who, generation, element, &bytes, Instant::now())
+}
+
+/// Whom `fx` sends a picture's bytes to.
+fn pictures_to(fx: &[Effect]) -> Vec<MemberId> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::SendPicture { to, .. } => Some(*to),
+            _ => None,
+        })
+        .collect()
+}
+
+fn answer(fx: &[Effect], to: MemberId) -> Option<Option<Refusal>> {
+    sent_to(fx, to).into_iter().find_map(|m| match m {
+        ControlMessage::PictureAnswer(a) => Some(a.refusal),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_picture_goes_to_everyone_once_with_its_bytes() {
+    let mut s = host_drawing_session();
+    s.set_drawing(true);
+    // Off by default: answered, refused.
+    let fx = put_picture(&mut s, ANA, 1, 7);
+    assert_eq!(answer(&fx, ANA), Some(Some(Refusal::PicturesOff)));
+    assert!(pictures_to(&fx).is_empty());
+    let fx = s.set_pictures(true);
+    assert!(matches!(sent_to(&fx, BIA)[..], [ControlMessage::BoardState(b)] if b.pictures));
+
+    let fx = put_picture(&mut s, ANA, 1, 7);
+    assert_eq!(answer(&fx, ANA), Some(None));
+    assert_eq!(pictures_to(&fx), [BIA], "the author has it");
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::HostPicture { .. })),
+        "and the host's windows"
+    );
+    assert!(matches!(
+        sent_to(&fx, BIA)[..],
+        [ControlMessage::BoardUpdate(u)] if u.author == ANA
+    ));
+    // The same picture again (a copy): its bytes aren't sent again.
+    let fx = put_picture(&mut s, ANA, 2, 7);
+    assert_eq!(answer(&fx, ANA), Some(None));
+    assert!(pictures_to(&fx).is_empty());
+    assert!(!fx.iter().any(|e| matches!(e, Effect::HostPicture { .. })));
+    // A newcomer gets the board and each picture once.
+    let fx = s.join(CAIO);
+    assert_eq!(pictures_to(&fx), [CAIO]);
+    // Erased and put again, a picture is sent again.
+    let generation = s.board().generation_of(ANA);
+    s.draw(
+        ANA,
+        generation,
+        vec![couch_proto::board::BoardOp::Remove(vec![1, 2])],
+        Instant::now(),
+    );
+    let fx = put_picture(&mut s, ANA, 3, 7);
+    assert_eq!(pictures_to(&fx), [BIA, CAIO]);
+
+    // The host's own: to every viewer, its other window hears it, and its
+    // bytes go to its windows; no answer on the wire.
+    let fx = put_picture(&mut s, HOST, 1, 8);
+    assert_eq!(pictures_to(&fx), [ANA, BIA, CAIO]);
+    assert!(fx.iter().any(|e| matches!(e, Effect::HostDrew(_))));
+    assert!(fx.iter().any(|e| matches!(e, Effect::HostPicture { .. })));
+    assert!(sent_to(&fx, HOST).is_empty());
+
+    // Off: every picture leaves the board, for everyone, authors included.
+    let fx = s.set_pictures(false);
+    assert!(s.board().picture_ids().is_empty());
+    for v in [ANA, BIA, CAIO] {
+        let removes = sent_to(&fx, v)
+            .into_iter()
+            .filter(|m| matches!(m, ControlMessage::BoardUpdate(u) if matches!(u.ops[..], [couch_proto::board::BoardOp::Remove(_)])))
+            .count();
+        assert_eq!(removes, 2, "Ana's and the host's");
+    }
+    assert!(
+        to_host(&fx)
+            .iter()
+            .any(|n| matches!(n, couch_proto::ipc::BoardNews::Update(u) if u.author == HOST))
+    );
+}
+
+#[test]
+fn a_picture_is_refused_as_a_drawing_is_and_always_answered() {
+    let mut s = drawing_session();
+    s.set_drawing(true);
+    s.set_pictures(true);
+    // Stale: answered, so its engine sends what it held back.
+    let generation = s.board().generation_of(ANA);
+    s.clear_board();
+    let bytes: crate::board::PictureBytes = std::sync::Arc::from(vec![1u8; 4]);
+    let couch_proto::board::BoardOp::Put(mut e) = a_box(1) else {
+        unreachable!()
+    };
+    e.kind = couch_proto::board::ElementKind::Picture;
+    e.picture = Some(couch_proto::board::PictureId(
+        <sha2::Sha256 as sha2::Digest>::digest(&bytes).into(),
+    ));
+    let fx = s.put_picture(ANA, generation, e, &bytes, Instant::now());
+    assert_eq!(answer(&fx, ANA), Some(Some(Refusal::Stale)));
+    // Stopped: refused, and its own come back at the next tick.
+    s.stop_drawing(BIA, true);
+    let fx = put_picture(&mut s, BIA, 1, 2);
+    assert_eq!(answer(&fx, BIA), Some(Some(Refusal::Stopped)));
+    assert!(pictures_to(&fx).is_empty());
+    // Not watching: nothing, not even an answer.
+    assert!(put_picture(&mut s, CAIO, 1, 3).is_empty());
+    // Nothing streamed.
+    s.set_stream(StreamState::Waiting);
+    let fx = put_picture(&mut s, ANA, 2, 4);
+    assert_eq!(answer(&fx, ANA), Some(Some(Refusal::NoStream)));
+}
+
 #[test]
 fn the_host_draws_nothing_during_desktop_control() {
     use couch_proto::ipc::BoardNews;
@@ -428,6 +561,7 @@ fn a_viewer_leaving_mid_stroke_has_it_finished() {
     let mut s = drawing_session();
     s.set_drawing(true);
     let open = couch_proto::board::Element {
+        picture: None,
         id: 1,
         kind: couch_proto::board::ElementKind::Pen,
         colour: 0,
@@ -1976,6 +2110,10 @@ enum Op {
     StopDrawing(u8, bool),
     /// The host draws a box over the game, as itself (M27b).
     HostDraw,
+    /// A viewer's picture, or the host's with 5 (M27e).
+    Picture(u8),
+    /// Pictures on or off.
+    Pictures(bool),
     Wait(u64),
     End,
 }
@@ -2014,6 +2152,8 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<bool>().prop_map(Op::Drawing),
         1 => (0u8..5, any::<bool>()).prop_map(|(w, s)| Op::StopDrawing(w, s)),
         1 => Just(Op::HostDraw),
+        1 => (0u8..6).prop_map(Op::Picture),
+        1 => any::<bool>().prop_map(Op::Pictures),
     ]
 }
 
@@ -2021,6 +2161,7 @@ fn op() -> impl Strategy<Value = Op> {
 fn a_box(id: u32) -> couch_proto::board::BoardOp {
     use couch_proto::board::{BoardOp, Element, ElementKind, Point};
     BoardOp::Put(Element {
+        picture: None,
         id,
         kind: ElementKind::Rectangle,
         colour: 0,
@@ -2194,6 +2335,8 @@ proptest! {
         let mut drawn: u32 = 0;
         let mut viewer_drew = false;
         let mut host_drew = false;
+        let mut pictures_on = false;
+        let mut pictured = false;
 
         for op in ops {
             let paused_before = s.control_paused();
@@ -2328,6 +2471,56 @@ proptest! {
                             e,
                             Effect::HostBoard(couch_proto::ipc::BoardNews::Update(_))
                         ));
+                    }
+                    fx
+                }
+                Op::Picture(i) => {
+                    let m = if i == 5 { HOST } else { member(i) };
+                    drawn += 1;
+                    let bytes: crate::board::PictureBytes = std::sync::Arc::from(drawn.to_be_bytes().to_vec());
+                    let id = couch_proto::board::PictureId(<sha2::Sha256 as sha2::Digest>::digest(&bytes).into());
+                    let couch_proto::board::BoardOp::Put(mut element) = a_box(drawn) else { unreachable!() };
+                    element.kind = couch_proto::board::ElementKind::Picture;
+                    element.picture = Some(id);
+                    let generation = s.board().generation_of(m);
+                    let fx = s.put_picture(m, generation, element, &bytes, now);
+                    let taken = s.board().element(m, drawn).is_some();
+                    pictured |= taken && m != HOST;
+                    if taken {
+                        prop_assert!(drawing_on && pictures_on && !ended_before);
+                        prop_assert!(m == HOST || s.is_viewer(m));
+                        prop_assert!(!stopped.contains(&m));
+                        prop_assert_ne!(router.holders[2], Some(m), "the keyboard seat's holder put a picture");
+                        prop_assert_ne!(desktop, Some(m), "desktop control put a picture");
+                        prop_assert_eq!(s.board().picture(&id), Some(&bytes));
+                    }
+                    // A viewer is always answered; its bytes go to every
+                    // other viewer once, and only those, and to nobody if
+                    // refused.
+                    let answered = fx.iter().any(|e| matches!(e, Effect::Send { to, message: ControlMessage::PictureAnswer(a) } if *to == m && a.id == drawn));
+                    prop_assert_eq!(answered, m != HOST && (s.is_viewer(m) && !s.is_ended()));
+                    let sent: Vec<MemberId> = fx.iter().filter_map(|e| match e {
+                        Effect::SendPicture { to, picture, bytes: b } => {
+                            assert!(*picture == id && *b == bytes);
+                            Some(*to)
+                        }
+                        _ => None,
+                    }).collect();
+                    if taken {
+                        let others: Vec<MemberId> = s.viewers().iter().copied().filter(|v| *v != m).collect();
+                        prop_assert_eq!(sent, others);
+                    } else {
+                        prop_assert!(sent.is_empty());
+                    }
+                    fx
+                }
+                Op::Pictures(on) => {
+                    if !ended_before {
+                        pictures_on = on;
+                    }
+                    let fx = s.set_pictures(on);
+                    if !on {
+                        prop_assert!(s.board().picture_ids().is_empty(), "off takes the pictures off");
                     }
                     fx
                 }
@@ -2522,6 +2715,7 @@ proptest! {
         // moment: `prop_assert!(!host_held_two)` or `!viewer_two` must fail;
         // and `!viewer_drew`, for a viewer's drawing taken (M27a), and
         // `!host_drew` for the host's (M27b).
-        let _ = (host_held_two, viewer_two, viewer_drew, host_drew);
+        // And `!pictured` for a viewer's picture taken (M27e).
+        let _ = (host_held_two, viewer_two, viewer_drew, host_drew, pictured);
     }
 }

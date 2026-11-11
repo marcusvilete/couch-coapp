@@ -16,7 +16,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 19;
+pub const IPC_VERSION: u16 = 20;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -52,6 +52,9 @@ pub mod kinds {
     /// main -> viewer: what the host says of the board ([`super::BoardNews`],
     /// M27a).
     pub const BOARD: u8 = 0x0C;
+    /// main -> viewer: a picture's bytes for the board ([`super::Picture`],
+    /// M27e), checked against its id, not yet decoded.
+    pub const PICTURE: u8 = 0x0D;
 
     /// viewer -> main: a local input event for the host ([`super::LocalInput`]).
     pub const INPUT: u8 = 0x81;
@@ -76,6 +79,9 @@ pub mod kinds {
     /// viewer -> main: the user's own operations on the board
     /// ([`super::Draw`], M27a), for the host.
     pub const DRAW: u8 = 0x89;
+    /// viewer -> main: the user's picture for the board ([`super::PictureUp`],
+    /// M27e), for the host.
+    pub const PICTURE_UP: u8 = 0x8A;
 }
 
 /// Header of a [`kinds::VIDEO_FRAME`] payload; the access unit follows it.
@@ -315,6 +321,8 @@ pub struct HudBoard {
     pub me: Option<crate::ids::MemberId>,
     /// Who may have drawn, by member, for a ping's name.
     pub names: Vec<(crate::ids::MemberId, String)>,
+    /// The host allows pictures (M27e).
+    pub pictures: bool,
 }
 
 /// Payload of [`kinds::BOARD`] (postcard, M27a): what the host said of the
@@ -333,6 +341,24 @@ pub enum BoardNews {
 pub struct Draw {
     pub generation: u32,
     pub ops: Vec<crate::board::BoardOp>,
+}
+
+/// Payload of [`kinds::PICTURE`] (postcard, M27e): a picture on the board,
+/// by its id (the SHA-256 of `bytes`, checked before it is sent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Picture {
+    pub picture: crate::board::PictureId,
+    pub bytes: Vec<u8>,
+}
+
+/// Payload of [`kinds::PICTURE_UP`] (postcard, M27e): the user's picture,
+/// made in the board's `generation`: its element (a picture naming
+/// `bytes`, already made what the board takes) and its bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PictureUp {
+    pub generation: u32,
+    pub element: crate::board::Element,
+    pub bytes: Vec<u8>,
 }
 
 /// One seat as the HUD shows it.
@@ -779,6 +805,7 @@ mod tests {
                 stopped: false,
                 me: Some(crate::ids::MemberId([1; 32])),
                 names: vec![(crate::ids::MemberId([2; 32]), "Bia".into())],
+                pictures: true,
             },
         };
         assert_eq!(from_payload(&to_payload(&hud)), Some(hud));
@@ -799,6 +826,31 @@ mod tests {
             ops: vec![BoardOp::Ping(Point::new(1, 2))],
         };
         assert_eq!(from_payload(&to_payload(&draw)), Some(draw));
+        // Pictures (M27e): a full one fits a frame many times over.
+        let picture = Picture {
+            picture: PictureId([7; 32]),
+            bytes: vec![0xab; MAX_PICTURE_BYTES],
+        };
+        let payload = to_payload(&picture);
+        assert!(payload.len() + 1 < MAX_FRAME_LEN);
+        assert_eq!(from_payload(&payload), Some(picture));
+        let up = PictureUp {
+            generation: 4,
+            element: Element {
+                id: 3,
+                kind: ElementKind::Picture,
+                colour: 0,
+                width: 1,
+                fades: false,
+                stay: 4,
+                done: true,
+                points: vec![Point::new(1, 2), Point::new(300, 400)],
+                text: String::new(),
+                picture: Some(PictureId([7; 32])),
+            },
+            bytes: vec![1, 2, 3],
+        };
+        assert_eq!(from_payload(&to_payload(&up)), Some(up));
         for action in [
             UserAction::RequestControl {
                 seat: 1,

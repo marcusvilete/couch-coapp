@@ -16,7 +16,17 @@ import type { Event as EngineEvent } from "../bindings/Event";
 import type { Response } from "../bindings/Response";
 import type { ScreenArea } from "../bindings/ScreenArea";
 import type { Toast } from "../model/overlay";
-import { BOARD_DONE, BOARD_NEWS, BOARD_OPS, BOARD_READY, BOARD_STATE, type BoardBatch } from "../board/events";
+import {
+  BOARD_DONE,
+  BOARD_NEWS,
+  BOARD_OPS,
+  BOARD_PICTURE,
+  BOARD_PICTURE_UP,
+  BOARD_READY,
+  BOARD_STATE,
+  type BoardBatch,
+  type BoardPictureUp,
+} from "../board/events";
 import { OVERLAY_READY, OVERLAY_TOASTS } from "../overlay/events";
 import type { BoardHost, OverlayHost, Platform } from "../platform";
 
@@ -55,6 +65,8 @@ function boardHost(): BoardHost {
     sendState: (state) => void emitTo(BOARD, BOARD_STATE, state).catch(() => {}),
     sendNews: (news) => void emitTo(BOARD, BOARD_NEWS, news).catch(() => {}),
     onOps: (handler) => listen<BoardBatch>(BOARD_OPS, (e) => handler(e.payload)),
+    sendPicture: (picture) => void emitTo(BOARD, BOARD_PICTURE, picture).catch(() => {}),
+    onPicture: (handler) => listen<BoardPictureUp>(BOARD_PICTURE_UP, (e) => handler(e.payload)),
     onDone: (handler) => listen(BOARD_DONE, () => handler()),
   };
 }

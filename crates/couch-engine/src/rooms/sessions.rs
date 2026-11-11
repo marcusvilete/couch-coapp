@@ -12,6 +12,9 @@
 
 mod board_overlay;
 mod own_window;
+mod pictures;
+
+pub(super) use own_window::Editor;
 
 use std::{
     any::Any,
@@ -21,7 +24,6 @@ use std::{
 use couch_input::{HidUsage, shortcuts::Shortcut};
 use couch_proto::remote::{RemoteDrawing, RemoteGuest, RemoteRequest, RemoteSession, RemoteStream};
 use couch_proto::{
-    board::BoardOps,
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
     ipc::{
@@ -141,6 +143,23 @@ struct Hosting {
     own: Option<own_window::Own>,
     /// Own windows opened so far in this session, to tell their words apart.
     own_windows: u32,
+    /// Each viewer's pictures read from the connection it joined on (M27e),
+    /// while it watches.
+    picture_readers: BTreeMap<MemberId, pictures::AbortOnDrop>,
+    /// What each of the host's windows drew behind a picture of its being
+    /// checked (M27e).
+    overlay_gate: pictures::Gate,
+    own_gate: pictures::Gate,
+}
+
+impl Hosting {
+    /// The gate of the host's window `from` (M27e).
+    fn gate_mut(&mut self, from: own_window::Editor) -> &mut pictures::Gate {
+        match from {
+            own_window::Editor::Overlay => &mut self.overlay_gate,
+            own_window::Editor::Own => &mut self.own_gate,
+        }
+    }
 }
 
 struct Watching {
@@ -180,6 +199,10 @@ struct Watching {
     /// it stopped us.
     board_on: bool,
     board_stopped: bool,
+    /// The host allows pictures (M27e).
+    board_pictures: bool,
+    /// Our drawing behind a picture of ours on its way to the host (M27e).
+    gate: pictures::Gate,
 }
 
 enum WatchState {
@@ -551,6 +574,9 @@ impl Actor {
         let link = watch.reconnect(c.conn.clone(), &c.datagrams, &c.streams);
         let w = self.sessions.watching.as_mut().expect("checked above");
         w.conn = conn;
+        // What waited for an answer on the old connection is lost with it;
+        // the host's snapshot on joining again puts our board right.
+        w.gate.reset();
         w.link = link;
         w.attempt += 1;
         let (session, attempt) = (w.session, w.attempt);
@@ -950,12 +976,19 @@ impl Actor {
                 let me = self.me;
                 if let Some(w) = self.sessions.watching.as_mut() {
                     let (on, stopped) = (b.on, b.stopped.contains(&me));
-                    if (w.board_on, w.board_stopped) != (on, stopped) {
+                    if (w.board_on, w.board_stopped, w.board_pictures) != (on, stopped, b.pictures)
+                    {
                         w.board_on = on;
                         w.board_stopped = stopped;
+                        w.board_pictures = b.pictures;
                         self.send_hud();
                     }
                 }
+            }
+            // The answer to our picture (M27e): what waited behind it goes
+            // to the host now.
+            ControlMessage::PictureAnswer(a) if self.watching(room, peer, a.session) => {
+                self.picture_answered(a, now);
             }
             ControlMessage::BoardSnapshot(s)
                 if self.watching(room, peer, s.session) && s.is_valid() =>
@@ -1026,6 +1059,7 @@ impl Actor {
                 SessionEffect::Send { to, message } => self.send_to(room, to, message),
                 SessionEffect::Broadcast(message) => self.broadcast(room, &message),
                 SessionEffect::StartViewer(member) => {
+                    let mut started_pictures = None;
                     let conn = self.current_conn(room, member);
                     let started = conn.and_then(|id| {
                         let c = self.conns.get(&id)?;
@@ -1044,6 +1078,7 @@ impl Actor {
                     match (started, self.sessions.hosting.as_mut()) {
                         (Some(id), Some(h)) => {
                             h.viewer_conns.insert(member, id);
+                            started_pictures = Some((member, id));
                             // A new viewer hears whether the game is in front.
                             focus = h.in_front.map(|in_front| {
                                 let message = ControlMessage::GameFocus(GameFocus {
@@ -1059,10 +1094,16 @@ impl Actor {
                     if let Some((id, message)) = focus {
                         self.send(id, Outgoing::Message(message));
                     }
+                    // Its pictures, read from the connection it joined on
+                    // (M27e).
+                    if let Some((member, id)) = started_pictures {
+                        self.read_pictures(member, id);
+                    }
                 }
                 SessionEffect::StopViewer(member) => {
                     if let Some(h) = self.sessions.hosting.as_mut() {
                         h.viewer_conns.remove(&member);
+                        h.picture_readers.remove(&member);
                         h.viewer_codecs.remove(&member);
                         h.guest_controllers.remove(&member);
                         h.chosen.retain(|(who, _), _| *who != member);
@@ -1135,6 +1176,14 @@ impl Actor {
                 // Routed by whoever passed the host's batch on: only to the
                 // window that didn't draw it (`own_window::host_drew`).
                 SessionEffect::HostDrew(_) => {}
+                SessionEffect::SendPicture { to, picture, bytes } => {
+                    if let Some(session) = self.sessions.hosting.as_ref().map(|h| h.session.id()) {
+                        self.send_picture_to(session, to, picture, bytes);
+                    }
+                }
+                SessionEffect::HostPicture { picture, bytes } => {
+                    self.to_host_windows_picture(room, picture, &bytes);
+                }
             }
         }
         if !more.is_empty() {
@@ -1283,8 +1332,9 @@ impl Actor {
         }
         // Drawing on the stream starts as Settings says (M27a), before
         // anyone hears of the session: nobody to tell yet.
-        let drawing = crate::store::drawing(&self.data_dir).on;
-        let _ = host_session.set_drawing(drawing);
+        let drawing = crate::store::drawing(&self.data_dir);
+        let _ = host_session.set_drawing(drawing.on);
+        let _ = host_session.set_pictures(drawing.pictures);
         let options = HostOptions {
             seats,
             // Games and Steam know a controller by its ids; a made-up pair
@@ -1344,6 +1394,9 @@ impl Actor {
             overlay: board_overlay::BoardOverlay::default(),
             own: None,
             own_windows: 0,
+            picture_readers: BTreeMap::new(),
+            overlay_gate: pictures::Gate::default(),
+            own_gate: pictures::Gate::default(),
         });
         Ok((session, options))
     }
@@ -2311,6 +2364,11 @@ impl Actor {
     // ---- Drawing on the stream (M27a) ----
 
     /// Lets those watching draw, or stops it (clearing the board).
+    /// [`crate::Command::SetPictures`] (M27e).
+    pub(super) fn set_pictures(&mut self, on: bool, now: Instant) -> Result<Response, EngineError> {
+        self.our_session(|s| Ok(s.set_pictures(on)), now)
+    }
+
     pub(super) fn set_drawing(&mut self, on: bool, now: Instant) -> Result<Response, EngineError> {
         self.our_session(|s| Ok(s.set_drawing(on)), now)
     }
@@ -2352,6 +2410,7 @@ impl Actor {
         {
             self.apply_session(room, fx, now);
         }
+        self.pictures_tick(now);
     }
 
     /// The panic key. The engine has already released through the
@@ -2593,6 +2652,8 @@ impl Actor {
             volume,
             window: None,
             board_on: false,
+            board_pictures: false,
+            gate: pictures::Gate::default(),
             board_stopped: false,
         });
         self.announce(room, now);
@@ -2917,18 +2978,10 @@ impl Actor {
             WatchEvent::ConnectionLost { link } if link == w.link => self.lost_host(now),
             WatchEvent::ConnectionLost { .. } => {}
             // Our drawing (M27a), to the host once joined: it checks it all.
-            WatchEvent::Draw(draw) => {
-                // Our own window's, but checked anyway: a batch too large
-                // for a control frame would close the connection.
-                if w.joined() && couch_proto::board::valid_batch(&draw.ops) {
-                    let message = ControlMessage::BoardOps(BoardOps {
-                        session: w.session,
-                        generation: draw.generation,
-                        ops: draw.ops,
-                    });
-                    self.send(w.conn, Outgoing::Message(message));
-                }
-            }
+            WatchEvent::Draw(draw) => self.watch_draw(draw),
+            // Our picture (M27e), to the host once joined, after what is on
+            // its way.
+            WatchEvent::Picture(up) => self.watch_picture(up, now),
             WatchEvent::Timing(_)
             | WatchEvent::AudioStats(_)
             | WatchEvent::Net(_)
@@ -2987,6 +3040,7 @@ impl Actor {
             board: HudBoard {
                 on: w.board_on,
                 stopped: w.board_stopped,
+                pictures: w.board_pictures,
                 me: Some(self.me),
                 names: self
                     .rooms
@@ -3531,6 +3585,7 @@ fn remote_drawing(board: &couch_room::board::Board) -> RemoteDrawing {
             .map(|(m, n)| (m, n as u32))
             .collect(),
         stopped: board.stopped().into_iter().take(listed).collect(),
+        pictures: board.pictures_on(),
     }
 }
 

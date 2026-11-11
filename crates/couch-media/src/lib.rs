@@ -10,6 +10,7 @@ pub mod clock;
 mod frame;
 pub mod mailbox;
 pub mod pacing;
+pub mod picture;
 pub mod ratecontrol;
 pub mod testpattern;
 mod traits;

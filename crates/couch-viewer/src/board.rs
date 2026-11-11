@@ -267,6 +267,7 @@ mod tests {
 
     fn stroke(id: u32, done: bool, fades: bool) -> Element {
         Element {
+            picture: None,
             id,
             kind: ElementKind::Pen,
             colour: 0,

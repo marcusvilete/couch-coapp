@@ -11,6 +11,10 @@ repository.workspace = true
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
+# Pictures on the board (M27e, `picture`).
+couch-proto.workspace = true
+image.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

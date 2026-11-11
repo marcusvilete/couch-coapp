@@ -70,6 +70,8 @@ export type World = {
   tray: boolean;
   /** Settings: sessions start with drawing on (M27a). */
   drawingDefault: boolean;
+  /** Sessions start with pictures allowed (M27e). */
+  picturesDefault: boolean;
   /** Remote play (M25): Settings → Remote play. Members offering it carry
    * their `remote` in the rooms. A PC unlocks with "246810". */
   remotePlay: RemotePlayView;
@@ -551,6 +553,7 @@ function remoteAction(room: FakeRoom, pc: MemberView, action: RemoteAction): Res
     case "setDrawing":
     case "clearBoard":
     case "stopDrawing":
+    case "setPictures":
       if (!s) throw "there's no session";
       return drawingCommand(room, s, action);
     default:
@@ -754,19 +757,22 @@ function handle(cmd: Command): Response | Promise<Response> {
     case "getTray":
       return { type: "tray", on: world.tray };
     case "getDrawingDefault":
-      return { type: "drawing", on: world.drawingDefault };
+      return { type: "drawing", on: world.drawingDefault, pictures: world.picturesDefault };
     case "setDrawingDefault":
       world.drawingDefault = cmd.on;
-      return { type: "drawing", on: world.drawingDefault };
+      world.picturesDefault = cmd.pictures;
+      return { type: "drawing", on: world.drawingDefault, pictures: world.picturesDefault };
     case "setDrawing":
     case "clearBoard":
-    case "stopDrawing": {
+    case "stopDrawing":
+    case "setPictures": {
       const { room, session: s } = hosting();
       return drawingCommand(room, s, cmd);
     }
     // The board over the game (M27b): the preview has no board window, so
     // its drawing and its page's asking change nothing.
     case "hostDraw":
+    case "hostPicture":
     case "hostBoard":
       hosting();
       return { type: "done" };
@@ -891,6 +897,7 @@ function handle(cmd: Command): Response | Promise<Response> {
       const chosen = hiding === "ready" ? cmd.controllers.map((c: HostController) => c.name) : [];
       const s = hostSession(me(), cmd.title.trim(), cmd.max_viewers, cmd.input, chosen);
       s.drawing.on = world.drawingDefault;
+      s.drawing.pictures = world.picturesDefault;
       if (hiding !== "ready" && cmd.controllers.length > 0) {
         s.hostControllerProblem = hiding === "busy" ? "HidHide is busy" : "HidHide isn't installed";
       }
@@ -1128,7 +1135,11 @@ export const DRAWING_KEYS: DrawingKeyView[] = [
 function drawingCommand(
   room: FakeRoom,
   s: SessionView,
-  cmd: { type: "setDrawing"; on: boolean } | { type: "clearBoard" } | { type: "stopDrawing"; member: string; stopped: boolean },
+  cmd:
+    | { type: "setDrawing"; on: boolean }
+    | { type: "clearBoard" }
+    | { type: "stopDrawing"; member: string; stopped: boolean }
+    | { type: "setPictures"; on: boolean },
 ): Response {
   const d = s.drawing;
   const clear = (member?: string) => {
@@ -1142,6 +1153,10 @@ function drawingCommand(
       break;
     case "clearBoard":
       clear();
+      break;
+    // Off takes the pictures off; the preview counts no pictures apart.
+    case "setPictures":
+      d.pictures = cmd.on;
       break;
     case "stopDrawing":
       if (!room.members.some((m) => m.id === cmd.member)) throw "unknown member";

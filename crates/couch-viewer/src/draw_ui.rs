@@ -85,6 +85,10 @@ pub struct Drawing {
     pub tools_hidden: bool,
     /// The host's own window (M27d): no game to go back to.
     pub own: bool,
+    /// Pictures on the board (M27e): theirs and ours, by id.
+    pub pictures: crate::pictures::Pictures,
+    /// Those shown, as egui textures.
+    textures: std::collections::HashMap<couch_proto::board::PictureId, egui::TextureHandle>,
     clicks: Vec<Click>,
 }
 
@@ -139,7 +143,30 @@ impl Drawing {
                     picture.min.y + f32::from(p.y) / 65_535.0 * picture.height(),
                 )
             };
+            // Textures for the pictures shown, made as their pictures are
+            // decoded; those no longer shown let go.
+            let shown_ids = self.shown_pictures();
+            self.pictures.sync(&shown_ids);
+            self.textures.retain(|id, _| shown_ids.contains(id));
+            for id in &shown_ids {
+                if !self.textures.contains_key(id)
+                    && let Some(image) = self.pictures.image(id)
+                {
+                    let colour = egui::ColorImage::from_rgba_unmultiplied(
+                        [image.width as usize, image.height as usize],
+                        &image.rgba,
+                    );
+                    let texture =
+                        ctx.load_texture("board-picture", colour, egui::TextureOptions::LINEAR);
+                    self.textures.insert(*id, texture);
+                }
+            }
             for shown in self.board.elements() {
+                if shown.element.kind == ElementKind::Picture {
+                    let texture = shown.element.picture.and_then(|id| self.textures.get(&id));
+                    paint_picture(&painter, shown, texture, now, &place);
+                    continue;
+                }
                 if shown.element.kind == ElementKind::Text {
                     paint_text(&painter, shown, picture.height(), now, &place);
                     continue;
@@ -194,6 +221,12 @@ impl Drawing {
                         let r = Rect::from_two_pos(place(a), place(b)).expand(6.0);
                         painter.rect_stroke(r, 3.0, Stroke::new(1.5, BLUE), StrokeKind::Outside);
                     }
+                }
+                // The selected element's resize handles (M27e).
+                for c in editor.handles(&self.board) {
+                    let r = Rect::from_center_size(place(c), vec2(10.0, 10.0));
+                    painter.rect_filled(r, 2.0, Color32::WHITE);
+                    painter.rect_stroke(r, 2.0, Stroke::new(1.5, BLUE), StrokeKind::Middle);
                 }
                 if let Some((a, b)) = editor.marquee() {
                     let r = Rect::from_two_pos(place(a), place(b));
@@ -431,6 +464,32 @@ impl Drawing {
         self.editor.as_mut().and_then(|e| e.copy(&self.board))
     }
 
+    /// The pictures the board shows, by id (M27e).
+    pub fn shown_pictures(&self) -> std::collections::BTreeSet<couch_proto::board::PictureId> {
+        self.board
+            .elements()
+            .iter()
+            .filter_map(|s| s.element.picture)
+            .collect()
+    }
+
+    /// A picture made from the clipboard or a file, pasted as ours (M27e):
+    /// kept, so it goes to the host with its bytes, and shown at once.
+    pub fn paste_picture(&mut self, ready: crate::pictures::Ready, now: Instant) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let p = ready.prepared;
+        let shown = self
+            .board
+            .elements()
+            .iter()
+            .filter_map(|s| s.element.picture)
+            .collect();
+        self.pictures.add(p.id, p.bytes, &shown);
+        editor.paste_picture(p.id, p.width, p.height, ready.at, &mut self.board, now);
+    }
+
     /// Ctrl+V, with the system clipboard's text, at the pointer if over the
     /// picture.
     pub fn paste(&mut self, system: Option<&str>, at: Option<Point>, now: Instant) {
@@ -545,10 +604,44 @@ fn element_shapes(
             let r = Rect::from_two_pos(points[0], points[1]);
             shapes.push(Shape::ellipse_stroke(r.center(), r.size() / 2.0, stroke));
         }
-        // Laid out with the fonts: `paint_text`.
-        ElementKind::Text => {}
+        // Laid out with the fonts: `paint_text`; a picture with its
+        // texture: `paint_picture`.
+        ElementKind::Text | ElementKind::Picture => {}
     }
     shapes
+}
+
+/// A picture on the board (M27e), stretched over its box, fading as any
+/// element; while its bytes are on their way or being decoded, a faint
+/// frame where it goes. The board overlay paints it alike (`paint.ts`).
+fn paint_picture(
+    painter: &Painter,
+    shown: &Shown,
+    texture: Option<&egui::TextureHandle>,
+    now: Instant,
+    place: &impl Fn(Point) -> Pos2,
+) {
+    let alpha = shown.alpha(now);
+    let e = &shown.element;
+    if alpha <= 0.0 || e.points.len() != 2 {
+        return;
+    }
+    let r = Rect::from_two_pos(place(e.points[0]), place(e.points[1]));
+    match texture {
+        Some(t) => {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            painter.image(
+                t.id(),
+                r,
+                uv,
+                Color32::from_white_alpha((alpha * 255.0) as u8),
+            );
+        }
+        None => {
+            let faint = Color32::from_white_alpha((alpha * 90.0) as u8);
+            painter.rect_stroke(r, 2.0, Stroke::new(1.0, faint), StrokeKind::Inside);
+        }
+    }
 }
 
 /// A text box on the picture, `height` points tall: each line from its

@@ -404,6 +404,22 @@ pub enum Command {
     /// While hosting: the board whole, for the board overlay that just
     /// loaded (M27b), as [`Event::HostBoard`] snapshots.
     HostBoard,
+    /// While hosting: lets those watching put pictures on the board, or
+    /// stops it (M27e). Off takes every picture off. A session starts as
+    /// Settings says ([`Command::SetDrawingDefault`]).
+    SetPictures {
+        on: bool,
+    },
+    /// While hosting: the host's own picture from its board overlay (M27e),
+    /// made in the board's `generation`: `element` a picture naming `data`,
+    /// a PNG or JPEG in base64 the page already made what the board takes.
+    /// Checked as a viewer's is; a refusal comes back as
+    /// [`Event::HostBoard`]. Never from afar.
+    HostPicture {
+        generation: u32,
+        element: board::BoardElement,
+        data: String,
+    },
     /// While hosting: drawing over the game ends (M27b; the overlay's Esc or
     /// Done), and the game comes back to the front. Only the host's own key
     /// begins it.
@@ -427,6 +443,8 @@ pub enum Command {
     /// [`Command::GetDrawingDefault`].
     SetDrawingDefault {
         on: bool,
+        /// And whether they start with pictures allowed (M27e).
+        pictures: bool,
     },
     /// While watching: the stream window's volume (P11), 0 to 100%, saved
     /// for the profile as the window's own slider is.
@@ -573,6 +591,10 @@ pub enum RemoteAction {
         member: String,
         stopped: bool,
     },
+    /// Pictures on the board allowed or not (M27e).
+    SetPictures {
+        on: bool,
+    },
 }
 
 impl RemoteAction {
@@ -596,6 +618,7 @@ impl RemoteAction {
             Self::SetDrawing { .. } => "SetDrawing",
             Self::ClearBoard => "ClearBoard",
             Self::StopDrawing { .. } => "StopDrawing",
+            Self::SetPictures { .. } => "SetPictures",
         }
     }
 }
@@ -648,6 +671,8 @@ pub struct StreamWindowSettingsView {
 pub struct DrawingSettingsView {
     /// Sessions start with drawing on.
     pub on: bool,
+    /// ...and with pictures allowed (M27e).
+    pub pictures: bool,
 }
 
 /// Answer to [`Command::GetTray`] (M25c).
@@ -1257,6 +1282,8 @@ pub struct DrawingView {
     pub drawers: Vec<DrawerView>,
     /// Members the host stopped drawing, by id.
     pub stopped: Vec<String>,
+    /// The host lets them put pictures on the board (M27e).
+    pub pictures: bool,
 }
 
 /// One member's share of the board (M27a).
@@ -1273,6 +1300,7 @@ impl DrawingView {
     pub(crate) fn of(d: &couch_proto::remote::RemoteDrawing) -> Self {
         Self {
             on: d.on,
+            pictures: d.pictures,
             elements: d.elements,
             drawers: d
                 .drawers
@@ -1776,6 +1804,14 @@ impl fmt::Debug for Command {
                 .field("ops", &ops.len())
                 .finish(),
             Self::HostBoard => f.write_str("HostBoard"),
+            Self::SetPictures { on } => f.debug_struct("SetPictures").field("on", on).finish(),
+            Self::HostPicture {
+                generation, data, ..
+            } => f
+                .debug_struct("HostPicture")
+                .field("generation", generation)
+                .field("data", &data.len())
+                .finish(),
             Self::EndHostDrawing => f.write_str("EndHostDrawing"),
             Self::ShowBoardOverlay { on } => {
                 f.debug_struct("ShowBoardOverlay").field("on", on).finish()
@@ -1785,9 +1821,11 @@ impl fmt::Debug for Command {
                 .field("open", open)
                 .finish(),
             Self::GetDrawingDefault => f.write_str("GetDrawingDefault"),
-            Self::SetDrawingDefault { on } => {
-                f.debug_struct("SetDrawingDefault").field("on", on).finish()
-            }
+            Self::SetDrawingDefault { on, pictures } => f
+                .debug_struct("SetDrawingDefault")
+                .field("on", on)
+                .field("pictures", pictures)
+                .finish(),
             Self::SetStreamVolume { percent, muted } => f
                 .debug_struct("SetStreamVolume")
                 .field("percent", percent)
@@ -2212,6 +2250,15 @@ pub enum Event {
     HostBoard {
         room: String,
         news: board::BoardNewsView,
+    },
+    /// While hosting: a picture on the board, for our board overlay over
+    /// the game (M27e), by its id in hex (`BoardElement::picture`): its
+    /// bytes in base64, checked as the board took them. Each once while it
+    /// is on the board, and every one as the overlay loads.
+    HostPicture {
+        room: String,
+        picture: String,
+        data: String,
     },
 }
 
@@ -2877,12 +2924,19 @@ impl Engine {
                 bar: store::stream_window(self.profile.data_dir()).bar,
             })),
             Command::GetTray => Ok(Response::Tray(TrayView { on: self.tray_on() })),
-            Command::GetDrawingDefault => Ok(Response::Drawing(DrawingSettingsView {
-                on: store::drawing(self.profile.data_dir()).on,
-            })),
-            Command::SetDrawingDefault { on } => {
-                store::save_drawing(self.profile.data_dir(), store::DrawingSettings { on })?;
-                Ok(Response::Drawing(DrawingSettingsView { on }))
+            Command::GetDrawingDefault => {
+                let drawing = store::drawing(self.profile.data_dir());
+                Ok(Response::Drawing(DrawingSettingsView {
+                    on: drawing.on,
+                    pictures: drawing.pictures,
+                }))
+            }
+            Command::SetDrawingDefault { on, pictures } => {
+                store::save_drawing(
+                    self.profile.data_dir(),
+                    store::DrawingSettings { on, pictures },
+                )?;
+                Ok(Response::Drawing(DrawingSettingsView { on, pictures }))
             }
             Command::SetTray { on } => {
                 store::save_app(self.profile.data_dir(), store::AppSettings { tray: on })?;

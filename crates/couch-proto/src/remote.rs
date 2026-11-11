@@ -152,6 +152,10 @@ pub enum RemoteOp {
         member: MemberId,
         stopped: bool,
     },
+    /// Pictures on the board allowed or not (M27e); off takes them off.
+    SetPictures {
+        on: bool,
+    },
 }
 
 impl fmt::Debug for RemoteOp {
@@ -221,6 +225,7 @@ impl fmt::Debug for RemoteOp {
                 .field("member", member)
                 .field("stopped", stopped)
                 .finish(),
+            Self::SetPictures { on } => f.debug_struct("SetPictures").field("on", on).finish(),
         }
     }
 }
@@ -413,6 +418,8 @@ pub struct RemoteDrawing {
     /// Each member with something on the board, and how many elements.
     pub drawers: Vec<(MemberId, u32)>,
     pub stopped: Vec<MemberId>,
+    /// Pictures allowed (M27e).
+    pub pictures: bool,
 }
 
 /// Its `Debug` leaves out the name, a window's title.

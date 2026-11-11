@@ -18,9 +18,10 @@ import {
 } from "../bindings/boardRules";
 import { BoardView } from "../model/board";
 import { Editor, type TextKey } from "../model/editor";
-import type { BoardBatch, BoardState } from "./events";
+import type { BoardBatch, BoardPicture, BoardPictureUp, BoardState } from "./events";
 import { ChevronIcon, FadeIcon, ToolIcon, TurnIcon } from "./icons";
 import { canvasMeasure, paintBoard } from "./paint";
+import { PictureStore, prepare } from "./pictures";
 
 /** How long a note stays. */
 const NOTE_MS = 3000;
@@ -35,6 +36,10 @@ export interface BoardSurfaceProps {
   send: (batch: BoardBatch) => void;
   /** Esc or Done: back to the game. */
   done: () => void;
+  /** The board's pictures as they come (M27e); returns the unsubscribe. */
+  subscribePictures?: (handler: (picture: BoardPicture) => void) => () => void;
+  /** The host's own picture, for the engine (M27e). */
+  sendPicture?: (up: BoardPictureUp) => void;
   /** The preview's clock, frozen for screenshots; `performance.now`
    * otherwise. */
   clock?: () => number;
@@ -80,10 +85,12 @@ export function textKey(key: string, ctrl: boolean): TextKey | null {
   }
 }
 
-export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfaceProps) {
+export function BoardSurface({ state, subscribe, send, done, clock, subscribePictures, sendPicture }: BoardSurfaceProps) {
   const now = useCallback(() => (clock ?? (() => performance.now()))(), [clock]);
   const canvas = useRef<HTMLCanvasElement>(null);
   const board = useRef(new BoardView());
+  // The board's pictures and ours (M27e), by id.
+  const pictures = useRef(new PictureStore());
   const editor = useRef<Editor | null>(null);
   const me = state?.me ?? null;
   const drawing = state?.drawing === true;
@@ -160,6 +167,7 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
       board: board.current,
       editor: drawing ? editor.current : null,
       names,
+      pictures: pictures.current,
       now: t,
       // Only while a box is typed in: a composition cut short by the box
       // ending never shows at the next one's caret.
@@ -182,6 +190,59 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
     repaint();
   }, [repaint]);
 
+  // The board's pictures (M27e): kept, and painted once decoded.
+  useEffect(() => subscribePictures?.((p) => pictures.current.add(p.picture, p.data, repaint, shownPictures(board.current))), [subscribePictures, repaint]);
+
+  // Batches and pictures in the order made: a picture goes once the
+  // operations before it have (M27e); its bytes are the store's.
+  const flush = useCallback(
+    (e: Editor | null, t: number) => {
+      if (!e) return;
+      for (;;) {
+        const batch = e.takeBatch(t);
+        if (batch) {
+          send(batch);
+          continue;
+        }
+        const up = e.takePicture();
+        if (!up) return;
+        const data = up.element.picture ? pictures.current.bytes(up.element.picture) : undefined;
+        if (data && sendPicture) {
+          sendPicture({ generation: up.generation, element: up.element, data });
+        } else {
+          // A copy of a picture this page never had: nothing to send, so
+          // off our own board too, rather than shown here alone.
+          board.current.apply(e.me, [{ type: "remove", ids: [up.element.id] }], t);
+          e.sync(board.current);
+          say("That picture can't go on the board");
+        }
+      }
+    },
+    [send, sendPicture],
+  );
+
+  // A picture from the clipboard or a dropped file (M27e), ours, where the
+  // pointer was.
+  const pasteFile = useCallback(
+    (file: Blob) => {
+      if (!state?.pictures) {
+        say("The host doesn't allow pictures");
+        return;
+      }
+      const at = pointer.current;
+      prepare(file)
+        .then((p) => {
+          const e = editor.current;
+          if (!e) return;
+          pictures.current.add(p.id, p.data, repaint, shownPictures(board.current));
+          e.pastePicture(p.id, p.width, p.height, at, board.current, now());
+          changed();
+        })
+        .catch(() => say("That picture can't go on the board"));
+    },
+    [state?.pictures, say, repaint, now, changed],
+  );
+
   // The board's news.
   useEffect(
     () =>
@@ -199,15 +260,14 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
             e.cleared(b);
             e.finishStrays(b, t);
             // Not drawing, no timer runs: what that finished goes now.
-            const batch = e.takeBatch(t);
-            if (batch) send(batch);
+            flush(e, t);
           } else {
             e.sync(b);
           }
         }
         changed();
       }),
-    [subscribe, me, now, say, changed, send],
+    [subscribe, me, now, say, changed, flush],
   );
 
   // Our operations go out as the editor lets them: while drawing, and after
@@ -216,12 +276,11 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
   useEffect(() => {
     const timer = window.setInterval(() => {
       const e = editor.current;
-      const batch = e?.takeBatch(now());
-      if (batch) send(batch);
+      flush(e, now());
       if (!drawing && !e?.pending()) window.clearInterval(timer);
     }, SEND_EVERY_MS);
     return () => window.clearInterval(timer);
-  }, [drawing, send, now]);
+  }, [drawing, flush, now]);
 
   // Drawing begins with the last tool, and ends with what's half done
   // finished.
@@ -302,8 +361,23 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
       ev.preventDefault();
       const e = editor.current;
       if (!drawing || !e) return;
-      e.paste(ev.clipboardData?.getData("text/plain") ?? null, pointer.current, board.current, now());
+      const text = ev.clipboardData?.getData("text/plain") ?? null;
+      // A picture copied elsewhere (M27e), when there is no text: our own
+      // copy puts text (or nothing) on the clipboard.
+      const file = Array.from(ev.clipboardData?.files ?? []).find((f) => f.type.startsWith("image/"));
+      if (file && !e.typing() && (text ?? "").trim() === "") {
+        pasteFile(file);
+        return;
+      }
+      e.paste(text, pointer.current, board.current, now());
       changed();
+    };
+    // A picture file dropped on the board while drawing (M27e).
+    const over = (ev: DragEvent) => ev.preventDefault();
+    const drop = (ev: DragEvent) => {
+      ev.preventDefault();
+      const file = Array.from(ev.dataTransfer?.files ?? []).find((f) => f.type.startsWith("image/"));
+      if (drawing && editor.current && file) pasteFile(file);
     };
     // Only a note's selected text is cut; drawings never are.
     const cut = (ev: ClipboardEvent) => {
@@ -321,7 +395,11 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
     window.addEventListener("paste", paste);
     window.addEventListener("cut", cut);
     window.addEventListener("contextmenu", menu);
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
     return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
       window.removeEventListener("keydown", key);
       window.removeEventListener("keyup", key);
       window.removeEventListener("copy", copy);
@@ -329,7 +407,7 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
       window.removeEventListener("cut", cut);
       window.removeEventListener("contextmenu", menu);
     };
-  }, [drawing, done, now, changed]);
+  }, [drawing, done, now, changed, pasteFile]);
 
   // What's typed or composed in the keys' field goes into the text box; the
   // field stays empty.
@@ -605,4 +683,11 @@ export function BoardSurface({ state, subscribe, send, done, clock }: BoardSurfa
 function rgb(index: number): string {
   const [r, g, b] = PALETTE[index] ?? PALETTE[0];
   return `rgb(${r}, ${g}, ${b})`;
+}
+
+/** The pictures the board shows, by id (M27e). */
+function shownPictures(board: BoardView): Set<string> {
+  const ids = new Set<string>();
+  for (const s of board.elements) if (s.element.picture) ids.add(s.element.picture);
+  return ids;
 }

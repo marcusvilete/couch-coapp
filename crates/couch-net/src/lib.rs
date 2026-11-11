@@ -17,6 +17,7 @@ pub mod endpoint;
 pub mod input;
 #[cfg(feature = "netem")]
 pub mod netem;
+pub mod pictures;
 pub mod streams;
 pub mod video;
 

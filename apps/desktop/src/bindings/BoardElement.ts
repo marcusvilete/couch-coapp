@@ -13,4 +13,9 @@ stay: number, done: boolean, points: Array<BoardPoint>,
 /**
  * A text box's text; empty for every other kind (M27c).
  */
-text: string, };
+text: string, 
+/**
+ * A picture's id, in hex ([`picture_hex`]); `None` for every other
+ * kind (M27e).
+ */
+picture: string | null, };
