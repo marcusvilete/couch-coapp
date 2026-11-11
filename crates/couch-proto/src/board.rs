@@ -44,7 +44,8 @@ pub const MAX_STROKE_POINTS: usize = 2_000;
 pub const MAX_MEMBER_ELEMENTS: usize = 300;
 /// Elements on the board, everyone's.
 pub const MAX_BOARD_ELEMENTS: usize = 1_500;
-/// Points on the board, everyone's.
+/// Points on the board, everyone's, a text box's text a point a byte
+/// ([`Element::load`]).
 pub const MAX_BOARD_POINTS: usize = 200_000;
 /// A batch's operations, and its points and removed ids together: keeps a
 /// batch, and the host's update carrying it, well inside a control frame.
@@ -88,8 +89,8 @@ impl Point {
     }
 }
 
-/// What an element is (M27a; text boxes and pictures come later, with a
-/// wire revision of their own).
+/// What an element is (M27a; text boxes M27c, wire revision 17; pictures
+/// come later, with a revision of their own).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ElementKind {
     /// A freehand line, drawn as it goes: points may follow ([`BoardOp::Append`]).
@@ -101,6 +102,12 @@ pub enum ElementKind {
     Arrow,
     Rectangle,
     Ellipse,
+    /// A text box (M27c): its [`Element::text`], lines broken only where
+    /// typed, from its first point, the top-left corner. Its second point
+    /// is the bottom-right corner as its author's window measured the text:
+    /// other windows' fonts may differ a little, so it says where the box
+    /// is for picking and moving, never how the text is laid out.
+    Text,
 }
 
 impl ElementKind {
@@ -108,6 +115,52 @@ impl ElementKind {
     pub fn is_stroke(self) -> bool {
         matches!(self, Self::Pen | Self::Highlighter)
     }
+}
+
+/// The most characters (Unicode scalar values) a text box holds.
+pub const MAX_TEXT_CHARS: usize = 500;
+/// The most lines a text box holds: each line is laid out on its own, so
+/// this bounds what a full board costs every window to paint.
+pub const MAX_TEXT_LINES: usize = 50;
+/// A text box's lines, one under the next, this many times its text size
+/// apart.
+pub const LINE_HEIGHT: f32 = 1.25;
+
+/// A text box's size (its font's em) as a fraction of the picture's height,
+/// by width index: small, medium, large.
+pub fn text_size(width: u8) -> f32 {
+    const SIZE: [f32; WIDTHS] = [0.025, 0.04, 0.065];
+    SIZE[usize::from(width).min(WIDTHS - 1)]
+}
+/// What each text size is called.
+pub const TEXT_SIZE_NAMES: [&str; WIDTHS] = ["Small", "Medium", "Large"];
+
+/// A text box's text as the board takes it: 1 to [`MAX_TEXT_CHARS`]
+/// characters on at most [`MAX_TEXT_LINES`] lines, something besides
+/// spaces, and no control characters but line breaks.
+pub fn valid_text(text: &str) -> bool {
+    !text.trim().is_empty()
+        && text.chars().count() <= MAX_TEXT_CHARS
+        && text.split('\n').count() <= MAX_TEXT_LINES
+        && text.chars().all(|c| c == '\n' || !c.is_control())
+}
+
+/// Text from elsewhere (the clipboard) as a text box may hold it, but for
+/// its length: line breaks of every kind as `\n`, tabs as four spaces,
+/// other control characters gone, and no blank lines or spaces at its end.
+/// The board overlay's editor does the same (`cleanText`).
+pub fn clean_text(text: &str) -> String {
+    let unified = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::with_capacity(unified.len());
+    for c in unified.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.trim_end().to_string()
 }
 
 /// A line's width as a fraction of the picture's height, by width index.
@@ -136,30 +189,43 @@ pub struct Element {
     /// How long it stays before it fades, in seconds: one of
     /// [`FADE_STAYS`], whether it fades or not (wire revision 16).
     pub stay: u8,
-    /// Finished: no more points come. A shape is always finished.
+    /// Finished: no more points come. A shape is always finished; a text
+    /// box isn't while its author types (it fades only once finished).
     pub done: bool,
     pub points: Vec<Point>,
+    /// A text box's text ([`valid_text`]); empty for every other kind
+    /// (wire revision 17).
+    pub text: String,
 }
 
 impl Element {
     /// Well formed on its own: a colour, width and stay that exist, a stroke
     /// of 1 to [`MAX_STROKE_POINTS`] points, a shape of exactly two,
-    /// finished.
+    /// finished, a text box of two with its text; text only in a text box.
     pub fn is_valid(&self) -> bool {
-        let points = if self.kind.is_stroke() {
-            (1..=MAX_STROKE_POINTS).contains(&self.points.len())
-        } else {
-            self.points.len() == 2 && self.done
+        let shape = match self.kind {
+            ElementKind::Pen | ElementKind::Highlighter => {
+                (1..=MAX_STROKE_POINTS).contains(&self.points.len()) && self.text.is_empty()
+            }
+            ElementKind::Text => self.points.len() == 2 && valid_text(&self.text),
+            _ => self.points.len() == 2 && self.done && self.text.is_empty(),
         };
         usize::from(self.colour) < PALETTE.len()
             && usize::from(self.width) < WIDTHS
             && FADE_STAYS.contains(&self.stay)
-            && points
+            && shape
     }
 
     /// How long it stays once finished, before fading, in milliseconds.
     pub fn stay_ms(&self) -> u64 {
         u64::from(self.stay) * 1_000
+    }
+
+    /// What it weighs on the board, in points: its points, and a text
+    /// box's text a point a byte (a point takes up to six on the wire), so
+    /// the limits on points bound text too.
+    pub fn load(&self) -> usize {
+        self.points.len() + self.text.len()
     }
 }
 
@@ -197,10 +263,10 @@ impl BoardOp {
         matches!(self, Self::Laser { .. } | Self::Ping(_))
     }
 
-    /// Points and ids it carries, for [`MAX_BATCH_ITEMS`].
+    /// Points, text bytes and ids it carries, for [`MAX_BATCH_ITEMS`].
     pub fn items(&self) -> usize {
         match self {
-            Self::Put(e) => e.points.len(),
+            Self::Put(e) => e.load(),
             Self::Append { points, .. } | Self::Laser { points, .. } => points.len(),
             Self::Remove(ids) => ids.len(),
             Self::Ping(_) => 1,
@@ -303,8 +369,8 @@ const SNAPSHOT_PART_WEIGHT: usize = 6_000;
 
 fn weight(element: &Element) -> usize {
     // An author (32 bytes) and the element's own fields weigh about as much
-    // as eight points.
-    element.points.len() + 8
+    // as eight points; a text box's text, a point a byte.
+    element.load() + 8
 }
 
 impl BoardSnapshot {
@@ -442,7 +508,96 @@ mod tests {
             points: (0..points)
                 .map(|i| Point::new(u16::MAX - (i as u16), u16::MAX))
                 .collect(),
+            text: String::new(),
         }
+    }
+
+    /// A text box of `chars` characters, each `c`.
+    fn text_box(id: u32, c: char, chars: usize) -> Element {
+        Element {
+            kind: ElementKind::Text,
+            done: false,
+            text: std::iter::repeat_n(c, chars).collect(),
+            ..stroke(id, 2)
+        }
+    }
+
+    #[test]
+    fn text_boxes_are_checked() {
+        assert!(text_box(1, 'a', 1).is_valid());
+        assert!(
+            text_box(1, 'ç', MAX_TEXT_CHARS).is_valid(),
+            "characters, not bytes"
+        );
+        assert!(!text_box(1, 'a', MAX_TEXT_CHARS + 1).is_valid());
+        assert!(!text_box(1, 'a', 0).is_valid(), "empty");
+        assert!(!text_box(1, ' ', 3).is_valid(), "spaces alone");
+        let lines = |n: usize| Element {
+            text: vec!["x"; n].join("\n"),
+            ..text_box(1, 'a', 1)
+        };
+        assert!(lines(MAX_TEXT_LINES).is_valid());
+        assert!(!lines(MAX_TEXT_LINES + 1).is_valid(), "too many lines");
+        assert!(
+            Element {
+                text: "\u{feff}".into(),
+                ..text_box(1, 'a', 1)
+            }
+            .is_valid(),
+            "a byte order mark isn't a space"
+        );
+        let lines = Element {
+            text: "two\nlines".into(),
+            ..text_box(1, 'a', 1)
+        };
+        assert!(lines.is_valid());
+        for bad in ["a\tb", "a\rb", "a\u{7f}", "a\u{85}", "a\u{0}"] {
+            let e = Element {
+                text: bad.into(),
+                ..text_box(1, 'a', 1)
+            };
+            assert!(!e.is_valid(), "{bad:?}");
+        }
+        assert!(
+            !Element {
+                points: vec![Point::new(0, 0)],
+                ..text_box(1, 'a', 1)
+            }
+            .is_valid(),
+            "a box has two corners"
+        );
+        assert!(
+            !Element {
+                text: "x".into(),
+                ..stroke(1, 3)
+            }
+            .is_valid(),
+            "text only in a text box"
+        );
+        assert!(
+            !Element {
+                kind: ElementKind::Arrow,
+                text: "x".into(),
+                ..stroke(1, 2)
+            }
+            .is_valid()
+        );
+        assert_eq!(text_box(1, 'ç', 10).load(), 2 + 20, "a point a byte");
+    }
+
+    #[test]
+    fn pasted_text_is_cleaned() {
+        assert_eq!(clean_text("a\r\nb\rc\n"), "a\nb\nc");
+        assert_eq!(clean_text("\tx\u{7}y \n\n  "), "    xy");
+        assert_eq!(clean_text("é\u{85}ü"), "éü");
+        assert_eq!(clean_text(" \n "), "");
+        assert!(valid_text(&clean_text("  indented\r\n\tline\u{0} ")));
+    }
+
+    #[test]
+    fn text_sizes_grow() {
+        assert!(text_size(0) < text_size(1) && text_size(1) < text_size(2));
+        assert_eq!(text_size(9), text_size(2));
     }
 
     #[test]
@@ -539,6 +694,24 @@ mod tests {
         };
         let len = postcard::to_stdvec(&update).unwrap().len();
         assert!(len + 2 <= crate::envelope::MAX_FRAME_LEN, "{len} bytes");
+
+        // Text: the widest characters, as many as the items allow, beside
+        // ids up to the batch's operations.
+        let mut ops = vec![
+            BoardOp::Put(text_box(1, '😀', MAX_TEXT_CHARS)),
+            BoardOp::Put(text_box(2, '😀', (MAX_BATCH_ITEMS - 4 - 2_000 - 62) / 4)),
+        ];
+        for _ in 0..62 {
+            ops.push(BoardOp::Remove(vec![u32::MAX]));
+        }
+        assert!(valid_batch(&ops), "{}", ops.len());
+        let update = BoardUpdate {
+            session: SessionId(u64::MAX),
+            author: MemberId([0xff; 32]),
+            ops,
+        };
+        let len = postcard::to_stdvec(&update).unwrap().len();
+        assert!(len + 2 <= crate::envelope::MAX_FRAME_LEN, "{len} bytes");
     }
 
     /// Every part of the fullest board fits a control frame, and the parts
@@ -557,10 +730,17 @@ mod tests {
                 },
             });
         }
-        for id in 1_400..1_500 {
+        for id in 1_400..1_450 {
             elements.push(Authored {
                 author,
                 element: stroke(id, MAX_STROKE_POINTS),
+            });
+        }
+        // And text boxes of the widest characters.
+        for id in 1_450..1_500 {
+            elements.push(Authored {
+                author,
+                element: text_box(id, '😀', MAX_TEXT_CHARS),
             });
         }
         let parts = BoardSnapshot::parts(SessionId(u64::MAX), u32::MAX, elements.clone());

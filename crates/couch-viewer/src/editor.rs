@@ -9,17 +9,24 @@
 //!
 //! **Only the author's own:** it selects, erases, moves and undoes only
 //! elements of this member; the host refuses anything else anyway.
+//!
+//! **Text boxes** (M27c): typed into one at a time ([`Typing`]), shown to
+//! the others as they grow (unfinished, so not fading), finished as one
+//! step of the history. A box's second corner is where this window's font
+//! ends it ([`Measure`]); other windows lay its text out with their own.
 
 use std::{
     collections::BTreeSet,
+    fmt,
     time::{Duration, Instant},
 };
 
 use couch_input::shortcuts::{DrawAction, DrawTool};
 use couch_proto::{
     board::{
-        BoardOp, DEFAULT_STAY, Element, ElementKind, FADE_STAYS, MAX_LASER_POINTS,
-        MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, PALETTE, Point, WIDTHS, batches, line_width,
+        BoardOp, DEFAULT_STAY, Element, ElementKind, FADE_STAYS, LINE_HEIGHT, MAX_LASER_POINTS,
+        MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, MAX_TEXT_CHARS, MAX_TEXT_LINES, PALETTE, Point,
+        WIDTHS, batches, clean_text, line_width, text_size, valid_text,
     },
     ids::MemberId,
 };
@@ -41,6 +48,114 @@ const TOUCH: f32 = 0.012;
 const NUDGE: i32 = 131;
 /// Where a paste lands from what was copied, in picture coordinates.
 const PASTE_STEP: i32 = 1_300;
+/// Where pasted text lands without a pointer over the picture.
+const TEXT_AT: Point = Point::new(6_554, 6_554);
+pub const TOO_MANY: &str = "You've drawn all you may: erase some first";
+pub const TOO_LONG: &str = "A text box holds at most 500 characters and 50 lines";
+
+/// How wide a line of text is, in ems of its font: a text box is that times
+/// its size wide. The window measures with its own font; until it says, and
+/// in the shared cases, [`Measure::estimate`] (half an em a character).
+pub struct Measure(Box<dyn Fn(&str) -> f32>);
+
+impl Measure {
+    pub fn new(measure: impl Fn(&str) -> f32 + 'static) -> Self {
+        Self(Box::new(measure))
+    }
+
+    pub fn estimate() -> Self {
+        Self::new(|line| line.chars().count() as f32 * 0.5)
+    }
+
+    fn of(&self, line: &str) -> f32 {
+        (self.0)(line).max(0.0)
+    }
+}
+
+impl fmt::Debug for Measure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Measure")
+    }
+}
+
+/// A key while typing in a text box: the window's keys go here, never to
+/// the drawing keys, until the box is finished. With Shift, a move extends
+/// the selection; with Ctrl (`word`), as text fields do: Left and Right by
+/// word, Backspace and Delete a word, Home and End the box's start and end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextKey {
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    /// The line's start and end.
+    Home,
+    End,
+    /// A line up or down, nearest the caret's place across.
+    Up,
+    Down,
+    /// A line break.
+    Enter,
+    /// Esc or Ctrl+Enter: the box is finished, and selected.
+    Finish,
+    /// Ctrl+A: all of the box's text.
+    SelectAll,
+}
+
+/// The text box being typed in.
+#[derive(Debug, Clone)]
+struct Typing {
+    /// Its number, kept while it has no text (and so isn't on the board).
+    id: u32,
+    /// Its colour, size and fading.
+    look: Element,
+    /// Its top-left corner.
+    anchor: Point,
+    text: String,
+    /// Characters before the caret.
+    caret: usize,
+    /// The selection's other end, in characters: the text between it and
+    /// the caret is selected. `None`, or the caret's own place: nothing.
+    mark: Option<usize>,
+    /// The box as it was before this edit; `None` for a new one.
+    before: Option<Element>,
+    /// On the board: it has text (spaces alone aren't).
+    shown: bool,
+}
+
+impl Typing {
+    /// The selected characters, start and end, if any.
+    fn range(&self) -> Option<(usize, usize)> {
+        let mark = self.mark.filter(|m| *m != self.caret)?;
+        Some((mark.min(self.caret), mark.max(self.caret)))
+    }
+
+    /// The caret moved to `to`: with `extend` (Shift, a drag) the selection
+    /// grows from where it was; otherwise there is none.
+    fn move_to(&mut self, to: usize, extend: bool) {
+        if extend {
+            self.mark = self.mark.or(Some(self.caret));
+        } else {
+            self.mark = None;
+        }
+        self.caret = to;
+        if self.mark == Some(self.caret) {
+            self.mark = None;
+        }
+    }
+}
+
+/// The text box being typed in, for painting it: its corners, the caret's
+/// top and bottom, the selection's boxes, one per line (picture
+/// coordinates), and its size (picture heights).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextCursor {
+    pub corners: (Point, Point),
+    pub caret: (Point, Point),
+    pub selection: Vec<(Point, Point)>,
+    pub size: f32,
+    pub colour: u8,
+}
 
 /// How the toolbar's one fade button steps (the author's choice, M27b):
 /// through "stays", then each fade time offered, shortest first.
@@ -60,6 +175,8 @@ pub enum Keyed {
     Done,
     /// Esc with nothing left to leave: drawing mode ends.
     LeaveDrawing,
+    /// Tab: the window hides its toolbar, or shows it again.
+    ToggleToolbar,
 }
 
 /// One change to one of our elements: what it was and what it became.
@@ -100,6 +217,8 @@ enum Gesture {
         to: Point,
         kept: BTreeSet<u32>,
     },
+    /// Dragging inside the text box being typed in: selecting.
+    TextSelect,
 }
 
 #[derive(Debug)]
@@ -123,7 +242,12 @@ pub struct Editor {
     undo: Vec<Vec<Change>>,
     redo: Vec<Vec<Change>>,
     clipboard: Vec<Element>,
+    /// What our last copy put on the system clipboard (the copied boxes'
+    /// text): while the clipboard still holds it, a paste is ours.
+    copied_text: Option<String>,
     pastes: i32,
+    typing: Option<Typing>,
+    measure: Measure,
     outbox: Vec<BoardOp>,
     /// The board's generation as last heard, and the one the queued
     /// operations were made in: sent with it, so ops made before a clear
@@ -152,7 +276,10 @@ impl Editor {
             undo: Vec::new(),
             redo: Vec::new(),
             clipboard: Vec::new(),
+            copied_text: None,
             pastes: 0,
+            typing: None,
+            measure: Measure::estimate(),
             outbox: Vec::new(),
             generation: 0,
             outbox_generation: 0,
@@ -190,6 +317,69 @@ impl Editor {
         self.note.take()
     }
 
+    /// How the window's font measures text, from now on.
+    pub fn set_measure(&mut self, measure: Measure) {
+        self.measure = measure;
+    }
+
+    /// A text box is being typed in: the window's keys and text are its.
+    pub fn typing(&self) -> bool {
+        self.typing.is_some()
+    }
+
+    /// The text box being typed in, for painting its frame and caret.
+    pub fn text_cursor(&self) -> Option<TextCursor> {
+        let t = self.typing.as_ref()?;
+        let size = text_size(t.look.width);
+        let (line, col) = line_col(&t.text, t.caret);
+        let prefix: String = t
+            .text
+            .split('\n')
+            .nth(line)
+            .unwrap_or("")
+            .chars()
+            .take(col)
+            .collect();
+        let (ax, ay) = self.uniform(t.anchor);
+        let x = ax + self.measure.of(&prefix) * size;
+        let y = ay + line as f32 * LINE_HEIGHT * size;
+        let corners = if t.shown {
+            bounds(&self.text_box(t, false))
+        } else {
+            (t.anchor, self.picture(ax, ay + LINE_HEIGHT * size))
+        };
+        // The selection, line by line; a line break selected shows as a
+        // little more past its line's end.
+        let mut selection = Vec::new();
+        if let Some((lo, hi)) = t.range() {
+            let mut start = 0;
+            for (i, line) in t.text.split('\n').enumerate() {
+                let cs: Vec<char> = line.chars().collect();
+                let end = start + cs.len();
+                let (s, e) = (lo.max(start), hi.min(end));
+                let past = hi > end && lo <= end;
+                if s < e || past {
+                    let width = |n: usize| self.measure.of(&cs[..n].iter().collect::<String>());
+                    let x0 = ax + width(s.min(end) - start) * size;
+                    let x1 = ax + (width(e.max(s) - start) + if past { 0.3 } else { 0.0 }) * size;
+                    let top = ay + i as f32 * LINE_HEIGHT * size;
+                    selection.push((
+                        self.picture(x0, top),
+                        self.picture(x1, top + LINE_HEIGHT * size),
+                    ));
+                }
+                start = end + 1;
+            }
+        }
+        Some(TextCursor {
+            corners,
+            caret: (self.picture(x, y), self.picture(x, y + LINE_HEIGHT * size)),
+            selection,
+            size,
+            colour: t.look.colour,
+        })
+    }
+
     /// Drawing mode begins: with the tool it last drew with.
     pub fn begin(&mut self) {
         if self.tool == DrawTool::Select && self.selection.is_empty() {
@@ -200,11 +390,13 @@ impl Editor {
     /// Drawing mode ends: whatever was half done is finished or dropped.
     pub fn end(&mut self, board: &mut BoardView, now: Instant) {
         self.release(None, false, board, now);
+        self.finish_typing(board, now);
         self.selection.clear();
     }
 
     pub fn set_tool(&mut self, tool: DrawTool, board: &mut BoardView, now: Instant) {
         self.release(None, false, board, now);
+        self.finish_typing(board, now);
         if tool != DrawTool::Select {
             self.selection.clear();
             self.last_tool = tool;
@@ -230,6 +422,19 @@ impl Editor {
         if let Some(f) = fades {
             self.fades = f;
         }
+        // The box being typed in takes it too, as part of its edit.
+        if let Some(t) = &mut self.typing {
+            if let Some(c) = colour.filter(|c| usize::from(*c) < PALETTE.len()) {
+                t.look.colour = c;
+            }
+            if let Some(w) = width.filter(|w| usize::from(*w) < WIDTHS) {
+                t.look.width = w;
+            }
+            if let Some(f) = fades {
+                t.look.fades = f;
+            }
+            self.show_typing(board, now);
+        }
         let changed: Vec<Element> = self
             .selected(board)
             .into_iter()
@@ -243,7 +448,8 @@ impl Editor {
                 if let Some(f) = fades {
                     e.fades = f;
                 }
-                e
+                // A text box's size changes its box (the review's finding).
+                self.remeasured(e)
             })
             .collect();
         self.replace_all(changed, board, now);
@@ -286,6 +492,11 @@ impl Editor {
         }
         self.stay = stay;
         self.fades = true;
+        if let Some(t) = &mut self.typing {
+            t.look.fades = true;
+            t.look.stay = stay;
+            self.show_typing(board, now);
+        }
         let changed: Vec<Element> = self
             .selected(board)
             .into_iter()
@@ -303,6 +514,11 @@ impl Editor {
     /// A press of the main button at `at` (Shift held or not).
     pub fn press(&mut self, at: Point, shift: bool, board: &mut BoardView, now: Instant) {
         self.release(None, false, board, now);
+        if self.tool == DrawTool::Text {
+            self.press_text(at, shift, board, now);
+            return;
+        }
+        self.finish_typing(board, now);
         self.gesture = match self.tool {
             DrawTool::Pen | DrawTool::Highlighter => {
                 let kind = if self.tool == DrawTool::Pen {
@@ -352,6 +568,7 @@ impl Editor {
                 self.erase_at(at, &mut removed, board, now);
                 Some(Gesture::Erase { removed })
             }
+            DrawTool::Text => None,
             DrawTool::Select => match self.hit(at, board) {
                 Some(id) => {
                     if shift {
@@ -462,6 +679,12 @@ impl Editor {
                     .collect();
                 self.selection = kept.union(&inside).copied().collect();
             }
+            Gesture::TextSelect => {
+                let caret = self.typing.as_ref().map(|t| self.caret_at(t, at));
+                if let (Some(caret), Some(t)) = (caret, &mut self.typing) {
+                    t.move_to(caret, true);
+                }
+            }
         }
         self.gesture = Some(gesture);
     }
@@ -493,7 +716,7 @@ impl Editor {
                 }
                 self.finish(vec![id], board);
             }
-            Gesture::Laser { .. } | Gesture::Marquee { .. } => {}
+            Gesture::Laser { .. } | Gesture::Marquee { .. } | Gesture::TextSelect => {}
             Gesture::Erase { removed } => {
                 if !removed.is_empty() {
                     self.record(
@@ -525,6 +748,302 @@ impl Editor {
         }
     }
 
+    /// A press with the Text tool: inside the box being typed in, the caret
+    /// goes there; elsewhere that box is finished (as Excalidraw: a click
+    /// away is done). Not typing, it edits our text box under it, or starts
+    /// a new one there (nothing goes out until it has text).
+    fn press_text(&mut self, at: Point, shift: bool, board: &mut BoardView, now: Instant) {
+        if self.typing.is_some() {
+            if let Some(cursor) = self.text_cursor()
+                && self.near_box(cursor.corners, at)
+                && let Some(caret) = self.typing.as_ref().map(|t| self.caret_at(t, at))
+                && let Some(t) = &mut self.typing
+            {
+                // The caret there (Shift: the selection to there), and a
+                // drag from here selects.
+                t.move_to(caret, shift);
+                self.gesture = Some(Gesture::TextSelect);
+            } else {
+                self.finish_typing(board, now);
+            }
+            return;
+        }
+        match self.hit_text(at, board) {
+            Some(id) => {
+                self.edit(id, Some(at), board, now);
+                self.gesture = Some(Gesture::TextSelect);
+            }
+            None => {
+                let Some(id) = self.new_id(board) else {
+                    return;
+                };
+                self.selection.clear();
+                self.typing = Some(Typing {
+                    id,
+                    look: self.element(id, ElementKind::Text, Vec::new(), false),
+                    anchor: at,
+                    text: String::new(),
+                    caret: 0,
+                    mark: None,
+                    before: None,
+                    shown: false,
+                });
+            }
+        }
+    }
+
+    /// A double click (after its two presses): inside the text box being
+    /// typed in, the word there is selected; with Select, on our text box,
+    /// typing in it, the caret where it was. Other tools drew with the
+    /// clicks; the Text tool edits on one.
+    pub fn double_click(&mut self, at: Point, board: &mut BoardView, now: Instant) {
+        if let Some(cursor) = self.text_cursor()
+            && self.near_box(cursor.corners, at)
+            && let Some(caret) = self.typing.as_ref().map(|t| self.caret_at(t, at))
+            && let Some(t) = &mut self.typing
+        {
+            self.gesture = None;
+            let cs: Vec<char> = t.text.chars().collect();
+            let (start, end) = word_at(&cs, caret);
+            t.mark = Some(start);
+            t.caret = end;
+            if start == end {
+                t.mark = None;
+            }
+            return;
+        }
+        if self.tool != DrawTool::Select || self.typing.is_some() {
+            return;
+        }
+        self.release(None, false, board, now);
+        if let Some(id) = self.hit_text(at, board) {
+            self.edit(id, Some(at), board, now);
+        }
+    }
+
+    // ---- Typing ----
+
+    /// Text typed (or composed by an input method) into the box being typed
+    /// in, at the caret: no control characters but line breaks, a tab as
+    /// spaces, and only as much as the box holds (characters and lines).
+    pub fn type_text(&mut self, text: &str, board: &mut BoardView, now: Instant) {
+        let Some(t) = &mut self.typing else {
+            return;
+        };
+        // What it types replaces the selection: line breaks there make room
+        // for new ones.
+        let (from, to) = t.range().unwrap_or((t.caret, t.caret));
+        let mut old: Vec<char> = t.text.chars().collect();
+        let mut breaks = old.iter().filter(|c| **c == '\n').count()
+            - old[from..to].iter().filter(|c| **c == '\n').count();
+        let mut cut = false;
+        let mut chars: Vec<char> = Vec::new();
+        for c in text.chars() {
+            match c {
+                '\t' => chars.extend([' '; 4]),
+                '\n' | '\r' if breaks + 1 >= MAX_TEXT_LINES => cut = true,
+                '\n' | '\r' => {
+                    breaks += 1;
+                    chars.push('\n');
+                }
+                c if !c.is_control() => chars.push(c),
+                _ => {}
+            }
+        }
+        let room = MAX_TEXT_CHARS.saturating_sub(old.len() - (to - from));
+        if chars.len() > room {
+            chars.truncate(room);
+            cut = true;
+        }
+        if cut {
+            self.note = Some(TOO_LONG);
+        }
+        if chars.is_empty() {
+            return;
+        }
+        let n = chars.len();
+        old.splice(from..to, chars);
+        t.text = old.into_iter().collect();
+        t.caret = from + n;
+        t.mark = None;
+        self.show_typing(board, now);
+    }
+
+    /// A key while typing: with `shift` a move extends the selection, with
+    /// `word` (Ctrl) it goes by word or to the box's ends.
+    pub fn text_key(
+        &mut self,
+        key: TextKey,
+        shift: bool,
+        word: bool,
+        board: &mut BoardView,
+        now: Instant,
+    ) {
+        if key == TextKey::Finish {
+            if let Some(id) = self.finish_typing(board, now) {
+                self.selection = BTreeSet::from([id]);
+            }
+            self.tool = DrawTool::Select;
+            return;
+        }
+        if key == TextKey::Enter {
+            self.type_text("\n", board, now);
+            return;
+        }
+        let Some(t) = self.typing.as_ref() else {
+            return;
+        };
+        let cs: Vec<char> = t.text.chars().collect();
+        let len = cs.len();
+        let (line, col) = line_col(&t.text, t.caret);
+        let lines: Vec<usize> = t.text.split('\n').map(|l| l.chars().count()).collect();
+        let start = t.caret - col;
+        let range = t.range();
+        match key {
+            TextKey::SelectAll => {
+                if let Some(t) = &mut self.typing {
+                    t.mark = Some(0);
+                    t.caret = len;
+                    if len == 0 {
+                        t.mark = None;
+                    }
+                }
+            }
+            TextKey::Backspace | TextKey::Delete => {
+                // The selection, or a character (Ctrl: a word) on that side.
+                let (from, to) = match range {
+                    Some(r) => r,
+                    None if key == TextKey::Backspace => {
+                        let from = if word {
+                            prev_word(&cs, t.caret)
+                        } else {
+                            t.caret.saturating_sub(1)
+                        };
+                        (from, t.caret)
+                    }
+                    None => {
+                        let to = if word {
+                            next_word(&cs, t.caret)
+                        } else {
+                            (t.caret + 1).min(len)
+                        };
+                        (t.caret, to)
+                    }
+                };
+                if from == to {
+                    return;
+                }
+                if let Some(t) = &mut self.typing {
+                    t.text = cs[..from].iter().chain(&cs[to..]).collect();
+                    t.caret = from;
+                    t.mark = None;
+                }
+                self.show_typing(board, now);
+            }
+            _ => {
+                let to = match key {
+                    // Without Shift, a selection collapses to its side.
+                    TextKey::Left if !shift && !word && range.is_some() => range.map_or(0, |r| r.0),
+                    TextKey::Right if !shift && !word && range.is_some() => {
+                        range.map_or(0, |r| r.1)
+                    }
+                    TextKey::Left if word => prev_word(&cs, t.caret),
+                    TextKey::Right if word => next_word(&cs, t.caret),
+                    TextKey::Left => t.caret.saturating_sub(1),
+                    TextKey::Right => (t.caret + 1).min(len),
+                    TextKey::Home if word => 0,
+                    TextKey::End if word => len,
+                    TextKey::Home => start,
+                    TextKey::End => start + lines[line],
+                    // Up on the first line goes to its start, Down on the
+                    // last to its end, as text fields do.
+                    TextKey::Up if line == 0 => 0,
+                    TextKey::Down if line + 1 == lines.len() => len,
+                    TextKey::Up | TextKey::Down => {
+                        let size = text_size(t.look.width);
+                        let line_text: Vec<&str> = t.text.split('\n').collect();
+                        let x = self
+                            .measure
+                            .of(&cs[start..t.caret].iter().collect::<String>())
+                            * size;
+                        let target = if key == TextKey::Up {
+                            line - 1
+                        } else {
+                            line + 1
+                        };
+                        let first: usize = lines[..target].iter().map(|n| n + 1).sum();
+                        first + self.nearest(line_text[target], x, size)
+                    }
+                    _ => return,
+                };
+                if let Some(t) = &mut self.typing {
+                    t.move_to(to, shift);
+                }
+            }
+        }
+    }
+
+    /// The selected text of the box being typed in, for Ctrl+C there.
+    pub fn copy_text(&self) -> Option<String> {
+        let t = self.typing.as_ref()?;
+        let (lo, hi) = t.range()?;
+        Some(t.text.chars().skip(lo).take(hi - lo).collect())
+    }
+
+    /// Ctrl+X in the box being typed in: its selected text, taken out.
+    pub fn cut_text(&mut self, board: &mut BoardView, now: Instant) -> Option<String> {
+        let text = self.copy_text()?;
+        self.text_key(TextKey::Delete, false, false, board, now);
+        Some(text)
+    }
+
+    /// What our copy puts on the system clipboard: the selection is ours to
+    /// paste, and its text boxes' text (or nothing) goes on the clipboard,
+    /// so a paste can tell our copy from text copied elsewhere since.
+    /// Nothing selected, nothing is copied (`None`): the clipboard keeps
+    /// what it had.
+    pub fn copy(&mut self, board: &BoardView) -> Option<String> {
+        if self.selection.is_empty() {
+            return None;
+        }
+        self.clipboard = self.selected(board);
+        let text: Vec<&str> = self
+            .clipboard
+            .iter()
+            .filter(|e| e.kind == ElementKind::Text)
+            .map(|e| e.text.as_str())
+            .collect();
+        let text = text.join("\n\n");
+        self.copied_text = Some(text.clone());
+        Some(text)
+    }
+
+    /// Ctrl+V, with the system clipboard's text (if any) and the pointer
+    /// (if over the picture). While typing, the text goes into the box.
+    /// Otherwise text copied elsewhere since our last copy becomes a new
+    /// text box there; else what we copied is pasted, as ever.
+    pub fn paste(
+        &mut self,
+        system: Option<&str>,
+        at: Option<Point>,
+        board: &mut BoardView,
+        now: Instant,
+    ) {
+        let text = system.map(clean_text).unwrap_or_default();
+        if self.typing.is_some() {
+            self.type_text(&text, board, now);
+            return;
+        }
+        let ours = self.copied_text.as_deref().map(clean_text);
+        if !text.trim().is_empty() && ours.as_deref() != Some(text.as_str()) {
+            self.paste_text(text, at.unwrap_or(TEXT_AT), board, now);
+        } else {
+            let copied = self.clipboard.clone();
+            self.pastes += 1;
+            self.paste_elements(copied, self.pastes, board, now);
+        }
+    }
+
     /// A middle click: a ping where it was.
     pub fn ping(&mut self, at: Point, board: &mut BoardView, now: Instant) {
         if self
@@ -546,18 +1065,31 @@ impl Editor {
         board: &mut BoardView,
         now: Instant,
     ) -> Keyed {
+        // The window's own: nothing of the editor's changes.
+        if action == DrawAction::ToggleToolbar {
+            return Keyed::ToggleToolbar;
+        }
+        // A drawing key while typing (the toolbar's undo, say): the box is
+        // finished first; Esc finishes it alone (`TextKey::Finish`).
+        if self.typing.is_some() {
+            if action == DrawAction::Leave {
+                self.text_key(TextKey::Finish, false, false, board, now);
+                return Keyed::Done;
+            }
+            self.finish_typing(board, now);
+        }
         match action {
             DrawAction::Undo => self.undo(board, now),
             DrawAction::Redo => self.redo(board, now),
-            DrawAction::Copy => self.clipboard = self.selected(board),
-            DrawAction::Paste => {
-                let copied = self.clipboard.clone();
-                self.pastes += 1;
-                self.paste(copied, self.pastes, board, now);
+            // Without the system clipboard (the window passes it through
+            // `copy` and `paste`): our own copy alone.
+            DrawAction::Copy => {
+                self.copy(board);
             }
+            DrawAction::Paste => self.paste(None, None, board, now),
             DrawAction::Duplicate => {
                 let selected = self.selected(board);
-                self.paste(selected, 1, board, now);
+                self.paste_elements(selected, 1, board, now);
             }
             DrawAction::SelectAll => {
                 self.release(None, false, board, now);
@@ -599,6 +1131,8 @@ impl Editor {
                     return Keyed::LeaveDrawing;
                 }
             }
+            // The window's (above).
+            DrawAction::ToggleToolbar => {}
         }
         Keyed::Done
     }
@@ -613,6 +1147,13 @@ impl Editor {
         // Made before the clear: the host drops it, and the clear took it
         // from our board too.
         self.outbox.clear();
+        // The box being typed in stays being typed in: a clear of ours is
+        // also the host's resync after a refused batch (a full board, too
+        // fast), and its text is the user's. It goes out again whole at the
+        // next key or when finished; what it was before is history, gone.
+        if let Some(t) = &mut self.typing {
+            t.before = None;
+        }
         self.sync(board);
     }
 
@@ -623,23 +1164,26 @@ impl Editor {
     pub fn finish_strays(&mut self, board: &mut BoardView, now: Instant) {
         let drawing = match &self.gesture {
             Some(Gesture::Stroke { id, .. }) => Some(*id),
-            _ => None,
+            _ => self.typing.as_ref().map(|t| t.id),
         };
-        let strays: Vec<u32> = board
+        let strays: Vec<Element> = board
             .of(self.me)
             .filter(|s| !s.element.done && Some(s.element.id) != drawing)
-            .map(|s| s.element.id)
+            .map(|s| s.element.clone())
             .collect();
-        for id in strays {
-            self.emit(
+        for e in strays {
+            // A text box left being typed in: the box again, finished (an
+            // append is a stroke's alone).
+            let op = if e.kind.is_stroke() {
                 BoardOp::Append {
-                    id,
+                    id: e.id,
                     points: Vec::new(),
                     done: true,
-                },
-                board,
-                now,
-            );
+                }
+            } else {
+                BoardOp::Put(Element { done: true, ..e })
+            };
+            self.emit(op, board, now);
         }
     }
 
@@ -659,6 +1203,11 @@ impl Editor {
         };
         if gone {
             self.gesture = None;
+        }
+        // The box being typed in is shown as the board has it: cleared by
+        // the host, it is put again at the next key (`cleared`).
+        if let Some(t) = &mut self.typing {
+            t.shown = board.get(self.me, t.id).is_some();
         }
     }
 
@@ -698,13 +1247,227 @@ impl Editor {
             stay: self.stay,
             done,
             points,
+            text: String::new(),
         }
+    }
+
+    /// The box being typed in as an element: from its corner, as wide as
+    /// its longest line and as tall as its lines, measured by our font.
+    fn text_box(&self, t: &Typing, done: bool) -> Element {
+        let size = text_size(t.look.width);
+        let lines: Vec<&str> = t.text.split('\n').collect();
+        let wide = lines.iter().map(|l| self.measure.of(l)).fold(0.0, f32::max) * size;
+        let tall = lines.len() as f32 * LINE_HEIGHT * size;
+        let (ax, ay) = self.uniform(t.anchor);
+        Element {
+            kind: ElementKind::Text,
+            done,
+            points: vec![t.anchor, self.picture(ax + wide, ay + tall)],
+            text: t.text.clone(),
+            ..t.look.clone()
+        }
+    }
+
+    /// A text box of ours as its look now makes it: its corner kept, its
+    /// other one measured again (a new size). Anything else as it is.
+    fn remeasured(&self, e: Element) -> Element {
+        if e.kind != ElementKind::Text || e.points.len() != 2 {
+            return e;
+        }
+        let t = Typing {
+            id: e.id,
+            anchor: e.points[0],
+            text: e.text.clone(),
+            caret: 0,
+            mark: None,
+            before: None,
+            shown: true,
+            look: e.clone(),
+        };
+        self.text_box(&t, e.done)
+    }
+
+    /// The box being typed in, on our board and to the host as it now is:
+    /// put while it has text, removed while it has none.
+    fn show_typing(&mut self, board: &mut BoardView, now: Instant) {
+        let Some(t) = self.typing.take() else {
+            return;
+        };
+        let shown = valid_text(&t.text);
+        if shown {
+            let e = self.text_box(&t, false);
+            self.emit(BoardOp::Put(e), board, now);
+        } else if t.shown {
+            self.emit(BoardOp::Remove(vec![t.id]), board, now);
+        }
+        self.typing = Some(Typing { shown, ..t });
+    }
+
+    /// Typing in our text box `id`, the caret where `at` is (or at the
+    /// end): it isn't finished meanwhile, so it doesn't fade.
+    fn edit(&mut self, id: u32, at: Option<Point>, board: &mut BoardView, now: Instant) {
+        let Some(e) = board.get(self.me, id).map(|s| s.element.clone()) else {
+            return;
+        };
+        if e.kind != ElementKind::Text || e.points.len() != 2 {
+            return;
+        }
+        let mut t = Typing {
+            id,
+            look: e.clone(),
+            anchor: e.points[0],
+            caret: e.text.chars().count(),
+            mark: None,
+            text: e.text.clone(),
+            before: Some(Element { done: true, ..e }),
+            shown: true,
+        };
+        if let Some(at) = at {
+            t.caret = self.caret_at(&t, at);
+        }
+        self.selection.clear();
+        self.tool = DrawTool::Text;
+        self.typing = Some(t);
+        self.show_typing(board, now);
+    }
+
+    /// Typing ends: the box goes out finished, and the edit is one step of
+    /// the history (a new box, a changed one, or one emptied away). Returns
+    /// the box, if it has text.
+    fn finish_typing(&mut self, board: &mut BoardView, now: Instant) -> Option<u32> {
+        let t = self.typing.take()?;
+        // By its text, not by `shown`: a box the host cleared while typed in
+        // goes out again, with all its text.
+        let after = valid_text(&t.text).then(|| self.text_box(&t, true));
+        if let Some(e) = &after {
+            self.emit(BoardOp::Put(e.clone()), board, now);
+        }
+        if t.before != after {
+            self.record(vec![Change {
+                id: t.id,
+                before: t.before,
+                after: after.clone(),
+            }]);
+        }
+        after.map(|e| e.id)
+    }
+
+    /// Pasted text as a new box of ours with its corner at `at`, moved in
+    /// as far as it must to fit the picture, finished and selected.
+    fn paste_text(&mut self, text: String, at: Point, board: &mut BoardView, now: Instant) {
+        let lines: Vec<&str> = text.split('\n').collect();
+        if lines.len() > MAX_TEXT_LINES {
+            self.note = Some(TOO_LONG);
+        }
+        let text = lines[..lines.len().min(MAX_TEXT_LINES)].join("\n");
+        let mut chars: Vec<char> = text.chars().collect();
+        if chars.len() > MAX_TEXT_CHARS {
+            chars.truncate(MAX_TEXT_CHARS);
+            self.note = Some(TOO_LONG);
+        }
+        let text: String = chars.into_iter().collect();
+        if !valid_text(&text) {
+            return;
+        }
+        let Some(id) = self.new_id(board) else {
+            return;
+        };
+        let t = Typing {
+            id,
+            look: self.element(id, ElementKind::Text, Vec::new(), true),
+            anchor: at,
+            caret: 0,
+            mark: None,
+            text,
+            before: None,
+            shown: true,
+        };
+        // As it would be with room to grow, then moved back inside.
+        let size = text_size(t.look.width);
+        let lines: Vec<&str> = t.text.split('\n').collect();
+        let wide = lines.iter().map(|l| self.measure.of(l)).fold(0.0, f32::max) * size;
+        let tall = lines.len() as f32 * LINE_HEIGHT * size;
+        let (ax, ay) = self.uniform(at);
+        let x = ax.min(self.aspect - wide).max(0.0);
+        let y = ay.min(1.0 - tall).max(0.0);
+        let t = Typing {
+            anchor: self.picture(x, y),
+            ..t
+        };
+        let e = self.text_box(&t, true);
+        self.selection = BTreeSet::from([id]);
+        self.tool = DrawTool::Select;
+        self.perform(
+            vec![Change {
+                id,
+                before: None,
+                after: Some(e),
+            }],
+            board,
+            now,
+        );
+    }
+
+    /// Where the caret goes for `at` in the box `t`: the nearest line, then
+    /// the nearest place between its characters.
+    fn caret_at(&self, t: &Typing, at: Point) -> usize {
+        let size = text_size(t.look.width);
+        let (ax, ay) = self.uniform(t.anchor);
+        let (px, py) = self.uniform(at);
+        let lines: Vec<&str> = t.text.split('\n').collect();
+        let line =
+            (((py - ay) / (LINE_HEIGHT * size)).floor().max(0.0) as usize).min(lines.len() - 1);
+        let before: usize = lines[..line].iter().map(|l| l.chars().count() + 1).sum();
+        before + self.nearest(lines[line], px - ax, size)
+    }
+
+    /// The place between `line`'s characters nearest `x` across it (picture
+    /// heights, its text `size`).
+    /// Prefixes only grow, so a binary search: the last place at or before
+    /// `x`, or the one after it if nearer (a tie keeps the first). A few
+    /// layouts per drag move, not one per character (the review's finding).
+    fn nearest(&self, line: &str, x: f32, size: f32) -> usize {
+        let chars: Vec<char> = line.chars().collect();
+        let width = |k: usize| self.measure.of(&chars[..k].iter().collect::<String>()) * size;
+        let (mut lo, mut hi) = (0, chars.len());
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if width(mid) <= x {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if lo < chars.len() && width(lo + 1) - x < x - width(lo) {
+            lo + 1
+        } else {
+            lo
+        }
+    }
+
+    /// Whether `at` is within a box, or near enough to pick it.
+    fn near_box(&self, (a, b): (Point, Point), at: Point) -> bool {
+        let p = self.uniform(at);
+        let (a, b) = (self.uniform(a), self.uniform(b));
+        p.0 >= a.0.min(b.0) - TOUCH
+            && p.0 <= a.0.max(b.0) + TOUCH
+            && p.1 >= a.1.min(b.1) - TOUCH
+            && p.1 <= a.1.max(b.1) + TOUCH
+    }
+
+    /// The topmost of our text boxes under `at`.
+    fn hit_text(&self, at: Point, board: &BoardView) -> Option<u32> {
+        board
+            .of(self.me)
+            .filter(|s| s.element.kind == ElementKind::Text && self.touches(&s.element, at, true))
+            .last()
+            .map(|s| s.element.id)
     }
 
     /// A number for a new element, unless we have all the elements we may.
     fn new_id(&mut self, board: &BoardView) -> Option<u32> {
         if board.of(self.me).count() >= MAX_MEMBER_ELEMENTS {
-            self.note = Some("You've drawn all you may: erase some first");
+            self.note = Some(TOO_MANY);
             return None;
         }
         let id = self.next_id;
@@ -875,7 +1638,7 @@ impl Editor {
         if step.iter().any(|c| c.before.is_none())
             && board.of(self.me).count() >= MAX_MEMBER_ELEMENTS
         {
-            self.note = Some("You've drawn all you may: erase some first");
+            self.note = Some(TOO_MANY);
             self.redo.push(step);
             return;
         }
@@ -888,7 +1651,13 @@ impl Editor {
 
     /// `elements` again as new ones of ours, `times` paste steps away, and
     /// selected.
-    fn paste(&mut self, elements: Vec<Element>, times: i32, board: &mut BoardView, now: Instant) {
+    fn paste_elements(
+        &mut self,
+        elements: Vec<Element>,
+        times: i32,
+        board: &mut BoardView,
+        now: Instant,
+    ) {
         if elements.is_empty() {
             return;
         }
@@ -1007,8 +1776,111 @@ impl Editor {
                 let near = (n - 1.0).abs() * r.0.min(r.1) <= reach;
                 near || (picking && n <= 1.0)
             }
+            // Its box, as its author measured it: the eraser too touches
+            // text anywhere in it.
+            ElementKind::Text => self.near_box((e.points[0], e.points[1]), at),
         }
     }
+}
+
+/// The caret's line and its place in that line, both counted from 0, for
+/// `caret` characters into `text`.
+fn line_col(text: &str, caret: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut col = 0;
+    for c in text.chars().take(caret) {
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// What a character is for moving by word: a space, part of a word
+/// (letters, digits, `_`), anything else (a run of punctuation is a word of
+/// its own), or a line break, which word moves stop at, as text fields do.
+/// The board overlay's editor alike.
+const SPACE: u8 = 0;
+const BREAK: u8 = 3;
+fn class(c: char) -> u8 {
+    if c == '\n' {
+        BREAK
+    } else if c.is_whitespace() {
+        SPACE
+    } else if c.is_alphanumeric() || c == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+/// Ctrl+Right from `at`: past the word there, then the spaces after it, up
+/// to a line's end; at a line's end, just past the break.
+fn next_word(cs: &[char], at: usize) -> usize {
+    let mut i = at;
+    match cs.get(i).map(|c| class(*c)) {
+        Some(BREAK) => return i + 1,
+        Some(k) if k != SPACE => {
+            while i < cs.len() && class(cs[i]) == k {
+                i += 1;
+            }
+        }
+        _ => {}
+    }
+    while i < cs.len() && class(cs[i]) == SPACE {
+        i += 1;
+    }
+    i
+}
+
+/// Ctrl+Left from `at`: back past the spaces, then the word before them,
+/// down to a line's start; at a line's start, just before the break.
+fn prev_word(cs: &[char], at: usize) -> usize {
+    let mut i = at;
+    while i > 0 && class(cs[i - 1]) == SPACE {
+        i -= 1;
+    }
+    if i > 0 {
+        let k = class(cs[i - 1]);
+        if k == BREAK {
+            return if i == at { i - 1 } else { i };
+        }
+        while i > 0 && class(cs[i - 1]) == k {
+            i -= 1;
+        }
+    }
+    i
+}
+
+/// The word (or run of spaces, or of punctuation) at `at`, for a double
+/// click: the run of one kind of character around it, never a line break
+/// (an empty line selects nothing; the review's finding).
+fn word_at(cs: &[char], at: usize) -> (usize, usize) {
+    if cs.is_empty() {
+        return (0, 0);
+    }
+    // At the end, or on a space or break just past a word: that word.
+    let after_word = at > 0 && matches!(class(cs[at - 1]), 1 | 2);
+    let i = if at == cs.len() || (matches!(class(cs[at]), SPACE | BREAK) && after_word) {
+        at - 1
+    } else {
+        at
+    };
+    let k = class(cs[i]);
+    if k == BREAK {
+        return (at, at);
+    }
+    let (mut lo, mut hi) = (i, i + 1);
+    while lo > 0 && class(cs[lo - 1]) == k {
+        lo -= 1;
+    }
+    while hi < cs.len() && class(cs[hi]) == k {
+        hi += 1;
+    }
+    (lo, hi)
 }
 
 /// Folds `op` into `last`, the queued operation before it, when both are

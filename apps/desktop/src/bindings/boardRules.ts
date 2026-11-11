@@ -11,6 +11,13 @@ export const WIDTH_NAMES: string[] = ["Thin", "Medium", "Bold"];
 /** A line's width as a fraction of the picture's height, by width index. */
 export const LINE_WIDTHS: number[] = [0.003, 0.006, 0.012];
 export const HIGHLIGHTER_WIDTHS: number[] = [0.012, 0.024, 0.048];
+/** A text box's size (its font's em) as a fraction of the picture's height, by width index (M27c). */
+export const TEXT_SIZES: number[] = [0.025, 0.04, 0.065];
+export const TEXT_SIZE_NAMES: string[] = ["Small", "Medium", "Large"];
+/** A text box's lines, this many ems apart. */
+export const LINE_HEIGHT = 1.25;
+export const MAX_TEXT_CHARS = 500;
+export const MAX_TEXT_LINES = 50;
 export const MAX_STROKE_POINTS = 2000;
 export const MAX_MEMBER_ELEMENTS = 300;
 export const MAX_BATCH_OPS = 64;
@@ -29,6 +36,7 @@ export type DrawTool =
   | "line"
   | "rectangle"
   | "ellipse"
+  | "text"
   | "eraser";
 
 /** The toolbar's tools, in order, with their names and keys. */
@@ -41,6 +49,7 @@ export const TOOLS: { tool: DrawTool; name: string; key: string }[] = [
   { tool: "line", name: "Line", key: "L" },
   { tool: "rectangle", name: "Rectangle", key: "R" },
   { tool: "ellipse", name: "Ellipse", key: "O" },
+  { tool: "text", name: "Text", key: "T" },
   { tool: "eraser", name: "Eraser", key: "E" },
 ];
 
@@ -54,7 +63,8 @@ export type DrawAction =
   | { type: "delete" }
   | { type: "nudge"; dx: number; dy: number }
   | { type: "tool"; tool: DrawTool }
-  | { type: "leave" };
+  | { type: "leave" }
+  | { type: "toggleToolbar" };
 
 /** The drawing editor's keys (Excalidraw's), by `KeyboardEvent.code`. */
 export const DRAWING_KEYS: { code: string; ctrl: boolean; shift: boolean; action: DrawAction }[] = [
@@ -79,6 +89,8 @@ export const DRAWING_KEYS: { code: string; ctrl: boolean; shift: boolean; action
   { code: "KeyL", ctrl: false, shift: false, action: { type: "tool", tool: "line" } },
   { code: "KeyR", ctrl: false, shift: false, action: { type: "tool", tool: "rectangle" } },
   { code: "KeyO", ctrl: false, shift: false, action: { type: "tool", tool: "ellipse" } },
+  { code: "KeyT", ctrl: false, shift: false, action: { type: "tool", tool: "text" } },
   { code: "KeyE", ctrl: false, shift: false, action: { type: "tool", tool: "eraser" } },
   { code: "Escape", ctrl: false, shift: false, action: { type: "leave" } },
+  { code: "Tab", ctrl: false, shift: false, action: { type: "toggleToolbar" } },
 ];

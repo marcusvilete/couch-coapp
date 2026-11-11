@@ -25,6 +25,7 @@ const el = (id: number, kind: BoardElement["kind"], colour: number, points: [num
   stay: 4,
   done: true,
   points: points.map(([x, y]) => ({ x, y })),
+  text: "",
 });
 
 const NEWS: BoardNewsView[] = [
@@ -35,6 +36,10 @@ const NEWS: BoardNewsView[] = [
     elements: [
       { author: BIA, element: el(1, "ellipse", 2, [[38_000, 24_000], [50_000, 40_000]]) },
       { author: BIA, element: el(2, "arrow", 2, [[24_000, 50_000], [37_000, 36_000]]) },
+      {
+        author: BIA,
+        element: { ...el(3, "text", 7, [[6_000, 52_000], [17_000, 58_000]]), text: "Behind the\nwaterfall!" },
+      },
       { author: CAIO, element: { ...el(1, "highlighter", 3, [[8_000, 12_000], [20_000, 12_500], [30_000, 12_000]]) } },
       { author: ME, element: el(1, "rectangle", 0, [[52_000, 44_000], [62_000, 56_000]]) },
       {

@@ -108,6 +108,15 @@ export function ToolIcon({ tool, laser }: { tool: DrawTool; laser: string }) {
           <ellipse cx={S / 2} cy={S / 2} rx={0.42 * S} ry={0.3 * S} />
         </Svg>
       );
+    // A T, as a letter of lines (the stream window's `tool_icon`).
+    case "text":
+      return (
+        <Svg>
+          <path
+            d={`M${0.18 * S} ${0.18 * S}H${0.82 * S}M${0.5 * S} ${0.18 * S}V${0.85 * S}M${0.38 * S} ${0.85 * S}H${0.62 * S}`}
+          />
+        </Svg>
+      );
     case "eraser":
       return (
         <Svg>
@@ -166,6 +175,18 @@ export function TurnIcon({ forward }: { forward: boolean }) {
           line(start, [flip(0.32), 0.48])
         }
       />
+    </Svg>
+  );
+}
+
+/** A chevron, up or down: the toolbar's handle and pill (`draw_ui.rs`'s
+ * `chevron`, 5 points either side and 2.5 up or down from the middle). */
+export function ChevronIcon({ up }: { up: boolean }) {
+  const dy = up ? 2.5 : -2.5;
+  const m = S / 2;
+  return (
+    <Svg>
+      <path d={`M${m - 5},${m + dy}L${m},${m - dy}L${m + 5},${m + dy}`} strokeWidth={1.8} />
     </Svg>
   );
 }

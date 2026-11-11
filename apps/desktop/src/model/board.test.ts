@@ -20,6 +20,7 @@ const stroke = (id: number, done: boolean, fades: boolean): BoardElement => ({
   stay: 4,
   done,
   points: [{ x: 1, y: 1 }],
+  text: "",
 });
 
 describe("the board as the overlay shows it", () => {

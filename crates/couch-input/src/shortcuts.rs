@@ -365,7 +365,7 @@ pub const SHORTCUTS: &[Binding] = &[
 
 // ---- The drawing editor's keys (M27a) ----
 
-/// A drawing tool (M27a; text comes with M27c).
+/// A drawing tool (M27a; text boxes M27c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DrawTool {
     Select,
@@ -376,12 +376,13 @@ pub enum DrawTool {
     Line,
     Rectangle,
     Ellipse,
+    Text,
     Eraser,
 }
 
 impl DrawTool {
     /// In the toolbar's order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Select,
         Self::Pen,
         Self::Highlighter,
@@ -390,6 +391,7 @@ impl DrawTool {
         Self::Line,
         Self::Rectangle,
         Self::Ellipse,
+        Self::Text,
         Self::Eraser,
     ];
 
@@ -403,6 +405,7 @@ impl DrawTool {
             Self::Line => "Line",
             Self::Rectangle => "Rectangle",
             Self::Ellipse => "Ellipse",
+            Self::Text => "Text",
             Self::Eraser => "Eraser",
         }
     }
@@ -423,6 +426,9 @@ pub enum DrawAction {
     Tool(DrawTool),
     /// Leaves the tool, then drawing mode.
     Leave,
+    /// Hides the toolbar to a small pill, or shows it again: the window's
+    /// own, not the editor's (M27c, the author's request).
+    ToggleToolbar,
 }
 
 /// One of the drawing editor's keys. They are each editor's own (the stream
@@ -655,6 +661,15 @@ pub const DRAWING_KEYS: &[DrawingKey] = &[
     dk(
         false,
         false,
+        0x17,
+        "T",
+        "KeyT",
+        DrawAction::Tool(DrawTool::Text),
+        "Text",
+    ),
+    dk(
+        false,
+        false,
         0x08,
         "E",
         "KeyE",
@@ -669,6 +684,15 @@ pub const DRAWING_KEYS: &[DrawingKey] = &[
         "Escape",
         DrawAction::Leave,
         "Leave the tool, then drawing",
+    ),
+    dk(
+        false,
+        false,
+        0x2B,
+        "Tab",
+        "Tab",
+        DrawAction::ToggleToolbar,
+        "Hide or show the drawing tools",
     ),
 ];
 

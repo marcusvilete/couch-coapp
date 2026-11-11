@@ -71,7 +71,8 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// 15: drawing on the stream (M27a): the board's `0x08xx` messages, and the
 /// console's drawing ops in `RemoteOp` and `RemoteSession`.
 /// 16: a fading drawing's stay, its author's pick (M27b): `Element.stay`.
-pub const PROTOCOL_MINOR: u16 = 16;
+/// 17: text boxes (M27c): `ElementKind::Text` and `Element.text`.
+pub const PROTOCOL_MINOR: u16 = 17;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -95,6 +96,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (14, "0.26"),
     (15, "0.28"),
     (16, "0.29"),
+    (17, "0.30"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

@@ -6,9 +6,17 @@ import { describe, expect, it } from "vitest";
 import type { BoardElement } from "../bindings/BoardElement";
 import type { BoardOpView } from "../bindings/BoardOpView";
 import type { BoardPoint } from "../bindings/BoardPoint";
-import { DEFAULT_STAY, type DrawAction, type DrawTool, MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS } from "../bindings/boardRules";
+import {
+  DEFAULT_STAY,
+  type DrawAction,
+  type DrawTool,
+  MAX_MEMBER_ELEMENTS,
+  MAX_STROKE_POINTS,
+  MAX_TEXT_CHARS,
+  MAX_TEXT_LINES,
+} from "../bindings/boardRules";
 import { BoardView } from "./board";
-import { Editor, marks, validBatch } from "./editor";
+import { Editor, type TextKey, TOO_LONG, cleanText, marks, validBatch, validText } from "./editor";
 
 const ME = "01".repeat(32);
 const BIA = "02".repeat(32);
@@ -156,6 +164,7 @@ describe("the drawing editor's shared cases", () => {
       stay: 4,
       done: true,
       points: [p(10_000, 10_000), p(20_000, 20_000)],
+      text: "",
     };
     d.board.apply(BIA, [{ type: "put", element: theirs }], d.now);
     d.tool("rectangle");
@@ -333,6 +342,7 @@ describe("the drawing editor's shared cases", () => {
       stay: 4,
       done: false,
       points: [p(1, 1)],
+      text: "",
     };
     d.board.news(
       { type: "snapshot", generation: 3, first: true, elements: [{ author: ME, element: open }] },
@@ -372,7 +382,7 @@ describe("the drawing editor's shared cases", () => {
       [
         {
           type: "put",
-          element: { id: 41, kind: "line", colour: 0, width: 0, fades: false, stay: 4, done: true, points: [p(0, 0), p(1, 1)] },
+          element: { id: 41, kind: "line", colour: 0, width: 0, fades: false, stay: 4, done: true, points: [p(0, 0), p(1, 1)], text: "" },
         },
       ],
       d.now,
@@ -430,6 +440,578 @@ describe("the drawing editor's shared cases", () => {
     d.editor.stepFade("shorter", d.board, d.now);
     d.editor.stepFade("shorter", d.board, d.now);
     expect(d.mine()[0].fades).toBe(false);
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+});
+
+// ---- Text boxes (M27c): the same cases as `editor/tests.rs`'s ----
+
+class TextDesk extends Desk {
+  /** A click with the Text tool. */
+  clickText(at: BoardPoint) {
+    this.tool("text");
+    this.editor.press(at, false, this.board, this.now);
+    this.editor.release(at, false, this.board, this.now);
+  }
+
+  typeText(text: string) {
+    this.editor.typeText(text, this.board, this.now);
+  }
+
+  textKey(key: TextKey) {
+    this.editor.textKey(key, this.board, this.now);
+  }
+
+  /** A key with Shift and Ctrl as given. */
+  textKeyWith(key: TextKey, shift: boolean, ctrl: boolean) {
+    this.editor.textKey(key, this.board, this.now, shift, ctrl);
+  }
+
+  /** The point over character `col` of `line` in the box at `anchor`
+   * (medium text, the estimate's half an em a character). */
+  overChar(anchor: BoardPoint, line: number, col: number): BoardPoint {
+    const size = 0.04;
+    const x = Math.fround(((col * 0.5 * size) / (16 / 9)) * 65_535);
+    const y = Math.fround((line + 0.5) * 1.25 * size * 65_535);
+    return p(anchor.x + Math.round(x), anchor.y + Math.round(y));
+  }
+
+  textNow(): string {
+    const mine = this.board.of(ME);
+    return mine.length > 0 ? mine[mine.length - 1].element.text : "";
+  }
+}
+
+/** Within one of `want`: the two editors round alike but for halves. */
+function near(got: BoardPoint, want: BoardPoint): boolean {
+  return Math.abs(got.x - want.x) <= 1 && Math.abs(got.y - want.y) <= 1;
+}
+
+/** Rust's f32 arithmetic for the expected corners. */
+const f32 = Math.fround;
+
+describe("the drawing editor's shared cases: text boxes", () => {
+  it("a text box goes as it is typed and finishes as one step", () => {
+    const d = new TextDesk();
+    d.clickText(p(10_000, 20_000));
+    expect(d.editor.typing()).toBe(true);
+    d.send();
+    expect(d.sent).toEqual([]);
+    d.typeText("Hi");
+    d.send();
+    expect(d.sent.length).toBe(1);
+    const first = d.sent[0];
+    expect(first.type === "put" && first.element.text === "Hi" && !first.element.done).toBe(true);
+    d.textKey("enter");
+    d.typeText("there");
+    d.textKey("finish");
+    expect(d.editor.typing()).toBe(false);
+    d.send();
+    const mine = plain(d.mine());
+    expect(mine.length).toBe(1);
+    const e = mine[0];
+    expect(e.done && e.kind === "text" && e.text === "Hi\nthere").toBe(true);
+    // Its box: as wide as "there" (half an em a character, medium: 0.04 of
+    // the height) and two lines tall, from where it was clicked.
+    expect(e.points[0]).toEqual(p(10_000, 20_000));
+    const wide = f32(((5 * 0.5 * 0.04) / (16 / 9)) * 65_535);
+    const tall = f32(2 * 1.25 * 0.04 * 65_535);
+    expect(near(e.points[1], p(10_000 + Math.round(wide), 20_000 + Math.round(tall)))).toBe(true);
+    expect(plain(d.hostsCopy())).toEqual(mine);
+    // Finished with Esc: selected, to move at once.
+    expect(d.editor.tool).toBe("select");
+    expect(d.editor.selection().size).toBe(1);
+    // One step: undone whole, and back.
+    d.key({ type: "undo" });
+    expect(d.mine()).toEqual([]);
+    d.key({ type: "redo" });
+    expect(plain(d.mine())).toEqual(mine);
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(mine);
+  });
+
+  it("the caret moves and keys edit where it is", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("abc\nde");
+    const text = () => d.board.of(ME)[0].element.text;
+    d.textKey("up");
+    d.typeText("X");
+    expect(text()).toBe("abXc\nde");
+    d.textKey("end");
+    d.textKey("down");
+    d.typeText("Y");
+    expect(text()).toBe("abXc\ndeY");
+    d.textKey("home");
+    d.textKey("backspace");
+    expect(text()).toBe("abXcdeY");
+    d.textKey("delete");
+    d.textKey("left");
+    d.textKey("left");
+    d.textKey("delete");
+    expect(text()).toBe("abceY");
+    // Tabs as spaces, control characters never.
+    d.textKey("end");
+    d.typeText("\t!\u0007");
+    expect(text()).toBe("abceY    !");
+    // Accents and wide characters are one character each.
+    d.textKey("home");
+    d.typeText("é😀");
+    d.textKey("left");
+    d.textKey("backspace");
+    expect(text()).toBe("😀abceY    !");
+    d.textKey("finish");
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("a box emptied goes and spaces alone never go", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("  ");
+    d.send();
+    expect(d.sent).toEqual([]);
+    d.typeText("x");
+    d.send();
+    expect(d.hostsCopy().length).toBe(1);
+    for (let i = 0; i < 3; i++) d.textKey("backspace");
+    d.send();
+    expect(d.hostsCopy()).toEqual([]);
+    expect(d.mine()).toEqual([]);
+    d.textKey("finish");
+    // A new box that came to nothing leaves no step to undo.
+    d.tool("rectangle");
+    d.stroke([p(1_000, 1_000), p(2_000, 2_000)], false);
+    d.key({ type: "undo" });
+    d.key({ type: "undo" });
+    expect(d.mine()).toEqual([]);
+    d.key({ type: "redo" });
+    expect(d.mine().length).toBe(1);
+  });
+
+  it("editing a box changes it as one step", () => {
+    const d = new TextDesk();
+    d.clickText(p(10_000, 10_000));
+    d.typeText("Hello");
+    d.textKey("finish");
+    const before = plain(d.mine());
+    // Double-clicked with Select, at the end of its line: typing in it, the
+    // caret there, unfinished meanwhile.
+    d.tool("select");
+    const at = p(before[0].points[1].x, 10_100);
+    d.stroke([at], false);
+    d.stroke([at], false);
+    d.editor.doubleClick(at, d.board, d.now);
+    expect(d.editor.typing()).toBe(true);
+    expect(d.mine()[0].done).toBe(false);
+    d.typeText("!");
+    expect(d.mine()[0].text).toBe("Hello!");
+    // A click inside it moves the caret: to the start here.
+    d.editor.press(p(10_000, 10_100), false, d.board, d.now);
+    d.typeText(">");
+    expect(d.mine()[0].text).toBe(">Hello!");
+    // A click away finishes it, the tool staying.
+    d.editor.press(p(60_000, 60_000), false, d.board, d.now);
+    expect(d.editor.typing()).toBe(false);
+    expect(d.editor.tool).toBe("text");
+    expect(d.mine()[0].done).toBe(true);
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+    d.key({ type: "undo" });
+    expect(plain(d.mine())).toEqual(before);
+    d.key({ type: "redo" });
+    expect(d.mine()[0].text).toBe(">Hello!");
+    // The Text tool's click on our box edits it too; on theirs, a new one.
+    const theirs: BoardElement = {
+      id: 9,
+      kind: "text",
+      colour: 0,
+      width: 1,
+      fades: false,
+      stay: 4,
+      done: true,
+      points: [p(40_000, 40_000), p(50_000, 45_000)],
+      text: "Bia",
+    };
+    d.board.apply(BIA, [{ type: "put", element: theirs }], d.now);
+    d.clickText(p(45_000, 42_000));
+    d.typeText("mine");
+    d.textKey("finish");
+    expect(d.board.get(BIA, 9)?.element.text).toBe("Bia");
+    expect(d.mine().length).toBe(2);
+  });
+
+  it("text stops at its limit", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("a".repeat(MAX_TEXT_CHARS - 1));
+    d.typeText("bcd");
+    const e = d.mine()[0];
+    expect(Array.from(e.text).length).toBe(MAX_TEXT_CHARS);
+    expect(e.text.endsWith("b")).toBe(true);
+    expect(d.editor.takeNote()).toBe(TOO_LONG);
+    expect(TOO_LONG).toContain(String(MAX_TEXT_CHARS));
+    d.textKey("enter");
+    expect(Array.from(d.mine()[0].text).length).toBe(MAX_TEXT_CHARS);
+    d.textKey("finish");
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("pasted text becomes a box and our own copy stays ours", () => {
+    const d = new TextDesk();
+    d.tool("rectangle");
+    d.stroke([p(1_000, 1_000), p(4_000, 3_000)], false);
+    d.key({ type: "selectAll" });
+    // No text boxes in it: the clipboard gets nothing, and a paste of
+    // nothing is our copy.
+    expect(d.editor.copy(d.board)).toBe("");
+    d.editor.paste("", null, d.board, d.now);
+    expect(d.mine().length).toBe(2);
+    expect(d.mine()[1].kind).toBe("rectangle");
+    // Text copied elsewhere since: a box at the pointer, cleaned, finished
+    // and selected, one step.
+    d.editor.paste("hello\r\nworld\t!\n\n", p(20_000, 20_000), d.board, d.now);
+    const e = plain(d.mine())[2];
+    expect(e.text).toBe("hello\nworld    !");
+    expect(e.done).toBe(true);
+    expect(e.points[0]).toEqual(p(20_000, 20_000));
+    expect([...d.editor.selection()]).toEqual([e.id]);
+    expect(d.editor.tool).toBe("select");
+    d.key({ type: "undo" });
+    expect(d.mine().length).toBe(2);
+    d.key({ type: "redo" });
+    // Copied, its text goes on the clipboard; that coming back (the
+    // clipboard's line breaks aside) pastes our copy, not a new box.
+    d.key({ type: "selectAll" });
+    expect(d.editor.copy(d.board)).toBe("hello\nworld    !");
+    d.editor.paste("hello\r\nworld    !", null, d.board, d.now);
+    expect(d.mine().length).toBe(6);
+    // Near the edge it moves in, whole.
+    d.editor.paste("far right", p(65_000, 65_000), d.board, d.now);
+    const far = d.mine()[d.mine().length - 1];
+    expect(far.text).toBe("far right");
+    // Its whole size (nine characters, one line), ending at the edges.
+    const wide = Math.round(f32(((9 * 0.5 * 0.04) / (16 / 9)) * 65_535));
+    const tall = Math.round(f32(1.25 * 0.04 * 65_535));
+    expect(near(far.points[0], p(65_535 - wide, 65_535 - tall))).toBe(true);
+    // Too long: cut, and said.
+    d.editor.paste("z".repeat(600), null, d.board, d.now);
+    expect(d.mine()[d.mine().length - 1].text.length).toBe(MAX_TEXT_CHARS);
+    expect(d.editor.takeNote()).toBe(TOO_LONG);
+    // While typing, it goes into the box, at the caret.
+    d.clickText(p(1_000, 30_000));
+    d.typeText("ab");
+    d.textKey("left");
+    d.editor.paste("X\r\nY", null, d.board, d.now);
+    expect(d.mine()[d.mine().length - 1].text).toBe("aX\nYb");
+    d.textKey("finish");
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("a text box left open is finished whole and a clear ends typing", () => {
+    const d = new TextDesk();
+    // As a page loaded again finds it: being typed.
+    const open: BoardElement = {
+      id: 3,
+      kind: "text",
+      colour: 0,
+      width: 1,
+      fades: true,
+      stay: 4,
+      done: false,
+      points: [p(1, 1), p(5_000, 5_000)],
+      text: "half",
+    };
+    d.board.apply(ME, [{ type: "put", element: open }], d.now);
+    d.sent.push(JSON.parse(JSON.stringify({ type: "put", element: open })));
+    d.editor.cleared(d.board);
+    d.editor.finishStrays(d.board, d.now);
+    d.send();
+    const last = d.sent[d.sent.length - 1];
+    // The box again, finished (an append is a stroke's alone).
+    expect(last.type === "put" && last.element.done && last.element.text === "half").toBe(true);
+    expect(d.mine()[0].done).toBe(true);
+    // The host clears ours while we type (its resync after a refused batch,
+    // say): typing goes on, and the box comes back whole at the next key,
+    // its old self gone from the history (the review's finding).
+    d.clickText(p(30_000, 30_000));
+    d.typeText("not gone");
+    d.board.news({ type: "cleared", generation: 9, author: ME }, ME, d.now);
+    d.editor.cleared(d.board);
+    expect(d.editor.typing()).toBe(true);
+    expect(d.mine()).toEqual([]);
+    d.typeText("!");
+    expect(d.mine()[0].text).toBe("not gone!");
+    // Cleared again, then finished at once: it goes out with all its text.
+    d.board.news({ type: "cleared", generation: 10, author: ME }, ME, d.now);
+    d.editor.cleared(d.board);
+    d.textKey("finish");
+    expect(d.mine()[0].done && d.mine()[0].text === "not gone!").toBe(true);
+    d.send();
+    expect(d.hostsCopy()[d.hostsCopy().length - 1].text).toBe("not gone!");
+    // One step, new: undone, it goes; nothing older comes back.
+    d.key({ type: "undo" });
+    expect(d.mine()).toEqual([]);
+  });
+
+  it("a size picked for a selected box measures it again", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("Hello");
+    d.textKey("finish");
+    const small = { ...d.mine()[0].points[1] };
+    d.editor.setStyle({ width: 2 }, d.board, d.now);
+    const e = plain(d.mine())[0];
+    expect(e.points[0]).toEqual(p(1_000, 1_000));
+    const wide = Math.round(f32(((5 * 0.5 * 0.065) / (16 / 9)) * 65_535));
+    const tall = Math.round(f32(1.25 * 0.065 * 65_535));
+    expect(e.points[1].x > small.x).toBe(true);
+    expect(near(e.points[1], p(1_000 + wide, 1_000 + tall))).toBe(true);
+    d.key({ type: "undo" });
+    expect(d.mine()[0].points[1]).toEqual(small);
+  });
+
+  it("lines stop at their limit and only select double clicks into a box", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("a\n".repeat(MAX_TEXT_LINES + 5));
+    const text = d.mine()[0].text;
+    expect(text.split("\n").length).toBe(MAX_TEXT_LINES);
+    expect(d.editor.takeNote()).toBe(TOO_LONG);
+    d.textKey("enter");
+    expect(d.mine()[0].text).toBe(text);
+    d.textKey("finish");
+    // Pasted, the lines past the last are cut.
+    d.editor.paste("b\n".repeat(80), p(30_000, 1_000), d.board, d.now);
+    expect(d.mine()[d.mine().length - 1].text.split("\n").length).toBe(MAX_TEXT_LINES);
+    // A double click with the pen draws; it doesn't edit.
+    d.tool("pen");
+    const at = p(1_200, 1_500);
+    d.stroke([at], false);
+    d.stroke([at], false);
+    d.editor.doubleClick(at, d.board, d.now);
+    expect(d.editor.typing()).toBe(false);
+    expect(d.editor.tool).toBe("pen");
+    // Ctrl+C with nothing selected leaves the clipboard alone.
+    d.key({ type: "leave" });
+    expect(d.editor.copy(d.board)).toBe(null);
+  });
+
+  it("a style picked while typing restyles the box", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("big");
+    const small = { ...d.mine()[0].points[1] };
+    d.editor.setStyle({ colour: 4, width: 2 }, d.board, d.now);
+    const e = plain(d.mine())[0];
+    expect([e.colour, e.width]).toEqual([4, 2]);
+    expect(e.points[1].x > small.x && e.points[1].y > small.y).toBe(true);
+    d.editor.stepFade("next", d.board, d.now);
+    expect(d.mine()[0].fades && !d.mine()[0].done).toBe(true);
+    d.textKey("finish");
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+    // The eraser takes a box anywhere in it.
+    d.tool("eraser");
+    const [a, b] = e.points;
+    const mid = p(Math.floor(a.x / 2) + Math.floor(b.x / 2), Math.floor(a.y / 2) + Math.floor(b.y / 2));
+    d.stroke([mid, mid], false);
+    expect(d.mine()).toEqual([]);
+  });
+
+  it("text boxes are checked and pasted text cleaned as the host does", () => {
+    // `couch_proto::board`'s `text_boxes_are_checked` and
+    // `pasted_text_is_cleaned`, for this editor's copies.
+    expect(validText("a")).toBe(true);
+    expect(validText("ç".repeat(MAX_TEXT_CHARS))).toBe(true);
+    expect(validText("a".repeat(MAX_TEXT_CHARS + 1))).toBe(false);
+    expect(validText("")).toBe(false);
+    expect(validText("   ")).toBe(false);
+    expect(validText("two\nlines")).toBe(true);
+    for (const bad of ["a\tb", "a\rb", "a\u007f", "a\u0085", "a\u0000"]) expect(validText(bad)).toBe(false);
+    expect(cleanText("a\r\nb\rc\n")).toBe("a\nb\nc");
+    expect(cleanText("\tx\u0007y \n\n  ")).toBe("    xy");
+    expect(cleanText("é\u0085ü")).toBe("éü");
+    expect(cleanText(" \n ")).toBe("");
+    expect(validText(cleanText("  indented\r\n\tline\u0000 "))).toBe(true);
+    expect(validText(Array(MAX_TEXT_LINES).fill("x").join("\n"))).toBe(true);
+    expect(validText(Array(MAX_TEXT_LINES + 1).fill("x").join("\n"))).toBe(false);
+    // As Rust's: a byte order mark isn't a space (JavaScript's own `trim`
+    // says it is), and a lone surrogate, which no Rust string holds, goes.
+    const bom = String.fromCharCode(0xfeff);
+    expect(validText(bom)).toBe(true);
+    expect(cleanText(`a${bom}`)).toBe(`a${bom}`);
+    expect(cleanText(`a${String.fromCharCode(0xd800)}b${String.fromCharCode(0xdc00)}`)).toBe("ab");
+  });
+});
+
+// ---- Editing text as text fields do (the author's request, M27c): the
+// same cases as `editor/tests.rs`'s ----
+
+describe("the drawing editor's shared cases: editing text", () => {
+  it("words and the selection move as in text fields", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("Hello big world");
+    // Ctrl+Left and Ctrl+Right by word.
+    d.textKeyWith("left", false, true);
+    d.textKeyWith("left", false, true);
+    d.typeText("<");
+    expect(d.textNow()).toBe("Hello <big world");
+    d.textKey("backspace");
+    d.textKeyWith("right", false, true);
+    d.typeText(">");
+    expect(d.textNow()).toBe("Hello big >world");
+    d.textKey("backspace");
+    // Shift+Ctrl+Right selects the word; typing replaces it.
+    d.textKeyWith("right", true, true);
+    expect(d.editor.copyText()).toBe("world");
+    d.typeText("there");
+    expect(d.textNow()).toBe("Hello big there");
+    // Ctrl+Backspace takes a word, then the spaces and the word before.
+    d.textKeyWith("backspace", false, true);
+    expect(d.textNow()).toBe("Hello big ");
+    d.textKeyWith("backspace", false, true);
+    expect(d.textNow()).toBe("Hello ");
+    // Ctrl+Home, then Ctrl+Delete: a word and the spaces after it, then
+    // punctuation and its spaces (as Windows' text fields).
+    d.typeText("a, b");
+    d.textKeyWith("home", false, true);
+    d.textKeyWith("delete", false, true);
+    expect(d.textNow()).toBe("a, b");
+    d.textKeyWith("end", false, true);
+    d.textKeyWith("left", false, true);
+    d.textKeyWith("left", false, true);
+    d.textKeyWith("delete", false, true);
+    expect(d.textNow()).toBe("ab");
+    // Shift+Home selects to the line's start; Left collapses to its start.
+    d.textKeyWith("end", false, false);
+    d.textKeyWith("home", true, false);
+    expect(d.editor.copyText()).toBe("ab");
+    d.textKey("left");
+    expect(d.editor.copyText()).toBe(null);
+    d.typeText("[");
+    expect(d.textNow()).toBe("[ab");
+    // Ctrl+A and Ctrl+X: all of it out, and the box with it.
+    d.textKey("selectAll");
+    expect(d.editor.cutText(d.board, d.now)).toBe("[ab");
+    expect(d.mine()).toEqual([]);
+    d.typeText("again");
+    d.textKey("finish");
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("up and down keep the place across and selections replace", () => {
+    const d = new TextDesk();
+    d.clickText(p(1_000, 1_000));
+    d.typeText("abcdef\nab");
+    // Up from the end of "ab": the same place across, after "ab".
+    d.textKey("up");
+    d.typeText("|");
+    expect(d.textNow()).toBe("ab|cdef\nab");
+    d.textKey("backspace");
+    // Down from the end of the long line: the short one's end.
+    d.textKey("end");
+    d.textKey("down");
+    d.typeText("!");
+    expect(d.textNow()).toBe("abcdef\nab!");
+    // Down on the last line: its end; Up on the first: the start.
+    d.textKey("up");
+    d.textKey("up");
+    d.typeText("^");
+    expect(d.textNow()).toBe("^abcdef\nab!");
+    // Shift+Down selects across the line break; typing replaces it all.
+    d.textKeyWith("down", true, false);
+    d.textKeyWith("end", true, false);
+    expect(d.editor.copyText()).toBe("abcdef\nab!");
+    d.typeText("one");
+    expect(d.textNow()).toBe("^one");
+    d.textKey("finish");
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+
+  it("dragging and double clicking select text", () => {
+    const d = new TextDesk();
+    const anchor = p(1_000, 1_000);
+    d.clickText(anchor);
+    d.typeText("Go left now\nthen jump");
+    // A drag inside the box selects, from where it began.
+    const [from, to] = [d.overChar(anchor, 0, 3), d.overChar(anchor, 0, 7)];
+    d.editor.press(from, false, d.board, d.now);
+    d.editor.drag(to, false, d.board, d.now);
+    d.editor.release(to, false, d.board, d.now);
+    expect(d.editor.copyText()).toBe("left");
+    // Shift and a click extend it.
+    const end = d.overChar(anchor, 1, 4);
+    d.editor.press(end, true, d.board, d.now);
+    d.editor.release(end, true, d.board, d.now);
+    expect(d.editor.copyText()).toBe("left now\nthen");
+    // A double click selects the word there; a click alone none.
+    const jump = d.overChar(anchor, 1, 6);
+    d.editor.press(jump, false, d.board, d.now);
+    d.editor.doubleClick(jump, d.board, d.now);
+    d.editor.release(jump, false, d.board, d.now);
+    expect(d.editor.copyText()).toBe("jump");
+    // Painted: one box for the word, on the second line.
+    const cursor = d.editor.textCursor();
+    expect(cursor?.selection.length).toBe(1);
+    expect((cursor?.selection[0][0].y ?? 0) > anchor.y + 2_000).toBe(true);
+    d.typeText("run");
+    expect(d.textNow()).toBe("Go left now\nthen run");
+    d.textKey("finish");
+    d.send();
+    expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
+  });
+});
+
+describe("the drawing editor's shared cases: line breaks", () => {
+  it("word moves stop at line breaks and an empty line selects nothing", () => {
+    const d = new TextDesk();
+    const anchor = p(1_000, 1_000);
+    d.clickText(anchor);
+    d.typeText("abc\n\n  def");
+    const mark = () => {
+      d.typeText("|");
+      const text = d.textNow();
+      d.textKey("backspace");
+      return text;
+    };
+    // Ctrl+Right: the word's end, then past each break, then the indent.
+    d.textKeyWith("home", false, true);
+    d.textKeyWith("right", false, true);
+    expect(mark()).toBe("abc|\n\n  def");
+    d.textKeyWith("right", false, true);
+    expect(mark()).toBe("abc\n|\n  def");
+    d.textKeyWith("right", false, true);
+    d.textKeyWith("right", false, true);
+    expect(mark()).toBe("abc\n\n  |def");
+    // Ctrl+Left: the line's start, then back over each break.
+    d.textKeyWith("left", false, true);
+    expect(mark()).toBe("abc\n\n|  def");
+    d.textKeyWith("left", false, true);
+    expect(mark()).toBe("abc\n|\n  def");
+    // A double click on the empty line selects nothing; at a line's end, the
+    // word before it.
+    const empty = d.overChar(anchor, 1, 0);
+    d.editor.press(empty, false, d.board, d.now);
+    d.editor.doubleClick(empty, d.board, d.now);
+    d.editor.release(empty, false, d.board, d.now);
+    expect(d.editor.copyText()).toBe(null);
+    const end = d.overChar(anchor, 0, 3);
+    d.editor.press(end, false, d.board, d.now);
+    d.editor.doubleClick(end, d.board, d.now);
+    d.editor.release(end, false, d.board, d.now);
+    expect(d.editor.copyText()).toBe("abc");
+    // Ctrl+Delete at a line's end takes the break alone.
+    d.textKey("end");
+    d.textKeyWith("delete", false, true);
+    expect(d.textNow()).toBe("abc\n  def");
+    d.textKey("finish");
     d.send();
     expect(plain(d.hostsCopy())).toEqual(plain(d.mine()));
   });

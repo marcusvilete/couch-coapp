@@ -86,6 +86,57 @@
   cursor: default;
 }
 
+/* The handle: a tab on the toolbar's top edge that hides it (M27c), as the
+   stream window paints its own. */
+.board-handle {
+  position: absolute;
+  top: -16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 44px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--bar);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.board-handle:hover,
+.board-pill:hover {
+  background: #2a2a30;
+}
+
+/* The toolbar hidden: a pill at the bottom centre, the tool and colour
+   picked; a click shows the toolbar again. */
+.board-pill {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 32px;
+  padding: 0 12px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bar);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.board-pill-colour {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+}
+
 .board-row {
   display: flex;
   flex-wrap: wrap;
@@ -138,6 +189,29 @@
 .board-dot {
   border-radius: 50%;
   background: currentColor;
+}
+
+/* A text size, with the Text tool (M27c). */
+.board-size {
+  line-height: 1;
+  font-weight: 600;
+}
+
+/* The keys' field (M27c): focused all through drawing, so typing, input
+   methods and the clipboard reach the page, at the caret so an input
+   method's candidates show beside the text. It shows nothing itself. */
+.board-keys {
+  position: absolute;
+  width: 1px;
+  height: 1.5em;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  pointer-events: none;
+  caret-color: transparent;
 }
 
 .board-gap {

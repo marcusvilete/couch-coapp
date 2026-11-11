@@ -1183,6 +1183,19 @@ impl FakeViewer {
             .collect()
     }
 
+    /// The text boxes as this window has them: (text, finished), in
+    /// drawing order (M27c).
+    fn texts(&self) -> Vec<(String, bool)> {
+        self.board
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .filter(|a| a.element.kind == ElementKind::Text)
+            .map(|a| (a.element.text.clone(), a.element.done))
+            .collect()
+    }
+
     fn refused(&self) -> Vec<Refusal> {
         self.refusals.lock().unwrap().clone()
     }
@@ -6477,6 +6490,22 @@ fn a_box(id: u32) -> BoardOp {
         stay: 4,
         done: true,
         points: vec![Point::new(100, 100), Point::new(9_000, 6_000)],
+        text: String::new(),
+    })
+}
+
+/// A text box, as element `id` of whoever types it (M27c).
+fn a_note(id: u32, text: &str, done: bool) -> BoardOp {
+    BoardOp::Put(Element {
+        id,
+        kind: ElementKind::Text,
+        colour: 7,
+        width: 1,
+        fades: false,
+        stay: 4,
+        done,
+        points: vec![Point::new(20_000, 20_000), Point::new(30_000, 23_000)],
+        text: text.into(),
     })
 }
 
@@ -6533,6 +6562,22 @@ async fn drawings_go_through_the_host_to_every_window() {
         (cid.clone(), 1),
         "C's own number, C's own"
     );
+    // A text box (M27c): seen as it is typed, then finished.
+    c_window.draw(&c, vec![a_note(2, "Over", false)]);
+    wait("B sees C typing", || {
+        b_window.texts() == [("Over".to_string(), false)]
+    })
+    .await;
+    c_window.draw(&c, vec![a_note(2, "Over here!", true)]);
+    wait("B sees C's note finished", || {
+        b_window.texts() == [("Over here!".to_string(), true)]
+    })
+    .await;
+    c_window.draw(&c, vec![BoardOp::Remove(vec![2])]);
+    wait("C's note gone from B's window", || {
+        b_window.texts().is_empty()
+    })
+    .await;
 
     // The host stops B: B's go everywhere, and B's next is refused.
     a.ok(Command::StopDrawing {
@@ -6846,6 +6891,7 @@ async fn the_host_draws_over_the_game() {
             stay: 4,
             done: true,
             points: vec![BoardPoint { x: 10, y: 10 }, BoardPoint { x: 900, y: 400 }],
+            text: String::new(),
         },
     };
     a.ok(Command::HostDraw {

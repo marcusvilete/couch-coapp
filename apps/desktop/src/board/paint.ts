@@ -6,12 +6,24 @@
 
 import type { BoardElement } from "../bindings/BoardElement";
 import type { BoardPoint } from "../bindings/BoardPoint";
-import { LASER_MS, PALETTE, PING_MS } from "../bindings/boardRules";
+import { LASER_MS, LINE_HEIGHT, PALETTE, PING_MS } from "../bindings/boardRules";
 import { alpha, type BoardView } from "../model/board";
-import { bounds, type Editor, lineWidth } from "../model/editor";
+import { bounds, type Editor, lineWidth, type Measure, textSize } from "../model/editor";
 
 const FULL = 65535;
 const BLUE = "#4a9ff0";
+/** Text boxes' font: the board's own. */
+const FONT = '"Segoe UI", system-ui, sans-serif';
+/** The size text is measured at: a box's width scales from it. */
+const MEASURE_AT = 64;
+
+/** The editor's measure, with the font text boxes are painted in. */
+export function canvasMeasure(): Measure {
+  const ctx = document.createElement("canvas").getContext("2d");
+  if (!ctx) return (line) => Array.from(line).length * 0.5;
+  ctx.font = `${MEASURE_AT}px ${FONT}`;
+  return (line) => ctx.measureText(line).width / MEASURE_AT;
+}
 
 function rgba(index: number, a: number): string {
   const [r, g, b] = PALETTE[Math.min(index, PALETTE.length - 1)];
@@ -24,6 +36,8 @@ export interface Painting {
   editor: Editor | null;
   names: Map<string, string>;
   now: number;
+  /** What an input method is composing into the text box, not yet typed. */
+  preedit?: string;
 }
 
 /** Paints everything on `ctx`, `width` by `height` CSS pixels. */
@@ -36,6 +50,48 @@ export function paintBoard(ctx: CanvasRenderingContext2D, width: number, height:
     element(ctx, shown.element, alpha(shown, p.now), height, place);
   }
   if (p.editor) {
+    // The box being typed in: its frame, what an input method composes, and
+    // the caret (still: nothing blinks).
+    const cursor = p.editor.textCursor();
+    if (cursor) {
+      const [a, b] = cursor.corners.map(place);
+      ctx.strokeStyle = BLUE;
+      ctx.lineWidth = 1;
+      roundRect(ctx, Math.min(a[0], b[0]) - 5, Math.min(a[1], b[1]) - 5, Math.abs(b[0] - a[0]) + 10, Math.abs(b[1] - a[1]) + 10, 3);
+      ctx.stroke();
+      // The selection, line by line (`draw_ui.rs`: blue at 90 of 255).
+      ctx.fillStyle = "rgba(74, 159, 240, 0.35)";
+      for (const box of cursor.selection) {
+        const [s, t] = box.map(place);
+        ctx.fillRect(Math.min(s[0], t[0]), Math.min(s[1], t[1]), Math.abs(t[0] - s[0]), Math.abs(t[1] - s[1]));
+      }
+      const [x, y] = place(cursor.caret[0]);
+      const [, bottom] = place(cursor.caret[1]);
+      const em = cursor.size * height;
+      let caretX = x;
+      if (p.preedit) {
+        ctx.font = `${em}px ${FONT}`;
+        ctx.textBaseline = "top";
+        ctx.textAlign = "left";
+        ctx.fillStyle = rgba(cursor.colour, 1);
+        ctx.fillText(p.preedit, x, y);
+        const w = ctx.measureText(p.preedit).width;
+        const under = y + em * LINE_HEIGHT * 0.95;
+        ctx.strokeStyle = rgba(cursor.colour, 1);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x, under);
+        ctx.lineTo(x + w, under);
+        ctx.stroke();
+        caretX += w;
+      }
+      ctx.strokeStyle = rgba(cursor.colour, 1);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(caretX, y);
+      ctx.lineTo(caretX, bottom);
+      ctx.stroke();
+    }
     ctx.strokeStyle = BLUE;
     ctx.lineWidth = 1.5;
     for (const id of p.editor.selection()) {
@@ -116,6 +172,10 @@ function element(
   place: (q: BoardPoint) => [number, number],
 ) {
   if (a <= 0 || e.points.length === 0) return;
+  if (e.kind === "text") {
+    paintText(ctx, e, a, height, place);
+    return;
+  }
   const seeThrough = e.kind === "highlighter" ? 0.38 : 1;
   const colour = rgba(e.colour, a * seeThrough);
   const width = Math.max(1, lineWidth(e.kind, e.width) * height);
@@ -172,6 +232,31 @@ function element(
       return;
     }
   }
+}
+
+/** A text box: each line from its first point down, a line height apart,
+ * over a soft shadow so it reads over any game (`draw_ui.rs`'s
+ * `paint_text`). */
+function paintText(
+  ctx: CanvasRenderingContext2D,
+  e: BoardElement,
+  a: number,
+  height: number,
+  place: (q: BoardPoint) => [number, number],
+) {
+  const em = textSize(e.width) * height;
+  const shadow = Math.max(1, em * 0.06);
+  const [x, y] = place(e.points[0]);
+  ctx.font = `${em}px ${FONT}`;
+  ctx.textBaseline = "top";
+  ctx.textAlign = "left";
+  e.text.split("\n").forEach((line, i) => {
+    const top = y + i * LINE_HEIGHT * em;
+    ctx.fillStyle = `rgba(0, 0, 0, ${Math.max(0, Math.min(1, a * 0.6))})`;
+    ctx.fillText(line, x + shadow, top + shadow);
+    ctx.fillStyle = rgba(e.colour, a);
+    ctx.fillText(line, x, top);
+  });
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
