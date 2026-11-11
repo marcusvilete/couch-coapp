@@ -20,7 +20,8 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, IsIconic, SWP_ASYNCWINDOWPOS,
         SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-        SetWindowLongPtrW, SetWindowPos, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+        SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, WDA_EXCLUDEFROMCAPTURE,
+        WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
     },
 };
 
@@ -142,6 +143,21 @@ pub fn set_interactive(board: WindowId, on: bool) -> bool {
     true
 }
 
+/// Leaves `window` out of every capture (M27d: the host's own stream window,
+/// so a host streaming its whole screen doesn't stream it; Windows 10 2004
+/// and later). Only from the process that owns the window: Windows refuses
+/// it for another's. `false` if it refused.
+pub fn exclude_from_capture(window: WindowId) -> bool {
+    // SAFETY: takes a handle value, which Windows checks.
+    match unsafe { SetWindowDisplayAffinity(hwnd(window), WDA_EXCLUDEFROMCAPTURE) } {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("leaving the window out of captures: {e}");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +167,6 @@ mod tests {
         let none = WindowId(0x7fff_fff0);
         assert_eq!(window_area(none), None);
         assert!(!set_interactive(none, true));
+        assert!(!exclude_from_capture(none));
     }
 }

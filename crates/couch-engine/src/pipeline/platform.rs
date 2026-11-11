@@ -434,6 +434,38 @@ impl Backend for WindowsBackend {
         foreground::foreground_window().map(|w| w.0)
     }
 
+    fn foreground_process(&self) -> Option<u32> {
+        foreground::foreground_process()
+    }
+
+    fn window_of_process(&self, pid: u32) -> Option<NativeId> {
+        couch_platform_win::process::window_of(pid)
+    }
+
+    fn own_window_left_out(&self) -> bool {
+        true
+    }
+
+    fn own_window_area(&self, source: Option<&Source>) -> Option<ScreenArea> {
+        // The monitor the game (or the screen streamed) is on; with nothing
+        // streamed, the primary one.
+        let game = match source {
+            Some(Source::Window(window)) => monitor::of_window(*window),
+            Some(Source::Screen(screen)) => monitor::of_monitor(*screen),
+            _ => monitor::primary(),
+        }?;
+        let other = monitor::handles()
+            .into_iter()
+            .filter_map(monitor::of_monitor)
+            .find(|area| *area != game)?;
+        Some(ScreenArea {
+            x: other.x,
+            y: other.y,
+            width: other.width,
+            height: other.height,
+        })
+    }
+
     fn decodes(&self) -> u8 {
         let h264 = Codec::H264.bit();
         // `COUCH_VIEWER_HEVC=0`: H.264 only, for measuring.

@@ -303,20 +303,23 @@ async fn from_host(link: &mut Option<Link>) -> FromHost {
 }
 
 /// The viewer process: what we write to it and what it says.
-struct Window {
-    to: ToViewer,
-    said: mpsc::UnboundedReceiver<IpcFrame>,
+pub(super) struct Window {
+    pub(super) to: ToViewer,
+    pub(super) said: mpsc::UnboundedReceiver<IpcFrame>,
     reader: JoinHandle<()>,
     guard: Box<dyn std::any::Any + Send>,
     /// Its process, to let it come to the front (P11).
-    pid: Option<u32>,
+    pub(super) pid: Option<u32>,
     /// The user left (the window's close button, or Leave): its exit is no
     /// crash.
-    left: bool,
+    pub(super) left: bool,
 }
 
 impl Window {
-    fn launch(backend: &dyn Backend, options: &ViewerOptions) -> Result<Self, MediaError> {
+    pub(super) fn launch(
+        backend: &dyn Backend,
+        options: &ViewerOptions,
+    ) -> Result<Self, MediaError> {
         let ViewerProcess {
             stdin,
             mut stdout,
@@ -347,7 +350,7 @@ impl Window {
 
     /// Lets the viewer close on its own (it releases what it held), then
     /// ends it if it doesn't.
-    async fn close(mut self) {
+    pub(super) async fn close(mut self) {
         let _ = self.to.send(ipc::kinds::SHUTDOWN, &[]).await;
         drop(self.to);
         let _ = tokio::time::timeout(CLOSE_WAIT, &mut self.reader).await;
@@ -356,13 +359,13 @@ impl Window {
 }
 
 /// Writes to the viewer; `false` once it is gone.
-struct ToViewer {
+pub(super) struct ToViewer {
     stdin: std::pin::Pin<Box<dyn AsyncWrite + Send>>,
     scratch: Vec<u8>,
 }
 
 impl ToViewer {
-    async fn send(&mut self, kind: u8, payload: &[u8]) -> bool {
+    pub(super) async fn send(&mut self, kind: u8, payload: &[u8]) -> bool {
         pipe::write_frame(&mut self.stdin, kind, payload, &mut self.scratch)
             .await
             .is_ok()

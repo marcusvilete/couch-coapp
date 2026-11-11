@@ -173,6 +173,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 hide_bar: false,
                 hide_stats: false,
                 log: None,
+                own_stream: false,
             },
             measure: true,
             // Off by default: `release-check` kills the window on purpose and

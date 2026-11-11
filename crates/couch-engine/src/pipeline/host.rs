@@ -438,6 +438,9 @@ struct Known {
 
 struct State {
     viewers: BTreeMap<MemberId, Viewer>,
+    /// The host's own window of its stream (M27d), while open: a feed and an
+    /// encoder of its own, no connection, no seat, no share of the upload.
+    own: Option<Viewer>,
     /// The stream's capture and sound threads, while anyone watches.
     running: Option<Running>,
     /// The stream's upload cap, split between viewers.
@@ -738,6 +741,7 @@ impl HostPipeline {
             streams: AtomicU32::new(0),
             state: Mutex::new(State {
                 viewers: BTreeMap::new(),
+                own: None,
                 running: None,
                 share: None,
                 traces: 0,
@@ -1046,7 +1050,7 @@ async fn start_now(
         state.share = stream.options.upload_bps.map(UploadShare::new);
         *lock(&sh.stream) = Some(stream.clone());
         reshare(&mut state);
-        if !state.viewers.is_empty() || sh.backend.captures_without_viewers() {
+        if state.watched() || sh.backend.captures_without_viewers() {
             state.running = Some(start_capture(sh, &stream));
         }
     }
@@ -1177,15 +1181,74 @@ impl HostPipeline {
         state.retired.extend(viewer.thread);
         lock(&sh.feeds).retain(|f| !Arc::ptr_eq(f, &viewer.feed));
         lock(&sh.audio_to).retain(|c| c.remote_id().as_bytes() != &member.0);
-        if state.viewers.is_empty()
-            && !sh.backend.captures_without_viewers()
-            && let Some(running) = state.running.take()
-        {
-            // Nobody watches: capture and sound stop.
-            running.stop.store(true, Ordering::SeqCst);
-            state.retired.extend(running.threads);
-        }
+        stop_unwatched(sh, &mut state);
         reshare(&mut state);
+    }
+
+    /// Opens the host's own window's video (M27d): every frame of the stream
+    /// (whatever streams from now on), encoded here at
+    /// [`OWN_FPS`] for the window alone, never sent anywhere. `None` while
+    /// it is open already, or once stopping. It closes with
+    /// [`Self::close_own`], or when its receiver goes.
+    pub fn open_own(&self) -> Option<mpsc::Receiver<OwnFrame>> {
+        let sh = &self.shared;
+        let mut state = lock(&sh.state);
+        if state.stopped || state.own.is_some() {
+            return None;
+        }
+        let feed = Arc::new(Feed::new(0));
+        let (frames, rx) = mpsc::channel(OWN_QUEUE);
+        let thread = {
+            let (feed, shared) = (feed.clone(), sh.clone());
+            std::thread::Builder::new()
+                .name("encode-own".into())
+                .spawn(move || own_encode_loop(&feed, &shared, &frames))
+        };
+        let thread = match thread {
+            Ok(thread) => thread,
+            Err(e) => {
+                tracing::warn!("the host's own window's encoder: {e}");
+                return None;
+            }
+        };
+        state.own = Some(Viewer {
+            feed: feed.clone(),
+            thread: Some(thread),
+        });
+        lock(&sh.feeds).push(feed.clone());
+        hand_last(sh, &feed);
+        if let Some(stream) = sh.current()
+            && state.running.is_none()
+        {
+            state.running = Some(start_capture(sh, &stream));
+        }
+        Some(rx)
+    }
+
+    /// The host's own window's decoder needs a keyframe (M27d).
+    pub fn own_keyframe(&self) {
+        let feed = lock(&self.shared.state)
+            .own
+            .as_ref()
+            .map(|own| own.feed.clone());
+        if let Some(feed) = feed {
+            feed.keyframe.store(true, Ordering::SeqCst);
+            hand_last(&self.shared, &feed);
+        }
+    }
+
+    /// Closes the host's own window's video (M27d): its encoder stops, and
+    /// the capture with it if nobody else watches.
+    pub fn close_own(&self) {
+        let sh = &self.shared;
+        let mut state = lock(&sh.state);
+        let Some(own) = state.own.take() else {
+            return;
+        };
+        own.feed.finish(reset_code::VIEWER_REMOVED);
+        state.retired.extend(own.thread);
+        lock(&sh.feeds).retain(|f| !Arc::ptr_eq(f, &own.feed));
+        stop_unwatched(sh, &mut state);
     }
 
     /// `member`'s decoder needs a keyframe.
@@ -1290,7 +1353,8 @@ impl HostPipeline {
             stream.ended.store(true, Ordering::SeqCst);
         }
         let mut threads = std::mem::take(&mut state.retired);
-        for (_, mut viewer) in std::mem::take(&mut state.viewers) {
+        let own = state.own.take();
+        for mut viewer in std::mem::take(&mut state.viewers).into_values().chain(own) {
             viewer.feed.finish(reset_code::SESSION_END);
             threads.extend(viewer.thread.take());
         }
@@ -1349,6 +1413,25 @@ fn numbered(path: &Path, n: u32) -> PathBuf {
 }
 
 /// Recomputes every viewer's share of the upload cap, if there is one.
+impl State {
+    /// Anyone watches: a viewer, or the host's own window (M27d).
+    fn watched(&self) -> bool {
+        !self.viewers.is_empty() || self.own.is_some()
+    }
+}
+
+/// Nobody watches any more: capture and sound stop, unless the backend
+/// captures regardless (a Linux share, which would ask again).
+fn stop_unwatched(sh: &Shared, state: &mut State) {
+    if !state.watched()
+        && !sh.backend.captures_without_viewers()
+        && let Some(running) = state.running.take()
+    {
+        running.stop.store(true, Ordering::SeqCst);
+        state.retired.extend(running.threads);
+    }
+}
+
 fn reshare(state: &mut State) {
     let Some(share) = state.share.as_mut() else {
         return;
@@ -2144,6 +2227,209 @@ fn encode(
         }
     }
     Ok(())
+}
+
+// ---- The host's own window (M27d) ----
+
+/// The host's own window's frame rate: enough to see and draw on, at a
+/// fraction of a viewer's encode.
+pub const OWN_FPS: u32 = 30;
+/// Encoded frames waiting for the window: past this the window is behind,
+/// and the next frame is a keyframe.
+const OWN_QUEUE: usize = 8;
+
+/// One encoded frame for the host's own window (M27d).
+#[derive(Debug, Clone)]
+pub struct OwnFrame {
+    /// Counts each encoder opened, from 1: the window's decoder starts again
+    /// at a new one.
+    pub epoch: u32,
+    pub seq: u32,
+    pub keyframe: bool,
+    /// [`Codec::wire`]: always H.264.
+    pub codec: u8,
+    pub capture_us: u64,
+    pub encode_us: u32,
+    pub data: bytes::Bytes,
+}
+
+/// The own window's bitrate for a picture of `width` by `height`: generous,
+/// since nothing leaves the PC (about 5 bits a pixel a second), within 4 to
+/// 20 Mbit/s.
+fn own_bitrate(width: u32, height: u32) -> u32 {
+    (u64::from(width) * u64::from(height) * 5).clamp(4_000_000, 20_000_000) as u32
+}
+
+/// Whether a frame taken at `last` leaves the next one (`now`) too soon for
+/// [`OWN_FPS`]; a little early counts as on time, or a source at the same
+/// rate would lose every other frame.
+fn own_too_soon(last: Option<Instant>, now: Instant) -> bool {
+    let interval = Duration::from_secs(1) / OWN_FPS;
+    last.is_some_and(|t| now.duration_since(t) < interval.mul_f32(0.9))
+}
+
+/// The host's own window's video for as long as it is open: each stream's
+/// frames at [`OWN_FPS`] at most, encoded in H.264 at a fixed bitrate, sent
+/// to the engine, which hands them to the window. No rate control: nothing
+/// goes over a network. A frame that comes too soon waits for its turn
+/// unless a newer one replaces it, so a still picture's last frame is
+/// shown.
+fn own_encode_loop(feed: &Feed, shared: &Shared, out: &mpsc::Sender<OwnFrame>) {
+    let mut current: Option<Arc<Stream>> = None;
+    let mut encoder: Option<Box<dyn VideoEncoder>> = None;
+    let mut size: Option<(u32, u32)> = None;
+    let mut gpu_pool: Option<u64> = None;
+    let (mut epoch, mut seq) = (0u32, 0u32);
+    let mut force_keyframe = true;
+    let mut last: Option<Instant> = None;
+    let mut waiting: Option<(Arc<Stream>, VideoFrame)> = None;
+    // GPU frames off for this window alone, for the stream: its encoder
+    // couldn't take them. Never the stream's `gpu_input_off`, which would
+    // turn them off for every guest's encoder for a window at the PC.
+    let mut gpu_off = false;
+    // A frame was dropped (the window behind): nothing goes out until a
+    // keyframe, since what follows would lean on it.
+    let mut broken = false;
+    // Frames that failed to encode (or read back) in a row.
+    let mut failures = 0u32;
+
+    while !feed.stop.load(Ordering::SeqCst) {
+        if current
+            .as_ref()
+            .is_some_and(|s| s.ended.load(Ordering::SeqCst))
+        {
+            current = None;
+            drop(encoder.take());
+            (size, gpu_pool) = (None, None);
+        }
+        let interval = Duration::from_secs(1) / OWN_FPS;
+        let wait = match (&waiting, last) {
+            (Some(_), Some(t)) => interval.saturating_sub(t.elapsed()).min(CAPTURE_WAIT),
+            _ => CAPTURE_WAIT,
+        };
+        match feed.frames.take_timeout(wait) {
+            Ok(Some(item)) => waiting = Some(item),
+            Ok(None) => {}
+            Err(_closed) => break,
+        }
+        let keyframe_asked = feed.keyframe.load(Ordering::SeqCst);
+        if waiting.is_none() || (own_too_soon(last, Instant::now()) && !keyframe_asked) {
+            continue;
+        }
+        let Some((stream, frame)) = waiting.take() else {
+            continue;
+        };
+        if stream.ended.load(Ordering::SeqCst) {
+            continue;
+        }
+        if !current.as_ref().is_some_and(|c| Arc::ptr_eq(c, &stream)) {
+            drop(encoder.take());
+            (size, gpu_pool, gpu_off) = (None, None, false);
+            current = Some(stream.clone());
+        }
+        let gpu = match &frame {
+            VideoFrame::Gpu(f) if !gpu_off && !stream.gpu_input_off.load(Ordering::SeqCst) => {
+                Some(f)
+            }
+            _ => None,
+        };
+        let (width, height) = (frame.width(), frame.height());
+        let pool_changed = encoder.as_ref().is_some_and(|e| e.caps().gpu_input)
+            && gpu.map(|f| f.source) != gpu_pool;
+        if size != Some((width, height)) || pool_changed || encoder.is_none() {
+            // Closed first: it holds its pool's textures and an NVENC session.
+            drop(encoder.take());
+            let config = EncoderConfig {
+                codec: Codec::H264,
+                width,
+                height,
+                fps: OWN_FPS,
+                bitrate_bps: own_bitrate(width, height),
+            };
+            let enc = match shared.backend.encoder(config, gpu) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    tracing::warn!("the host's own window's encoder failed to open: {e}");
+                    return;
+                }
+            };
+            gpu_pool = gpu.filter(|_| enc.caps().gpu_input).map(|f| f.source);
+            if gpu.is_some() && !enc.caps().gpu_input {
+                // This window's frames read back on their own (`cpu()`
+                // below), the guests' left on the GPU.
+                gpu_off = true;
+            }
+            tracing::info!(
+                "the host's own window: {width}x{height} with {} at {:.1} Mbit/s",
+                enc.caps().name,
+                f64::from(config.bitrate_bps) / 1e6
+            );
+            encoder = Some(enc);
+            size = Some((width, height));
+            epoch += 1;
+            seq = 0;
+            force_keyframe = true;
+        }
+        let enc = encoder.as_mut().expect("opened above");
+        let key = std::mem::take(&mut force_keyframe) | feed.keyframe.swap(false, Ordering::SeqCst);
+        let encoded = match gpu {
+            Some(f) if enc.caps().gpu_input => enc.encode(EncoderInput::Gpu(f), key),
+            _ => frame
+                .cpu()
+                .and_then(|cpu| enc.encode(EncoderInput::Cpu(&cpu), key)),
+        };
+        last = Some(Instant::now());
+        let units = match encoded {
+            Ok(units) => units,
+            Err(e) if enc.caps().gpu_input => {
+                tracing::warn!(
+                    "the host's own window: encoding GPU frames failed ({e}); its frames go \
+                     through memory"
+                );
+                gpu_off = true;
+                size = None;
+                continue;
+            }
+            // A read-back or an encode failing once skips that frame; a few
+            // in a row end the window, as for the stream's own read-backs.
+            Err(e) => {
+                failures += 1;
+                if failures >= READ_BACK_FAILURES {
+                    tracing::warn!("the host's own window: encoding failed ({e})");
+                    return;
+                }
+                tracing::debug!("the host's own window: a frame skipped ({e})");
+                continue;
+            }
+        };
+        failures = 0;
+        for unit in units {
+            if broken && !unit.keyframe {
+                force_keyframe = true;
+                continue;
+            }
+            broken = false;
+            let frame = OwnFrame {
+                epoch,
+                seq,
+                keyframe: unit.keyframe,
+                codec: Codec::H264.wire(),
+                capture_us: unit.captured_at.0,
+                encode_us: unit.encode_time_us,
+                data: unit.data,
+            };
+            seq = seq.wrapping_add(1);
+            match out.try_send(frame) {
+                Ok(()) => {}
+                // Behind: what follows must not lean on what was dropped.
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    force_keyframe = true;
+                    broken = true;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+    }
 }
 
 struct PeriodStats {

@@ -293,6 +293,9 @@ export function hostSession(
       key: seats.length > 0 ? "Ctrl+Alt+Shift+D" : null,
       note: null,
     },
+    // Ours: the host's own stream window (M27d), closed; left out of what
+    // is streamed, as on Windows.
+    ownWindow: { open: false, drawing: false, leftOut: true },
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,
@@ -773,6 +776,15 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (s.boardOverlay) {
         if (cmd.type === "endHostDrawing") s.boardOverlay.drawing = false;
         else s.boardOverlay.shown = cmd.on;
+      }
+      changed(room);
+      return { type: "done" };
+    }
+    case "ownStreamWindow": {
+      const { room, session: s } = hosting();
+      if (s.ownWindow) {
+        s.ownWindow.open = cmd.open;
+        if (!cmd.open) s.ownWindow.drawing = false;
       }
       changed(room);
       return { type: "done" };

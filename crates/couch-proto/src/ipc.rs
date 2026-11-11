@@ -16,7 +16,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 18;
+pub const IPC_VERSION: u16 = 19;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -462,6 +462,10 @@ pub enum WindowRequest {
     /// Come to the front, restored if minimized. The app allows it to take
     /// the foreground first (Windows refuses a background process otherwise).
     Raise,
+    /// Drawing mode on or off (M27d: the host's drawing key, heard by the
+    /// app's hook, for the host's own stream window). On is refused, with
+    /// the window's note, where its own key would be.
+    Drawing(bool),
 }
 
 /// Payload of [`kinds::WINDOW_STATE`] (postcard, P11): the stream window as
@@ -473,6 +477,9 @@ pub struct WindowState {
     /// app or its setting).
     pub bar: bool,
     pub stats: bool,
+    /// In drawing mode (M27d: the host's own window, whose drawing begun by
+    /// the host's key gives the game back the front as it ends).
+    pub drawing: bool,
 }
 
 /// Payload of [`kinds::CONTROLLER_NAMES`] (postcard, P12): each connected
@@ -844,6 +851,7 @@ mod tests {
             WindowRequest::ShowBar(false),
             WindowRequest::ShowStats(true),
             WindowRequest::Raise,
+            WindowRequest::Drawing(true),
         ] {
             assert_eq!(from_payload(&to_payload(&request)), Some(request));
         }
@@ -851,6 +859,7 @@ mod tests {
             fullscreen: true,
             bar: false,
             stats: true,
+            drawing: true,
         };
         let mut bytes = to_payload(&state);
         assert_eq!(from_payload(&bytes), Some(state));

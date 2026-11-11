@@ -33,7 +33,7 @@ use couch_input::shortcuts::Shortcut;
 use couch_proto::{board::BoardOp, ids::SessionId};
 use tokio::sync::{mpsc, watch};
 
-use super::{Actor, OurStream};
+use super::{Actor, OurStream, own_window::Editor};
 use crate::{
     BoardOverlayView, EngineError, Response, ScreenArea,
     board::{BoardOpView, BoardWindows},
@@ -242,7 +242,7 @@ async fn follow(
 
 /// What the board lies over while a stream is live: the game's window as
 /// the pipeline follows it (window swaps included), or the screen.
-fn lies_over(h: &super::Hosting) -> Option<Source> {
+pub(super) fn lies_over(h: &super::Hosting) -> Option<Source> {
     if !matches!(h.stream, Some(OurStream::Live { .. })) {
         return None;
     }
@@ -257,7 +257,7 @@ fn lies_over(h: &super::Hosting) -> Option<Source> {
 }
 
 /// The game's own window, if it is one.
-fn game_window(h: &super::Hosting) -> Option<NativeId> {
+pub(super) fn game_window(h: &super::Hosting) -> Option<NativeId> {
     match lies_over(h) {
         Some(Source::Window(window)) => Some(window),
         _ => None,
@@ -551,6 +551,17 @@ impl Actor {
     /// The host's drawing key, pressed at the PC: drawing over the game
     /// begins, or ends.
     pub(in crate::rooms) fn host_draw_key(&mut self, session: SessionId, now: Instant) {
+        // Our own stream window in front (M27d): the key is its drawing key,
+        // which the hook took before the window could hear it.
+        let ours = self
+            .sessions
+            .hosting
+            .as_ref()
+            .is_some_and(|h| h.session.id() == session && h.pipeline.is_some());
+        if ours && self.own_in_front() {
+            self.own_drawing_key();
+            return;
+        }
         let can = self.draws_over_game();
         let full_screen = self.backend.exclusive_full_screen();
         let before = self.backend.foreground_window();
@@ -583,16 +594,32 @@ impl Actor {
             Some("Nothing is streamed to draw on")
         } else if h.session.desktop_holder().is_some() {
             Some("Not while a device of yours controls this PC's desktop")
-        } else if full_screen {
-            Some(
-                "Drawings can't show over a game in exclusive full screen: set the game to \
-                 borderless or windowed full screen",
-            )
-        } else if !on_screen {
-            Some("The game isn't on screen to draw over: bring it back first")
         } else {
             None
         };
+        // Nothing of ours can be over a game in exclusive full screen: our
+        // own stream window instead, in front, drawing (M27d, the author's
+        // choice); as that drawing ends, the game comes back.
+        if refused.is_none() && full_screen {
+            h.overlay.failed = false;
+            h.overlay.note = Some(
+                "Drawings can't show over a game in exclusive full screen: you draw in your \
+                 stream window, or set the game to borderless",
+            );
+            if h.own.is_some() {
+                self.own_draws_by_key(now);
+            } else if let Err(e) = self.open_own(true, now) {
+                tracing::warn!("the host's own stream window didn't open: {e}");
+                if let Some(h) = self.sessions.hosting.as_mut() {
+                    h.overlay.note = Some("Your stream window couldn't open");
+                }
+            }
+            self.announce(room, now);
+            return;
+        }
+        let refused = refused.or_else(|| {
+            (!on_screen).then_some("The game isn't on screen to draw over: bring it back first")
+        });
         h.overlay.note = refused;
         // Asked again: a window that failed may be tried once more.
         h.overlay.failed = false;
@@ -646,11 +673,8 @@ impl Actor {
         now: Instant,
     ) -> Result<Response, EngineError> {
         let ops: Vec<BoardOp> = ops.iter().map(Into::into).collect();
-        if !couch_proto::board::valid_batch(&ops) {
-            return Err(EngineError::Refused("that drawing isn't well formed"));
-        }
-        let me = self.me;
-        self.our_session(|s| Ok(s.draw(me, generation, ops, now)), now)
+        // Our own stream window hears it too (M27d).
+        self.host_drew(Editor::Overlay, generation, ops, now)
     }
 
     /// [`crate::Command::HostBoard`]: the board whole, for the overlay.

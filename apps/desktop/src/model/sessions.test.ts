@@ -76,6 +76,7 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     guestsKeyboard: true,
     drawing: noDrawing(),
     boardOverlay: null,
+    ownWindow: null,
     namesGame: false,
     warnHotCorner: false,
     gameWindow: null,

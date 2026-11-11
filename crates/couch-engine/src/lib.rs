@@ -413,6 +413,14 @@ pub enum Command {
     ShowBoardOverlay {
         on: bool,
     },
+    /// While hosting: opens the host's own stream window, or closes it
+    /// (M27d): the stream as those watching see it, encoded here for it
+    /// alone, where the host sees and draws on the board (a game in
+    /// exclusive full screen, a Linux host). Opening one that is open brings
+    /// it to the front. Never from afar.
+    OwnStreamWindow {
+        open: bool,
+    },
     /// Settings: whether sessions start with drawing on (M27a).
     GetDrawingDefault,
     /// Saves it, for the next session; answers like
@@ -1199,6 +1207,23 @@ pub struct SessionView {
     pub drawing: DrawingView,
     /// Our own session only: the board over the game at this PC (M27b).
     pub board_overlay: Option<BoardOverlayView>,
+    /// Our own session only: the host's own stream window (M27d).
+    pub own_window: Option<OwnWindowView>,
+}
+
+/// The host's own stream window (M27d), as the console shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OwnWindowView {
+    /// It is open.
+    pub open: bool,
+    /// The host draws in it now.
+    pub drawing: bool,
+    /// It is left out of what is streamed (Windows). Where it can't be (a
+    /// Linux host's share), the console says to keep it off the screen
+    /// being shared.
+    pub left_out: bool,
 }
 
 /// The host's board overlay over the game (M27b), as the console shows it.
@@ -1755,6 +1780,10 @@ impl fmt::Debug for Command {
             Self::ShowBoardOverlay { on } => {
                 f.debug_struct("ShowBoardOverlay").field("on", on).finish()
             }
+            Self::OwnStreamWindow { open } => f
+                .debug_struct("OwnStreamWindow")
+                .field("open", open)
+                .finish(),
             Self::GetDrawingDefault => f.write_str("GetDrawingDefault"),
             Self::SetDrawingDefault { on } => {
                 f.debug_struct("SetDrawingDefault").field("on", on).finish()

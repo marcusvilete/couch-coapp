@@ -18,6 +18,7 @@ pub mod host;
 pub mod ipc;
 #[cfg(target_os = "linux")]
 mod linux;
+pub mod own_window;
 #[cfg(windows)]
 pub mod platform;
 pub mod source;
@@ -208,6 +209,9 @@ pub struct ViewerOptions {
     /// Write the viewer's log here, without a console window. `None` lets it
     /// log to ours (the CLI).
     pub log: Option<PathBuf>,
+    /// The host's own window of its stream (M27d, `--own-stream`): no
+    /// controllers, sound or input, left out of captures.
+    pub own_stream: bool,
 }
 
 /// A running viewer: its stdin and stdout carry `couch_proto::ipc`.
@@ -504,6 +508,34 @@ pub trait Backend: Send + Sync + 'static {
     /// drawing over a streamed screen ends).
     fn foreground_window(&self) -> Option<NativeId> {
         None
+    }
+
+    /// The process whose window is in front, if known (M27d: the host's
+    /// drawing key acts on the host's own stream window when it is).
+    fn foreground_process(&self) -> Option<u32> {
+        None
+    }
+
+    /// The window of process `pid`, once it shows one (M27d: the host's own
+    /// stream window, which the engine brings forward itself: from a
+    /// process not in front, the window's own raise is refused).
+    fn window_of_process(&self, _pid: u32) -> Option<NativeId> {
+        None
+    }
+
+    /// Where the host's own stream window opens (M27d): the work area of a
+    /// monitor other than the one `source` is on, if there is one, so it
+    /// doesn't cover the game. `None` lets it open where it likes.
+    fn own_window_area(&self, _source: Option<&Source>) -> Option<ScreenArea> {
+        None
+    }
+
+    /// Whether the host's own stream window is left out of what is
+    /// captured (M27d: Windows' display affinity). A Linux share can't
+    /// leave a window out: the console says to keep it off the screen
+    /// shared.
+    fn own_window_left_out(&self) -> bool {
+        false
     }
 
     /// What this system can host (M16c, ADR 0012): sessions (capture,

@@ -225,6 +225,8 @@ struct Fake {
     off_screen: AtomicBool,
     /// The board's window can't be made (WebView2 refused it).
     board_open_fails: AtomicBool,
+    /// A fake stream window is in front (M27d: the host's own).
+    viewer_in_front: AtomicBool,
 }
 
 /// GPU frames on the fake machine: off unless a scenario turns them on.
@@ -811,6 +813,16 @@ impl Backend for Fake {
         self.full_screen.load(Ordering::SeqCst)
     }
 
+    fn foreground_process(&self) -> Option<u32> {
+        self.viewer_in_front
+            .load(Ordering::SeqCst)
+            .then_some(FAKE_VIEWER_PID)
+    }
+
+    fn window_of_process(&self, pid: u32) -> Option<NativeId> {
+        (pid == FAKE_VIEWER_PID).then_some(VIEWER_WINDOW)
+    }
+
     fn board_area(&self, source: &Source) -> Option<couch_engine::ScreenArea> {
         (matches!(source, Source::Window(WINDOW)) && !self.off_screen.load(Ordering::SeqCst))
             .then_some(GAME_AREA)
@@ -981,6 +993,8 @@ struct FakeViewer {
     started_without_bar: Arc<AtomicBool>,
     /// It was started with its stats shown (no `--hide-stats`).
     started_with_stats: Arc<AtomicBool>,
+    /// It was started as the host's own window (`--own-stream`, M27d).
+    own: Arc<AtomicBool>,
     /// The board as the window keeps it (M27a), and the host's refusals.
     board: Arc<Mutex<Replica>>,
     refusals: Arc<Mutex<Vec<Refusal>>>,
@@ -1008,6 +1022,9 @@ impl Fake {
 /// The process id every fake stream window has, to see the foreground
 /// allowed to it (P11).
 const FAKE_VIEWER_PID: u32 = 4242;
+/// The window every fake stream window shows (M27d: the host's own, brought
+/// forward by the engine).
+const VIEWER_WINDOW: NativeId = 0x4243;
 
 impl FakeViewer {
     /// Like the real one, it says how it is at once and after each request
@@ -1022,6 +1039,7 @@ impl FakeViewer {
         viewer
             .started_with_stats
             .store(!hide_stats, Ordering::SeqCst);
+        viewer.own.store(options.own_stream, Ordering::SeqCst);
         *viewer.say.lock().unwrap() = Some(say);
         let v = viewer.clone();
         tokio::spawn(async move {
@@ -1031,6 +1049,7 @@ impl FakeViewer {
                 fullscreen: false,
                 bar: !hide_bar,
                 stats: !hide_stats,
+                drawing: false,
             };
             let payload = couch_proto::ipc::to_payload(&state);
             if ipc::write_frame(
@@ -1095,6 +1114,8 @@ impl FakeViewer {
                                     WindowRequest::Fullscreen(on) => state.fullscreen = on,
                                     WindowRequest::ShowBar(on) => state.bar = on,
                                     WindowRequest::ShowStats(on) => state.stats = on,
+                                    // A fake window has a picture at once.
+                                    WindowRequest::Drawing(on) => state.drawing = on,
                                     WindowRequest::Raise => continue,
                                 }
                                 let payload = couch_proto::ipc::to_payload(&state);
@@ -5126,6 +5147,7 @@ async fn the_apps_controls_reach_the_stream_window_and_back() {
         fullscreen: true,
         bar: false,
         stats: true,
+        drawing: false,
     });
     b.wait_session(&room, &a, "bar off, stats on", |s| {
         open(s).is_some_and(|w| !w.bar && w.stats)
@@ -7026,6 +7048,269 @@ async fn the_host_draws_over_the_game() {
     a.ok(Command::EndSession).await;
     wait("closed with the session", || {
         board_count(&a.fake.board_closed) == 5
+    })
+    .await;
+    c.stop().await;
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// The host's own stream window as the console shows it (M27d).
+fn own_of(s: Option<&SessionView>) -> Option<couch_engine::OwnWindowView> {
+    s.and_then(|s| s.own_window.clone())
+}
+
+/// The host's own stream window of `fake`, the last one opened.
+fn own_window(fake: &Fake) -> Option<FakeViewer> {
+    fake.viewers
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|v| v.own.load(Ordering::SeqCst))
+        .cloned()
+}
+
+fn own_windows(fake: &Fake) -> usize {
+    fake.viewers
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|v| v.own.load(Ordering::SeqCst))
+        .count()
+}
+
+/// M27d: the host's own stream window opens on the console's word: frames
+/// encoded here for it alone, no seats, the host drawing as itself, its
+/// drawing reaching every viewer and the board over the game, and theirs
+/// reaching it; its input reaching nothing. The drawing key acts on it while
+/// it is in front, and over a game in exclusive full screen opens it in
+/// front, drawing (the author's choice), the game coming back as that
+/// drawing ends. Closed by the console, by the host, and with the session.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosts_own_stream_window() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.draws.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let (aid, bid) = (a.id(), b.id());
+    a.ok(Command::SetDrawing { on: true }).await;
+    wait("the board window", || {
+        board_count(&a.fake.board_opened) == 1
+    })
+    .await;
+    a.ok(Command::HostBoard).await;
+    let view = own_of(a.session(&room, &a).await.as_ref()).unwrap();
+    assert!(!view.open && !view.left_out);
+
+    // Opened: its own frames, no seats, the host as its author.
+    a.ok(Command::OwnStreamWindow { open: true }).await;
+    wait("its window", || own_window(&a.fake).is_some()).await;
+    let own = own_window(&a.fake).unwrap();
+    wait("its frames", || own.frames() >= 3).await;
+    assert_eq!(own.first_was_key.lock().unwrap().clone(), Some(true));
+    wait("its HUD", || {
+        own.hud()
+            .is_some_and(|h| h.seats.is_empty() && h.board.on && h.board.me == Some(member_id(&a)))
+    })
+    .await;
+    a.wait_session(&room, &a, "open", |s| own_of(s).is_some_and(|o| o.open))
+        .await;
+    // Open again: brought to the front, not a second one.
+    a.ok(Command::OwnStreamWindow { open: true }).await;
+    wait("raised", || {
+        own.requests.lock().unwrap().contains(&WindowRequest::Raise)
+    })
+    .await;
+    assert_eq!(own_windows(&a.fake), 1);
+
+    // Its input reaches nothing: it has no seat and no input path.
+    let before = a.fake.kbm.calls().len();
+    own.key(0x04, true);
+    own.key(0x04, false);
+    own.action(UserAction::RequestControl {
+        seat: 0,
+        controller: None,
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(a.fake.kbm.calls().len(), before, "nothing injected");
+    assert!(
+        a.session(&room, &a)
+            .await
+            .is_some_and(|s| s.requests.is_empty()),
+        "no request"
+    );
+
+    // The host draws in it: every viewer sees it, and so does the board
+    // over the game, once.
+    own.draw(&a, vec![a_box(1)]);
+    wait("B sees the host's", || {
+        b_window.board().contains(&(aid.clone(), 1))
+    })
+    .await;
+    let author = a
+        .event("the overlay hears it", |e| match e {
+            Event::HostBoard {
+                news: couch_engine::board::BoardNewsView::Update { author, .. },
+                ..
+            } => Some(author.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(author, aid);
+    // The board over the game draws: the window hears it, once.
+    let generation = own.board.lock().unwrap().generation();
+    let stroke = couch_engine::board::BoardOpView::from(&a_box(2));
+    a.ok(Command::HostDraw {
+        generation,
+        ops: vec![stroke],
+    })
+    .await;
+    wait("the window hears the overlay's", || {
+        own.board().contains(&(aid.clone(), 2))
+    })
+    .await;
+    assert_eq!(own.board().len(), 2);
+    // A viewer's drawing reaches it too.
+    b_window.draw(&b, vec![a_box(1)]);
+    wait("the window hears B's", || {
+        own.board().contains(&(bid.clone(), 1))
+    })
+    .await;
+
+    // The drawing key, the window in front: its own drawing mode.
+    a.fake.viewer_in_front.store(true, Ordering::SeqCst);
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    a.wait_session(&room, &a, "drawing in it", |s| {
+        own_of(s).is_some_and(|o| o.drawing)
+    })
+    .await;
+    assert!(!interactive(&a.fake), "not over the game");
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    a.wait_session(&room, &a, "not drawing", |s| {
+        own_of(s).is_some_and(|o| !o.drawing)
+    })
+    .await;
+    a.fake.viewer_in_front.store(false, Ordering::SeqCst);
+
+    // Closed by the console.
+    a.ok(Command::OwnStreamWindow { open: false }).await;
+    wait("closed", || own.shut_down.load(Ordering::SeqCst)).await;
+    a.wait_session(&room, &a, "shown closed", |s| {
+        own_of(s).is_some_and(|o| !o.open)
+    })
+    .await;
+
+    // A game in exclusive full screen: the key opens it, in front, drawing;
+    // as that drawing ends, the game comes back to the front.
+    a.fake.full_screen.store(true, Ordering::SeqCst);
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("opened by the key", || own_windows(&a.fake) == 2).await;
+    let own = own_window(&a.fake).unwrap();
+    a.wait_session(&room, &a, "drawing in it", |s| {
+        own_of(s).is_some_and(|o| o.open && o.drawing)
+    })
+    .await;
+    // Brought forward by the engine itself, with its key tap: the window's
+    // own raise would be refused, the game being in front.
+    assert!(
+        a.fake
+            .brought_to_front
+            .lock()
+            .unwrap()
+            .contains(&VIEWER_WINDOW)
+    );
+    assert!(
+        own.requests
+            .lock()
+            .unwrap()
+            .contains(&WindowRequest::Drawing(true))
+    );
+    assert!(!interactive(&a.fake), "nothing over the game");
+    a.fake.brought_to_front.lock().unwrap().clear();
+    // Esc in the window.
+    own.state(WindowState {
+        fullscreen: false,
+        bar: true,
+        stats: false,
+        drawing: false,
+    });
+    wait("the game back", || brought_last(&a.fake) == Some(WINDOW)).await;
+    // The key again, the window open: in front and drawing once more.
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    wait("asked to draw again", || {
+        own.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| **r == WindowRequest::Drawing(true))
+            .count()
+            == 2
+    })
+    .await;
+    a.wait_session(&room, &a, "drawing again", |s| {
+        own_of(s).is_some_and(|o| o.drawing)
+    })
+    .await;
+    a.fake.full_screen.store(false, Ordering::SeqCst);
+
+    // Closed by the host, in the window.
+    a.fake.brought_to_front.lock().unwrap().clear();
+    own.close();
+    a.wait_session(&room, &a, "closed by the host", |s| {
+        own_of(s).is_some_and(|o| !o.open)
+    })
+    .await;
+    assert_eq!(
+        brought_last(&a.fake),
+        Some(WINDOW),
+        "closed while drawing by the key: the game back"
+    );
+
+    // Open across a stream's end, closed with the session.
+    a.ok(Command::OwnStreamWindow { open: true }).await;
+    wait("open", || own_windows(&a.fake) == 3).await;
+    let own = own_window(&a.fake).unwrap();
+    wait("its frames", || own.frames() >= 3).await;
+    a.ok(Command::StopStream).await;
+    wait("told nothing is streamed", || {
+        own.hud().is_some_and(|h| h.stream != StreamState::Live)
+    })
+    .await;
+    assert!(!own.shut_down.load(Ordering::SeqCst), "it stays");
+    let frames = own.frames();
+    a.ok(stream_window()).await;
+    wait("frames of the next", || own.frames() > frames + 2).await;
+    // A refusal goes to the window that drew alone (nothing streamed a
+    // moment ago is no matter here: drawing off refuses it).
+    a.ok(Command::SetDrawing { on: false }).await;
+    let generation = own.board.lock().unwrap().generation();
+    own.say(
+        couch_proto::ipc::kinds::DRAW,
+        couch_proto::ipc::to_payload(&Draw {
+            generation,
+            ops: vec![a_box(9)],
+        }),
+    );
+    wait("refused, to it", || {
+        own.refusals.lock().unwrap().contains(&Refusal::Off)
+    })
+    .await;
+    a.ok(Command::SetDrawing { on: true }).await;
+    // The session ending while the key's drawing is on gives the game back.
+    a.fake.full_screen.store(true, Ordering::SeqCst);
+    assert!(a.fake.press_host_key(Shortcut::HostDrawing));
+    a.wait_session(&room, &a, "drawing by the key", |s| {
+        own_of(s).is_some_and(|o| o.drawing)
+    })
+    .await;
+    a.fake.brought_to_front.lock().unwrap().clear();
+    a.ok(Command::EndSession).await;
+    wait("the game back as the session ends", || {
+        brought_last(&a.fake) == Some(WINDOW)
+    })
+    .await;
+    wait("closed with the session", || {
+        own.shut_down.load(Ordering::SeqCst)
     })
     .await;
     c.stop().await;
