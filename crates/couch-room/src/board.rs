@@ -163,7 +163,8 @@ impl Board {
         self.elements.is_empty()
     }
 
-    /// Points on the board.
+    /// Points on the board, a text box's text a point a byte
+    /// (`Element::load`).
     pub fn points(&self) -> usize {
         self.points
     }
@@ -262,9 +263,11 @@ impl Board {
         self.stopped.retain(|m| keep(*m));
     }
 
-    /// Finishes `member`'s strokes still being drawn (it can no longer
-    /// finish them: refused, or gone), so fading ones fade. Returns the
-    /// operations that did it, for the others to hear.
+    /// Finishes `member`'s strokes still being drawn and text boxes still
+    /// being typed (it can no longer finish them: refused, or gone), so
+    /// fading ones fade. Returns the operations that did it, for the others
+    /// to hear: an empty append for a stroke, the box again for a text box
+    /// (an append is a stroke's alone).
     pub fn finish_open(&mut self, member: MemberId, now: Instant) -> Vec<BoardOp> {
         let mut ops = Vec::new();
         for ((_, id), s) in self.elements.range_mut((member, 0)..=(member, u32::MAX)) {
@@ -273,10 +276,14 @@ impl Board {
                 if s.element.fades {
                     s.drop_at = Some(now + fade_drop(&s.element));
                 }
-                ops.push(BoardOp::Append {
-                    id: *id,
-                    points: Vec::new(),
-                    done: true,
+                ops.push(if s.element.kind.is_stroke() {
+                    BoardOp::Append {
+                        id: *id,
+                        points: Vec::new(),
+                        done: true,
+                    }
+                } else {
+                    BoardOp::Put(s.element.clone())
                 });
             }
         }
@@ -311,7 +318,7 @@ impl Board {
 
     fn remove(&mut self, key: (MemberId, u32)) {
         if let Some(old) = self.elements.remove(&key) {
-            self.points -= old.element.points.len();
+            self.points -= old.element.load();
             if let Some(n) = self.per_member.get_mut(&key.0) {
                 *n -= 1;
                 if *n == 0 {
@@ -432,10 +439,8 @@ impl Board {
             let has = isize::from(change.is_some());
             mine += has - had;
             total += has - had;
-            points += change
-                .as_ref()
-                .map_or(0, |s| s.element.points.len() as isize)
-                - old.map_or(0, |s| s.element.points.len() as isize);
+            points += change.as_ref().map_or(0, |s| s.element.load() as isize)
+                - old.map_or(0, |s| s.element.load() as isize);
         }
         let grew = |after: isize, before: usize| after > before as isize;
         let before_mine = self.per_member.get(&author).copied().unwrap_or(0);
@@ -454,7 +459,7 @@ impl Board {
         for (id, change) in changes {
             self.remove((author, id));
             if let Some(stored) = change {
-                self.points += stored.element.points.len();
+                self.points += stored.element.load();
                 *self.per_member.entry(author).or_default() += 1;
                 self.elements.insert((author, id), stored);
             }
@@ -561,7 +566,7 @@ impl Replica {
 #[cfg(test)]
 mod tests {
     use couch_proto::{
-        board::{BoardSnapshot, ElementKind, MAX_BATCH_OPS, Point},
+        board::{BoardSnapshot, ElementKind, MAX_BATCH_OPS, MAX_TEXT_CHARS, Point},
         ids::SessionId,
     };
     use proptest::prelude::*;
@@ -670,6 +675,7 @@ mod tests {
             stay: 4,
             done,
             points: (0..points).map(|i| Point::new(i as u16, 7)).collect(),
+            text: String::new(),
         }
     }
 
@@ -683,6 +689,7 @@ mod tests {
             stay: 4,
             done: true,
             points: vec![Point::new(1, 1), Point::new(9, 9)],
+            text: String::new(),
         }
     }
 
@@ -937,6 +944,82 @@ mod tests {
         assert!(board.go(BIA, &[BoardOp::Put(odd)], now).is_err());
     }
 
+    fn text(id: u32, text: &str, done: bool) -> Element {
+        Element {
+            kind: ElementKind::Text,
+            done,
+            text: text.into(),
+            ..rect(id)
+        }
+    }
+
+    #[test]
+    fn a_text_box_is_typed_then_finished() {
+        let now = Instant::now();
+        let mut board = Board::new(true);
+        let typing = |t| {
+            BoardOp::Put(Element {
+                fades: true,
+                ..text(1, t, false)
+            })
+        };
+        board.go(BIA, &[typing("H")], now).unwrap();
+        board.go(BIA, &[typing("Hi\nthere")], now).unwrap();
+        assert_eq!(board.points(), 2 + 8, "its text weighs a point a byte");
+        assert_eq!(board.next_expiry(), None, "no fading while typed");
+        // Points are a stroke's alone, even to finish it.
+        assert_eq!(
+            board.go(
+                BIA,
+                &[BoardOp::Append {
+                    id: 1,
+                    points: vec![],
+                    done: true
+                }],
+                now
+            ),
+            Err(Refusal::Invalid)
+        );
+        // Nor may it lose its text, nor carry what a box can't.
+        for bad in ["", "  ", "tab\there"] {
+            assert_eq!(
+                board.go(BIA, &[BoardOp::Put(text(1, bad, false))], now),
+                Err(Refusal::Invalid),
+                "{bad:?}"
+            );
+        }
+        // Its author gone mid-word: the host finishes it as a box again.
+        let ops = board.finish_open(BIA, now);
+        assert_eq!(
+            ops,
+            [BoardOp::Put(Element {
+                fades: true,
+                ..text(1, "Hi\nthere", true)
+            })]
+        );
+        assert_eq!(board.next_expiry(), Some(now + FADE_DROP));
+        // Text counts against the board's points: long boxes fill it.
+        let long: String = "😀".repeat(MAX_TEXT_CHARS);
+        let mut later = now;
+        let mut taken = 0;
+        'members: for m in 3..250u8 {
+            for id in 0..5 {
+                later += Duration::from_secs(1);
+                match board.go(
+                    MemberId([m; 32]),
+                    &[BoardOp::Put(text(id, &long, true))],
+                    later,
+                ) {
+                    Ok(_) => taken += 1,
+                    Err(Refusal::BoardFull) => break 'members,
+                    Err(e) => panic!("{e:?}"),
+                }
+            }
+        }
+        assert_eq!(taken, (MAX_BOARD_POINTS - 10) / 2_002);
+        assert!(board.points() <= MAX_BOARD_POINTS);
+    }
+
     #[test]
     fn a_snapshot_keeps_the_drawing_order() {
         let now = Instant::now();
@@ -967,6 +1050,8 @@ mod tests {
         Stop(u8, bool),
         Clear,
         Expire,
+        /// The member is gone: the host finishes what it left open.
+        Finish(u8),
     }
 
     fn element() -> impl Strategy<Value = Element> {
@@ -977,22 +1062,30 @@ mod tests {
                 Just(ElementKind::Highlighter),
                 Just(ElementKind::Arrow),
                 Just(ElementKind::Rectangle),
+                Just(ElementKind::Text),
             ],
             any::<bool>(),
             any::<bool>(),
             1usize..6,
+            prop_oneof![Just("Hi"), Just("Olá\nali"), Just("😀 x"), Just("")],
         )
-            .prop_map(|(id, kind, fades, done, n)| Element {
+            .prop_map(|(id, kind, fades, done, n, text)| Element {
                 id,
                 kind,
                 colour: (id % 8) as u8,
                 width: (id % 3) as u8,
                 fades,
                 stay: 4,
-                done: done || !kind.is_stroke(),
+                done: done || !(kind.is_stroke() || kind == ElementKind::Text),
                 points: (0..if kind.is_stroke() { n } else { 2 })
                     .map(|i| Point::new(i as u16 * 100, id as u16))
                     .collect(),
+                // Now and then a box with no text, which is refused.
+                text: if kind == ElementKind::Text {
+                    text.into()
+                } else {
+                    String::new()
+                },
             })
     }
 
@@ -1017,6 +1110,7 @@ mod tests {
             1 => (0u8..3, any::<bool>()).prop_map(|(m, s)| Step::Stop(m, s)),
             1 => Just(Step::Clear),
             2 => Just(Step::Expire),
+            1 => (0u8..3).prop_map(Step::Finish),
         ]
     }
 
@@ -1076,12 +1170,18 @@ mod tests {
                         let kept = keys(&board.snapshot());
                         viewer.retain(|a, e| kept.contains(&(a, e.id)) || !(e.done && e.fades));
                     }
+                    Step::Finish(m) => {
+                        let member = MemberId([m; 32]);
+                        let ops = board.finish_open(member, now);
+                        viewer.heard(member, &ops);
+                        prop_assert!(board.snapshot().iter().all(|a| a.author != member || a.element.done));
+                    }
                 }
                 // The counts are the board's.
                 let snapshot = board.snapshot();
                 prop_assert_eq!(snapshot.len(), board.len());
                 prop_assert_eq!(
-                    snapshot.iter().map(|a| a.element.points.len()).sum::<usize>(),
+                    snapshot.iter().map(|a| a.element.load()).sum::<usize>(),
                     board.points()
                 );
                 prop_assert!(board.len() <= MAX_BOARD_ELEMENTS);

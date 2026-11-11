@@ -11,18 +11,27 @@ use std::time::{Duration, Instant};
 
 use couch_input::shortcuts::{DrawAction, DrawTool, tool_key};
 use couch_proto::{
-    board::{COLOUR_NAMES, ElementKind, PALETTE, Point, WIDTH_NAMES, WIDTHS, line_width},
+    board::{
+        COLOUR_NAMES, ElementKind, LINE_HEIGHT, PALETTE, Point, TEXT_SIZE_NAMES, WIDTH_NAMES,
+        WIDTHS, line_width, text_size,
+    },
     ids::MemberId,
 };
 use egui::{
-    Align2, Color32, FontId, Margin, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2,
+    Align2, Color32, FontId, Margin, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui,
+    pos2, vec2,
 };
 
 use crate::{
     board::{BoardView, LASER, PING, Shown},
-    editor::{Editor, FadeStep, Keyed, bounds},
+    editor::{Editor, FadeStep, Keyed, Measure, TextKey, bounds},
     hud::{BAR, BLUE, BLUE_TINT, BORDER, CONTROL_HOVER, FAINT, TEXT},
 };
+
+/// The size text is measured at: a text box's width scales from it.
+const MEASURE_AT: f32 = 64.0;
+/// The toolbar's handle, a tab on its top edge.
+const HANDLE: egui::Vec2 = egui::Vec2::new(44.0, 16.0);
 
 /// While something on the board moves by itself, the window paints at most
 /// this often for it.
@@ -36,6 +45,8 @@ enum Click {
     Width(u8),
     Fade(FadeStep),
     Undo,
+    /// The handle or the pill: the toolbar hidden or shown again.
+    ToggleTools,
     Redo,
     Done,
 }
@@ -61,6 +72,17 @@ pub struct Drawing {
     pub names: Vec<(MemberId, String)>,
     /// The main button is down for the editor.
     pub held: bool,
+    /// Where the free pointer last was, in points: where pasted text goes.
+    pub pointer: Option<Pos2>,
+    /// What an input method is composing into the text box, not yet typed
+    /// (M27c): shown at the caret, never sent.
+    pub preedit: String,
+    /// The editor measures text with this window's font: set at the first
+    /// paint after it came (fonts exist only once egui has run).
+    pub measures: bool,
+    /// The toolbar is hidden to a small pill (its handle or Tab), for this
+    /// window's life: what it covered can be drawn on and picked.
+    pub tools_hidden: bool,
     clicks: Vec<Click>,
 }
 
@@ -86,6 +108,23 @@ impl Drawing {
         self.board.prune(now);
         self.toolbar = None;
         self.fade_button = None;
+        if !self.measures
+            && let Some(editor) = &mut self.editor
+        {
+            let ctx = ctx.clone();
+            editor.set_measure(Measure::new(move |line| {
+                ctx.fonts_mut(|f| {
+                    f.layout_no_wrap(
+                        line.to_owned(),
+                        FontId::proportional(MEASURE_AT),
+                        Color32::WHITE,
+                    )
+                    .size()
+                    .x
+                }) / MEASURE_AT
+            }));
+            self.measures = true;
+        }
         let Some(picture) = self.picture else {
             return;
         };
@@ -99,6 +138,10 @@ impl Drawing {
                 )
             };
             for shown in self.board.elements() {
+                if shown.element.kind == ElementKind::Text {
+                    paint_text(&painter, shown, picture.height(), now, &place);
+                    continue;
+                }
                 for shape in element_shapes(shown, picture.height(), now, &place) {
                     painter.add(shape);
                 }
@@ -106,6 +149,43 @@ impl Drawing {
             if self.on
                 && let Some(editor) = &self.editor
             {
+                // The box being typed in: its frame, what an input method
+                // composes, and the caret (still: nothing blinks).
+                if let Some(cursor) = editor.text_cursor() {
+                    let (a, b) = cursor.corners;
+                    let frame = Rect::from_two_pos(place(a), place(b)).expand(5.0);
+                    painter.rect_stroke(frame, 3.0, Stroke::new(1.0, BLUE), StrokeKind::Outside);
+                    for (a, b) in &cursor.selection {
+                        painter.rect_filled(
+                            Rect::from_two_pos(place(*a), place(*b)),
+                            0.0,
+                            Color32::from_rgba_unmultiplied(74, 159, 240, 90),
+                        );
+                    }
+                    let top = place(cursor.caret.0);
+                    let em = cursor.size * picture.height();
+                    let mut caret_x = top.x;
+                    if !self.preedit.is_empty() {
+                        let laid = painter.layout_no_wrap(
+                            self.preedit.clone(),
+                            FontId::proportional(em),
+                            colour(cursor.colour),
+                        );
+                        let width = laid.size().x;
+                        painter.galley(top, laid, colour(cursor.colour));
+                        let under = top.y + em * LINE_HEIGHT * 0.95;
+                        painter.line_segment(
+                            [pos2(top.x, under), pos2(top.x + width, under)],
+                            Stroke::new(1.5, colour(cursor.colour)),
+                        );
+                        caret_x += width;
+                    }
+                    let bottom = place(cursor.caret.1);
+                    painter.line_segment(
+                        [pos2(caret_x, top.y), pos2(caret_x, bottom.y)],
+                        Stroke::new(2.0, colour(cursor.colour)),
+                    );
+                }
                 for id in editor.selection() {
                     if let Some(s) = self.board.get(editor.me(), *id) {
                         let (a, b) = bounds(&s.element);
@@ -181,10 +261,18 @@ impl Drawing {
             let state = editor.map(|e| (e.tool, e.colour, e.width, e.fades, e.stay));
             let mut clicks = Vec::new();
             let mut fade_button = None;
-            let shown = egui::Area::new(egui::Id::new("drawing"))
-                .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -14.0))
-                .show(ctx, |ui| {
-                    if let Some(state) = state {
+            let hidden = self.tools_hidden;
+            let shown = egui::Area::new(egui::Id::new(if hidden {
+                "drawing-pill"
+            } else {
+                "drawing"
+            }))
+            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -14.0))
+            .show(ctx, |ui| {
+                if let Some(state) = state {
+                    if hidden {
+                        tools_pill(ui, state, &mut clicks);
+                    } else {
                         toolbar(
                             ui,
                             state,
@@ -193,8 +281,49 @@ impl Drawing {
                             &mut fade_button,
                         );
                     }
-                });
-            self.toolbar = Some(shown.response.rect);
+                }
+            });
+            let mut rect = shown.response.rect;
+            // The handle: a tab on the toolbar's top edge, centred, that
+            // hides it (M27c, the author's request).
+            if !hidden && state.is_some() {
+                let tab = Rect::from_center_size(
+                    pos2(rect.center().x, rect.top() - HANDLE.y / 2.0 + 1.0),
+                    HANDLE,
+                );
+                egui::Area::new(egui::Id::new("drawing-handle"))
+                    .fixed_pos(tab.min)
+                    .show(ctx, |ui| {
+                        let (r, response) = ui.allocate_exact_size(HANDLE, Sense::click());
+                        let fill = if response.hovered() {
+                            CONTROL_HOVER
+                        } else {
+                            BAR
+                        };
+                        ui.painter().rect(
+                            r,
+                            egui::CornerRadius {
+                                nw: 6,
+                                ne: 6,
+                                sw: 0,
+                                se: 0,
+                            },
+                            BAR,
+                            Stroke::new(1.0, BORDER),
+                            StrokeKind::Inside,
+                        );
+                        ui.painter().rect_filled(r.shrink(1.0), 5.0, fill);
+                        chevron(ui.painter(), r.center(), false, TEXT);
+                        if response
+                            .on_hover_text("Hide the drawing tools · Tab")
+                            .clicked()
+                        {
+                            clicks.push(Click::ToggleTools);
+                        }
+                    });
+                rect = rect.union(tab);
+            }
+            self.toolbar = Some(rect);
             self.fade_button = fade_button;
             self.clicks = clicks;
         }
@@ -220,6 +349,7 @@ impl Drawing {
                     editor.key(DrawAction::Redo, false, board, now);
                 }
                 Click::Done => done = true,
+                Click::ToggleTools => self.tools_hidden = !self.tools_hidden,
             }
         }
         done
@@ -246,9 +376,82 @@ impl Drawing {
 
     pub fn key(&mut self, action: DrawAction, shift: bool, now: Instant) -> bool {
         match &mut self.editor {
-            Some(editor) => editor.key(action, shift, &mut self.board, now) == Keyed::LeaveDrawing,
+            Some(editor) => match editor.key(action, shift, &mut self.board, now) {
+                Keyed::LeaveDrawing => true,
+                Keyed::ToggleToolbar => {
+                    self.tools_hidden = !self.tools_hidden;
+                    false
+                }
+                Keyed::Done => false,
+            },
             None => false,
         }
+    }
+
+    /// A text box is being typed in: keys and text are its.
+    pub fn typing(&self) -> bool {
+        self.editor.as_ref().is_some_and(Editor::typing)
+    }
+
+    /// Text typed into the box (SDL's text input: accents, dead keys and
+    /// input methods composed); what was being composed is done.
+    pub fn type_text(&mut self, text: &str, now: Instant) {
+        self.preedit.clear();
+        if let Some(editor) = &mut self.editor {
+            editor.type_text(text, &mut self.board, now);
+        }
+    }
+
+    pub fn text_key(&mut self, key: TextKey, shift: bool, word: bool, now: Instant) {
+        if let Some(editor) = &mut self.editor {
+            editor.text_key(key, shift, word, &mut self.board, now);
+        }
+        if !self.typing() {
+            self.preedit.clear();
+        }
+    }
+
+    /// Ctrl+C or Ctrl+X in the text box: its selected text, for the system
+    /// clipboard (taken out for Ctrl+X).
+    pub fn copy_text(&mut self, cut: bool, now: Instant) -> Option<String> {
+        let editor = self.editor.as_mut()?;
+        if cut {
+            editor.cut_text(&mut self.board, now)
+        } else {
+            editor.copy_text()
+        }
+    }
+
+    /// Ctrl+C: what goes on the system clipboard.
+    pub fn copy(&mut self) -> Option<String> {
+        self.editor.as_mut().and_then(|e| e.copy(&self.board))
+    }
+
+    /// Ctrl+V, with the system clipboard's text, at the pointer if over the
+    /// picture.
+    pub fn paste(&mut self, system: Option<&str>, at: Option<Point>, now: Instant) {
+        if let Some(editor) = &mut self.editor {
+            editor.paste(system, at, &mut self.board, now);
+        }
+    }
+
+    /// The box being typed in, in the window's points: where an input
+    /// method's candidates go. Its top-left, and the caret's top and
+    /// bottom.
+    pub fn text_area(&self) -> Option<(Pos2, Pos2, Pos2)> {
+        let picture = self.picture?;
+        let cursor = self.editor.as_ref()?.text_cursor()?;
+        let place = |p: Point| {
+            pos2(
+                picture.min.x + f32::from(p.x) / 65_535.0 * picture.width(),
+                picture.min.y + f32::from(p.y) / 65_535.0 * picture.height(),
+            )
+        };
+        Some((
+            place(cursor.corners.0),
+            place(cursor.caret.0),
+            place(cursor.caret.1),
+        ))
     }
 
     /// Whether something on the board moves by itself.
@@ -338,8 +541,51 @@ fn element_shapes(
             let r = Rect::from_two_pos(points[0], points[1]);
             shapes.push(Shape::ellipse_stroke(r.center(), r.size() / 2.0, stroke));
         }
+        // Laid out with the fonts: `paint_text`.
+        ElementKind::Text => {}
     }
     shapes
+}
+
+/// A text box on the picture, `height` points tall: each line from its
+/// first point down, a line height apart, over a soft shadow so it reads
+/// over any game. The board overlay paints it alike (`paint.ts`).
+fn paint_text(
+    painter: &Painter,
+    shown: &Shown,
+    height: f32,
+    now: Instant,
+    place: &impl Fn(Point) -> Pos2,
+) {
+    let e = &shown.element;
+    let alpha = shown.alpha(now);
+    let Some(corner) = e.points.first() else {
+        return;
+    };
+    if alpha <= 0.0 {
+        return;
+    }
+    let em = text_size(e.width) * height;
+    let font = FontId::proportional(em);
+    let shadow = (em * 0.06).max(1.0);
+    let top = place(*corner);
+    for (i, line) in e.text.split('\n').enumerate() {
+        let at = pos2(top.x, top.y + i as f32 * LINE_HEIGHT * em);
+        painter.text(
+            at + vec2(shadow, shadow),
+            Align2::LEFT_TOP,
+            line,
+            font.clone(),
+            with_alpha(Color32::BLACK, alpha * 0.6),
+        );
+        painter.text(
+            at,
+            Align2::LEFT_TOP,
+            line,
+            font.clone(),
+            with_alpha(colour(e.colour), alpha),
+        );
+    }
 }
 
 /// The toolbar: the tools; then the colours, widths, staying or fading,
@@ -384,11 +630,27 @@ fn toolbar(
                     }
                 }
                 ui.separator();
+                // Widths, or with the Text tool the text's sizes.
+                let text = tool == DrawTool::Text;
                 for w in 0..WIDTHS as u8 {
                     let dot = 2.0 + 2.0 * f32::from(w);
-                    let tip = WIDTH_NAMES[usize::from(w)];
+                    let tip = if text {
+                        TEXT_SIZE_NAMES[usize::from(w)]
+                    } else {
+                        WIDTH_NAMES[usize::from(w)]
+                    };
                     if icon_button(ui, w == width, |p, r, c| {
-                        p.circle_filled(r.center(), dot, c);
+                        if text {
+                            p.text(
+                                r.center(),
+                                Align2::CENTER_CENTER,
+                                "A",
+                                FontId::proportional(10.0 + 4.0 * f32::from(w)),
+                                c,
+                            );
+                        } else {
+                            p.circle_filled(r.center(), dot, c);
+                        }
                     })
                     .on_hover_text(tip)
                     .clicked()
@@ -456,15 +718,60 @@ fn toolbar(
                 }
             });
             if max_width >= 480.0 {
+                let hint = if tool == DrawTool::Text {
+                    "Click to write, or on your text to change it · double click: a word · Esc: done"
+                } else {
+                    "Shift: straight lines, squares and circles · middle click: ping · Tab: hide the tools · Esc: back to the game"
+                };
                 ui.label(
-                    egui::RichText::new(
-                        "Shift: straight lines, squares and circles · middle click: ping · Esc: back to the game",
-                    )
+                    egui::RichText::new(hint)
                     .size(11.5)
                     .color(FAINT),
                 );
             }
         });
+}
+
+/// The toolbar hidden: a small pill at the bottom centre showing the tool
+/// and colour picked; a click on it shows the toolbar again.
+fn tools_pill(
+    ui: &mut Ui,
+    (tool, picked, ..): (DrawTool, u8, u8, bool, u8),
+    clicks: &mut Vec<Click>,
+) {
+    egui::Frame::new()
+        .fill(BAR)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(15)
+        .inner_margin(Margin::ZERO)
+        .show(ui, |ui| {
+            let (rect, response) = ui.allocate_exact_size(vec2(96.0, 32.0), Sense::click());
+            if response.hovered() {
+                ui.painter().rect_filled(rect, 12.0, CONTROL_HOVER);
+            }
+            let p = ui.painter();
+            chevron(p, pos2(rect.min.x + 13.0, rect.center().y), true, TEXT);
+            let icon =
+                Rect::from_center_size(pos2(rect.center().x, rect.center().y), vec2(18.0, 18.0));
+            tool_icon(p, icon, tool, TEXT, picked);
+            p.circle_filled(
+                pos2(rect.max.x - 13.0, rect.center().y),
+                7.0,
+                colour(picked),
+            );
+            let tip = format!("{} · show the drawing tools · Tab", tool.name());
+            if response.on_hover_text(tip).clicked() {
+                clicks.push(Click::ToggleTools);
+            }
+        });
+}
+
+/// A chevron at `at`, pointing up or down.
+fn chevron(p: &egui::Painter, at: Pos2, up: bool, c: Color32) {
+    let dy = if up { 2.5 } else { -2.5 };
+    let s = Stroke::new(1.8, c);
+    p.line_segment([at + vec2(-5.0, dy), at + vec2(0.0, -dy)], s);
+    p.line_segment([at + vec2(0.0, -dy), at + vec2(5.0, dy)], s);
 }
 
 /// A 30-point square button with a painted icon, blue while `on`.
@@ -547,6 +854,12 @@ fn tool_icon(p: &egui::Painter, r: Rect, tool: DrawTool, c: Color32, picked: u8)
                 vec2(r.width() * 0.42, r.height() * 0.3),
                 s,
             ));
+        }
+        // A T, as a letter of lines.
+        DrawTool::Text => {
+            p.line_segment([at(r, 0.18, 0.18), at(r, 0.82, 0.18)], s);
+            p.line_segment([at(r, 0.5, 0.18), at(r, 0.5, 0.85)], s);
+            p.line_segment([at(r, 0.38, 0.85), at(r, 0.62, 0.85)], s);
         }
         DrawTool::Eraser => {
             let pts = [

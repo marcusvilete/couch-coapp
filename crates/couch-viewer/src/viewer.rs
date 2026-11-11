@@ -16,7 +16,7 @@ use anyhow::{Result, anyhow};
 use couch_codec_ffmpeg::{DecoderKind, FfmpegDecoder};
 use couch_input::{
     HidUsage,
-    shortcuts::{Shortcut, Shortcuts, drawing_key},
+    shortcuts::{DrawAction, Shortcut, Shortcuts, drawing_key},
 };
 use couch_media::{
     Codec, DecodedFrame, GpuNv12Frame, MediaError, Micros, Nv12Frame, VideoDecoder, barcode,
@@ -33,7 +33,7 @@ use couch_proto::{
 };
 use sdl3::{
     event::{Event, WindowEvent},
-    keyboard::Mod,
+    keyboard::{Mod, Scancode},
     mouse::{Cursor, MouseButton, SystemCursor},
     video::Window,
 };
@@ -42,7 +42,7 @@ use crate::{
     audio::AudioOut,
     clock,
     draw_ui::{Drawing, MOVING_EVERY},
-    editor::Editor,
+    editor::{Editor, TextKey},
     gpu,
     hud::{DrawBar, Hud, HudAction},
     input::{InputCapture, button_code},
@@ -147,10 +147,15 @@ pub enum Preview {
     /// Drawing on the stream (M27a): the toolbar, and a board with each
     /// kind of element, a laser trail and a ping.
     Drawing,
+    /// Typing in a text box (M27c): the Text tool, the box with its caret,
+    /// beside the drawing preview's board.
+    Typing,
+    /// The drawing preview with its toolbar hidden to a pill (M27c).
+    DrawingHidden,
 }
 
 impl Preview {
-    pub const NAMES: [(&'static str, Preview); 15] = [
+    pub const NAMES: [(&'static str, Preview); 17] = [
         ("watching", Preview::Watching),
         ("asking", Preview::Asking),
         ("controlling", Preview::Controlling),
@@ -166,6 +171,8 @@ impl Preview {
         ("choosing", Preview::Choosing),
         ("together", Preview::Together),
         ("drawing", Preview::Drawing),
+        ("typing", Preview::Typing),
+        ("drawing-hidden", Preview::DrawingHidden),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -338,8 +345,16 @@ pub fn run(options: WindowOptions) -> Result<()> {
         Cursor::from_system(SystemCursor::Arrow).ok(),
     );
     let mut board_painted: Option<Instant> = None;
-    if options.preview == Some(Preview::Drawing) {
-        preview_board(&mut drawing, Instant::now());
+    if matches!(
+        options.preview,
+        Some(Preview::Drawing | Preview::Typing | Preview::DrawingHidden)
+    ) {
+        preview_board(
+            &mut drawing,
+            Instant::now(),
+            options.preview == Some(Preview::Typing),
+        );
+        drawing.tools_hidden = options.preview == Some(Preview::DrawingHidden);
     }
     // A preview's pointer, sent once the bar has been laid out.
     let mut preview_pointer = options.preview_pointer;
@@ -364,6 +379,9 @@ pub fn run(options: WindowOptions) -> Result<()> {
     let mut volume_unsaved: Option<Instant> = None;
     // The window's state as last told to the main process (P11).
     let mut reported: Option<WindowState> = None;
+    // SDL's text input, on while a text box is typed in (M27c), with the
+    // area last given for an input method's candidates.
+    let mut text_input: Option<Option<(i32, i32, u32, i32)>> = None;
 
     'running: loop {
         for event in events.poll_iter() {
@@ -403,7 +421,9 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 // nowhere else, so it is never forwarded and never captures
                 // the mouse.
                 Event::MouseMotion { x, y, .. } if !input.mouse_captured() => {
-                    hud.pointer_moved(hud_point(&window, options.hud_scale, x, y));
+                    let at = hud_point(&window, options.hud_scale, x, y);
+                    hud.pointer_moved(at);
+                    drawing.pointer = Some(at);
                 }
                 Event::MouseButtonDown {
                     mouse_btn, x, y, ..
@@ -459,21 +479,69 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     Event::KeyDown {
                         scancode: Some(scancode),
                         keymod,
+                        repeat,
                         ..
                     } => {
                         shortcut = input.chord_shortcut(&event);
                         let alt = held(*keymod, Mod::LALTMOD, Mod::RALTMOD);
-                        if shortcut.is_none() && !alt {
-                            let ctrl = held(*keymod, Mod::LCTRLMOD, Mod::RCTRLMOD);
-                            let shift = held(*keymod, Mod::LSHIFTMOD, Mod::RSHIFTMOD);
+                        let ctrl = held(*keymod, Mod::LCTRLMOD, Mod::RCTRLMOD);
+                        let shift = held(*keymod, Mod::LSHIFTMOD, Mod::RSHIFTMOD);
+                        let paste = |drawing: &mut Drawing| {
+                            let system = video.clipboard().clipboard_text().ok();
+                            let at = drawing.pointer.and_then(|p| drawing.to_picture(p, false));
+                            drawing.paste(system.as_deref(), at, now);
+                        };
+                        if shortcut.is_some() || alt {
+                            // The window's shortcuts, or AltGr's characters
+                            // (they come as text).
+                        } else if drawing.typing() {
+                            // A text box has the keys (M27c); its letters
+                            // come as text. While an input method composes,
+                            // the keys are its own.
+                            if drawing.preedit.is_empty() {
+                                if let Some(key) = text_key(*scancode, ctrl) {
+                                    drawing.text_key(key, shift, ctrl, now);
+                                } else if ctrl && *scancode == Scancode::V {
+                                    paste(&mut drawing);
+                                } else if ctrl && matches!(*scancode, Scancode::C | Scancode::X) {
+                                    let cut = *scancode == Scancode::X;
+                                    if let Some(text) = drawing.copy_text(cut, now)
+                                        && let Err(e) = video.clipboard().set_clipboard_text(&text)
+                                    {
+                                        tracing::debug!("copying text: {e}");
+                                    }
+                                }
+                            }
+                        } else {
                             let usage = HidUsage(scancode.to_i32() as u16);
-                            if let Some(action) = drawing_key(usage, ctrl, shift) {
-                                leave = drawing.key(action, shift, now);
+                            match drawing_key(usage, ctrl, shift) {
+                                Some(DrawAction::Copy) => {
+                                    if let Some(text) = drawing.copy()
+                                        && let Err(e) = video.clipboard().set_clipboard_text(&text)
+                                    {
+                                        tracing::debug!("copying drawings: {e}");
+                                    }
+                                }
+                                Some(DrawAction::Paste) => paste(&mut drawing),
+                                // Tab held repeats: the toolbar folds once.
+                                Some(DrawAction::ToggleToolbar) if *repeat => {}
+                                Some(action) => leave = drawing.key(action, shift, now),
+                                None => {}
                             }
                         }
                     }
+                    Event::TextInput { text, .. } if drawing.typing() => {
+                        drawing.type_text(text, now);
+                    }
+                    Event::TextEditing { text, .. } if drawing.typing() => {
+                        drawing.preedit = text.clone();
+                    }
                     Event::MouseButtonDown {
-                        mouse_btn, x, y, ..
+                        mouse_btn,
+                        clicks,
+                        x,
+                        y,
+                        ..
                     } => {
                         let at = drawing
                             .to_picture(hud_point(&window, options.hud_scale, *x, *y), false);
@@ -481,6 +549,9 @@ pub fn run(options: WindowOptions) -> Result<()> {
                             match mouse_btn {
                                 MouseButton::Left => {
                                     editor.press(at, shift_now(), &mut drawing.board, now);
+                                    if *clicks == 2 {
+                                        editor.double_click(at, &mut drawing.board, now);
+                                    }
                                     drawing.held = true;
                                 }
                                 MouseButton::Middle => editor.ping(at, &mut drawing.board, now),
@@ -650,6 +721,38 @@ pub fn run(options: WindowOptions) -> Result<()> {
             volume_unsaved = None;
             let _ = out_tx.send(Outgoing::Volume(volume));
         }
+        // SDL's text input (M27c) only while a text box is typed in: it can
+        // bring up an input method, and a game's keys never need it. Its
+        // candidates go by the caret.
+        let typing = drawing.on && drawing.typing();
+        if typing != text_input.is_some() {
+            if typing {
+                video.text_input().start(&window);
+                text_input = Some(None);
+            } else {
+                video.text_input().stop(&window);
+                drawing.preedit.clear();
+                text_input = None;
+            }
+        }
+        if let Some(placed) = &mut text_input
+            && let Some((corner, top, bottom)) = drawing.text_area()
+        {
+            let (w, _) = window.size();
+            let (pw, _) = window.size_in_pixels();
+            let per_coord = if pw == 0 { 1.0 } else { w as f32 / pw as f32 };
+            let to_window = hud_scale(&window, options.hud_scale) * per_coord;
+            let x = (corner.x * to_window).round() as i32;
+            let y = (top.y * to_window).round() as i32;
+            let height = ((bottom.y - top.y) * to_window).round().max(1.0) as u32;
+            let cursor = ((top.x - corner.x) * to_window).round() as i32;
+            let area = (x, y, height, cursor);
+            if *placed != Some(area) {
+                let rect = sdl3::rect::Rect::new(x, y, 1, height);
+                video.text_input().set_rect(&window, rect, cursor);
+                *placed = Some(area);
+            }
+        }
         while let Ok(message) = window_rx.try_recv() {
             match message {
                 ForWindow::Seat(seat) => {
@@ -731,7 +834,10 @@ pub fn run(options: WindowOptions) -> Result<()> {
         // turned it off or stopped us, we were given the keyboard and
         // mouse, the stream stopped); a preview draws on its test picture,
         // its laser and ping going on.
-        if options.preview == Some(Preview::Drawing) {
+        if matches!(
+            options.preview,
+            Some(Preview::Drawing | Preview::Typing | Preview::DrawingHidden)
+        ) {
             hud.drawing = Some(DrawBar {
                 on: drawing.on,
                 hidden: drawing.hidden,
@@ -1179,7 +1285,7 @@ fn preview_session(preview: Preview) -> HudState {
             s.seats = vec![seat("Controller", true, None, false, false)];
             s.viewers = 1;
         }
-        P::Drawing => {
+        P::Drawing | P::Typing | P::DrawingHidden => {
             s.board = HudBoard {
                 on: true,
                 stopped: false,
@@ -1245,7 +1351,7 @@ const PREVIEW_CAROL: MemberId = MemberId([2; 32]);
 
 /// A board for `--hud-preview drawing`: one of each element, a laser trail
 /// and a ping, some of ours selected.
-fn preview_board(drawing: &mut Drawing, now: Instant) {
+fn preview_board(drawing: &mut Drawing, now: Instant, typing: bool) {
     use couch_proto::board::{BoardOp, Element, ElementKind, Point};
     let element = |id, kind, colour, width, points: Vec<(u16, u16)>| Element {
         id,
@@ -1256,6 +1362,7 @@ fn preview_board(drawing: &mut Drawing, now: Instant) {
         stay: 4,
         done: true,
         points: points.into_iter().map(|(x, y)| Point::new(x, y)).collect(),
+        text: String::new(),
     };
     let wave: Vec<(u16, u16)> = (0..60)
         .map(|i| {
@@ -1305,6 +1412,16 @@ fn preview_board(drawing: &mut Drawing, now: Instant) {
             0,
             vec![(30_000, 18_000), (52_000, 18_000)],
         ),
+        Element {
+            text: "Behind the\nwaterfall!".into(),
+            ..element(
+                4,
+                ElementKind::Text,
+                7,
+                1,
+                vec![(6_000, 26_000), (17_000, 32_000)],
+            )
+        },
     ];
     let put = |es: &[Element]| es.iter().cloned().map(BoardOp::Put).collect::<Vec<_>>();
     drawing.board.apply(PREVIEW_ME, &put(&mine), now);
@@ -1326,6 +1443,20 @@ fn preview_board(drawing: &mut Drawing, now: Instant) {
         &mut drawing.board,
         now,
     );
+    if typing {
+        // A note half typed, an input method composing the next word.
+        editor.key(
+            couch_input::shortcuts::DrawAction::Tool(couch_input::shortcuts::DrawTool::Text),
+            false,
+            &mut drawing.board,
+            now,
+        );
+        editor.set_style(Some(2), None, None, &mut drawing.board, now);
+        editor.press(Point::new(42_000, 46_000), false, &mut drawing.board, now);
+        editor.release(None, false, &mut drawing.board, now);
+        editor.type_text("Take the left door,\nthen jump ", &mut drawing.board, now);
+        drawing.preedit = "now".into();
+    }
     drawing.editor = Some(editor);
     drawing.on = true;
 }
@@ -1368,6 +1499,25 @@ fn drawing_refusal(
     } else {
         None
     }
+}
+
+/// What a key does in a text box, if anything (its letters come as text).
+fn text_key(scancode: Scancode, ctrl: bool) -> Option<TextKey> {
+    Some(match scancode {
+        Scancode::Escape => TextKey::Finish,
+        Scancode::Return | Scancode::KpEnter if ctrl => TextKey::Finish,
+        Scancode::Return | Scancode::KpEnter => TextKey::Enter,
+        Scancode::Backspace => TextKey::Backspace,
+        Scancode::Delete => TextKey::Delete,
+        Scancode::Left => TextKey::Left,
+        Scancode::Right => TextKey::Right,
+        Scancode::Up => TextKey::Up,
+        Scancode::Down => TextKey::Down,
+        Scancode::Home => TextKey::Home,
+        Scancode::End => TextKey::End,
+        Scancode::A if ctrl => TextKey::SelectAll,
+        _ => return None,
+    })
 }
 
 /// Drawing mode on or off (M27a): the keyboard and mouse go to the board

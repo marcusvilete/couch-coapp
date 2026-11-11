@@ -9,4 +9,8 @@ export type BoardElement = { id: number, kind: BoardElementKind, colour: number,
 /**
  * How long it stays before fading, in seconds: one of `FADE_STAYS`.
  */
-stay: number, done: boolean, points: Array<BoardPoint>, };
+stay: number, done: boolean, points: Array<BoardPoint>, 
+/**
+ * A text box's text; empty for every other kind (M27c).
+ */
+text: string, };

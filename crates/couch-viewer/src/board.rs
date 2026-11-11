@@ -150,6 +150,9 @@ impl BoardView {
     pub fn apply(&mut self, author: MemberId, ops: &[BoardOp], now: Instant) {
         for op in ops {
             match op {
+                // A malformed element is nothing (the host checks every one
+                // it takes; this window never trusts that to index points).
+                BoardOp::Put(e) if !e.is_valid() => {}
                 BoardOp::Put(e) => {
                     let done_at = e.done.then_some(now);
                     match self
@@ -272,6 +275,7 @@ mod tests {
             stay: 4,
             done,
             points: vec![Point::new(1, 1)],
+            text: String::new(),
         }
     }
 

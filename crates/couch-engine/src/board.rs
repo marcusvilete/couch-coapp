@@ -13,9 +13,9 @@ use couch_input::shortcuts::{DRAWING_KEYS, DrawAction, DrawTool, tool_key};
 use couch_proto::{
     board::{
         Authored, BoardOp, COLOUR_NAMES, DEFAULT_STAY, Element, ElementKind, FADE_OUT_MS,
-        FADE_STAYS, LASER_MS, MAX_BATCH_ITEMS, MAX_BATCH_OPS, MAX_LASER_POINTS,
-        MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, PALETTE, PING_MS, Point, WIDTH_NAMES, WIDTHS,
-        line_width,
+        FADE_STAYS, LASER_MS, LINE_HEIGHT, MAX_BATCH_ITEMS, MAX_BATCH_OPS, MAX_LASER_POINTS,
+        MAX_MEMBER_ELEMENTS, MAX_STROKE_POINTS, MAX_TEXT_CHARS, MAX_TEXT_LINES, PALETTE, PING_MS,
+        Point, TEXT_SIZE_NAMES, WIDTH_NAMES, WIDTHS, line_width, text_size,
     },
     ids::MemberId,
     ipc::BoardNews,
@@ -57,6 +57,7 @@ pub enum BoardElementKind {
     Arrow,
     Rectangle,
     Ellipse,
+    Text,
 }
 
 /// One element on the board (`couch_proto::board::Element`).
@@ -73,6 +74,8 @@ pub struct BoardElement {
     pub stay: u8,
     pub done: bool,
     pub points: Vec<BoardPoint>,
+    /// A text box's text; empty for every other kind (M27c).
+    pub text: String,
 }
 
 /// One thing the host does on the board, to its own elements only
@@ -159,6 +162,7 @@ impl From<ElementKind> for BoardElementKind {
             ElementKind::Arrow => Self::Arrow,
             ElementKind::Rectangle => Self::Rectangle,
             ElementKind::Ellipse => Self::Ellipse,
+            ElementKind::Text => Self::Text,
         }
     }
 }
@@ -172,6 +176,7 @@ impl From<BoardElementKind> for ElementKind {
             BoardElementKind::Arrow => Self::Arrow,
             BoardElementKind::Rectangle => Self::Rectangle,
             BoardElementKind::Ellipse => Self::Ellipse,
+            BoardElementKind::Text => Self::Text,
         }
     }
 }
@@ -187,6 +192,7 @@ impl From<&Element> for BoardElement {
             stay: e.stay,
             done: e.done,
             points: points(&e.points),
+            text: e.text.clone(),
         }
     }
 }
@@ -202,6 +208,7 @@ impl From<&BoardElement> for Element {
             stay: e.stay,
             done: e.done,
             points: from_points(&e.points),
+            text: e.text.clone(),
         }
     }
 }
@@ -300,6 +307,7 @@ fn tool_name(tool: DrawTool) -> &'static str {
         DrawTool::Line => "line",
         DrawTool::Rectangle => "rectangle",
         DrawTool::Ellipse => "ellipse",
+        DrawTool::Text => "text",
         DrawTool::Eraser => "eraser",
     }
 }
@@ -317,6 +325,7 @@ fn action_ts(action: DrawAction) -> String {
         DrawAction::Nudge(dx, dy) => format!("{{ type: \"nudge\", dx: {dx}, dy: {dy} }}"),
         DrawAction::Tool(tool) => format!("{{ type: \"tool\", tool: \"{}\" }}", tool_name(tool)),
         DrawAction::Leave => plain("leave"),
+        DrawAction::ToggleToolbar => plain("toggleToolbar"),
     }
 }
 
@@ -370,7 +379,24 @@ export const DEFAULT_STAY = {DEFAULT_STAY};
         "export const HIGHLIGHTER_WIDTHS: number[] = [{}];\n",
         widths(ElementKind::Highlighter)
     );
+    ts += "/** A text box's size (its font's em) as a fraction of the picture's height, by width index (M27c). */\n";
+    ts += &format!(
+        "export const TEXT_SIZES: number[] = [{}];\n",
+        list(
+            (0..WIDTHS as u8)
+                .map(|w| format!("{}", text_size(w)))
+                .collect()
+        )
+    );
+    ts += &format!(
+        "export const TEXT_SIZE_NAMES: string[] = [{}];\n",
+        list(TEXT_SIZE_NAMES.iter().map(|n| format!("\"{n}\"")).collect())
+    );
+    ts += "/** A text box's lines, this many ems apart. */\n";
+    ts += &format!("export const LINE_HEIGHT = {LINE_HEIGHT};\n");
     for (name, value) in [
+        ("MAX_TEXT_CHARS", MAX_TEXT_CHARS as u64),
+        ("MAX_TEXT_LINES", MAX_TEXT_LINES as u64),
         ("MAX_STROKE_POINTS", MAX_STROKE_POINTS as u64),
         ("MAX_MEMBER_ELEMENTS", MAX_MEMBER_ELEMENTS as u64),
         ("MAX_BATCH_OPS", MAX_BATCH_OPS as u64),
@@ -413,7 +439,8 @@ export const DEFAULT_STAY = {DEFAULT_STAY};
            \x20 | { type: \"delete\" }\n\
            \x20 | { type: \"nudge\"; dx: number; dy: number }\n\
            \x20 | { type: \"tool\"; tool: DrawTool }\n\
-           \x20 | { type: \"leave\" };\n\n";
+           \x20 | { type: \"leave\" }\n\
+           \x20 | { type: \"toggleToolbar\" };\n\n";
     ts += "/** The drawing editor's keys (Excalidraw's), by `KeyboardEvent.code`. */\n";
     ts += "export const DRAWING_KEYS: { code: string; ctrl: boolean; shift: boolean; action: DrawAction }[] = [\n";
     for key in DRAWING_KEYS {
@@ -448,6 +475,18 @@ mod tests {
                 stay: 4,
                 done: true,
                 points: vec![Point::new(1, 2), Point::new(65_535, 0)],
+                text: String::new(),
+            }),
+            BoardOp::Put(Element {
+                id: 4,
+                kind: ElementKind::Text,
+                colour: 7,
+                width: 0,
+                fades: false,
+                stay: 2,
+                done: false,
+                points: vec![Point::new(1, 2), Point::new(3, 4)],
+                text: "Olá\n😀".into(),
             }),
             BoardOp::Append {
                 id: 3,

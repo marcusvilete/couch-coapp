@@ -54,6 +54,29 @@ export const SHOTS = [
     await page.getByRole("button", { name: "Stays until erased" }).click();
     await page.getByRole("button", { name: "Fades away after 2 seconds" }).click();
   }],
+  // A text box being typed in (M27c): the Text tool, its sizes, the caret.
+  ["board-typing", "board", async (page) => {
+    await page.getByRole("button", { name: "Text" }).click();
+    // Above the toolbar at every size.
+    const canvas = page.locator(".board-canvas");
+    const box = await canvas.boundingBox();
+    await canvas.click({ position: { x: Math.round(box.width * 0.45), y: Math.round(box.height * 0.42) } });
+    await page.keyboard.type("Take the left door,");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("then jump");
+  }],
+  // Text selected (M27c): Shift+Ctrl+Left over the last word.
+  ["board-typing-selected", "board", async (page) => {
+    await page.getByRole("button", { name: "Text" }).click();
+    const canvas = page.locator(".board-canvas");
+    const box = await canvas.boundingBox();
+    await canvas.click({ position: { x: Math.round(box.width * 0.45), y: Math.round(box.height * 0.42) } });
+    await page.keyboard.type("Take the left door");
+    await page.keyboard.press("Shift+Control+ArrowLeft");
+  }],
+  // The toolbar hidden to its pill (M27c). Last of the board's shots: the
+  // page remembers it, and a look's and size's shots share their storage.
+  ["board-tools-hidden", "board", click("Hide the drawing tools")],
 
   // Rooms
   ["dialog-add", "lobby", click("Create or join a room")],

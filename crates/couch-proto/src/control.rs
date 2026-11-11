@@ -960,6 +960,7 @@ mod tests {
             stay: 4,
             done: true,
             points: vec![Point::new(0, 0), Point::new(u16::MAX, 40)],
+            text: String::new(),
         };
         for message in [
             ControlMessage::BoardOps(BoardOps {
@@ -967,6 +968,13 @@ mod tests {
                 generation: 4,
                 ops: vec![
                     BoardOp::Put(element.clone()),
+                    BoardOp::Put(Element {
+                        id: 5,
+                        kind: ElementKind::Text,
+                        done: false,
+                        text: "Olá,\nali 👉".into(),
+                        ..element.clone()
+                    }),
                     BoardOp::Append {
                         id: 4,
                         points: vec![Point::new(1, 2)],

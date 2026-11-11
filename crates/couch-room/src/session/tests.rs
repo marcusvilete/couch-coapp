@@ -177,6 +177,7 @@ fn a_refused_author_gets_its_own_back_at_the_tick() {
         stay: 4,
         done: false,
         points: vec![Point::new(1, 1)],
+        text: String::new(),
     };
     s.draw(ANA, g, vec![BoardOp::Put(open)], t0);
     // Stopping someone else doesn't stale Ana's batches.
@@ -270,6 +271,7 @@ fn many_open_strokes_are_finished_in_batches_the_checks_allow() {
                     stay: 4,
                     done: false,
                     points: vec![Point::new(1, 1)],
+                    text: String::new(),
                 })
             })
             .collect();
@@ -409,6 +411,7 @@ fn a_viewer_leaving_mid_stroke_has_it_finished() {
         stay: 4,
         done: false,
         points: vec![Point::new(1, 1)],
+        text: String::new(),
     };
     let g = s.board().generation_of(ANA);
     s.draw(ANA, g, vec![BoardOp::Put(open)], Instant::now());
@@ -2001,6 +2004,7 @@ fn a_box(id: u32) -> couch_proto::board::BoardOp {
         stay: 4,
         done: true,
         points: vec![Point::new(0, 0), Point::new(10, 10)],
+        text: String::new(),
     })
 }
 

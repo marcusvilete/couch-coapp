@@ -1,10 +1,16 @@
 # ADR 0013: Drawing on the stream
 
-**Status:** accepted (2026-11-10), for M27. M27a built (0.28.0, [results](../m27a-results.md)), M27b built (0.29.0, [results](../m27b-results.md)). Settled while building M27b:
+**Status:** accepted (2026-11-10), for M27. M27a built (0.28.0, [results](../m27a-results.md)), M27b built (0.29.0, [results](../m27b-results.md)), M27c built (0.30.0, [results](../m27c-results.md)). Settled while building M27b:
 - **the board overlay's window is the engine's to place and switch** (`couch_platform_win::board_window`), the app's only to make (`couch_engine::board::BoardWindows`): laid over the capture's exact rectangle every 33 ms (polling, not a WinEvent hook), parked off screen rather than hidden, its styles changed in place with `SetWindowLongPtr`, never through Tauri's setters (they `ShowWindow`), focused with Bring to front's F24 tap. It is shown only once its page has loaded, and only while something is drawn (or the host draws), so no transparent window lies over a game for nothing;
 - **the host is an author like any other** (`HostSession::set_me`), with no wire change;
 - **sessions to watch together** (M24, no hook at all) get a hook with the drawing key alone while drawing is on: the author's choice, 2026-11-10;
 - **the host's drawing key shares Ctrl+Alt+Shift+D with the stream window's**: the one pair of rows allowed one key.
+
+Settled while building M27c:
+- **a text box is two points and its text** (`ElementKind::Text`, `Element.text`): its top-left corner, and the bottom-right one as its author's window measured it, so picking, moving, the marquee and keeping inside the picture work as for any box; other windows lay its text out with their own font, from the first point. Its size is the width index (small, medium, large), it isn't `done` while typed (no fading meanwhile), and its text weighs a point a byte against every limit on points;
+- **each editor measures with its own font** (egui's in the stream window, the canvas's on the board overlay), and the shared cases with a fixed estimate (half an em a character), so the cases stay alike;
+- **Ctrl+V pastes text copied elsewhere as a new box,** and our own copy still pastes drawings: a copy puts the copied boxes' text (or nothing) on the system clipboard, and a paste is ours while the clipboard still holds it;
+- **the stream window turns SDL's text input on only while a box is typed in,** so no input method comes up over a game; the board overlay keeps a hidden field focused through drawing mode, where its typing, input methods and the page's copy and paste events arrive.
 
 The author's choices:
 - those watching **and the host** draw, write and erase on the picture; a remote-play device too, as itself;
