@@ -17,6 +17,7 @@ pub mod autostart;
 pub mod awake;
 pub mod chime;
 pub mod clock;
+mod cursor;
 pub mod front;
 pub mod global_keys;
 pub mod gpu;

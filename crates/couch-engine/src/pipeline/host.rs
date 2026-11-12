@@ -2753,6 +2753,9 @@ struct Inputs {
     /// The stream the pointer is kept on the screen of, for desktop control
     /// of a streamed screen.
     bounds_for: Option<u32>,
+    /// The game window a guest's pointer is kept inside (a Linux host),
+    /// as last told to `kbm`: none for a new one.
+    confined: Option<NativeId>,
 }
 
 /// The host's controllers, in the input task.
@@ -2796,6 +2799,7 @@ impl Inputs {
         if !self.kbm_made && permissions.intersects(Permissions::KEYBOARD | Permissions::MOUSE) {
             self.kbm = self.shared.backend.kbm();
             self.kbm_made = true;
+            self.confined = None;
         }
     }
 
@@ -2808,8 +2812,10 @@ impl Inputs {
     /// just took the foreground must not get a key meant for the game.
     fn refresh_focus(&mut self) -> Vec<Effect> {
         // A stream switched since: the pointer's bounds follow before this
-        // input moves it (M25b review).
+        // input moves it (M25b review). The same for the game window a
+        // guest's pointer is kept in.
         self.sync_bounds();
+        self.sync_confined();
         // No stream, no window: nothing of the keyboard's reaches anything.
         let focus = match self.shared.window() {
             0 => Focus::default(),
@@ -2901,6 +2907,7 @@ impl Inputs {
             }
         }
         self.sync_bounds();
+        self.sync_confined();
         for seat in self.seats() {
             let status = self.router.seat(seat).map(|s| s.2);
             let slot = &mut self.status[usize::from(seat.0)];
@@ -2940,6 +2947,21 @@ impl Inputs {
             "the pointer kept on the streamed screen"
         );
         self.kbm.set_bounds(bounds);
+    }
+
+    /// A guest's pointer is kept inside the game window's client area
+    /// wherever the injector can do that (a Linux host); desktop control's
+    /// never is, nor anything while no game window is known.
+    fn sync_confined(&mut self) {
+        let want = match (self.desktop, self.shared.window()) {
+            (None, window) if window != 0 => Some(window),
+            _ => None,
+        };
+        if self.confined == want {
+            return;
+        }
+        self.confined = want;
+        self.kbm.confine(want);
     }
 
     fn tick(&mut self, now: Instant) {
@@ -3133,6 +3155,7 @@ async fn input_loop(
         local,
         desktop: None,
         bounds_for: None,
+        confined: None,
         shared,
     };
     for seat in st.seats() {

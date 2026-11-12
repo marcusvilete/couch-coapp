@@ -27,8 +27,9 @@ const XML = `<node>
 // At most this many apps (one per profile) watch at once.
 const MAX_WATCHERS = 4;
 // How often the Shell looks at the pointer while it moves (it stops while
-// the user is idle).
-const POINTER_MS = 50;
+// the user is idle). A guest's moves are cut from each position told (they
+// slow near the game window's edges until the next).
+const POINTER_MS = 16;
 const NOTHING = JSON.stringify({active: '', pointer: false});
 
 function listed(w) {
@@ -57,14 +58,20 @@ function inside(rect, x, y) {
     return x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
 }
 
-// The pointer is over the focused window, and what a click there reaches is
-// that window: not another window above it, nor the Shell's own UI over it
-// (a notification and its buttons, the dock, a menu), which aren't windows.
-function pointerOver(focused) {
+// The window's client area: inside its frame, without the title bar Mutter
+// draws (an app drawing its own title bar has it inside).
+function clientArea(w) {
+    return w.frame_rect_to_client_rect(w.get_frame_rect());
+}
+
+// The pointer is over the focused window's client area (never the title bar
+// Mutter draws), and what a click there reaches is that window: not another
+// window above it, nor the Shell's own UI over it (a notification and its
+// buttons, the dock, a menu), which aren't windows.
+function pointerOver(focused, x, y) {
     if (!focused)
         return false;
-    const [x, y] = global.get_pointer();
-    if (!inside(focused.get_frame_rect(), x, y))
+    if (!inside(clientArea(focused), x, y))
         return false;
     const windowActor = focused.get_compositor_private();
     const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y);
@@ -188,6 +195,8 @@ class Front {
                 this._pushWindows(null);
                 this._pushFront(false);
             }),
+            // Its client area moved.
+            w.connect('position-changed', () => this._pushFront(false)),
             w.connect('unmanaged', () => {
                 const ids = this._windowIds.get(w) ?? [];
                 for (const id of ids)
@@ -203,10 +212,18 @@ class Front {
         if (shellHasKeys())
             return NOTHING;
         const focused = global.display.focus_window;
-        return JSON.stringify({
+        const [x, y] = global.get_pointer();
+        const front = {
             active: focused ? String(focused.get_id()) : '',
-            pointer: pointerOver(focused),
-        });
+            pointer: pointerOver(focused, x, y),
+            at: [x, y],
+        };
+        if (focused) {
+            // What a guest's pointer is kept in.
+            const c = clientArea(focused);
+            front.area = [c.x, c.y, c.width, c.height];
+        }
+        return JSON.stringify(front);
     }
 
     _pushWindows(except) {

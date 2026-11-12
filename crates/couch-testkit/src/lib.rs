@@ -242,6 +242,8 @@ pub enum KbmCall {
     Wheel(i32, i32),
     /// The pointer kept on a screen, or let go (M25b).
     Bounds(Option<Bounds>),
+    /// The pointer kept inside a game window, or let go.
+    Confine(Option<isize>),
 }
 
 /// Records injected keyboard and mouse input instead of sending it to the OS.
@@ -282,6 +284,10 @@ impl KbmInjector for RecordingInjector {
 
     fn set_bounds(&mut self, bounds: Option<Bounds>) {
         self.calls.lock().unwrap().push(KbmCall::Bounds(bounds));
+    }
+
+    fn confine(&mut self, window: Option<isize>) {
+        self.calls.lock().unwrap().push(KbmCall::Confine(window));
     }
 }
 

@@ -38,6 +38,7 @@ use ashpd::{
     zbus::{self, MatchRule, fdo::DBusProxy, message::Type as MessageType, names::BusName},
     zvariant::OwnedValue,
 };
+use couch_input::{Bounds, confine::PointerReport};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::sync::{Notify, oneshot};
@@ -147,8 +148,16 @@ struct Told {
     /// Ours for the active window; 0 for none, -1 for one whose helper id
     /// was too long (never a window's).
     active: isize,
-    /// The pointer is over the active window.
+    /// The pointer is over the active window's client area.
     pointer: bool,
+    /// Where the pointer is and the active window's client area, in the
+    /// desktop's coordinates, if the helper says (an older GNOME extension
+    /// doesn't).
+    at: Option<(i32, i32)>,
+    area: Option<Bounds>,
+    /// Counts the changes of `at`: a guest's moves are cut from each new
+    /// position (`couch_input::confine`).
+    moves: u64,
     /// The lock screen is up, whatever the helper says: KWin keeps the
     /// active window while its lock screen takes the keys.
     locked: bool,
@@ -206,6 +215,21 @@ impl Told {
             self.id_for(&pushed.active)
         };
         self.pointer = pushed.pointer;
+        let at = pushed
+            .at
+            .and_then(|[x, y]| Some((coordinate(x)?, coordinate(y)?)));
+        if at.is_some() && at != self.at {
+            self.moves += 1;
+        }
+        self.at = at;
+        self.area = pushed.area.and_then(|[x, y, width, height]| {
+            Some(Bounds {
+                x: coordinate(x)?,
+                y: coordinate(y)?,
+                width: coordinate(width)?.max(0),
+                height: coordinate(height)?.max(0),
+            })
+        });
         self.heard = Some(now);
     }
 
@@ -220,11 +244,27 @@ impl Told {
         (foreground, foreground && self.pointer)
     }
 
+    /// Where the pointer is, while `window` is in front and the helper says.
+    fn pointer(&self, window: isize, now: Instant) -> Option<PointerReport> {
+        if !self.focus(window, now).0 {
+            return None;
+        }
+        let ((x, y), area) = (self.at?, self.area?);
+        Some(PointerReport {
+            x,
+            y,
+            area,
+            changes: self.moves,
+        })
+    }
+
     /// The watch's helper said nothing yet, or no longer counts.
     fn forget(&mut self) {
         self.heard = None;
         self.active = 0;
         self.pointer = false;
+        self.at = None;
+        self.area = None;
     }
 }
 
@@ -243,6 +283,13 @@ fn cut(mut text: String) -> String {
         text.truncate(end);
     }
     text
+}
+
+/// A position or size the helper pushed, in whole pixels; `None` for one
+/// no screen has.
+fn coordinate(value: f64) -> Option<i32> {
+    const FAR: f64 = 1_000_000.0;
+    (value.is_finite() && value.abs() <= FAR).then(|| value.round() as i32)
 }
 
 fn dimension(value: f64) -> u32 {
@@ -271,6 +318,12 @@ struct PushedFront {
     active: String,
     #[serde(default)]
     pointer: bool,
+    /// The pointer's position.
+    #[serde(default)]
+    at: Option<[f64; 2]>,
+    /// The active window's client area: x, y, width, height.
+    #[serde(default)]
+    area: Option<[f64; 4]>,
 }
 
 fn told() -> std::sync::MutexGuard<'static, Told> {
@@ -300,6 +353,13 @@ pub fn windows() -> Vec<Window> {
 /// neither while nobody watches or the helper is quiet.
 pub fn focus(window: isize) -> (bool, bool) {
     told().focus(window, Instant::now())
+}
+
+/// Where the pointer is and `window`'s client area, as last told, while
+/// `window` is in front and the helper says: what a guest's pointer is kept
+/// in (`kbm`). Costs a lock, never the bus.
+pub fn pointer(window: isize) -> Option<PointerReport> {
+    told().pointer(window, Instant::now())
 }
 
 /// Whether `window` is still listed. True while the helper is quiet (a
@@ -1209,6 +1269,62 @@ mod tests {
         let mut quiet = Told::default();
         push(&mut quiet, r#"[{"id":"a"}]"#);
         assert!(!quiet.live(Instant::now()));
+    }
+
+    #[test]
+    fn the_pointer_is_told_only_for_the_window_in_front() {
+        let mut told = Told::default();
+        push(&mut told, r#"[{"id":"a"},{"id":"b"}]"#);
+        let (game, other) = (told.windows[0].id, told.windows[1].id);
+        // An older GNOME extension says nothing of where the pointer is.
+        front(&mut told, r#"{"active":"a","pointer":true}"#);
+        assert_eq!(told.pointer(game, Instant::now()), None);
+        let area = Bounds {
+            x: 10,
+            y: 40,
+            width: 800,
+            height: 600,
+        };
+        front(
+            &mut told,
+            r#"{"active":"a","pointer":true,"at":[100.4,200.6],"area":[10,40,800,600]}"#,
+        );
+        let first = told.pointer(game, Instant::now()).unwrap();
+        assert_eq!((first.x, first.y, first.area), (100, 201, area));
+        assert_eq!(told.pointer(other, Instant::now()), None);
+        // The heartbeat with the same position isn't a new one; a move is.
+        front(
+            &mut told,
+            r#"{"active":"a","pointer":true,"at":[100,201],"area":[10,40,800,600]}"#,
+        );
+        assert_eq!(
+            told.pointer(game, Instant::now()).unwrap().changes,
+            first.changes
+        );
+        front(
+            &mut told,
+            r#"{"active":"a","pointer":false,"at":[5,20],"area":[10,40,800,600]}"#,
+        );
+        let moved = told.pointer(game, Instant::now()).unwrap();
+        assert_ne!(moved.changes, first.changes);
+        assert_eq!((moved.x, moved.y), (5, 20));
+        // Nothing while another window is in front, the helper is quiet, or
+        // for a position no screen has.
+        front(&mut told, r#"{"active":"b","at":[5,20],"area":[0,0,9,9]}"#);
+        assert_eq!(told.pointer(game, Instant::now()), None);
+        front(
+            &mut told,
+            r#"{"active":"a","at":[5,20],"area":[10,40,800,600]}"#,
+        );
+        let heard = told.heard.unwrap();
+        assert_eq!(told.pointer(game, heard + STALE), None);
+        front(
+            &mut told,
+            r#"{"active":"a","at":[1e300,20],"area":[10,40,800,600]}"#,
+        );
+        assert_eq!(told.pointer(game, Instant::now()), None);
+        told.forget();
+        assert_eq!(told.pointer(game, Instant::now()), None);
     }
 
     #[test]

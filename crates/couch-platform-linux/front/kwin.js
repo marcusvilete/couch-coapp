@@ -84,19 +84,26 @@ function windowUnder(p) {
     return null;
 }
 
-// The pointer is over the active window, not under another one above it.
-function pointerOver(active) {
+// The pointer is over the active window's client area (never its title bar
+// or frame), not under another window above it.
+function pointerOver(active, p) {
     if (!active) {
         return false;
     }
-    const p = workspace.cursorPos;
-    return inside(active.frameGeometry, p) && windowUnder(p) === active;
+    return inside(active.clientGeometry, p) && windowUnder(p) === active;
 }
 
 let sentFront = "";
 function pushFront(always) {
     const active = activeWindow();
-    const json = JSON.stringify({ active: idOf(active), pointer: pointerOver(active) });
+    const p = workspace.cursorPos;
+    const front = { active: idOf(active), pointer: pointerOver(active, p), at: [p.x, p.y] };
+    if (active) {
+        // What a guest's pointer is kept in: the client area.
+        const c = active.clientGeometry;
+        front.area = [c.x, c.y, c.width, c.height];
+    }
+    const json = JSON.stringify(front);
     if (always || json !== sentFront) {
         sentFront = json;
         callDBus(SERVICE, PATH, IFACE, "Front", TOKEN, json);
@@ -126,14 +133,26 @@ on("windowRemoved", "clientRemoved", function (w) {
 on("windowActivated", "clientActivated", function () {
     pushFront(false);
 });
+// Where the pointer is goes at most every 8 ms while it moves: a guest's
+// moves are cut from each position told (they slow near the game window's
+// edges until the next).
+const POINTER_MS = 8;
 if (workspace.cursorPosChanged) {
-    workspace.cursorPosChanged.connect(function () {
+    const soon = new QTimer();
+    soon.singleShot = true;
+    soon.interval = POINTER_MS;
+    soon.timeout.connect(function () {
         pushFront(false);
+    });
+    workspace.cursorPosChanged.connect(function () {
+        if (!soon.active) {
+            soon.start();
+        }
     });
 } else {
     // No signal for the pointer: looked at often instead.
     const pointer = new QTimer();
-    pointer.interval = 100;
+    pointer.interval = 2 * POINTER_MS;
     pointer.timeout.connect(function () {
         pushFront(false);
     });
