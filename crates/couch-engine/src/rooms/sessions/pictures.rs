@@ -52,10 +52,16 @@ pub(in crate::rooms) enum Held {
 /// what the window draws next waits here.
 #[derive(Debug, Default)]
 pub(in crate::rooms) struct Gate {
-    /// The picture element on its way, and since when.
+    /// The upload on its way (its number), and since when.
     pending: Option<(u32, std::time::Instant)>,
     held: VecDeque<Held>,
 }
+
+/// The next upload's number (P17), one count for the whole process: across
+/// resets, watches and windows, so an answer to an upload given up on
+/// (overdue, on a connection gone, or of a watch ended) never stands for a
+/// later one, of the same element or not.
+static NEXT_UPLOAD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl Gate {
     /// Something waits, or is on its way: what comes now must wait too.
@@ -73,9 +79,16 @@ impl Gate {
         self.held.push_back(held);
     }
 
-    /// The answer for picture `id`: whether it was the one on its way.
-    fn answered(&mut self, id: u32) -> bool {
-        if self.pending.is_some_and(|(p, _)| p == id) {
+    /// An upload goes now: its number, waited on from `now`.
+    fn start(&mut self, now: std::time::Instant) -> u32 {
+        let upload = NEXT_UPLOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pending = Some((upload, now));
+        upload
+    }
+
+    /// The answer for upload `upload`: whether it was the one on its way.
+    fn answered(&mut self, upload: u32) -> bool {
+        if self.pending.is_some_and(|(p, _)| p == upload) {
             self.pending = None;
             true
         } else {
@@ -180,8 +193,9 @@ impl Actor {
         let Some(w) = self.sessions.watching.as_mut() else {
             return;
         };
-        let header = PictureUpload {
+        let mut header = PictureUpload {
             session: w.session,
+            upload: 0,
             generation: up.generation,
             element: up.element,
             len: up.bytes.len() as u32,
@@ -194,7 +208,7 @@ impl Actor {
         let Some(c) = self.conns.get(&w.conn) else {
             return;
         };
-        w.gate.pending = Some((header.element.id, now));
+        header.upload = w.gate.start(now);
         let conn = c.conn.clone();
         tokio::spawn(async move {
             if let Err(e) =
@@ -211,7 +225,7 @@ impl Actor {
         let Some(w) = self.sessions.watching.as_mut() else {
             return;
         };
-        if w.session != answer.session || !w.gate.answered(answer.id) {
+        if w.session != answer.session || !w.gate.answered(answer.upload) {
             return;
         }
         // Stale: our window heard of the clear itself.
@@ -260,13 +274,37 @@ impl Actor {
         let inbox = self.inbox.clone();
         let task = tokio::spawn(async move {
             while let Some(recv) = streams.recv().await {
-                let Some((upload, bytes)) = couch_net::pictures::read_upload(recv).await else {
+                let Some((upload, body)) = couch_net::pictures::read_upload_header(recv).await
+                else {
                     continue;
                 };
                 if upload.session != session {
+                    body.refuse();
                     continue;
                 }
-                let bytes = checked(&upload.element, bytes).await;
+                // The session first (P17): a picture it would refuse anyway
+                // (pictures off, the member stopped or too fast) is answered
+                // now, and its bytes are never read nor decoded.
+                let (reply, coming) = tokio::sync::oneshot::channel();
+                let ask = Input::PictureComing {
+                    conn,
+                    peer: member,
+                    upload: upload.clone(),
+                    reply,
+                };
+                if inbox.send(ask).await.is_err() {
+                    return;
+                }
+                if !coming.await.unwrap_or(false) {
+                    body.refuse();
+                    continue;
+                }
+                // Bytes that don't come whole are answered as no picture,
+                // so the member's gate isn't left waiting (P17's review).
+                let bytes = match body.read().await {
+                    Some(bytes) => checked(&upload.element, bytes).await,
+                    None => None,
+                };
                 let input = Input::PictureUp {
                     conn,
                     peer: member,
@@ -279,6 +317,31 @@ impl Actor {
             }
         });
         h.picture_readers.insert(member, AbortOnDrop(task));
+    }
+
+    /// A viewer's picture whose header alone was read (P17): whether to
+    /// read its bytes. Refused, it is answered here, as the session says.
+    pub(in crate::rooms) fn picture_coming(
+        &mut self,
+        conn: ConnId,
+        peer: MemberId,
+        upload: &PictureUpload,
+        now: std::time::Instant,
+    ) -> bool {
+        let Some(h) = self.sessions.hosting.as_mut() else {
+            return false;
+        };
+        if !h.session.is_viewer(peer) || h.viewer_conns.get(&peer) != Some(&conn) {
+            return false;
+        }
+        let room = h.room;
+        match h.session.picture_coming(peer, upload, now) {
+            Ok(()) => true,
+            Err(fx) => {
+                self.apply_session(room, fx, now);
+                false
+            }
+        }
     }
 
     /// A viewer's picture, read and checked: to the session, from the
@@ -301,12 +364,22 @@ impl Actor {
         let fx = match bytes {
             Some(bytes) => {
                 let bytes: PictureBytes = Arc::from(bytes);
-                h.session
-                    .put_picture(peer, upload.generation, upload.element, &bytes, now)
+                h.session.put_picture(
+                    peer,
+                    upload.upload,
+                    upload.generation,
+                    upload.element,
+                    &bytes,
+                    now,
+                )
             }
-            None => h
-                .session
-                .refuse_picture(peer, upload.element.id, Refusal::BadPicture, now),
+            None => h.session.refuse_picture(
+                peer,
+                upload.upload,
+                upload.element.id,
+                Refusal::BadPicture,
+                now,
+            ),
         };
         self.apply_session(room, fx, now);
     }
@@ -380,7 +453,7 @@ impl Actor {
         let Some(h) = self.sessions.hosting.as_mut() else {
             return;
         };
-        h.gate_mut(from).pending = Some((up.element.id, now));
+        let upload = h.gate_mut(from).start(now);
         let session = h.session.id();
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
@@ -394,6 +467,7 @@ impl Actor {
                 .send(Input::HostPictureChecked {
                     session,
                     own: from == Editor::Own,
+                    upload,
                     generation,
                     element,
                     bytes,
@@ -404,10 +478,12 @@ impl Actor {
 
     /// The host's picture, checked: to the session, then what its window
     /// drew meanwhile.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::rooms) fn host_picture_checked(
         &mut self,
         session: SessionId,
         from: Editor,
+        upload: u32,
         generation: u32,
         element: couch_proto::board::Element,
         bytes: Option<Vec<u8>>,
@@ -422,17 +498,20 @@ impl Actor {
         else {
             return;
         };
-        if !h.gate_mut(from).answered(element.id) {
+        // Its own check alone (P17): one given up on after its wait counts
+        // for nothing when it comes, whatever the window put since.
+        if !h.gate_mut(from).answered(upload) {
             return;
         }
         let fx = match bytes {
             Some(bytes) => {
                 let bytes: PictureBytes = Arc::from(bytes);
-                h.session.put_picture(me, generation, element, &bytes, now)
+                h.session
+                    .put_picture(me, upload, generation, element, &bytes, now)
             }
             None => h
                 .session
-                .refuse_picture(me, element.id, Refusal::BadPicture, now),
+                .refuse_picture(me, upload, element.id, Refusal::BadPicture, now),
         };
         self.host_effects(from, fx, now);
         self.drain_host(from, now);
@@ -507,5 +586,44 @@ impl Actor {
             bytes,
         };
         self.host_picture(Editor::Overlay, up, now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn draw() -> Held {
+        Held::Draw(Draw {
+            generation: 0,
+            ops: Vec::new(),
+        })
+    }
+
+    /// P17: a gate opens on its own upload's answer alone. An upload given up
+    /// on (overdue, or its connection gone) may still be answered late, after
+    /// a newer upload of the same element went: that answer lets nothing go.
+    #[test]
+    fn a_late_answer_never_opens_a_newer_uploads_gate() {
+        let start = std::time::Instant::now();
+        let mut gate = Gate::default();
+        let first = gate.start(start);
+        assert!(gate.overdue(start + ANSWER_WITHIN));
+        gate.pending = None; // given up on, as the tick does
+        let second = gate.start(start + ANSWER_WITHIN);
+        assert_ne!(first, second);
+        gate.hold(draw());
+        assert!(!gate.answered(first), "the first's late answer");
+        assert!(gate.next().is_none(), "the move still waits");
+        assert!(gate.answered(second));
+        assert!(gate.next().is_some());
+        // A reset (a new connection), or another gate (a new watch), keeps
+        // counting: an old answer is for a number no later upload has.
+        let third = gate.start(start);
+        gate.reset();
+        let fourth = Gate::default().start(start);
+        let fifth = gate.start(start);
+        assert!(third != fourth && fourth != fifth);
+        assert!(!gate.answered(third) && !gate.answered(fourth) && gate.answered(fifth));
     }
 }

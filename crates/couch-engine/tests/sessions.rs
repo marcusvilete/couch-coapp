@@ -7435,7 +7435,15 @@ async fn the_hosts_own_stream_window() {
     wait("frames of the next", || own.frames() > frames + 2).await;
     // A refusal goes to the window that drew alone (nothing streamed a
     // moment ago is no matter here: drawing off refuses it).
+    // Drawing off clears the board in a new generation: drawn in the old
+    // one, the batch would be dropped as stale, unsaid (P17: read before
+    // the window heard the clear, it failed under load).
+    let before = own.board.lock().unwrap().generation();
     a.ok(Command::SetDrawing { on: false }).await;
+    wait("the window hears the clear", || {
+        own.board.lock().unwrap().generation() != before
+    })
+    .await;
     let generation = own.board.lock().unwrap().generation();
     own.say(
         couch_proto::ipc::kinds::DRAW,

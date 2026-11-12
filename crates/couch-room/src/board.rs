@@ -419,15 +419,41 @@ impl Board {
         self.take(author, generation, &ops, now, blocked, Some(bytes))
     }
 
-    fn take(
+    /// Whether `author`'s picture `element`, made in `generation`, could be
+    /// taken as far as the cheap checks go (P17): asked before its bytes are
+    /// read, so a member refused (too fast, stale, drawing off or blocked,
+    /// stopped, pictures off) costs the host no read and no decode. Refused,
+    /// it counts toward the rates as any refused batch does (refusals are no
+    /// way to try faster); let through, it spends nothing yet, since
+    /// [`Self::put_picture`] counts it then, once.
+    pub fn picture_coming(
+        &mut self,
+        author: MemberId,
+        generation: u32,
+        element: &Element,
+        now: Instant,
+        blocked: Option<Refusal>,
+    ) -> Result<(), Refusal> {
+        let ops = [BoardOp::Put(element.clone())];
+        self.admit(author, generation, &ops, now, blocked, true, false)
+    }
+
+    /// A batch's checks before the board is looked at: the rates first, then
+    /// the generation, `blocked`, drawing on, the author not stopped, the
+    /// batch well formed, and for a `picture` pictures on. The batch counts
+    /// toward the rates whatever the answer, but for a picture's header let
+    /// through (`spend` false), which its upload counts later.
+    #[allow(clippy::too_many_arguments)]
+    fn admit(
         &mut self,
         author: MemberId,
         generation: u32,
         ops: &[BoardOp],
         now: Instant,
         blocked: Option<Refusal>,
-        upload: Option<&PictureBytes>,
-    ) -> Result<Taken, Refusal> {
+        picture: bool,
+        spend: bool,
+    ) -> Result<(), Refusal> {
         let rates = self.rates.entry(author).or_insert_with(|| Rates {
             batches: Bucket::new(MAX_BATCHES_PER_SEC, now),
             marks: Bucket::new(MAX_MARKS_PER_SEC, now),
@@ -440,8 +466,35 @@ impl Board {
             rates.batches.tokens = (rates.batches.tokens - 1.0).max(0.0);
             return Err(Refusal::TooFast);
         }
-        rates.batches.tokens -= 1.0;
-        rates.marks.tokens -= marks;
+        let checked = self.checks(author, generation, ops, blocked, picture);
+        if spend || checked.is_err() {
+            let rates = self.rates.get_mut(&author).expect("made above");
+            rates.batches.tokens -= 1.0;
+            rates.marks.tokens -= marks;
+        }
+        checked
+    }
+
+    /// A batch refused before the board saw it, counted toward the rates as
+    /// any refused batch is: a picture whose bytes weren't one (P17's review).
+    pub fn count_refused(&mut self, author: MemberId, now: Instant) {
+        let rates = self.rates.entry(author).or_insert_with(|| Rates {
+            batches: Bucket::new(MAX_BATCHES_PER_SEC, now),
+            marks: Bucket::new(MAX_MARKS_PER_SEC, now),
+        });
+        rates.batches.refill(MAX_BATCHES_PER_SEC, now);
+        rates.batches.tokens = (rates.batches.tokens - 1.0).max(0.0);
+    }
+
+    /// [`Self::admit`]'s checks after the rates, in their order.
+    fn checks(
+        &self,
+        author: MemberId,
+        generation: u32,
+        ops: &[BoardOp],
+        blocked: Option<Refusal>,
+        picture: bool,
+    ) -> Result<(), Refusal> {
         if generation != self.generation_of(author) {
             return Err(Refusal::Stale);
         }
@@ -457,10 +510,31 @@ impl Board {
         if !valid_batch(ops) {
             return Err(Refusal::Invalid);
         }
+        if picture && !self.pictures_on {
+            return Err(Refusal::PicturesOff);
+        }
+        Ok(())
+    }
+
+    fn take(
+        &mut self,
+        author: MemberId,
+        generation: u32,
+        ops: &[BoardOp],
+        now: Instant,
+        blocked: Option<Refusal>,
+        upload: Option<&PictureBytes>,
+    ) -> Result<Taken, Refusal> {
+        self.admit(
+            author,
+            generation,
+            ops,
+            now,
+            blocked,
+            upload.is_some(),
+            true,
+        )?;
         if let Some(bytes) = upload {
-            if !self.pictures_on {
-                return Err(Refusal::PicturesOff);
-            }
             let named = match ops {
                 [BoardOp::Put(e)] => e.picture,
                 _ => None,

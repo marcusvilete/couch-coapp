@@ -95,13 +95,15 @@ fn draw_box(s: &mut HostSession, who: MemberId, id: u32) -> Vec<Effect> {
 fn a_drawing_goes_to_the_other_viewers_with_its_author() {
     let mut s = drawing_session();
     let fx = s.set_drawing(true);
-    // Everyone hears drawing is on, and gets the (empty) board.
+    // Everyone gets the (empty) board, then hears drawing is on: the
+    // snapshot's generation first, so a window never draws in the old one
+    // (P17).
     for v in [ANA, BIA] {
         let to = sent_to(&fx, v);
-        assert!(matches!(to[0], ControlMessage::BoardState(b) if b.on));
         assert!(
-            matches!(to[1], ControlMessage::BoardSnapshot(b) if b.first && b.elements.is_empty())
+            matches!(to[0], ControlMessage::BoardSnapshot(b) if b.first && b.elements.is_empty())
         );
+        assert!(matches!(to[1], ControlMessage::BoardState(b) if b.on));
     }
     let fx = draw_box(&mut s, ANA, 1);
     assert!(sent_to(&fx, ANA).is_empty(), "the author drew it already");
@@ -397,7 +399,7 @@ fn put_picture(s: &mut HostSession, who: MemberId, id: u32, seed: u8) -> Vec<Eff
         <sha2::Sha256 as sha2::Digest>::digest(&bytes).into(),
     ));
     let generation = s.board().generation_of(who);
-    s.put_picture(who, generation, element, &bytes, Instant::now())
+    s.put_picture(who, id, generation, element, &bytes, Instant::now())
 }
 
 /// Whom `fx` sends a picture's bytes to.
@@ -415,6 +417,122 @@ fn answer(fx: &[Effect], to: MemberId) -> Option<Option<Refusal>> {
         ControlMessage::PictureAnswer(a) => Some(a.refusal),
         _ => None,
     })
+}
+
+/// P17: a viewer's picture is asked about by its header before its bytes
+/// are read. Refused there (pictures off, stopped, too fast, stale), it is
+/// answered with its upload's number, as the board would have answered;
+/// let through, nothing is spent, and the picture is then taken.
+#[test]
+fn a_picture_is_refused_before_its_bytes_where_it_can_be() {
+    use couch_proto::board::{BoardOp, ElementKind, PictureId, PictureUpload};
+    let mut s = host_drawing_session();
+    s.set_drawing(true);
+    let BoardOp::Put(mut element) = a_box(1) else {
+        unreachable!()
+    };
+    element.kind = ElementKind::Picture;
+    element.picture = Some(PictureId([7; 32]));
+    let up = |s: &HostSession, upload: u32, element: &Element| PictureUpload {
+        session: s.id(),
+        upload,
+        generation: s.board().generation_of(ANA),
+        element: element.clone(),
+        len: 20,
+    };
+    let refusal = |fx: &[Effect]| {
+        sent_to(fx, ANA).into_iter().find_map(|m| match m {
+            ControlMessage::PictureAnswer(a) => Some((a.upload, a.refusal)),
+            _ => None,
+        })
+    };
+    let now = Instant::now();
+    // Pictures off: answered with its number, and its own back at the tick.
+    let fx = s
+        .picture_coming(ANA, &up(&s, 5, &element), now)
+        .unwrap_err();
+    assert_eq!(refusal(&fx), Some((5, Some(Refusal::PicturesOff))));
+    assert!(!sent_to(&s.board_tick(now), ANA).is_empty(), "resynced");
+    // Stale: answered so, nothing more.
+    s.set_pictures(true);
+    let mut stale = up(&s, 6, &element);
+    stale.generation = stale.generation.wrapping_sub(1);
+    let fx = s.picture_coming(ANA, &stale, now).unwrap_err();
+    assert_eq!(refusal(&fx), Some((6, Some(Refusal::Stale))));
+    // Let through: the picture then goes on the board as ever, however
+    // many were let through first (nothing spent).
+    for i in 0..100 {
+        assert!(s.picture_coming(ANA, &up(&s, i, &element), now).is_ok());
+    }
+    let fx = put_picture(&mut s, ANA, 1, 7);
+    assert_eq!(answer(&fx, ANA), Some(None));
+    // Stopped: refused before its bytes.
+    s.stop_drawing(ANA, true);
+    let fx = s
+        .picture_coming(ANA, &up(&s, 7, &element), now)
+        .unwrap_err();
+    assert_eq!(refusal(&fx), Some((7, Some(Refusal::Stopped))));
+    s.stop_drawing(ANA, false);
+    // Too fast: spent as any batch over the rate.
+    let mut too_fast = None;
+    for i in 0..1_000 {
+        let fx = draw_box(&mut s, ANA, 100 + i);
+        if sent_to(&fx, ANA)
+            .iter()
+            .any(|m| matches!(m, ControlMessage::BoardRefused(r) if r.why == Refusal::TooFast))
+        {
+            too_fast = Some(i);
+            break;
+        }
+    }
+    assert!(too_fast.is_some(), "over the rate");
+    let fx = s
+        .picture_coming(ANA, &up(&s, 8, &element), Instant::now())
+        .unwrap_err();
+    assert_eq!(refusal(&fx), Some((8, Some(Refusal::TooFast))));
+    // Never asked of the host's own, nor of a stranger.
+    assert_eq!(
+        s.picture_coming(CAIO, &up(&s, 9, &element), now),
+        Err(Vec::new())
+    );
+}
+
+/// P17's review: a picture refused by its header counts toward the rates as
+/// any refused batch does, so refusals are no way to send faster; one whose
+/// bytes weren't a picture counts too.
+#[test]
+fn refused_pictures_count_toward_the_rate() {
+    use couch_proto::board::{BoardOp, ElementKind, MAX_BATCHES_PER_SEC, PictureId, PictureUpload};
+    let mut s = host_drawing_session();
+    s.set_drawing(true);
+    let BoardOp::Put(mut element) = a_box(1) else {
+        unreachable!()
+    };
+    element.kind = ElementKind::Picture;
+    element.picture = Some(PictureId([7; 32]));
+    let now = Instant::now();
+    let up = PictureUpload {
+        session: s.id(),
+        upload: 0,
+        generation: s.board().generation_of(ANA),
+        element,
+        len: 20,
+    };
+    // Pictures off: each refused, each counted, until the rate says so.
+    let refused = |fx: &[Effect]| {
+        sent_to(fx, ANA).into_iter().find_map(|m| match m {
+            ControlMessage::PictureAnswer(a) => a.refusal,
+            _ => None,
+        })
+    };
+    for _ in 0..MAX_BATCHES_PER_SEC - 1 {
+        let fx = s.picture_coming(ANA, &up, now).unwrap_err();
+        assert_eq!(refused(&fx), Some(Refusal::PicturesOff));
+    }
+    // A picture that wasn't one counts too: the rate is spent.
+    s.refuse_picture(ANA, 1, 1, Refusal::BadPicture, now);
+    let fx = s.picture_coming(ANA, &up, now).unwrap_err();
+    assert_eq!(refused(&fx), Some(Refusal::TooFast));
 }
 
 #[test]
@@ -499,7 +617,7 @@ fn a_picture_is_refused_as_a_drawing_is_and_always_answered() {
     e.picture = Some(couch_proto::board::PictureId(
         <sha2::Sha256 as sha2::Digest>::digest(&bytes).into(),
     ));
-    let fx = s.put_picture(ANA, generation, e, &bytes, Instant::now());
+    let fx = s.put_picture(ANA, 0, generation, e, &bytes, Instant::now());
     assert_eq!(answer(&fx, ANA), Some(Some(Refusal::Stale)));
     // Stopped: refused, and its own come back at the next tick.
     s.stop_drawing(BIA, true);
@@ -1724,6 +1842,62 @@ fn a_report_from_before_the_panic_key_never_answers_a_later_grant() {
     assert_eq!(s.pending.len(), 1, "the pass of seat 1 still on its way");
 }
 
+/// P17 (P16's review): a viewer whose granted seat the panic key overtook
+/// asks again for it after Allow, while the old grant's report is still on
+/// its way. The report answers its own, cancelled grant alone: the new
+/// request stays for the host to answer, and nothing more is revoked (the
+/// panic key's release follows the report).
+#[test]
+fn a_cancelled_grants_late_report_leaves_a_new_request_pending() {
+    let now = Instant::now();
+    let mut s = with_seats(&[SeatKind::Controller, SeatKind::Controller]);
+    s.join(ANA);
+    s.set_controllers(ANA, 1);
+    s.request(ANA, S0, now);
+    let old = ticket_of(&s.answer(ANA, true, now).unwrap());
+    s.panic();
+    s.allow_control();
+    // Not asked again: the viewer is told of the seat as ever (it still
+    // shows the request it was granted, review of P17), then of its release.
+    assert!(!s.report_keeps_request(old, ANA, S0));
+    assert!(!s.request(ANA, S0, now).is_empty(), "asked again");
+    assert!(s.report_keeps_request(old, ANA, S0));
+    assert!(!s.report_keeps_request(old, ANA, S1), "its own seat alone");
+    // The old report: mirrored as the router has it, nothing else.
+    let fx = s.seat_changed(S0, Some(ANA), Some(old));
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Revoke { .. })),
+        "{fx:?}"
+    );
+    assert_eq!(s.holders()[0], Some(ANA));
+    assert_eq!(s.requests(), [(ANA, S0)], "the new request stays");
+    assert!(s.pending.is_empty() && !s.report_keeps_request(old, ANA, S0));
+    // The panic key's release: still asking, and the host answers it.
+    s.seat_changed(S0, None, None);
+    assert_eq!(s.requests(), [(ANA, S0)]);
+    let fx = s.answer(ANA, true, now).unwrap();
+    assert_eq!(grant_of(&fx).map(|g| (g.0, g.1)), Some((S0, ANA)));
+}
+
+/// P17: the same across a departure: the viewer leaves with a grant on its
+/// way, comes back and asks for that seat; the old report answers nothing.
+#[test]
+fn a_grant_from_a_former_stay_answers_no_request_of_the_next() {
+    let now = Instant::now();
+    let mut s = with_seats(&[SeatKind::Controller]);
+    s.join(ANA);
+    s.set_controllers(ANA, 1);
+    let old = ticket_of(&s.pass(ANA, S0).unwrap());
+    s.leave(ANA);
+    s.join(ANA);
+    s.set_controllers(ANA, 1);
+    assert!(!s.request(ANA, S0, now).is_empty());
+    s.seat_changed(S0, Some(ANA), Some(old));
+    assert_eq!(s.requests(), [(ANA, S0)]);
+    s.seat_changed(S0, None, None);
+    assert_eq!(s.requests(), [(ANA, S0)]);
+}
+
 /// P16: a grant the input task refused (the panic key overtook it) is
 /// answered by the refusal: it counts no more, and nothing else is.
 #[test]
@@ -2757,7 +2931,19 @@ fn play_ops(host_controllers: u8, ops: Vec<Op>) -> Result<(), TestCaseError> {
                 element.kind = couch_proto::board::ElementKind::Picture;
                 element.picture = Some(id);
                 let generation = s.board().generation_of(m);
-                let fx = s.put_picture(m, generation, element, &bytes, now);
+                // A viewer's is asked about first, before its bytes are read
+                // (P17): refused there, it never reaches the board.
+                let upload = couch_proto::board::PictureUpload {
+                    session: s.id(),
+                    upload: drawn,
+                    generation,
+                    element: element.clone(),
+                    len: bytes.len() as u32,
+                };
+                let fx = match (m != HOST).then(|| s.picture_coming(m, &upload, now)) {
+                    Some(Err(fx)) => fx,
+                    _ => s.put_picture(m, drawn, generation, element, &bytes, now),
+                };
                 let taken = s.board().element(m, drawn).is_some();
                 pictured |= taken && m != HOST;
                 if taken {
@@ -2774,7 +2960,7 @@ fn play_ops(host_controllers: u8, ops: Vec<Op>) -> Result<(), TestCaseError> {
                 // A viewer is always answered; its bytes go to every
                 // other viewer once, and only those, and to nobody if
                 // refused.
-                let answered = fx.iter().any(|e| matches!(e, Effect::Send { to, message: ControlMessage::PictureAnswer(a) } if *to == m && a.id == drawn));
+                let answered = fx.iter().any(|e| matches!(e, Effect::Send { to, message: ControlMessage::PictureAnswer(a) } if *to == m && a.id == drawn && a.upload == drawn));
                 prop_assert_eq!(answered, m != HOST && (s.is_viewer(m) && !s.is_ended()));
                 let sent: Vec<MemberId> = fx
                     .iter()

@@ -562,6 +562,10 @@ pub struct BoardRefused {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PictureUpload {
     pub session: SessionId,
+    /// The member's own number for this upload, counting up (P17): its
+    /// answer names it, so a late answer to an earlier upload of the same
+    /// element never stands for this one's.
+    pub upload: u32,
     /// As a batch's ([`BoardOps::generation`]).
     pub generation: u32,
     /// A picture ([`ElementKind::Picture`]) naming the bytes that follow.
@@ -621,6 +625,8 @@ pub fn header_len(prefix: [u8; 2]) -> Option<usize> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PictureAnswer {
     pub session: SessionId,
+    /// The upload answered ([`PictureUpload::upload`], P17).
+    pub upload: u32,
     /// The picture element's id.
     pub id: u32,
     /// `None`: on the board.
@@ -715,6 +721,7 @@ mod tests {
         }
         let upload = |len: usize| PictureUpload {
             session: SessionId(1),
+            upload: 0,
             generation: 0,
             element: picture(1),
             len: len as u32,
@@ -745,6 +752,7 @@ mod tests {
     fn picture_headers_roundtrip_within_their_limit() {
         let upload = PictureUpload {
             session: SessionId(u64::MAX),
+            upload: u32::MAX,
             generation: u32::MAX,
             element: Element {
                 id: u32::MAX,

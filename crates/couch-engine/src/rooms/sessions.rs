@@ -2054,7 +2054,14 @@ impl Actor {
                         pipeline.revoke(seat, Some(member));
                     }
                 }
-                let viewer = h.session.is_viewer(member);
+                // A cancelled grant's report while the viewer asks again for
+                // that seat (P17): its release follows, and the session keeps
+                // the request, so the viewer is told nothing of it (or it
+                // would take the seat as its new request's answer, then lose
+                // it). Without a new request it is told, as ever: it may
+                // still show the request it was granted until it hears.
+                let viewer = h.session.is_viewer(member)
+                    && !ticket.is_some_and(|t| h.session.report_keeps_request(t, member, seat));
                 // The controller we chose goes with the grant it was for
                 // (P12), once, by its ticket (P16).
                 let controller = ticket
