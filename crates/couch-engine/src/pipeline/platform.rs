@@ -159,6 +159,7 @@ impl Backend for WindowsBackend {
             min_interval,
             cursor: true,
             output,
+            hdr: request.hdr,
         };
         match source {
             Source::Window(id) => wgc(CaptureSource::Window(WindowId(*id)), options),

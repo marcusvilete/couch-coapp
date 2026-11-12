@@ -120,6 +120,10 @@ pub struct CaptureRequest {
     /// Nobody may be at the PC (a stream started from afar): a dialog the
     /// capture brings up is given up after [`UNANSWERED_AFTER`] (M16c).
     pub unattended: bool,
+    /// A monitor in HDR is captured in FP16 and converted to SDR with its
+    /// SDR white level (M29; Windows, unless `COUCH_HOST_HDR=0`). Off,
+    /// Windows' own 8-bit capture, which clips HDR content at 80 nits.
+    pub hdr: bool,
 }
 
 /// How long a capture started from afar waits for its dialog to be

@@ -174,6 +174,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     tray: false,
     drawingDefault: false,
     picturesDefault: false,
+    hdr: true,
     remotePlay: {
       on: false,
       pinSet: false,

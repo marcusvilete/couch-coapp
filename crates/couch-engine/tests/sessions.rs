@@ -17,7 +17,8 @@ use couch_engine::{
     Command, Engine, EngineError, EngineOptions, Event, HidingView, HostCapabilities,
     HostController, HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile,
     RemoteAccessView, RemoteAction, Response, RoomView, SessionEnd, SessionRole, SessionView,
-    SourceChoice, StreamStateView, StreamWindowRequest, StreamWindowSettingsView, WatchEnd,
+    SourceChoice, StreamStateView, StreamWindowRequest, StreamWindowSettingsView,
+    StreamingSettingsView, WatchEnd,
     pipeline::{
         AudioKind, Backend, CaptureRequest, Focus, GameProcess, GameWindow, Hiding, HostKeyEvent,
         NativeId, Source, Sources, ViewerOptions, ViewerProcess, VirtualDevice, WindowSource, ipc,
@@ -2782,6 +2783,42 @@ async fn a_backend_capturing_unwatched_captures_once_from_the_streams_start() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
+/// M29: Settings → Streaming reaches the capture. A stream converts a
+/// monitor in HDR by default; turned off, the next stream doesn't, and the
+/// setting is kept for the profile.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hdr_setting_reaches_the_next_streams_capture() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.captures_unwatched.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        a.handle(Command::GetStreaming).await,
+        Ok(Response::Streaming(StreamingSettingsView { hdr: true }))
+    ));
+    a.go_live(&room, 4).await;
+    wait("the first capture", || {
+        a.fake.captures.lock().unwrap().len() == 1
+    })
+    .await;
+    assert!(a.fake.captures.lock().unwrap()[0].hdr, "on by default");
+
+    assert!(matches!(
+        a.handle(Command::SetStreaming { hdr: false }).await,
+        Ok(Response::Streaming(StreamingSettingsView { hdr: false }))
+    ));
+    a.ok(Command::StopStream).await;
+    a.ok(stream_window()).await;
+    wait("the next capture", || {
+        a.fake.captures.lock().unwrap().len() == 2
+    })
+    .await;
+    assert!(!a.fake.captures.lock().unwrap()[1].hdr, "turned off");
+    assert!(matches!(
+        a.handle(Command::GetStreaming).await,
+        Ok(Response::Streaming(StreamingSettingsView { hdr: false }))
+    ));
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
 /// A backend where the host picks the sound by program (Linux, M16c): what
 /// plays is listed, and a stream with a program asks for that program's
 /// sound; one without, the default. Elsewhere both are refused.
@@ -3253,6 +3290,7 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
             audio: couch_engine::pipeline::AudioChoice::Off,
             pacing_trace: None,
             unattended: false,
+            hdr: true,
         })
         .await;
     let guest = MemberId([9; 32]);

@@ -177,6 +177,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         audio: args.audio,
         pacing_trace: args.pacing_trace.clone(),
         unattended: false,
+        // `COUCH_HOST_HDR=0` turns it off for measuring.
+        hdr: true,
     };
     stream.set_sound_level(args.audio_level);
     let mut current = stream.start_stream(stream_options.clone()).await;

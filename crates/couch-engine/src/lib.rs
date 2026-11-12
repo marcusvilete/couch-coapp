@@ -446,6 +446,14 @@ pub enum Command {
         /// And whether they start with pictures allowed (M27e).
         pictures: bool,
     },
+    /// Settings → Streaming (M29): how a host captures what it streams.
+    GetStreaming,
+    /// Saves it, from the next stream on; answers like
+    /// [`Command::GetStreaming`].
+    SetStreaming {
+        /// A monitor in HDR captured in FP16 and converted to SDR (Windows).
+        hdr: bool,
+    },
     /// While watching: the stream window's volume (P11), 0 to 100%, saved
     /// for the profile as the window's own slider is.
     SetStreamVolume {
@@ -673,6 +681,17 @@ pub struct DrawingSettingsView {
     pub on: bool,
     /// ...and with pictures allowed (M27e).
     pub pictures: bool,
+}
+
+/// Answer to [`Command::GetStreaming`] (M29).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StreamingSettingsView {
+    /// A monitor in HDR is captured in FP16 and converted to SDR with its
+    /// SDR white level; off, Windows' own 8-bit capture (HDR content
+    /// clipped at 80 nits).
+    pub hdr: bool,
 }
 
 /// Answer to [`Command::GetTray`] (M25c).
@@ -1547,6 +1566,7 @@ pub enum Response {
     StreamWindow(StreamWindowSettingsView),
     Tray(TrayView),
     Drawing(DrawingSettingsView),
+    Streaming(StreamingSettingsView),
     Drivers {
         drivers: Vec<DriverView>,
     },
@@ -1826,6 +1846,8 @@ impl fmt::Debug for Command {
                 .field("on", on)
                 .field("pictures", pictures)
                 .finish(),
+            Self::GetStreaming => f.write_str("GetStreaming"),
+            Self::SetStreaming { hdr } => f.debug_struct("SetStreaming").field("hdr", hdr).finish(),
             Self::SetStreamVolume { percent, muted } => f
                 .debug_struct("SetStreamVolume")
                 .field("percent", percent)
@@ -1919,6 +1941,7 @@ impl fmt::Debug for Response {
             Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
             Self::Tray(tray) => f.debug_tuple("Tray").field(tray).finish(),
             Self::Drawing(d) => f.debug_tuple("Drawing").field(d).finish(),
+            Self::Streaming(s) => f.debug_tuple("Streaming").field(s).finish(),
             Self::Drivers { drivers } => {
                 f.debug_struct("Drivers").field("drivers", drivers).finish()
             }
@@ -2937,6 +2960,13 @@ impl Engine {
                     store::DrawingSettings { on, pictures },
                 )?;
                 Ok(Response::Drawing(DrawingSettingsView { on, pictures }))
+            }
+            Command::GetStreaming => Ok(Response::Streaming(StreamingSettingsView {
+                hdr: store::streaming(self.profile.data_dir()).hdr,
+            })),
+            Command::SetStreaming { hdr } => {
+                store::save_streaming(self.profile.data_dir(), store::StreamingSettings { hdr })?;
+                Ok(Response::Streaming(StreamingSettingsView { hdr }))
             }
             Command::SetTray { on } => {
                 store::save_app(self.profile.data_dir(), store::AppSettings { tray: on })?;

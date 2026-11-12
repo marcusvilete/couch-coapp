@@ -1745,6 +1745,7 @@ impl Actor {
             audio,
             pacing_trace: None,
             unattended: start.from_afar,
+            hdr: crate::store::streaming(&self.data_dir).hdr,
         };
         let mut name = start.name.trim().to_string();
         if name.len() > MAX_STREAM_NAME {

@@ -72,6 +72,8 @@ export type World = {
   drawingDefault: boolean;
   /** Sessions start with pictures allowed (M27e). */
   picturesDefault: boolean;
+  /** Settings → Streaming (M29): a monitor in HDR converted to SDR. */
+  hdr: boolean;
   /** Remote play (M25): Settings → Remote play. Members offering it carry
    * their `remote` in the rooms. A PC unlocks with "246810". */
   remotePlay: RemotePlayView;
@@ -756,6 +758,11 @@ function handle(cmd: Command): Response | Promise<Response> {
       return { type: "streamWindow", bar: world.streamWindowBar };
     case "getTray":
       return { type: "tray", on: world.tray };
+    case "getStreaming":
+      return { type: "streaming", hdr: world.hdr };
+    case "setStreaming":
+      world.hdr = cmd.hdr;
+      return { type: "streaming", hdr: world.hdr };
     case "getDrawingDefault":
       return { type: "drawing", on: world.drawingDefault, pictures: world.picturesDefault };
     case "setDrawingDefault":
