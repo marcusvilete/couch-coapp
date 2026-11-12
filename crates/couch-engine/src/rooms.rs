@@ -206,6 +206,14 @@ pub(crate) enum Input {
     },
     /// The host's drawing key (M27b), physically pressed at the PC.
     HostDrawKey(SessionId),
+    /// A viewer's picture header read from `conn` (P17): whether its bytes
+    /// are worth reading (`reply`), asked of the session before they are.
+    PictureComing {
+        conn: ConnId,
+        peer: MemberId,
+        upload: couch_proto::board::PictureUpload,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     /// A viewer's picture read from `conn` (M27e), and its bytes if they
     /// are a picture the board takes, checked off this thread.
     PictureUp {
@@ -219,6 +227,8 @@ pub(crate) enum Input {
     HostPictureChecked {
         session: SessionId,
         own: bool,
+        /// Its number in its window's gate (P17).
+        upload: u32,
         generation: u32,
         element: couch_proto::board::Element,
         bytes: Option<Vec<u8>>,
@@ -764,6 +774,15 @@ impl Actor {
             Input::HostKeysBound { session, keys } => self.host_keys_bound(session, keys, now),
             Input::HostKeysLost { session, error } => self.host_keys_lost(session, error, now),
             Input::HostDrawKey(session) => self.host_draw_key(session, now),
+            Input::PictureComing {
+                conn,
+                peer,
+                upload,
+                reply,
+            } => {
+                let coming = self.picture_coming(conn, peer, &upload, now);
+                let _ = reply.send(coming);
+            }
             Input::PictureUp {
                 conn,
                 peer,
@@ -773,6 +792,7 @@ impl Actor {
             Input::HostPictureChecked {
                 session,
                 own,
+                upload,
                 generation,
                 element,
                 bytes,
@@ -782,7 +802,7 @@ impl Actor {
                 } else {
                     sessions::Editor::Overlay
                 };
-                self.host_picture_checked(session, from, generation, element, bytes, now);
+                self.host_picture_checked(session, from, upload, generation, element, bytes, now);
             }
             Input::BoardWindowOpened { session, window } => {
                 self.board_window_opened(session, window, now)

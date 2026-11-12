@@ -76,7 +76,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// `BoardState.pictures`, the picture streams (`PICTURE_UP`, `PICTURE`),
 /// `PictureAnswer` and three refusals; `RemoteOp::SetPictures` and
 /// `RemoteDrawing.pictures`.
-pub const PROTOCOL_MINOR: u16 = 18;
+/// 19: a number per picture upload (P17): `PictureUpload.upload`, echoed in
+/// `PictureAnswer.upload`.
+pub const PROTOCOL_MINOR: u16 = 19;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -102,6 +104,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (16, "0.29"),
     (17, "0.30"),
     (18, "0.32"),
+    (19, "0.33"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

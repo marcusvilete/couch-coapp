@@ -1041,11 +1041,13 @@ mod tests {
             }),
             ControlMessage::PictureAnswer(crate::board::PictureAnswer {
                 session,
+                upload: u32::MAX,
                 id: 7,
                 refusal: Some(Refusal::TooManyPictures),
             }),
             ControlMessage::PictureAnswer(crate::board::PictureAnswer {
                 session,
+                upload: 0,
                 id: 8,
                 refusal: None,
             }),

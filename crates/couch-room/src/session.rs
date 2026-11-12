@@ -53,7 +53,7 @@ use std::{
 use couch_proto::{
     board::{
         BoardCleared, BoardOp, BoardRefused, BoardSnapshot, BoardState, BoardUpdate, Element,
-        PictureAnswer, PictureId, Refusal,
+        PictureAnswer, PictureId, PictureUpload, Refusal,
     },
     control::ControlMessage,
     ids::{MemberId, Permissions, SeatId, SessionId},
@@ -729,7 +729,7 @@ impl HostSession {
         }
         if self.is_viewer(member) {
             let mut fx = vec![reply(JoinResult::Joined)];
-            fx.extend(self.board_for(member));
+            fx.extend(self.board_for(member, true));
             return fx;
         }
         if self.viewers.len() >= usize::from(self.config.max_viewers) {
@@ -738,7 +738,7 @@ impl HostSession {
         self.viewers.push(member);
         let mut fx = vec![Effect::StartViewer(member), reply(JoinResult::Joined)];
         // What is drawn on the stream, after the join's answer (M27a).
-        fx.extend(self.board_for(member));
+        fx.extend(self.board_for(member, true));
         fx.extend([Effect::Broadcast(self.status()), Effect::Changed]);
         fx
     }
@@ -948,6 +948,13 @@ impl HostSession {
                 .iter()
                 .position(|p| p.ticket == t && p.seat == seat && p.member == m)
         });
+        // A cancelled grant's report (P17): its release is right behind it
+        // on the same ordered channel, so it answers no request (the viewer
+        // may have asked again for that seat since: the panic key, or a
+        // departure and a return), and it frees nothing (its frees were
+        // cleared). The engine tells the viewer nothing of it either
+        // ([`Self::report_keeps_request`]), so both sides keep the request.
+        let cancelled = answered.is_some_and(|i| self.pending[i].cancelled);
         let freed = answered.map(|i| self.pending.remove(i).frees);
         let host = holder.is_some_and(|h| self.is_host(h));
         match holder {
@@ -971,7 +978,7 @@ impl HostSession {
                 }
                 // A request for this seat is answered; one for another seat
                 // stays, and the viewer keeps asking too.
-                if self.requests.contains(&(member, seat)) {
+                if !cancelled && self.requests.contains(&(member, seat)) {
                     self.requests.retain(|r| *r != (member, seat));
                     self.asked_with.remove(&member);
                 }
@@ -999,6 +1006,26 @@ impl HostSession {
                 fx
             }
         }
+    }
+
+    /// Whether the report of grant `ticket` (`seat` to `member`) leaves a
+    /// request of the member's standing (P17): the grant was cancelled and
+    /// the member has asked for that seat again since (after the panic key,
+    /// or a departure and a return). Its release follows it, and
+    /// [`Self::seat_changed`] keeps the request, so the engine tells the
+    /// viewer nothing of it. Without a request standing, the viewer is told
+    /// as before (it may still show the accepted request as its own until
+    /// it hears of the seat, then of its release).
+    pub fn report_keeps_request(
+        &self,
+        ticket: GrantTicket,
+        member: MemberId,
+        seat: SeatId,
+    ) -> bool {
+        self.pending
+            .iter()
+            .any(|p| p.ticket == ticket && p.cancelled && p.member == member && p.seat == seat)
+            && self.requests.contains(&(member, seat))
     }
 
     /// The input task refused the grant `ticket` names (P16): the panic key
@@ -1526,30 +1553,33 @@ impl HostSession {
             .map(|t| t + mark)
     }
 
-    /// The board's state and the board whole, to one viewer: as it starts
-    /// watching, in a new generation of its own (the window takes a
-    /// snapshot as a clear of its own elements, so a batch it made before
-    /// must be dropped here too, not taken).
-    fn board_for(&mut self, member: MemberId) -> Vec<Effect> {
+    /// The board whole, then the board's state (`with_state`), to one
+    /// viewer: as it starts watching, in a new generation of its own (the
+    /// window takes a snapshot as a clear of its own elements, so a batch it
+    /// made before must be dropped here too, not taken). The snapshot comes
+    /// first (P17's review): a window draws once it hears drawing is on,
+    /// and must draw in the snapshot's generation.
+    fn board_for(&mut self, member: MemberId, with_state: bool) -> Vec<Effect> {
         self.board.new_generation(member);
         // A snapshot: the window starts afresh, its pictures too.
         self.pictures_sent.remove(&member);
-        let mut fx = vec![Effect::Send {
+        let mut fx: Vec<Effect> = BoardSnapshot::parts(
+            self.id,
+            self.board.generation_of(member),
+            self.board.snapshot(),
+        )
+        .into_iter()
+        .map(|part| Effect::Send {
             to: member,
-            message: self.board_state(),
-        }];
-        fx.extend(
-            BoardSnapshot::parts(
-                self.id,
-                self.board.generation_of(member),
-                self.board.snapshot(),
-            )
-            .into_iter()
-            .map(|part| Effect::Send {
+            message: ControlMessage::BoardSnapshot(part),
+        })
+        .collect();
+        if with_state {
+            fx.push(Effect::Send {
                 to: member,
-                message: ControlMessage::BoardSnapshot(part),
-            }),
-        );
+                message: self.board_state(),
+            });
+        }
         let all: Vec<Element> = self
             .board
             .snapshot()
@@ -1662,20 +1692,63 @@ impl HostSession {
         }
     }
 
+    /// A viewer's picture whose header alone was read (P17): `Ok` if its
+    /// bytes are worth reading, or the effects of its refusal, answered as
+    /// [`Self::put_picture`] would answer it (with nothing to say where that
+    /// says nothing). Only the checks that need no bytes
+    /// (`Board::picture_coming`), so a member refused for those costs the
+    /// host no read and no decode; the rest come with the bytes.
+    pub fn picture_coming(
+        &mut self,
+        member: MemberId,
+        upload: &PictureUpload,
+        now: Instant,
+    ) -> Result<(), Vec<Effect>> {
+        if self.ended || !self.draws_here(member) || self.me == Some(member) {
+            return Err(Vec::new());
+        }
+        self.board_now = Some(now);
+        let blocked = self.drawing_blocked(member);
+        let refused = match self.board.picture_coming(
+            member,
+            upload.generation,
+            &upload.element,
+            now,
+            blocked,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(why) => why,
+        };
+        if refused != Refusal::Stale {
+            self.resync_due.entry(member).or_insert(now);
+        }
+        Err(vec![Effect::Send {
+            to: member,
+            message: ControlMessage::PictureAnswer(PictureAnswer {
+                session: self.id,
+                upload: upload.upload,
+                id: upload.element.id,
+                refusal: Some(refused),
+            }),
+        }])
+    }
+
     /// A member's picture, made in `generation` (M27e): `element` with
     /// `bytes`, which the engine has checked decode as a picture within the
     /// limits. Taken under the same checks as [`Self::draw`] and the
     /// pictures' own (`Board::put_picture`).
     ///
-    /// A viewer is always answered ([`PictureAnswer`], stale ones too): its
-    /// engine holds its later batches until then. Taken, the element goes to
-    /// everyone else as a `Put`, and its bytes to each who hasn't got them;
-    /// refused, it gets its own elements back as after a refused batch. The
-    /// host's own picture is answered by the engine, which called this; its
-    /// refusal goes to its windows as any refusal does.
+    /// A viewer is always answered ([`PictureAnswer`], stale ones too, with
+    /// its `upload`, P17): its engine holds its later batches until then.
+    /// Taken, the element goes to everyone else as a `Put`, and its bytes to
+    /// each who hasn't got them; refused, it gets its own elements back as
+    /// after a refused batch. The host's own picture is answered by the
+    /// engine, which called this; its refusal goes to its windows as any
+    /// refusal does.
     pub fn put_picture(
         &mut self,
         member: MemberId,
+        upload: u32,
         generation: u32,
         element: Element,
         bytes: &PictureBytes,
@@ -1691,6 +1764,7 @@ impl HostSession {
             to: member,
             message: ControlMessage::PictureAnswer(PictureAnswer {
                 session: self.id,
+                upload,
                 id,
                 refusal,
             }),
@@ -1765,6 +1839,7 @@ impl HostSession {
     pub fn refuse_picture(
         &mut self,
         member: MemberId,
+        upload: u32,
         id: u32,
         why: Refusal,
         now: Instant,
@@ -1772,6 +1847,10 @@ impl HostSession {
         if self.ended || !self.draws_here(member) {
             return Vec::new();
         }
+        // A refused batch, counted as any is (P17's review): bytes that
+        // aren't a picture, sent fast, are held back by the rate at the
+        // next header, unread.
+        self.board.count_refused(member, now);
         self.resync_due.entry(member).or_insert(now);
         if self.me == Some(member) {
             let refused = ControlMessage::BoardRefused(BoardRefused {
@@ -1784,6 +1863,7 @@ impl HostSession {
                 to: member,
                 message: ControlMessage::PictureAnswer(PictureAnswer {
                     session: self.id,
+                    upload,
                     id,
                     refusal: Some(why),
                 }),
@@ -1847,15 +1927,20 @@ impl HostSession {
         if self.ended || !self.board.set_on(on) {
             return Vec::new();
         }
-        let mut fx = self.to_viewers(&self.board_state(), None);
+        // The board in its new generation before the switch (P17): a window
+        // draws once it hears drawing is on, and what it draws must name
+        // the generation of the snapshot it had, or it is dropped as stale,
+        // unsaid. Off, the same: the clear, then the switch.
+        let mut fx = Vec::new();
         if on {
             for viewer in self.viewers.clone() {
-                fx.extend(self.board_for(viewer).into_iter().skip(1));
+                fx.extend(self.board_for(viewer, false));
             }
             fx.extend(self.host_board());
         } else {
             fx.extend(self.to_board(&self.board_cleared(None), None));
         }
+        fx.extend(self.to_viewers(&self.board_state(), None));
         fx.push(Effect::Changed);
         fx
     }
