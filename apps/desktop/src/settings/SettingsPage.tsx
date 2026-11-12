@@ -1,6 +1,6 @@
 // Settings, as a page over the room (Esc goes back): your name, the look,
 // the keyboard shortcuts (each can move to another key), the overlay, the
-// stream window (P11), drawing on the stream (M27a), the network (which relay, applied when the app
+// stream window (P11), drawing on the stream (M27a), streaming (M29: HDR), the network (which relay, applied when the app
 // restarts), remote play (M25), the drivers, a backup of the profile (M13), and About. Each
 // section is mounted only while shown: a passphrase leaves with its page, and
 // nothing polls behind it.
@@ -12,6 +12,7 @@ import {
   Info,
   Keyboard,
   Layers,
+  MonitorPlay,
   Network,
   Palette,
   Pencil,
@@ -33,6 +34,7 @@ import {
   DriversSection,
   NetworkSection,
   OverlaySection,
+  StreamingSection,
   StreamWindowSection,
 } from "./sections";
 import { RemotePlaySection } from "./RemotePlaySection";
@@ -46,20 +48,23 @@ export type SettingsSection =
   | "overlay"
   | "streamWindow"
   | "drawing"
+  | "streaming"
   | "network"
   | "remotePlay"
   | "drivers"
   | "backup"
   | "about";
 
-/** `hostOnly`: only where this system can host (`EngineInfo.capabilities.sessions`, M16b). */
-const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode; hostOnly?: true }[] = [
+/** `hostOnly`: only where this system can host (`EngineInfo.capabilities.sessions`, M16b).
+ * `windowsOnly`: what only a Windows host does (M29: HDR, which Linux's capture doesn't convert). */
+const SECTIONS: { id: SettingsSection; label: string; icon: ReactNode; hostOnly?: true; windowsOnly?: true }[] = [
   { id: "profile", label: "Profile", icon: <UserRound /> },
   { id: "appearance", label: "Appearance", icon: <Palette /> },
   { id: "shortcuts", label: "Shortcuts", icon: <Keyboard /> },
   { id: "overlay", label: "Overlay and sounds", icon: <Layers />, hostOnly: true },
   { id: "streamWindow", label: "Stream window", icon: <AppWindow /> },
   { id: "drawing", label: "Drawing", icon: <Pencil />, hostOnly: true },
+  { id: "streaming", label: "Streaming", icon: <MonitorPlay />, hostOnly: true, windowsOnly: true },
   { id: "network", label: "Network", icon: <Network /> },
   { id: "remotePlay", label: "Remote play", icon: <Router /> },
   { id: "drivers", label: "Drivers", icon: <Cpu />, hostOnly: true },
@@ -89,7 +94,7 @@ export function SettingsPage(props: {
 }) {
   const canHost = props.info?.capabilities.sessions ?? true;
   const linux = props.info?.platform === "linux";
-  const sections = SECTIONS.filter((s) => canHost || !s.hostOnly);
+  const sections = SECTIONS.filter((s) => (canHost || !s.hostOnly) && !(linux && s.windowsOnly));
   const section = sections.find((s) => s.id === props.section) ?? sections[0];
   return (
     <div className="settings">
@@ -138,6 +143,7 @@ export function SettingsPage(props: {
             {section.id === "overlay" && <OverlaySection linux={linux} />}
             {section.id === "streamWindow" && <StreamWindowSection />}
             {section.id === "drawing" && <DrawingSection />}
+            {section.id === "streaming" && <StreamingSection />}
             {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
             {section.id === "remotePlay" && <RemotePlaySection canHost={props.info?.homePc ?? true} linux={linux} />}
             {section.id === "drivers" && <DriversSection linux={linux} />}

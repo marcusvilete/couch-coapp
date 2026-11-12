@@ -140,6 +140,54 @@ export function DrawingSection() {
   );
 }
 
+// ---- Streaming (M29) ----
+
+export function StreamingSection() {
+  const [hdr, setHdr] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    request({ type: "getStreaming" }, "streaming")
+      .then((v) => setHdr(v.hdr))
+      .catch((e) => setError(errorText(e)));
+  }, []);
+  const change = (next: boolean) => {
+    const was = hdr;
+    setHdr(next);
+    setError(null);
+    request({ type: "setStreaming", hdr: next }, "streaming").catch((e) => {
+      setHdr(was);
+      setError(errorText(e));
+    });
+  };
+  return (
+    <div className="settings-section">
+      <p className="settings-lead">
+        On a monitor with HDR turned on, Windows' own capture makes games in HDR look washed out to those watching:
+        light greys, whites and everything brighter all turn the same white. Couch Co-App can capture the HDR picture
+        itself and turn it into the colours their screens show.
+      </p>
+      <div className="settings-card">
+        <Switch
+          checked={hdr ?? true}
+          disabled={hdr == null}
+          onChange={change}
+          label="Convert the picture of a monitor in HDR"
+          detail="From the next stream you start. Monitors without HDR are captured as before."
+        />
+      </div>
+      {error && (
+        <p className="field-error selectable" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="settings-note">
+        Streams stay SDR: what is brighter than your monitor's SDR content brightness shows as white. Turn this off
+        only if colours look wrong with it on.
+      </p>
+    </div>
+  );
+}
+
 // ---- Stream window ----
 
 export function StreamWindowSection() {

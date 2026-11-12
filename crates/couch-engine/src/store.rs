@@ -10,6 +10,7 @@
 //!   (M27a).
 //! - `app.json`: whether the app keeps an icon in the notification area
 //!   (M25c).
+//! - `streaming.json`: how a host captures: HDR converted to SDR (M29).
 //!
 //! The room actor rewrites `settings.json` whole, so what the engine itself
 //! writes has files of its own.
@@ -50,6 +51,7 @@ const HOST_AUDIO_FILE: &str = "host-audio.json";
 const STREAM_WINDOW_FILE: &str = "stream-window.json";
 const APP_FILE: &str = "app.json";
 const DRAWING_FILE: &str = "drawing.json";
+const STREAMING_FILE: &str = "streaming.json";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread. `CCR3` (M13) adds the chain of
@@ -74,7 +76,7 @@ pub enum StoreError {
 
 /// The settings files a backup carries, as they are (`crate::backup`).
 /// Not the webview's own storage (the room order, the last session setup).
-const BACKED_UP_FILES: [&str; 8] = [
+const BACKED_UP_FILES: [&str; 9] = [
     SETTINGS_FILE,
     SHORTCUTS_FILE,
     NETWORK_FILE,
@@ -83,6 +85,7 @@ const BACKED_UP_FILES: [&str; 8] = [
     STREAM_WINDOW_FILE,
     APP_FILE,
     DRAWING_FILE,
+    STREAMING_FILE,
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,6 +553,42 @@ pub(crate) fn save_drawing(dir: &Path, settings: DrawingSettings) -> Result<(), 
     write_atomic(&dir.join(DRAWING_FILE), &bytes)
 }
 
+/// `streaming.json` (M29): how a host captures what it streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StreamingSettings {
+    /// A monitor in HDR is captured in FP16 and converted to SDR with its
+    /// SDR white level (Windows). Off, Windows' own 8-bit capture, which
+    /// clips HDR content at 80 nits. On unless the user turns it off.
+    #[serde(default = "on")]
+    pub hdr: bool,
+}
+
+fn on() -> bool {
+    true
+}
+
+impl Default for StreamingSettings {
+    fn default() -> Self {
+        Self { hdr: true }
+    }
+}
+
+pub(crate) fn streaming(dir: &Path) -> StreamingSettings {
+    let path = dir.join(STREAMING_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            StreamingSettings::default()
+        }),
+        Err(_) => StreamingSettings::default(),
+    }
+}
+
+pub(crate) fn save_streaming(dir: &Path, settings: StreamingSettings) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
+    write_atomic(&dir.join(STREAMING_FILE), &bytes)
+}
+
 /// `app.json` (M25c): the app's own behaviour on this PC.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AppSettings {
@@ -762,6 +801,23 @@ mod tests {
         let first = store(dir.path()).identity().unwrap();
         let again = store(dir.path()).identity().unwrap();
         assert_eq!(first.to_bytes(), again.to_bytes());
+    }
+
+    /// M29: converting HDR is on unless the user turned it off, and a file
+    /// from before it, or a damaged one, leaves it on.
+    #[test]
+    fn hdr_conversion_is_on_unless_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(streaming(dir.path()).hdr, "no file");
+        save_streaming(dir.path(), StreamingSettings { hdr: false }).unwrap();
+        assert!(!streaming(dir.path()).hdr);
+        save_streaming(dir.path(), StreamingSettings { hdr: true }).unwrap();
+        assert!(streaming(dir.path()).hdr);
+        fs::write(dir.path().join(STREAMING_FILE), b"{}").unwrap();
+        assert!(streaming(dir.path()).hdr, "a file without the field");
+        fs::write(dir.path().join(STREAMING_FILE), b"not json").unwrap();
+        assert!(streaming(dir.path()).hdr, "a damaged file");
+        assert!(BACKED_UP_FILES.contains(&STREAMING_FILE));
     }
 
     #[test]

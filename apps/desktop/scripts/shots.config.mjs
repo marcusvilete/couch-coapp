@@ -269,6 +269,8 @@ export const SHOTS = [
   ["stream-picker-linux-keyboard", "linux-keyboard-idle", click("Start streaming…")],
   ["settings-stream-window", "lobby", settings("Stream window")],
   ["settings-drawing", "lobby", settings("Drawing")],
+  // M29: HDR converted for guests; Linux has no such section.
+  ["settings-streaming", "lobby", settings("Streaming")],
   // M25: the home PC's remote play, a laptop trusted; and one set up anew.
   ["settings-remote-home", "remote-home", settings("Remote play")],
   ["settings-remote-new", "lobby", settings("Remote play")],

@@ -31,6 +31,7 @@ impl ScreenProbe {
                 min_interval: Duration::from_secs(1) / 60,
                 cursor: false,
                 output: FrameOutput::Cpu,
+                hdr: true,
             },
         )?;
         let samples = Arc::new(Mutex::new(Samples::default()));
@@ -104,6 +105,7 @@ pub fn scan_once(out: Option<&std::path::Path>) -> anyhow::Result<()> {
             min_interval: Duration::from_millis(1),
             cursor: false,
             output: FrameOutput::Cpu,
+            hdr: true,
         },
     )?;
     let frame = match capturer.next_event(Duration::from_secs(3))? {

@@ -48,6 +48,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             min_interval: Duration::from_secs(1) / args.fps,
             cursor: false,
             output: FrameOutput::Cpu,
+            hdr: true,
         },
     )
     .with_context(|| format!("starting capture of {source:?}"))?;

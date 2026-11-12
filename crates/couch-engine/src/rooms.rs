@@ -927,6 +927,8 @@ impl Actor {
             | Command::SetTray { .. }
             | Command::GetDrawingDefault
             | Command::SetDrawingDefault { .. }
+            | Command::GetStreaming
+            | Command::SetStreaming { .. }
             | Command::GetDrivers
             | Command::SharedChoice { .. }
             | Command::PlayChime

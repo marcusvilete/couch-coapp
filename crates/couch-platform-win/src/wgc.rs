@@ -11,7 +11,10 @@
 
 use std::{
     ffi::c_void,
-    sync::{Arc, Mutex, OnceLock, PoisonError},
+    sync::{
+        Arc, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -61,6 +64,28 @@ pub struct Options {
     /// At most one frame per this interval (where Windows supports it).
     pub min_interval: Duration,
     pub cursor: bool,
+    /// The frames' pixel format.
+    pub format: Format,
+}
+
+/// The pixel format Windows hands frames over in (M29).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// 8-bit BGRA, sRGB: what an SDR desktop is composed in. Of a monitor in
+    /// HDR, Windows converts its scRGB to this itself.
+    Bgra8,
+    /// 16-bit floating point RGBA, linear scRGB (1.0 = 80 nits): what
+    /// Windows composes a monitor in HDR in.
+    Fp16,
+}
+
+impl Format {
+    fn pixel_format(self) -> DirectXPixelFormat {
+        match self {
+            Self::Bgra8 => DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            Self::Fp16 => DirectXPixelFormat::R16G16B16A16Float,
+        }
+    }
 }
 
 /// A captured frame, valid for the sink's call only.
@@ -130,6 +155,12 @@ struct State {
     device: Device,
     /// The pool's frame size.
     size: SizeInt32,
+    /// The format asked for (FP16 when set), outside the lock: a sink may
+    /// ask for another from inside its own call ([`FormatSwitch`]), which
+    /// runs under it. And the one the pool makes now: they differ until
+    /// the next frame remakes the pool.
+    wanted: Arc<AtomicBool>,
+    pool_format: Format,
     buffers: i32,
     stopped: bool,
 }
@@ -144,7 +175,36 @@ struct Device {
 // once a texture pool uses it), and the WinRT device wraps the same device.
 unsafe impl Send for Device {}
 
-const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
+/// Changes a running session's format from any thread, its sink's own call
+/// included (M29: the monitor went in or out of HDR, or converting failed);
+/// harmless once the session is gone.
+#[derive(Clone)]
+pub struct FormatSwitch(Arc<AtomicBool>);
+
+impl FormatSwitch {
+    /// A switch for a session to start with ([`Session::start_switched`]),
+    /// first asking for `format`: whoever holds it can change the format
+    /// from the session's first frame on.
+    pub fn new(format: Format) -> Self {
+        Self(Arc::new(AtomicBool::new(format == Format::Fp16)))
+    }
+
+    fn get(&self) -> Format {
+        if self.0.load(Ordering::SeqCst) {
+            Format::Fp16
+        } else {
+            Format::Bgra8
+        }
+    }
+
+    /// Frames in `format` from the next one on; the frame that comes first
+    /// is still in the old one.
+    pub fn set(&self, format: Format) {
+        // Never the session's lock: this may run inside a frame's delivery,
+        // which holds it (M29's fallback deadlocked so).
+        self.0.store(format == Format::Fp16, Ordering::SeqCst);
+    }
+}
 
 impl Session {
     pub fn start(
@@ -153,7 +213,27 @@ impl Session {
         device: &ID3D11Device,
         sink: impl Sink,
     ) -> windows_core::Result<Self> {
+        Self::start_switched(
+            target,
+            options,
+            device,
+            sink,
+            FormatSwitch::new(options.format),
+        )
+    }
+
+    /// [`Self::start`] with a format switch made beforehand, which the sink
+    /// may hold to change the format from the first frame on;
+    /// `options.format` is ignored for the switch's.
+    pub fn start_switched(
+        target: Target,
+        options: Options,
+        device: &ID3D11Device,
+        sink: impl Sink,
+        switch: FormatSwitch,
+    ) -> windows_core::Result<Self> {
         winrt_ready();
+        let format = switch.get();
         let interop = windows_core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         // SAFETY: handle values are checked by Windows, which fails for
         // anything that isn't a window or monitor.
@@ -169,7 +249,13 @@ impl Session {
             unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()?;
         let size = item.Size()?;
         let buffers = options.buffers.max(1);
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&winrt, FORMAT, buffers, size)?;
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            &winrt,
+            format.pixel_format(),
+            buffers,
+            size,
+        )?;
+        let wanted = switch.0;
         let state = Arc::new(Mutex::new(State {
             sink: Box::new(sink),
             device: Device {
@@ -177,6 +263,8 @@ impl Session {
                 winrt,
             },
             size,
+            wanted,
+            pool_format: format,
             buffers,
             stopped: false,
         }));
@@ -255,9 +343,20 @@ fn on_frame(pool: &Direct3D11CaptureFramePool, state: &Mutex<State>) {
         if content.Width <= 0 || content.Height <= 0 {
             return Ok(());
         }
+        let wanted = if state.wanted.load(Ordering::SeqCst) {
+            Format::Fp16
+        } else {
+            Format::Bgra8
+        };
         if content != state.size {
-            pool.Recreate(&state.device.winrt, FORMAT, state.buffers, content)?;
+            pool.Recreate(
+                &state.device.winrt,
+                wanted.pixel_format(),
+                state.buffers,
+                content,
+            )?;
             state.size = content;
+            state.pool_format = wanted;
             return Ok(());
         }
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
@@ -279,6 +378,26 @@ fn on_frame(pool: &Direct3D11CaptureFramePool, state: &Mutex<State>) {
             height: (content.Height as u32).min(desc.Height),
             timestamp,
         });
+        // Another format asked for (the monitor went in or out of HDR):
+        // the pool remade after this frame, which the sink took as it came,
+        // so a still window still has its picture.
+        // Read again: the sink may have asked for another during its call
+        // (the capture giving up on converting HDR), and a still window may
+        // send no next frame.
+        let wanted = if state.wanted.load(Ordering::SeqCst) {
+            Format::Fp16
+        } else {
+            Format::Bgra8
+        };
+        if wanted != state.pool_format {
+            pool.Recreate(
+                &state.device.winrt,
+                wanted.pixel_format(),
+                state.buffers,
+                content,
+            )?;
+            state.pool_format = wanted;
+        }
         Ok(())
     })();
     if let Err(e) = delivered {

@@ -4,7 +4,8 @@
 //!
 //! Windows.Graphics.Capture reuses its one texture as soon as the frame
 //! callback returns, so every frame is copied, GPU to GPU, into a texture of
-//! the pool. A texture is free again once no frame points at it (FFmpeg holds
+//! the pool; an HDR frame (FP16) is drawn into it as SDR instead (M29,
+//! [`TexturePool::convert`]), so the pool is BGRA either way. A texture is free again once no frame points at it (FFmpeg holds
 //! a frame until NVENC has read it).
 //!
 //! A pool's textures live as long as the pool, and as long as any encoder
@@ -25,6 +26,8 @@ use std::{
 
 use bytes::Bytes;
 use couch_media::{BgraFrame, GpuFrame, GpuTexture, MediaError, Micros};
+
+use crate::tonemap::Converter;
 use windows::{
     Win32::{
         Foundation::HMODULE,
@@ -66,6 +69,8 @@ pub struct TexturePool {
     kept: Arc<Kept>,
     /// Staging textures for frames read back mapped (M12a).
     mapped: Arc<StagingSet>,
+    /// Draws HDR frames into the pool's textures (M29), made on the first.
+    converter: Option<Converter>,
     /// The last copy's timings, in microseconds: waiting for the device's
     /// lock, queuing the copy, and flushing it (M9f: `COUCH_CAPTURE_TRACE`).
     pub last_timings: (u64, u64, u64),
@@ -112,6 +117,7 @@ impl TexturePool {
                 made: std::sync::atomic::AtomicUsize::new(0),
                 gave_up: AtomicBool::new(false),
             }),
+            converter: None,
             last_timings: (0, 0, 0),
         })
     }
@@ -137,6 +143,35 @@ impl TexturePool {
         from: &ID3D11Texture2D,
         captured_at: Micros,
     ) -> Result<Option<GpuFrame>, MediaError> {
+        self.put(from, captured_at, None)
+    }
+
+    /// Like [`Self::copy`], for an FP16 scRGB frame of a monitor in HDR
+    /// (M29): drawn into the texture as SDR whose white is `white` (scRGB),
+    /// by a [`Converter`]. The pool's format is BGRA, as for a copy.
+    pub fn convert(
+        &mut self,
+        from: &ID3D11Texture2D,
+        captured_at: Micros,
+        white: f32,
+    ) -> Result<Option<GpuFrame>, MediaError> {
+        self.put(from, captured_at, Some(white))
+    }
+
+    fn put(
+        &mut self,
+        from: &ID3D11Texture2D,
+        captured_at: Micros,
+        convert: Option<f32>,
+    ) -> Result<Option<GpuFrame>, MediaError> {
+        if convert.is_some() {
+            if self.converter.is_none() {
+                self.converter = Some(Converter::new(&self.device)?);
+            }
+        } else if let Some(converter) = self.converter.as_mut() {
+            // The monitor left HDR: Windows' FP16 frames go with it.
+            converter.forget_sources();
+        }
         // A frame dropped below (every texture in use) or failed shows no
         // timings, not the last frame's.
         self.last_timings = (0, 0, 0);
@@ -182,15 +217,32 @@ impl TexturePool {
         // SAFETY: paired with the Leave below; nothing between can return.
         unsafe { self.multithread.Enter() };
         let locked = started.elapsed();
-        // SAFETY: both textures are live on this device, in the same format,
-        // and the region lies within both. Flush hands the copy to the GPU
-        // now, ahead of the encoder's work on the same device.
-        unsafe {
-            self.context
-                .CopySubresourceRegion(&slot.texture, 0, 0, 0, 0, from, 0, Some(&region));
-        }
+        let drawn = match (convert, self.converter.as_mut()) {
+            (Some(white), Some(converter)) => {
+                converter.convert(from, &slot.texture, self.width, self.height, white)
+            }
+            _ => {
+                // SAFETY: both textures are live on this device, in the same
+                // format, and the region lies within both.
+                unsafe {
+                    self.context.CopySubresourceRegion(
+                        &slot.texture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        from,
+                        0,
+                        Some(&region),
+                    );
+                }
+                Ok(())
+            }
+        };
         let copied = started.elapsed();
-        // SAFETY: as above.
+        // Flush hands the copy or draw to the GPU now, ahead of the
+        // encoder's work on the same device.
+        // SAFETY: a live context, under the lock.
         unsafe { self.context.Flush() };
         let flushed = started.elapsed();
         // SAFETY: entered above.
@@ -200,6 +252,7 @@ impl TexturePool {
             (copied - locked).as_micros() as u64,
             (flushed - copied).as_micros() as u64,
         );
+        drawn?;
         Ok(Some(GpuFrame::new(
             slot,
             self.width,
@@ -434,7 +487,7 @@ fn protect(device: &ID3D11Device) -> Result<ID3D11Multithread, MediaError> {
     Ok(multithread)
 }
 
-fn texture(
+pub(crate) fn texture(
     device: &ID3D11Device,
     format: DXGI_FORMAT,
     width: u32,

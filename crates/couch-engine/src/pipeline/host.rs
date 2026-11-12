@@ -222,6 +222,9 @@ pub struct StreamOptions {
     /// Started from afar (remote play, M16c): nobody may be at the PC to
     /// answer a dialog the capture brings up ([`CaptureRequest::unattended`]).
     pub unattended: bool,
+    /// A monitor in HDR converted to SDR (M29, Settings → Streaming;
+    /// [`CaptureRequest::hdr`]).
+    pub hdr: bool,
 }
 
 /// The host's own controllers, read on this PC and each played through a
@@ -1608,6 +1611,7 @@ fn capture_loop(shared: &Shared, stream: &Arc<Stream>, stop: &AtomicBool) {
             in_memory: in_memory(stream, paced),
             paced,
             unattended: stream.options.unattended,
+            hdr: stream.options.hdr,
         };
         let mut started = shared.backend.capture(&source, request);
         if started.is_err() && restarting {

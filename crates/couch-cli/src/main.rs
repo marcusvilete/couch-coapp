@@ -25,6 +25,8 @@ mod fake_game;
 mod front_probe;
 #[cfg(windows)]
 mod gates;
+#[cfg(windows)]
+mod hdr_probe;
 mod host;
 #[cfg(windows)]
 mod host_pad;
@@ -369,6 +371,32 @@ enum Cmd {
         #[arg(long, default_value_t = 200)]
         presses: u32,
     },
+    /// Each monitor's colour (HDR or not, its SDR white level), and what a
+    /// capture holds in 8-bit BGRA and in FP16 (M29). Reads only.
+    #[cfg(windows)]
+    HdrProbe {
+        /// A window to grab (title substring).
+        #[arg(long)]
+        window: Option<String>,
+        /// A monitor to grab, by its number in the list (from 1).
+        #[arg(long)]
+        monitor: Option<usize>,
+        /// Pixels to print, as X,Y (in the grabbed picture).
+        #[arg(long = "at", value_parser = hdr_probe::parse_point)]
+        points: Vec<(u32, u32)>,
+        /// Show a pattern of known scRGB values, HDR included, on the first
+        /// monitor in HDR, and compare what each capture holds of it.
+        #[arg(long)]
+        pattern: bool,
+        /// Time the GPU's conversion of an HDR frame against the copy it
+        /// replaces, at 1080p, 1440p and 4K.
+        #[arg(long)]
+        bench: bool,
+        /// Only show the HDR pattern on the first monitor in HDR for this many
+        /// seconds, for a stream of it (`capture-test --window "Couch HDR pattern"`).
+        #[arg(long)]
+        show_pattern: Option<u64>,
+    },
     /// Every gamepad SDL finds, where it sits in Windows' device tree, and the
     /// origin the app gives it (P9). Plugs pads only when asked to.
     #[cfg(windows)]
@@ -636,6 +664,17 @@ async fn main() -> ExitCode {
             real_pad_ids,
             count,
         } => tokio::task::block_in_place(|| pad_test::run(secs, real_pad_ids, count)),
+        #[cfg(windows)]
+        Cmd::HdrProbe {
+            window,
+            monitor,
+            points,
+            pattern,
+            bench,
+            show_pattern,
+        } => tokio::task::block_in_place(|| {
+            hdr_probe::run(window, monitor, &points, pattern, bench, show_pattern)
+        }),
         #[cfg(windows)]
         Cmd::PadOrigins {
             ours,

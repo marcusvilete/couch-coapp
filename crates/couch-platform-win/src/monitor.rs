@@ -12,20 +12,27 @@ use std::ffi::c_void;
 
 use windows::Win32::{
     Devices::Display::{
-        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-        DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SDR_WHITE_LEVEL,
         DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
         DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
         QueryDisplayConfig,
     },
     Foundation::{HWND, LPARAM, POINT, RECT},
-    Graphics::Gdi::{
-        DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW,
-        GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
-        MonitorFromPoint, MonitorFromWindow,
+    Graphics::{
+        Dxgi::{
+            Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, CreateDXGIFactory1,
+            DXGI_OUTPUT_DESC1, IDXGIFactory1, IDXGIOutput6,
+        },
+        Gdi::{
+            DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW,
+            GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
+            MonitorFromPoint, MonitorFromWindow,
+        },
     },
 };
-use windows_core::{BOOL, PCWSTR};
+use windows_core::{BOOL, Interface, PCWSTR};
 
 /// A rectangle on the desktop, in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +126,113 @@ pub fn size(monitor: isize) -> Option<(u32, u32)> {
 /// A monitor's own name ("DELL U2720Q"), as Windows' display settings show
 /// it; `None` if it reports none.
 pub fn name(monitor: isize) -> Option<String> {
-    let device = device_name(HMONITOR(monitor as *mut c_void))?;
+    let path = display_path(HMONITOR(monitor as *mut c_void))?;
+    let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+            size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+            adapterId: path.sourceInfo.adapterId,
+            id: path.targetInfo.id,
+        },
+        ..Default::default()
+    };
+    // SAFETY: the header names the struct around it and its size.
+    if unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } != 0 {
+        return None;
+    }
+    let name = wide(&target.monitorFriendlyDeviceName);
+    (!name.trim().is_empty()).then_some(name)
+}
+
+/// How a monitor shows colour (M29), for the capture to read it right.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Colour {
+    /// The monitor is in HDR: Windows composes its desktop in scRGB (FP16,
+    /// linear, 1.0 = 80 nits) and sends it out as BT.2100 PQ.
+    pub hdr: bool,
+    /// DXGI's colour space (`DXGI_COLOR_SPACE_TYPE`), for the log: 12 is
+    /// HDR (G2084, BT.2020), 0 SDR (G22, BT.709).
+    pub colour_space: i32,
+    pub bits_per_colour: u32,
+    /// Where Windows shows SDR white on this monitor, in nits (the "SDR
+    /// content brightness" setting); `None` if it doesn't say.
+    pub sdr_white_nits: Option<f32>,
+    /// The panel's own word on its peak and full-frame brightness, in nits.
+    pub max_nits: f32,
+    pub max_full_frame_nits: f32,
+}
+
+/// The colour of `monitor` (a monitor handle value, as screens are listed);
+/// `None` if DXGI can't find it.
+pub fn colour(monitor: isize) -> Option<Colour> {
+    let monitor = HMONITOR(monitor as *mut c_void);
+    let desc = output_desc(monitor)?;
+    Some(Colour {
+        hdr: desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+        colour_space: desc.ColorSpace.0,
+        bits_per_colour: desc.BitsPerColor,
+        sdr_white_nits: sdr_white_nits(monitor),
+        max_nits: desc.MaxLuminance,
+        max_full_frame_nits: desc.MaxFullFrameLuminance,
+    })
+}
+
+/// The colour of the monitor showing most of `window`.
+pub fn colour_of_window(window: isize) -> Option<Colour> {
+    colour(showing(window).0 as isize)
+}
+
+/// The monitor's output description, found among every adapter's outputs.
+fn output_desc(monitor: HMONITOR) -> Option<DXGI_OUTPUT_DESC1> {
+    // SAFETY: no arguments; the factory is ours.
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    for a in 0.. {
+        // SAFETY: a plain enumeration; it fails past the last adapter.
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(a) }) else {
+            break;
+        };
+        for o in 0.. {
+            // SAFETY: as above, past the last output.
+            let Ok(output) = (unsafe { adapter.EnumOutputs(o) }) else {
+                break;
+            };
+            let Ok(output) = output.cast::<IDXGIOutput6>() else {
+                continue;
+            };
+            // SAFETY: a plain getter on a live output.
+            if let Ok(desc) = unsafe { output.GetDesc1() }
+                && desc.Monitor == monitor
+            {
+                return Some(desc);
+            }
+        }
+    }
+    None
+}
+
+/// The SDR white level Windows set for `monitor`, in nits.
+fn sdr_white_nits(monitor: HMONITOR) -> Option<f32> {
+    let path = display_path(monitor)?;
+    let mut white = DISPLAYCONFIG_SDR_WHITE_LEVEL {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+            size: size_of::<DISPLAYCONFIG_SDR_WHITE_LEVEL>() as u32,
+            adapterId: path.targetInfo.adapterId,
+            id: path.targetInfo.id,
+        },
+        ..Default::default()
+    };
+    // SAFETY: the header names the struct around it and its size.
+    if unsafe { DisplayConfigGetDeviceInfo(&mut white.header) } != 0 || white.SDRWhiteLevel == 0 {
+        return None;
+    }
+    // In thousandths of the 80-nit reference.
+    Some(white.SDRWhiteLevel as f32 / 1000.0 * 80.0)
+}
+
+/// The active display path whose source is `monitor`.
+fn display_path(monitor: HMONITOR) -> Option<DISPLAYCONFIG_PATH_INFO> {
+    let device = device_name(monitor)?;
     let (mut paths, mut modes) = (0u32, 0u32);
     // SAFETY: live out-parameters.
     unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }
@@ -151,24 +264,10 @@ pub fn name(monitor: isize) -> Option<String> {
             ..Default::default()
         };
         // SAFETY: the header names the struct around it and its size.
-        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0
-            || wide(&source.viewGdiDeviceName) != device
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } == 0
+            && wide(&source.viewGdiDeviceName) == device
         {
-            continue;
-        }
-        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
-            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-                size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
-                adapterId: path.sourceInfo.adapterId,
-                id: path.targetInfo.id,
-            },
-            ..Default::default()
-        };
-        // SAFETY: as above.
-        if unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } == 0 {
-            let name = wide(&target.monitorFriendlyDeviceName);
-            return (!name.trim().is_empty()).then_some(name);
+            return Some(*path);
         }
     }
     None
@@ -257,7 +356,16 @@ mod tests {
         assert!(primary.width > 0 && primary.height > 0);
         // Not a window: the primary monitor's.
         assert_eq!(of_window(0x7fff_0001), Some(primary));
-        assert_eq!(of_monitor(0x7fff_0001), Some(primary));
+        // Not a monitor: some monitor's, never none. With several monitors
+        // Windows may answer a made-up handle with another one's (a virtual
+        // display did, M29), as it answers stale ones.
+        let stranger = of_monitor(0x7fff_0001);
+        assert!(
+            handles()
+                .into_iter()
+                .any(|m| work_area(HMONITOR(m as *mut c_void)) == stranger),
+            "{stranger:?}"
+        );
     }
 
     #[test]

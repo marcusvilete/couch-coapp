@@ -15,14 +15,16 @@ use std::{
     io::{LineWriter, Write},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use couch_media::{
-    BgraFrame, CaptureEvent, Capturer, MediaError, Micros, VideoFrame, mailbox::Mailbox,
+    BgraFrame, CaptureEvent, Capturer, MediaError, Micros, VideoFrame, hdr::white_scale,
+    mailbox::Mailbox,
 };
 use windows::Win32::{
     Foundation::HWND,
@@ -32,6 +34,7 @@ use windows::Win32::{
             ID3D11Texture2D,
         },
         Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
+        Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT},
     },
     UI::WindowsAndMessaging::IsWindow,
 };
@@ -39,9 +42,11 @@ use windows::Win32::{
 use crate::{
     clock,
     foreground::WindowId,
-    gpu_frames::{TexturePool, staging_texture},
-    monitor, top_windows,
-    wgc::{self, Arrived, Sink, Target},
+    gpu_frames::{self, TexturePool, staging_texture},
+    monitor,
+    tonemap::Converter,
+    top_windows,
+    wgc::{self, Arrived, Format, FormatSwitch, Sink, Target},
 };
 
 /// A monitor, by its handle value, as [`list_monitors`] found it.
@@ -70,6 +75,10 @@ pub struct CaptureOptions {
     pub min_interval: Duration,
     pub cursor: bool,
     pub output: FrameOutput,
+    /// A monitor in HDR is captured in FP16 and converted to SDR (M29:
+    /// Settings → Streaming, on by default); `COUCH_HOST_HDR=0` turns it off
+    /// whatever this says.
+    pub hdr: bool,
 }
 
 /// Where captured frames go.
@@ -183,6 +192,21 @@ struct Shared {
     /// Keeping frames on the GPU failed, and they come in memory now: not
     /// yet reported ([`CaptureEvent::GpuFramesFailed`]).
     gpu_failed: AtomicBool,
+    /// The SDR white HDR frames are converted with (M29), an `f32` (scRGB)
+    /// by its bits: 1.0 for a monitor not in HDR.
+    white: AtomicU32,
+    /// Converting failed once: 8-bit for the rest of the capture, the
+    /// watcher stopped.
+    hdr_broken: AtomicBool,
+    /// The session's format switch, made before it starts, so a frame that
+    /// fails to convert can switch from the first frame on.
+    switch: FormatSwitch,
+}
+
+impl Shared {
+    fn white(&self) -> f32 {
+        f32::from_bits(self.white.load(Ordering::SeqCst))
+    }
 }
 
 /// Takes each frame on Windows' thread: into the texture pool, or to memory.
@@ -192,14 +216,24 @@ struct Handler {
     pool: Option<TexturePool>,
     /// For frames to memory: the texture they are copied into to be read.
     staging: Option<ID3D11Texture2D>,
+    /// For HDR frames to memory: the converter, and the BGRA texture it
+    /// draws them into to be read (M29).
+    converter: Option<Converter>,
+    converted: Option<ID3D11Texture2D>,
     /// Frames are being skipped as too small (logged once each time).
     too_small: bool,
     trace: Option<LineWriter<std::fs::File>>,
 }
 
+/// Whether a captured texture is in HDR's FP16 (scRGB), to be converted.
+fn is_hdr(desc: &D3D11_TEXTURE2D_DESC) -> bool {
+    desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT
+}
+
 impl Handler {
     /// The frame copied into the pool, which is replaced first if the device,
-    /// format or size changed. `None`: every texture is still in use.
+    /// format or size changed; an HDR frame drawn into it as SDR (M29), the
+    /// pool staying BGRA. `None`: every texture is still in use.
     fn on_gpu(
         &mut self,
         frame: &Arrived<'_>,
@@ -208,14 +242,75 @@ impl Handler {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: fills a local description of the live frame texture.
         unsafe { frame.texture.GetDesc(&mut desc) };
+        let hdr = is_hdr(&desc);
+        let format = if hdr {
+            DXGI_FORMAT_B8G8R8A8_UNORM
+        } else {
+            desc.Format
+        };
         // 4:2:0 encoders need even sizes; the copy drops an odd last row or column.
         let (width, height) = (frame.width & !1, frame.height & !1);
         let pool = match self.pool.take() {
-            Some(pool) if pool.fits(frame.device, desc.Format, width, height) => pool,
-            _ => TexturePool::new(frame.device, desc.Format, width, height)?,
+            Some(pool) if pool.fits(frame.device, format, width, height) => pool,
+            _ => TexturePool::new(frame.device, format, width, height)?,
         };
         let pool = self.pool.insert(pool);
-        Ok(pool.copy(frame.texture, captured_at)?.map(VideoFrame::Gpu))
+        let put = if hdr {
+            pool.convert(frame.texture, captured_at, self.shared.white())?
+        } else {
+            pool.copy(frame.texture, captured_at)?
+        };
+        Ok(put.map(VideoFrame::Gpu))
+    }
+
+    /// An HDR frame drawn as SDR into a BGRA texture of its size (M29), for
+    /// a capture to memory to read; any other frame as it is.
+    fn sdr_texture(&mut self, frame: &Arrived<'_>) -> Result<ID3D11Texture2D, MediaError> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: fills a local description of the live frame texture.
+        unsafe { frame.texture.GetDesc(&mut desc) };
+        if !is_hdr(&desc) {
+            if let Some(converter) = self.converter.as_mut() {
+                converter.forget_sources();
+            }
+            return Ok(frame.texture.clone());
+        }
+        if self
+            .converter
+            .as_ref()
+            .is_none_or(|c| c.device() != frame.device)
+        {
+            self.converter = Some(Converter::new(frame.device)?);
+            self.converted = None;
+        }
+        let fits = self.converted.as_ref().is_some_and(|t| {
+            let mut have = D3D11_TEXTURE2D_DESC::default();
+            // SAFETY: fills a local description of a live texture.
+            unsafe { t.GetDesc(&mut have) };
+            (have.Width, have.Height) == (frame.width, frame.height)
+        });
+        if !fits {
+            if let (Some(old), Some(converter)) = (self.converted.take(), self.converter.as_mut()) {
+                converter.forget(&old);
+            }
+            self.converted = Some(gpu_frames::texture(
+                frame.device,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                frame.width,
+                frame.height,
+                None,
+            )?);
+        }
+        let converted = self.converted.clone().expect("made above");
+        let white = self.shared.white();
+        self.converter.as_mut().expect("made above").convert(
+            frame.texture,
+            &converted,
+            frame.width,
+            frame.height,
+            white,
+        )?;
+        Ok(converted)
     }
 
     /// The frame read into memory, through a staging texture kept while the
@@ -225,9 +320,10 @@ impl Handler {
         frame: &Arrived<'_>,
         captured_at: Micros,
     ) -> Result<BgraFrame, MediaError> {
+        let texture = self.sdr_texture(frame)?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
-        // SAFETY: fills a local description of the live frame texture.
-        unsafe { frame.texture.GetDesc(&mut desc) };
+        // SAFETY: fills a local description of a live texture.
+        unsafe { texture.GetDesc(&mut desc) };
         let fits = self.staging.as_ref().is_some_and(|s| {
             let mut have = D3D11_TEXTURE2D_DESC::default();
             // SAFETY: as above.
@@ -251,7 +347,7 @@ impl Handler {
         // and the region lies within both; Map waits for the copy, and the
         // mapping is read and then unmapped before anything else uses it.
         let data = unsafe {
-            context.CopySubresourceRegion(staging, 0, 0, 0, 0, frame.texture, 0, Some(&region));
+            context.CopySubresourceRegion(staging, 0, 0, 0, 0, &texture, 0, Some(&region));
             context
                 .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .map_err(backend)?;
@@ -268,6 +364,21 @@ impl Handler {
             data,
             captured_at,
         })
+    }
+}
+
+impl Handler {
+    /// Converting HDR failed (a shader or view this GPU refuses): the rest
+    /// of this capture is Windows' 8-bit, as before M29, rather than no
+    /// picture. Never a reason to turn GPU frames off for everyone.
+    fn give_up_hdr(&mut self, e: &MediaError) {
+        if self.shared.hdr_broken.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            "converting HDR failed ({e}): captured in 8-bit from now on, HDR content clipped at 80 nits"
+        );
+        self.shared.switch.set(Format::Bgra8);
     }
 }
 
@@ -296,6 +407,17 @@ impl Sink for Handler {
         // or every capture-to-present figure reads too low.
         let now = clock::now();
         let captured_at = frame.timestamp.map_or(now, |t| t.min(now));
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: fills a local description of the live frame texture.
+        unsafe { frame.texture.GetDesc(&mut desc) };
+        let hdr = is_hdr(&desc);
+        // Converting gave up (below): the frames still in FP16 until the
+        // pool comes back in 8-bit are dropped, and each asks for 8-bit
+        // again, in case the watcher asked for FP16 meanwhile.
+        if hdr && self.shared.hdr_broken.load(Ordering::SeqCst) {
+            self.shared.switch.set(Format::Bgra8);
+            return;
+        }
         if self.output == FrameOutput::Gpu {
             let result = self.on_gpu(&frame, captured_at);
             if let Some(trace) = self.trace.as_mut() {
@@ -319,6 +441,9 @@ impl Sink for Handler {
                 }
                 // Every texture in use: dropped, as a full mailbox would.
                 Ok(None) => {}
+                // Converting failed, not keeping frames on the GPU: 8-bit
+                // from now on, GPU frames kept (M29's review).
+                Err(e) if hdr => self.give_up_hdr(&e),
                 Err(e) => {
                     tracing::warn!(
                         "keeping frames on the GPU failed ({e}); copying them to memory"
@@ -336,6 +461,7 @@ impl Sink for Handler {
             Ok(frame) => {
                 self.shared.frames.put(VideoFrame::Cpu(frame));
             }
+            Err(e) if hdr => self.give_up_hdr(&e),
             Err(e) => tracing::debug!("a captured frame couldn't be read: {e}"),
         }
     }
@@ -355,6 +481,140 @@ pub struct WgcCapturer {
     target: Target,
     /// When the captured window or monitor was last seen to exist.
     source_checked: Instant,
+    /// Follows the monitor's HDR state (M29); stopped on drop.
+    colour_watch: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+}
+
+/// Whether a monitor in HDR is captured in FP16 and converted to SDR on
+/// the GPU (M29); `COUCH_HOST_HDR=0` captures it in 8-bit as before, which
+/// Windows clips at 80 nits for HDR content: the switch for measuring.
+/// Read once.
+pub fn hdr_capture() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("COUCH_HOST_HDR").map_or(true, |v| v.trim() != "0"))
+}
+
+/// How often the captured monitor's HDR state is looked at: a look costs
+/// about half a millisecond (DXGI and the display configuration), so on a
+/// thread of its own.
+const COLOUR_CHECK: Duration = Duration::from_secs(1);
+
+fn colour_of(target: Target) -> Option<monitor::Colour> {
+    match target {
+        Target::Window(w) => monitor::colour_of_window(w),
+        Target::Monitor(m) => monitor::colour(m),
+    }
+}
+
+/// Why a monitor in HDR isn't converted: `None` when it is.
+type HdrOff = Option<&'static str>;
+
+/// Whether HDR is converted, as [`CaptureOptions::hdr`] and
+/// `COUCH_HOST_HDR` say.
+fn hdr_off(asked: bool) -> HdrOff {
+    if !hdr_capture() {
+        Some("COUCH_HOST_HDR=0")
+    } else if !asked {
+        Some("turned off in Settings")
+    } else {
+        None
+    }
+}
+
+/// The format to capture a monitor of `colour` in, and the SDR white (scRGB)
+/// its HDR frames are converted with. A monitor in HDR whose SDR white
+/// Windows doesn't give stays 8-bit: converted at a guessed white, every SDR
+/// window would come out too bright, where Windows' own capture gets those
+/// right (M29's review).
+fn hdr_choice(colour: Option<&monitor::Colour>, off: HdrOff) -> (Format, f32) {
+    match (colour, off) {
+        (Some(c), None) if c.hdr => c.sdr_white_nits.map_or((Format::Bgra8, 1.0), |nits| {
+            (Format::Fp16, white_scale(Some(nits)))
+        }),
+        _ => (Format::Bgra8, 1.0),
+    }
+}
+
+/// The monitor's colour and what the capture does with it, for the log
+/// (the host's log is how a friend's run tells us, M29).
+fn log_colour(colour: Option<&monitor::Colour>, (format, white): (Format, f32), off: HdrOff) {
+    let Some(c) = colour else {
+        tracing::info!("the captured monitor's colour is unknown: captured in 8-bit");
+        return;
+    };
+    let about = format!(
+        "colour space {}, {} bits, SDR white {}, peak {:.0} nits",
+        c.colour_space,
+        c.bits_per_colour,
+        c.sdr_white_nits
+            .map_or("unknown".into(), |n| format!("{n:.0} nits")),
+        c.max_nits,
+    );
+    match (c.hdr, format) {
+        (true, Format::Fp16) => tracing::info!(
+            "the captured monitor is in HDR ({about}): captured in FP16 and converted to SDR, white at scRGB {white:.3}"
+        ),
+        (true, Format::Bgra8) => tracing::warn!(
+            "the captured monitor is in HDR ({about}), but converting it is {}: captured in 8-bit, HDR content clipped at 80 nits",
+            off.unwrap_or("not possible without its SDR white level, which Windows didn't give")
+        ),
+        (false, _) => tracing::info!("the captured monitor is SDR ({about}): captured in 8-bit"),
+    }
+}
+
+/// Looks at the captured monitor every [`COLOUR_CHECK`] until `stop`, and
+/// moves the capture to the other format, and the conversion to the new
+/// white, when it changes: HDR turned on or off, the white level moved, or
+/// the window moved to another monitor.
+fn watch_colour(target: Target, mut last: (Format, f32), shared: &Shared, stop: &AtomicBool) {
+    let step = Duration::from_millis(100);
+    let mut waited = Duration::ZERO;
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(step);
+        waited += step;
+        if waited < COLOUR_CHECK {
+            continue;
+        }
+        waited = Duration::ZERO;
+        // Converting gave up: 8-bit for good, nothing more to follow.
+        if shared.hdr_broken.load(Ordering::SeqCst) {
+            return;
+        }
+        // Not found for a moment (a display changing mode): as it was,
+        // rather than 8-bit and back.
+        let Some(colour) = colour_of(target) else {
+            continue;
+        };
+        // In HDR still, but its white not read this time (the display
+        // configuration changing as it was asked): as it was too.
+        if colour.hdr && colour.sdr_white_nits.is_none() && last.0 == Format::Fp16 {
+            continue;
+        }
+        let choice = hdr_choice(Some(&colour), None);
+        if choice == last {
+            continue;
+        }
+        // The white before the switch, both in one order with the frames'
+        // reads (`SeqCst`): frames of the new format see it. FP16 frames
+        // still coming from a monitor that left HDR hold SDR white at 1.0,
+        // the white stored when going to 8-bit. Looking once a second, a
+        // change shows wrong for up to that second.
+        shared.white.store(choice.1.to_bits(), Ordering::SeqCst);
+        if choice.0 != last.0 {
+            shared.switch.set(choice.0);
+        }
+        log_colour(Some(&colour), choice, None);
+        last = choice;
+    }
+}
+
+impl Drop for WgcCapturer {
+    fn drop(&mut self) {
+        if let Some((stop, thread)) = self.colour_watch.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+        }
+    }
 }
 
 impl WgcCapturer {
@@ -377,9 +637,16 @@ impl WgcCapturer {
             CaptureSource::PrimaryMonitor => (Target::Monitor(monitor::primary_handle()), None),
         };
         let device = wgc::new_device().map_err(backend)?;
+        let colour = colour_of(target);
+        let off = hdr_off(options.hdr);
+        let choice = hdr_choice(colour.as_ref(), off);
+        log_colour(colour.as_ref(), choice, off);
         let shared = Arc::new(Shared {
             frames: Mailbox::new(),
             gpu_failed: AtomicBool::new(false),
+            white: AtomicU32::new(choice.1.to_bits()),
+            hdr_broken: AtomicBool::new(false),
+            switch: FormatSwitch::new(choice.0),
         });
         let trace = std::env::var_os("COUCH_CAPTURE_TRACE").and_then(|path| {
             let file = std::fs::OpenOptions::new()
@@ -394,6 +661,8 @@ impl WgcCapturer {
             output: options.output,
             pool: None,
             staging: None,
+            converter: None,
+            converted: None,
             too_small: false,
             trace,
         };
@@ -401,6 +670,7 @@ impl WgcCapturer {
             buffers: buffers(),
             min_interval: options.min_interval,
             cursor: options.cursor,
+            format: choice.0,
         };
         tracing::debug!(
             buffers = wgc_options.buffers,
@@ -409,8 +679,27 @@ impl WgcCapturer {
             min_interval = wgc::has("MinUpdateInterval"),
             "capture settings this Windows supports"
         );
-        let session =
-            wgc::Session::start(target, wgc_options, &device, handler).map_err(backend)?;
+        let session = wgc::Session::start_switched(
+            target,
+            wgc_options,
+            &device,
+            handler,
+            shared.switch.clone(),
+        )
+        .map_err(backend)?;
+        // Converting off, there is nothing to follow: 8-bit throughout.
+        let colour_watch = off
+            .is_none()
+            .then(|| {
+                let stop = Arc::new(AtomicBool::new(false));
+                let (shared, stop_) = (shared.clone(), stop.clone());
+                std::thread::Builder::new()
+                    .name("capture-colour".into())
+                    .spawn(move || watch_colour(target, choice, &shared, &stop_))
+                    .ok()
+                    .map(|thread| (stop, thread))
+            })
+            .flatten();
         Ok(Self {
             shared,
             _session: session,
@@ -418,6 +707,7 @@ impl WgcCapturer {
             window,
             target,
             source_checked: Instant::now(),
+            colour_watch,
         })
     }
 
