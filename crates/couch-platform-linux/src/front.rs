@@ -38,6 +38,7 @@ use ashpd::{
     zbus::{self, MatchRule, fdo::DBusProxy, message::Type as MessageType, names::BusName},
     zvariant::OwnedValue,
 };
+use couch_input::{Bounds, confine::PointerReport};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::sync::{Notify, oneshot};
@@ -56,6 +57,11 @@ const KWIN_SCRIPT: &str = include_str!("../front/kwin.js");
 /// The GNOME extension's files.
 const EXTENSION_METADATA: &str = include_str!("../front/gnome/metadata.json");
 const EXTENSION_JS: &str = include_str!("../front/gnome/extension.js");
+/// The version in its `metadata.json`: GNOME runs the version it read at
+/// log-in, so a newer one installed since counts only after logging in again
+/// (an older one says nothing of the pointer, which keeps a guest's in the
+/// game window: P18).
+const EXTENSION_VERSION: f64 = 5.0;
 
 /// The largest push taken: a list of a few hundred windows.
 const MAX_PUSH: usize = 256 * 1024;
@@ -147,8 +153,17 @@ struct Told {
     /// Ours for the active window; 0 for none, -1 for one whose helper id
     /// was too long (never a window's).
     active: isize,
-    /// The pointer is over the active window.
+    /// The pointer is over the active window's client area.
     pointer: bool,
+    /// Where the pointer is and the active window's client area, in the
+    /// desktop's coordinates, if the helper says (an older GNOME extension
+    /// doesn't).
+    at: Option<(i32, i32)>,
+    area: Option<Bounds>,
+    /// Counts the changes of `at`: a guest's moves are cut from each new
+    /// position (`couch_input::confine`), from when it came.
+    moves: u64,
+    moved_at: Option<Instant>,
     /// The lock screen is up, whatever the helper says: KWin keeps the
     /// active window while its lock screen takes the keys.
     locked: bool,
@@ -206,6 +221,22 @@ impl Told {
             self.id_for(&pushed.active)
         };
         self.pointer = pushed.pointer;
+        let at = pushed
+            .at
+            .and_then(|[x, y]| Some((coordinate(x)?, coordinate(y)?)));
+        if at.is_some() && at != self.at {
+            self.moves += 1;
+            self.moved_at = Some(now);
+        }
+        self.at = at;
+        self.area = pushed.area.and_then(|[x, y, width, height]| {
+            Some(Bounds {
+                x: coordinate(x)?,
+                y: coordinate(y)?,
+                width: coordinate(width)?.max(0),
+                height: coordinate(height)?.max(0),
+            })
+        });
         self.heard = Some(now);
     }
 
@@ -220,11 +251,29 @@ impl Told {
         (foreground, foreground && self.pointer)
     }
 
+    /// Where the pointer is, while `window` is in front and the helper says.
+    fn pointer(&self, window: isize, now: Instant) -> Option<PointerReport> {
+        if !self.focus(window, now).0 {
+            return None;
+        }
+        let ((x, y), area) = (self.at?, self.area?);
+        Some(PointerReport {
+            x,
+            y,
+            area,
+            changes: self.moves,
+            came: self.moved_at,
+            told: self.heard,
+        })
+    }
+
     /// The watch's helper said nothing yet, or no longer counts.
     fn forget(&mut self) {
         self.heard = None;
         self.active = 0;
         self.pointer = false;
+        self.at = None;
+        self.area = None;
     }
 }
 
@@ -243,6 +292,13 @@ fn cut(mut text: String) -> String {
         text.truncate(end);
     }
     text
+}
+
+/// A position or size the helper pushed, in whole pixels; `None` for one
+/// no screen has.
+fn coordinate(value: f64) -> Option<i32> {
+    const FAR: f64 = 1_000_000.0;
+    (value.is_finite() && value.abs() <= FAR).then(|| value.round() as i32)
 }
 
 fn dimension(value: f64) -> u32 {
@@ -271,6 +327,12 @@ struct PushedFront {
     active: String,
     #[serde(default)]
     pointer: bool,
+    /// The pointer's position.
+    #[serde(default)]
+    at: Option<[f64; 2]>,
+    /// The active window's client area: x, y, width, height.
+    #[serde(default)]
+    area: Option<[f64; 4]>,
 }
 
 fn told() -> std::sync::MutexGuard<'static, Told> {
@@ -300,6 +362,13 @@ pub fn windows() -> Vec<Window> {
 /// neither while nobody watches or the helper is quiet.
 pub fn focus(window: isize) -> (bool, bool) {
     told().focus(window, Instant::now())
+}
+
+/// Where the pointer is and `window`'s client area, as last told, while
+/// `window` is in front and the helper says: what a guest's pointer is kept
+/// in (`kbm`). Costs a lock, never the bus.
+pub fn pointer(window: isize) -> Option<PointerReport> {
+    told().pointer(window, Instant::now())
 }
 
 /// Whether `window` is still listed. True while the helper is quiet (a
@@ -1000,9 +1069,12 @@ pub mod gnome {
     /// Where our extension stands.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ExtensionState {
-        /// Not installed, or an older version of it.
+        /// Not installed.
         Missing,
-        /// Installed, but GNOME reads extensions only when you log in.
+        /// An older version of it is installed: Install updates it.
+        Outdated,
+        /// Installed, but GNOME reads extensions only when you log in: it
+        /// doesn't know ours yet, or still runs an older version of it.
         NeedsLogout,
         /// Installed and known, but turned off.
         Off,
@@ -1023,11 +1095,16 @@ pub mod gnome {
         Some(data.join("gnome-shell/extensions").join(EXTENSION_UUID))
     }
 
-    /// Whether our files, as this build has them, are in place.
-    fn installed() -> bool {
-        let Some(folder) = folder() else { return false };
-        std::fs::read_to_string(folder.join("metadata.json")).is_ok_and(|m| m == EXTENSION_METADATA)
-            && std::fs::read_to_string(folder.join("extension.js")).is_ok_and(|j| j == EXTENSION_JS)
+    /// Whether our files, as this build has them, are in place: `Some(true)`;
+    /// others of ours (an older version): `Some(false)`; none: `None`.
+    fn installed() -> Option<bool> {
+        let folder = folder()?;
+        let metadata = std::fs::read_to_string(folder.join("metadata.json")).ok()?;
+        Some(
+            metadata == EXTENSION_METADATA
+                && std::fs::read_to_string(folder.join("extension.js"))
+                    .is_ok_and(|j| j == EXTENSION_JS),
+        )
     }
 
     /// Our extension's state; `None` off GNOME. Blocks briefly.
@@ -1048,16 +1125,20 @@ pub mod gnome {
     }
 
     pub(super) async fn look(bus: &zbus::Connection) -> ExtensionState {
-        if !installed() {
-            return ExtensionState::Missing;
+        match installed() {
+            None => return ExtensionState::Missing,
+            Some(false) => return ExtensionState::Outdated,
+            Some(true) => {}
         }
         if !user_extensions_on(bus).await {
             return ExtensionState::ExtensionsOff;
         }
-        match info_state(bus).await {
+        match info(bus).await {
             // Unknown to the Shell: installed since it started.
             None => ExtensionState::NeedsLogout,
-            Some(state) => match state as u32 {
+            // The Shell still runs the version it read at log-in.
+            Some((_, version)) if version != Some(EXTENSION_VERSION) => ExtensionState::NeedsLogout,
+            Some((state, _)) => match state as u32 {
                 1 => ExtensionState::Ready,
                 // Off, being turned off, or read but not yet on.
                 2 | 6 | 7 => ExtensionState::Off,
@@ -1069,8 +1150,9 @@ pub mod gnome {
     }
 
     /// The Shell's state for our extension (1 on, 2 off, 3 failed, 4 out of
-    /// date, 6 read, ...); `None` if it doesn't know it.
-    async fn info_state(bus: &zbus::Connection) -> Option<f64> {
+    /// date, 6 read, ...) and the version it read; `None` if it doesn't know
+    /// it.
+    async fn info(bus: &zbus::Connection) -> Option<(f64, Option<f64>)> {
         let reply = call(
             bus,
             SHELL,
@@ -1082,7 +1164,9 @@ pub mod gnome {
         .await
         .ok()?;
         let info: HashMap<String, OwnedValue> = reply.body().deserialize().ok()?;
-        f64::try_from(info.get("state")?).ok()
+        let state = f64::try_from(info.get("state")?).ok()?;
+        let version = info.get("version").and_then(|v| f64::try_from(v).ok());
+        Some((state, version))
     }
 
     async fn user_extensions_on(bus: &zbus::Connection) -> bool {
@@ -1212,6 +1296,62 @@ mod tests {
     }
 
     #[test]
+    fn the_pointer_is_told_only_for_the_window_in_front() {
+        let mut told = Told::default();
+        push(&mut told, r#"[{"id":"a"},{"id":"b"}]"#);
+        let (game, other) = (told.windows[0].id, told.windows[1].id);
+        // An older GNOME extension says nothing of where the pointer is.
+        front(&mut told, r#"{"active":"a","pointer":true}"#);
+        assert_eq!(told.pointer(game, Instant::now()), None);
+        let area = Bounds {
+            x: 10,
+            y: 40,
+            width: 800,
+            height: 600,
+        };
+        front(
+            &mut told,
+            r#"{"active":"a","pointer":true,"at":[100.4,200.6],"area":[10,40,800,600]}"#,
+        );
+        let first = told.pointer(game, Instant::now()).unwrap();
+        assert_eq!((first.x, first.y, first.area), (100, 201, area));
+        assert_eq!(told.pointer(other, Instant::now()), None);
+        // The heartbeat with the same position isn't a new one; a move is.
+        front(
+            &mut told,
+            r#"{"active":"a","pointer":true,"at":[100,201],"area":[10,40,800,600]}"#,
+        );
+        assert_eq!(
+            told.pointer(game, Instant::now()).unwrap().changes,
+            first.changes
+        );
+        front(
+            &mut told,
+            r#"{"active":"a","pointer":false,"at":[5,20],"area":[10,40,800,600]}"#,
+        );
+        let moved = told.pointer(game, Instant::now()).unwrap();
+        assert_ne!(moved.changes, first.changes);
+        assert_eq!((moved.x, moved.y), (5, 20));
+        // Nothing while another window is in front, the helper is quiet, or
+        // for a position no screen has.
+        front(&mut told, r#"{"active":"b","at":[5,20],"area":[0,0,9,9]}"#);
+        assert_eq!(told.pointer(game, Instant::now()), None);
+        front(
+            &mut told,
+            r#"{"active":"a","at":[5,20],"area":[10,40,800,600]}"#,
+        );
+        let heard = told.heard.unwrap();
+        assert_eq!(told.pointer(game, heard + STALE), None);
+        front(
+            &mut told,
+            r#"{"active":"a","at":[1e300,20],"area":[10,40,800,600]}"#,
+        );
+        assert_eq!(told.pointer(game, Instant::now()), None);
+        told.forget();
+        assert_eq!(told.pointer(game, Instant::now()), None);
+    }
+
+    #[test]
     fn long_or_many_helper_ids_are_kept_in_bounds() {
         let mut told = Told::default();
         let long = "x".repeat(MAX_HELPER_ID + 1);
@@ -1308,6 +1448,21 @@ mod tests {
         assert!(EXTENSION_JS.contains(PATH) || EXTENSION_JS.contains("/com/couchcoapp/Front"));
         assert!(EXTENSION_JS.contains(&format!("'{IFACE}'")));
         assert!(EXTENSION_METADATA.contains(EXTENSION_UUID));
+        assert!(EXTENSION_METADATA.contains(&format!("\"version\": {EXTENSION_VERSION}")));
+    }
+
+    /// GNOME runs the extension it read at log-in, and the app tells an
+    /// older one by its version alone: a change to `extension.js` without a
+    /// new version would count as ready while GNOME still runs the old code
+    /// (P18's review). Changed it? Raise `metadata.json`'s version and
+    /// `EXTENSION_VERSION`, then put the new hash here.
+    #[test]
+    fn the_extensions_version_moves_with_its_code() {
+        let code = EXTENSION_JS.replace('\r', "");
+        let hash = code.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        assert_eq!((EXTENSION_VERSION, hash), (5.0, 0xed39_9fa7_a222_c2ae));
     }
 
     /// The whole path on a real bus, with a stand-in KWin: the script loaded

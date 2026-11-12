@@ -13,6 +13,12 @@
 //!   replaced.
 //! - **The shared window closing, or the user stopping the share** from the
 //!   desktop, ends the capture as its source closing.
+//! - **The pointer comes beside the picture** where the portal can send it
+//!   so (the cursor as metadata), and we draw it in (`crate::cursor`): a
+//!   shared window sends a picture only when it redraws, so a pointer the
+//!   desktop drew in moved at a couple of frames a second over a still one
+//!   (GNOME). A pointer that moves over a still picture makes a new frame
+//!   of the last.
 
 use std::{
     os::fd::OwnedFd,
@@ -20,6 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::cursor::{self, Channels, Shape, Under};
 use ashpd::desktop::{
     PersistMode, ResponseError,
     screencast::{CursorMode, Screencast, SourceType},
@@ -31,15 +38,15 @@ use pw::{
     properties::properties,
     spa::{
         self,
-        buffer::ChunkFlags,
+        buffer::{ChunkFlags, meta::MetaCursor},
         param::{
             ParamType,
             format::{FormatProperties, MediaSubtype, MediaType},
             format_utils,
             video::{VideoFormat, VideoInfoRaw},
         },
-        pod::{Pod, Value, serialize::PodSerializer},
-        utils::{Direction, Fraction, Rectangle, SpaTypes},
+        pod::{ChoiceValue, Pod, Value, serialize::PodSerializer},
+        utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Rectangle, SpaTypes},
     },
     stream::{StreamFlags, StreamState},
 };
@@ -260,15 +267,15 @@ async fn share(options: Options, inbox: &Arc<Inbox>, mut stop: tokio::sync::ones
         }
     };
     let chosen = async {
-        let cursor = if proxy
-            .available_cursor_modes()
-            .await?
-            .contains(CursorMode::Embedded)
-        {
-            CursorMode::Embedded
-        } else {
-            CursorMode::Hidden
-        };
+        // The pointer beside the picture, drawn in by us (`crate::cursor`):
+        // drawn in by the desktop, it moves only when a shared window
+        // redraws.
+        let modes = proxy.available_cursor_modes().await?;
+        let cursor = [CursorMode::Metadata, CursorMode::Embedded]
+            .into_iter()
+            .find(|mode| modes.contains(*mode))
+            .unwrap_or(CursorMode::Hidden);
+        tracing::info!(?cursor, "the shared picture's pointer");
         proxy
             .select_sources(
                 &session,
@@ -387,6 +394,134 @@ struct Video {
     streamed: bool,
     inbox: Arc<Inbox>,
     mainloop: pw::main_loop::MainLoopRc,
+    /// The pointer sent beside the picture.
+    pointer: Pointer,
+    /// The last frame handed on, and what its pointer covered: a pointer
+    /// that moves while the picture doesn't makes a new frame from it.
+    last: Option<(BgraFrame, Option<Under>)>,
+}
+
+/// The pointer as the portal's metadata last said.
+#[derive(Default)]
+struct Pointer {
+    shape: Option<Shape>,
+    /// Its position on the shared picture; `None` while it isn't over it.
+    at: Option<(i32, i32)>,
+}
+
+impl Video {
+    /// Hands on `picture` with the pointer drawn in.
+    fn send(&mut self, picture: Picture) {
+        let Picture {
+            width,
+            height,
+            mut data,
+            captured_at,
+        } = picture;
+        let under = self.draw_pointer(&mut data, width, height);
+        let frame = BgraFrame {
+            width,
+            height,
+            stride: width * 4,
+            data: data.into(),
+            captured_at,
+        };
+        self.last = Some((frame.clone(), under));
+        self.inbox.frame(frame);
+    }
+
+    fn draw_pointer(&self, data: &mut [u8], width: u32, height: u32) -> Option<Under> {
+        cursor::draw(
+            data,
+            width,
+            height,
+            self.pointer.shape.as_ref()?,
+            self.pointer.at?,
+        )
+    }
+
+    /// The pointer moved, the picture didn't: the last frame again, the
+    /// pointer put back where it was and drawn where it is now.
+    fn pointer_moved(&mut self) {
+        let Some((frame, under)) = &self.last else {
+            return;
+        };
+        let mut data = frame.data.to_vec();
+        if let Some(under) = under {
+            cursor::restore(&mut data, frame.width, under);
+        }
+        let picture = Picture {
+            width: frame.width,
+            height: frame.height,
+            data,
+            captured_at: crate::clock::now(),
+        };
+        self.send(picture);
+    }
+
+    /// Takes in the pointer the buffer carries, if any, `crop` being where
+    /// the picture's part starts: whether it changed.
+    fn take_pointer(&mut self, buffer: &pw::buffer::Buffer<'_>, crop: (u32, u32)) -> bool {
+        let Some(meta) = buffer.find_meta::<MetaCursor>() else {
+            return false;
+        };
+        let before = (self.pointer.at, self.pointer.shape.is_some());
+        if meta.id() == 0 {
+            // Not over the shared picture.
+            self.pointer.at = None;
+            return before.0.is_some();
+        }
+        let position = meta.position();
+        self.pointer.at = Some((
+            position.x.saturating_sub(crop.0 as i32),
+            position.y.saturating_sub(crop.1 as i32),
+        ));
+        // A new shape comes only when it changed. Where the desktop says its
+        // header is, checked before it is read (aligned, past the cursor's
+        // own, within the most room asked for); the room agreed may be less
+        // (a desktop offers one fixed size within our range): what lies
+        // within it is the compositor's word, trusted as it is for the
+        // picture itself (P18's review).
+        let header = meta.bitmap_offset() as usize;
+        let header_fits = header >= std::mem::size_of::<spa::sys::spa_meta_cursor>()
+            && header.is_multiple_of(std::mem::align_of::<spa::sys::spa_meta_bitmap>())
+            && header + std::mem::size_of::<spa::sys::spa_meta_bitmap>() <= CURSOR_META_BYTES;
+        let mut reshaped = false;
+        if header_fits && let Some(bitmap) = meta.bitmap() {
+            let size = bitmap.size();
+            let channels = match bitmap.format() {
+                VideoFormat::BGRA | VideoFormat::BGRx => Some(Channels::Bgra),
+                VideoFormat::RGBA | VideoFormat::RGBx => Some(Channels::Rgba),
+                VideoFormat::ARGB | VideoFormat::xRGB => Some(Channels::Argb),
+                VideoFormat::ABGR | VideoFormat::xBGR => Some(Channels::Abgr),
+                _ => None,
+            };
+            // Checked before the pixels are read: they lie within the most
+            // asked for (`cursor_meta`).
+            let fits = size.width <= cursor::MAX_SHAPE
+                && size.height <= cursor::MAX_SHAPE
+                && bitmap.stride() > 0
+                && (meta.bitmap_offset() as usize)
+                    .saturating_add(bitmap.offset() as usize)
+                    .saturating_add(bitmap.stride() as usize * size.height as usize)
+                    <= CURSOR_META_BYTES;
+            if let Some(channels) = channels.filter(|_| fits)
+                && let Some(data) = bitmap.bitmap_data()
+            {
+                let hotspot = meta.hotspot();
+                self.pointer.shape = Shape::new(
+                    channels,
+                    size.width,
+                    size.height,
+                    bitmap.stride() as usize,
+                    (hotspot.x, hotspot.y),
+                    data,
+                );
+                reshaped = true;
+            }
+        }
+        reshaped || before != (self.pointer.at, self.pointer.shape.is_some())
+    }
 }
 
 /// PipeWire's side, on its own thread: the shared stream's frames into
@@ -425,6 +560,8 @@ fn video(
             streamed: false,
             inbox: inbox.clone(),
             mainloop: mainloop.clone(),
+            pointer: Pointer::default(),
+            last: None,
         })
         .state_changed(|_, video, _, state| match state {
             StreamState::Streaming => video.streamed = true,
@@ -452,20 +589,29 @@ fn video(
             if let Ok((MediaType::Video, MediaSubtype::Raw)) = format_utils::parse_format(param) {
                 let _ = video.format.parse(param);
                 // Each buffer's crop region: GNOME shares a window in a
-                // larger picture and marks the window's part with it.
-                let meta = crop_meta();
-                if let Some(meta) = Pod::from_bytes(&meta)
-                    && let Err(e) = stream.update_params(&mut [meta])
+                // larger picture and marks the window's part with it. And
+                // the pointer, when the portal sends it beside the picture.
+                let (crop, cursor) = (crop_meta(), cursor_meta());
+                if let (Some(crop), Some(cursor)) =
+                    (Pod::from_bytes(&crop), Pod::from_bytes(&cursor))
+                    && let Err(e) = stream.update_params(&mut [crop, cursor])
                 {
-                    tracing::debug!("the shared picture's crop region isn't asked for: {e}");
+                    tracing::debug!("the shared picture's metadata isn't asked for: {e}");
                 }
             }
         })
         .process(|stream, video| {
-            if let Some(mut buffer) = stream.dequeue_buffer()
-                && let Some(frame) = copy_frame(&mut buffer, &video.format)
-            {
-                video.inbox.frame(frame);
+            let Some(mut buffer) = stream.dequeue_buffer() else {
+                return;
+            };
+            let size = video.format.size();
+            let (x, y, width, height) = cropped(size.width, size.height, crop_of(&buffer));
+            let moved = video.take_pointer(&buffer, (x, y));
+            match copy_frame(&mut buffer, &video.format, (x, y, width, height)) {
+                Some(picture) => video.send(picture),
+                // A buffer with only the pointer in it.
+                None if moved => video.pointer_moved(),
+                None => {}
             }
         })
         .register()?;
@@ -534,6 +680,54 @@ fn formats(fps: u32) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// The room for the pointer's metadata with a shape of `side` pixels each
+/// way: its position, then its shape.
+const fn cursor_meta_bytes(side: usize) -> usize {
+    std::mem::size_of::<spa::sys::spa_meta_cursor>()
+        + std::mem::size_of::<spa::sys::spa_meta_bitmap>()
+        + side * side * 4
+}
+
+/// The most room asked for the pointer's metadata, for a shape of up to
+/// 1,024 pixels each way (OBS's range). The desktops each offer one fixed
+/// size, which must fall inside ours or no pointer comes at all: KWin's for
+/// 256 pixels, Mutter's for 384 (P18's VM run: a range up to 256 met
+/// nothing on GNOME). PipeWire allocates no more than the size agreed, never
+/// more than this.
+const CURSOR_META_BYTES: usize = cursor_meta_bytes(1024);
+
+/// The pointer's metadata asked for (`SPA_META_Cursor`), with room for a
+/// shape of 64 pixels each way at first and up to [`CURSOR_META_BYTES`].
+fn cursor_meta() -> Vec<u8> {
+    let bytes = |side: usize| cursor_meta_bytes(side) as i32;
+    let object = Value::Object(spa::pod::Object {
+        type_: SpaTypes::ObjectParamMeta.as_raw(),
+        id: ParamType::Meta.as_raw(),
+        properties: vec![
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_type,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: Value::Id(spa::utils::Id(spa::sys::SPA_META_Cursor)),
+            },
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_size,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: Value::Choice(ChoiceValue::Int(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: bytes(64),
+                        min: bytes(1),
+                        max: CURSOR_META_BYTES as i32,
+                    },
+                ))),
+            },
+        ],
+    });
+    PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &object)
+        .map(|(cursor, _)| cursor.into_inner())
+        .unwrap_or_default()
+}
+
 /// The buffer metadata asked for: the crop region (`SPA_META_VideoCrop`).
 fn crop_meta() -> Vec<u8> {
     let object = Value::Object(spa::pod::Object {
@@ -577,17 +771,17 @@ fn cropped(width: u32, height: u32, crop: Option<(i32, i32, u32, u32)>) -> (u32,
     }
 }
 
-/// The buffer's picture (its crop region, if it names one) as a BGRA frame
-/// of its own, or `None` for a buffer with no picture (a cursor-only update,
-/// a corrupted one, a format not asked for).
-fn copy_frame(buffer: &mut pw::buffer::Buffer<'_>, format: &VideoInfoRaw) -> Option<BgraFrame> {
-    let swap = match format.format() {
-        VideoFormat::BGRx | VideoFormat::BGRA => false,
-        VideoFormat::RGBx | VideoFormat::RGBA => true,
-        _ => return None,
-    };
-    let size = format.size();
-    let crop = buffer
+/// A picture copied out of a buffer, packed BGRA.
+struct Picture {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+    captured_at: couch_media::Micros,
+}
+
+/// The crop region the buffer names, if any.
+fn crop_of(buffer: &pw::buffer::Buffer<'_>) -> Option<(i32, i32, u32, u32)> {
+    buffer
         .find_meta::<spa::buffer::meta::MetaVideoCrop>()
         .map(|c| c.meta_region())
         .filter(|r| r.is_valid())
@@ -598,8 +792,24 @@ fn copy_frame(buffer: &mut pw::buffer::Buffer<'_>, format: &VideoInfoRaw) -> Opt
                 r.size().width,
                 r.size().height,
             )
-        });
-    let (x, y, width, height) = cropped(size.width, size.height, crop);
+        })
+}
+
+/// The buffer's picture, the `region` of it ([`cropped`]), as a BGRA
+/// picture of its own, or `None` for a buffer with no picture (a
+/// pointer-only update, a corrupted one, a format not asked for).
+fn copy_frame(
+    buffer: &mut pw::buffer::Buffer<'_>,
+    format: &VideoInfoRaw,
+    region: (u32, u32, u32, u32),
+) -> Option<Picture> {
+    let swap = match format.format() {
+        VideoFormat::BGRx | VideoFormat::BGRA => false,
+        VideoFormat::RGBx | VideoFormat::RGBA => true,
+        _ => return None,
+    };
+    let size = format.size();
+    let (x, y, width, height) = region;
     let data = buffer.datas_mut().first_mut()?;
     let chunk = data.chunk();
     if chunk.size() == 0 || chunk.flags().contains(ChunkFlags::CORRUPTED) {
@@ -612,11 +822,10 @@ fn copy_frame(buffer: &mut pw::buffer::Buffer<'_>, format: &VideoInfoRaw) -> Opt
     let offset = chunk.offset() as usize + y as usize * stride + x as usize * 4;
     let captured_at = crate::clock::now();
     let bytes = data.data()?;
-    pack(bytes.get(offset..)?, width, height, Some(stride), swap).map(|data| BgraFrame {
+    pack(bytes.get(offset..)?, width, height, Some(stride), swap).map(|data| Picture {
         width,
         height,
-        stride: width * 4,
-        data: data.into(),
+        data,
         captured_at,
     })
 }
@@ -679,6 +888,21 @@ mod tests {
         let params = formats(60);
         assert!(Pod::from_bytes(&params).is_some());
         assert!(Pod::from_bytes(&crop_meta()).is_some());
+        assert!(Pod::from_bytes(&cursor_meta()).is_some());
+    }
+
+    /// Each desktop offers the pointer's metadata at one fixed size: ours
+    /// must take both, or the shared picture comes without a pointer.
+    #[test]
+    fn the_pointers_room_takes_kwins_and_mutters_sizes() {
+        // KWin: a 256-pixel shape; Mutter: 384 (589,872 bytes, read from
+        // GNOME's port in the VM).
+        for side in [256, 384] {
+            let size = cursor_meta_bytes(side);
+            assert!(size <= CURSOR_META_BYTES, "{side}");
+            assert!(side as u32 <= cursor::MAX_SHAPE, "{side}");
+        }
+        assert_eq!(cursor_meta_bytes(384), 589_872);
     }
 
     /// GNOME shares a window inside a larger picture, its part marked by a

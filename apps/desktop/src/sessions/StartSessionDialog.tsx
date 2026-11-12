@@ -319,7 +319,8 @@ export function StartSessionDialog(props: {
             <p className="start-note">Guests play with their gamepad only.</p>
           ) : (
             <p className="start-note">
-              Guests play with their gamepad only: {pcName ?? "this PC"} offers no keyboard seat yet (Linux).
+              Guests play with their gamepad only: {pcName ?? "this PC"} offers no keyboard seat yet. On GNOME it
+              needs our extension, installed and up to date (Settings → Drivers).
             </p>
           )}
         </section>

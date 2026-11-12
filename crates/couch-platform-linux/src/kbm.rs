@@ -17,19 +17,24 @@
 //!   acceleration applies to it, and nothing keeps it on one screen
 //!   (`set_bounds` does nothing here: Wayland tells no program where the
 //!   pointer is).
+//! - **A guest's pointer stays inside the game window** (`confine`): each
+//!   move is cut to what keeps it in the window's client area, from where
+//!   the desktop's helper last said the pointer is (`front::pointer`), by
+//!   `couch_input::confine`. Only our moves are cut: the host's own mouse
+//!   drives the same pointer, and stays free.
 //!
 //! Ours are named like the pads, `couch-coapp/<pid>/keyboard` and
 //! `/mouse`, in their `phys`.
 
 use std::{ffi::CString, io};
 
-use couch_input::{HidUsage, InputError, KbmInjector, MouseButton};
+use couch_input::{HidUsage, InputError, KbmInjector, MouseButton, confine::Confiner};
 use evdev::{
     AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode, RelativeAxisCode,
     uinput::VirtualDevice,
 };
 
-use crate::pads::PHYS_PREFIX;
+use crate::{front, pads::PHYS_PREFIX};
 
 const KEYBOARD_NAME: &str = "Couch Co-App keyboard";
 const MOUSE_NAME: &str = "Couch Co-App mouse";
@@ -135,6 +140,8 @@ pub struct UinputKbm {
     /// What the wheels moved short of a whole notch, for the axes that count
     /// notches.
     wheel_rest: (i32, i32),
+    /// The game window a guest's pointer is kept in, by `front`'s id.
+    confined: Option<(isize, Confiner)>,
 }
 
 impl UinputKbm {
@@ -188,6 +195,7 @@ impl UinputKbm {
             keyboard,
             mouse,
             wheel_rest: (0, 0),
+            confined: None,
         })
     }
 }
@@ -264,6 +272,12 @@ impl KbmInjector for UinputKbm {
     }
 
     fn mouse_move(&mut self, dx: i32, dy: i32) -> Result<(), InputError> {
+        let (dx, dy) = match &mut self.confined {
+            Some((window, confiner)) => {
+                confiner.cut(front::pointer(*window), dx, dy, std::time::Instant::now())
+            }
+            None => (dx, dy),
+        };
         if dx == 0 && dy == 0 {
             return Ok(());
         }
@@ -290,6 +304,17 @@ impl KbmInjector for UinputKbm {
             return Ok(());
         }
         self.mouse.emit(&events).map_err(injection)
+    }
+
+    fn confine(&mut self, window: Option<isize>) {
+        if self.confined.as_ref().map(|(w, _)| *w) == window {
+            return;
+        }
+        tracing::info!(
+            on = window.is_some(),
+            "a guest's pointer kept in the game window"
+        );
+        self.confined = window.map(|w| (w, Confiner::new()));
     }
 }
 

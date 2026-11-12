@@ -243,6 +243,8 @@ export const SHOTS = [
   ["settings-shortcuts-linux", "linux-host", settings("Shortcuts")],
   // M16c-2: the GNOME extension beside the virtual devices, and naming the game's window.
   ["settings-drivers-gnome", "linux-keyboard-unnamed", settings("Drivers")],
+  // P18: an older extension is updated, not installed; meanwhile no keyboard seat.
+  ["settings-drivers-gnome-outdated", "linux-extension-outdated", settings("Drivers")],
   ["game-window-menu", "linux-keyboard-unnamed", click("Another…")],
   ["game-window-change", "linux-keyboard-named", click("Change…")],
   // M16c: a Linux host picks the sound, everything but us or one program.

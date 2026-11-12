@@ -26,9 +26,13 @@ const XML = `<node>
 </node>`;
 // At most this many apps (one per profile) watch at once.
 const MAX_WATCHERS = 4;
-// How often the Shell looks at the pointer while it moves (it stops while
-// the user is idle).
-const POINTER_MS = 50;
+// Where the pointer is goes as it moves (Mutter's cursor tracker, which its
+// own screencasts follow), once per turn of the Shell's loop: a guest's
+// moves are cut from each position told, so the sooner the next, the less
+// they slow near the game window's edges (P18's VM run). And looked at this
+// often while it moves (it stops while the user is idle), should a move go
+// untold.
+const POINTER_MS = 16;
 const NOTHING = JSON.stringify({active: '', pointer: false});
 
 function listed(w) {
@@ -57,14 +61,36 @@ function inside(rect, x, y) {
     return x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
 }
 
-// The pointer is over the focused window, and what a click there reaches is
-// that window: not another window above it, nor the Shell's own UI over it
-// (a notification and its buttons, the dock, a menu), which aren't windows.
-function pointerOver(focused) {
+// The window's client area: inside its frame, without the title bar Mutter
+// draws (an app drawing its own title bar has it inside).
+function clientArea(w) {
+    return w.frame_rect_to_client_rect(w.get_frame_rect());
+}
+
+// What a guest's pointer is kept in: the client area, less what the Shell's
+// own panels lie over (a fixed dock, the top bar: outside the monitor's work
+// area), unless the window is full screen above them. P18's VM run: a window
+// partly under Ubuntu's dock let the pointer hover its icons.
+function keptIn(w) {
+    const c = clientArea(w);
+    if (w.is_fullscreen())
+        return [c.x, c.y, c.width, c.height];
+    const work = w.get_work_area_current_monitor();
+    const x = Math.max(c.x, work.x);
+    const y = Math.max(c.y, work.y);
+    const right = Math.min(c.x + c.width, work.x + work.width);
+    const bottom = Math.min(c.y + c.height, work.y + work.height);
+    return [x, y, Math.max(right - x, 0), Math.max(bottom - y, 0)];
+}
+
+// The pointer is over the focused window's client area (never the title bar
+// Mutter draws), and what a click there reaches is that window: not another
+// window above it, nor the Shell's own UI over it (a notification and its
+// buttons, the dock, a menu), which aren't windows.
+function pointerOver(focused, x, y) {
     if (!focused)
         return false;
-    const [x, y] = global.get_pointer();
-    if (!inside(focused.get_frame_rect(), x, y))
+    if (!inside(clientArea(focused), x, y))
         return false;
     const windowActor = focused.get_compositor_private();
     const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y);
@@ -89,6 +115,7 @@ class Front {
         this._sentWindows = '';
         this._sentFront = '';
         this._beat = 0;
+        this._moved = 0;
     }
 
     WatchAsync(params, invocation) {
@@ -150,11 +177,26 @@ class Front {
             if (w)
                 this._follow(w);
         }
+        const tracker = global.backend.get_cursor_tracker();
+        this._ids.push([tracker, tracker.connect('position-invalidated', () => {
+            if (!this._moved) {
+                this._moved = GLib.idle_add(GLib.PRIORITY_HIGH, () => {
+                    this._moved = 0;
+                    this._pushFront(false);
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
+        })]);
         this._pointer = getPointerWatcher().addWatch(POINTER_MS, () => this._pushFront(false));
-        // Every second: the list if it changed, and what is in front always,
-        // so the app knows this still speaks.
-        this._beat = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
-            this._pushWindows(null);
+        // What is in front, and where the pointer is, always every 250 ms, so
+        // the app knows this still speaks, and that a pointer standing still
+        // (a game locked it) stands still (P18's review); the list every
+        // second, if it changed.
+        let beats = 0;
+        this._beat = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
+            beats += 1;
+            if (beats % 4 === 0)
+                this._pushWindows(null);
             this._pushFront(true);
             return GLib.SOURCE_CONTINUE;
         });
@@ -173,6 +215,10 @@ class Front {
         this._windowIds.clear();
         this._pointer?.remove();
         this._pointer = null;
+        if (this._moved) {
+            GLib.source_remove(this._moved);
+            this._moved = 0;
+        }
         if (this._beat) {
             GLib.source_remove(this._beat);
             this._beat = 0;
@@ -188,6 +234,8 @@ class Front {
                 this._pushWindows(null);
                 this._pushFront(false);
             }),
+            // Its client area moved.
+            w.connect('position-changed', () => this._pushFront(false)),
             w.connect('unmanaged', () => {
                 const ids = this._windowIds.get(w) ?? [];
                 for (const id of ids)
@@ -203,10 +251,15 @@ class Front {
         if (shellHasKeys())
             return NOTHING;
         const focused = global.display.focus_window;
-        return JSON.stringify({
+        const [x, y] = global.get_pointer();
+        const front = {
             active: focused ? String(focused.get_id()) : '',
-            pointer: pointerOver(focused),
-        });
+            pointer: pointerOver(focused, x, y),
+            at: [x, y],
+        };
+        if (focused)
+            front.area = keptIn(focused);
+        return JSON.stringify(front);
     }
 
     _pushWindows(except) {

@@ -5846,6 +5846,26 @@ async fn a_trusted_device_controls_the_home_desktop() {
         .filter(|k| **k == KbmCall::Key(HidUsage(LEFT_GUI), true))
         .count();
     assert_eq!(guis, 1, "only B's Windows key ever went in");
+
+    // C's pointer is kept in the game window (where the injector can,
+    // a Linux host); it never was during desktop control on the screen.
+    let confined = |a: &Member| {
+        a.fake
+            .kbm
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, KbmCall::Confine(_)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(confined(&a), vec![KbmCall::Confine(Some(WINDOW))]);
+    // Desktop control on the window: B's pointer goes anywhere.
+    desktop_on(&room, &a, &b, &b_window).await;
+    b_window.key(0x06, true);
+    wait("B's C key", || injected(&a, 0x06, true)).await;
+    assert_eq!(
+        confined(&a),
+        vec![KbmCall::Confine(Some(WINDOW)), KbmCall::Confine(None)]
+    );
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

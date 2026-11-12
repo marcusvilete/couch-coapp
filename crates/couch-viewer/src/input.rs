@@ -62,7 +62,10 @@ pub struct InputCapture {
     /// user's keys.
     shortcuts: Shortcuts,
     focused: bool,
-    /// The user freed the mouse with the hotkey.
+    /// The mouse stays free until a click into the picture: at the start,
+    /// after the focus went elsewhere, and once the hotkey freed it (P18's VM
+    /// run: taken as soon as the window had the focus, the bar and its Give
+    /// back were out of reach).
     mouse_freed: bool,
     captured: bool,
     /// The system keys are ours (M25b, desktop control).
@@ -141,7 +144,7 @@ impl InputCapture {
             seats: SeatState::default(),
             shortcuts: Shortcuts::default(),
             focused: false,
-            mouse_freed: false,
+            mouse_freed: true,
             captured: false,
             keyboard_grabbed: false,
             drawing: false,
@@ -287,6 +290,9 @@ impl InputCapture {
                 WindowEvent::FocusGained => self.focused = true,
                 WindowEvent::FocusLost => {
                     self.focused = false;
+                    // Coming back (Alt+Tab, a click on the title bar) never
+                    // captures by itself.
+                    self.mouse_freed = true;
                     self.release_all(out);
                 }
                 _ => {}

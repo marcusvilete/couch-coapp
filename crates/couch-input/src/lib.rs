@@ -10,6 +10,7 @@
 //! the host's keyboard layout decides what a key types and WASD stays WASD on
 //! any layout.
 
+pub mod confine;
 pub mod filter;
 pub mod forward;
 pub mod local;
@@ -265,6 +266,12 @@ pub trait KbmInjector: Send {
     /// motion, within `bounds`, without Windows' acceleration. `None` moves
     /// it relatively again, as games want.
     fn set_bounds(&mut self, _bounds: Option<Bounds>) {}
+    /// Keeps a guest's pointer inside the game window `window`'s client
+    /// area (the host's own id for it), or lets it go with `None`. Only an
+    /// injector that moves the pointer where nothing else keeps it there
+    /// does anything (a Linux host: [`confine`]); never set for desktop
+    /// control.
+    fn confine(&mut self, _window: Option<isize>) {}
 }
 
 /// A screen's area on the desktop, in pixels.

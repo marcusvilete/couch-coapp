@@ -216,6 +216,12 @@ pub fn run(options: WindowOptions) -> Result<()> {
     if !own {
         InputCapture::allow_background_pads();
     }
+    // The click that brings the window back counts: the mouse is captured
+    // only by a click into the picture (P18), and SDL would drop that one,
+    // asking for a second. It is never forwarded either way (it only
+    // captures), and a click on the bar stays the bar's; while drawing it is
+    // dropped again (`set_drawing_mode`).
+    sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
     let sdl = sdl3::init().map_err(|e| anyhow!("SDL init: {e}"))?;
     // Audio first, so the pipe reader has somewhere to put packets. The
     // host's own window has none: the host hears the game itself.
@@ -1745,6 +1751,10 @@ fn set_drawing_mode(
     let now = Instant::now();
     drawing.on = on;
     drawing.held = false;
+    // While drawing, the click that focuses the window stays SDL's own: on
+    // the picture it would be the board's, a stroke sent to everyone (P18's
+    // second review). SDL reads the hint at each click.
+    sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", if on { "0" } else { "1" });
     input.set_drawing(on, local);
     if let Some(editor) = &mut drawing.editor {
         if on {

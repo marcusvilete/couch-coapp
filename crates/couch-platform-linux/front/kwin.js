@@ -84,19 +84,48 @@ function windowUnder(p) {
     return null;
 }
 
-// The pointer is over the active window, not under another one above it.
-function pointerOver(active) {
+// The pointer is over the active window's client area (never its title bar
+// or frame), not under another window above it.
+function pointerOver(active, p) {
     if (!active) {
         return false;
     }
-    const p = workspace.cursorPos;
-    return inside(active.frameGeometry, p) && windowUnder(p) === active;
+    return inside(active.clientGeometry, p) && windowUnder(p) === active;
+}
+
+// What a guest's pointer is kept in: the client area, less what lies past
+// its screen's usable area (a panel over the window, the screen's edge for a
+// window partly off it, where the pointer can't go but its moves would count
+// as unanswered), unless the window is full screen. P18's review.
+function keptIn(w) {
+    const c = w.clientGeometry;
+    let work = null;
+    if (!w.fullScreen) {
+        try {
+            work = workspace.clientArea(KWin.MaximizeArea, w);
+        } catch (e) {
+            work = null;
+        }
+    }
+    if (!work) {
+        return [c.x, c.y, c.width, c.height];
+    }
+    const x = Math.max(c.x, work.x);
+    const y = Math.max(c.y, work.y);
+    const right = Math.min(c.x + c.width, work.x + work.width);
+    const bottom = Math.min(c.y + c.height, work.y + work.height);
+    return [x, y, Math.max(right - x, 0), Math.max(bottom - y, 0)];
 }
 
 let sentFront = "";
 function pushFront(always) {
     const active = activeWindow();
-    const json = JSON.stringify({ active: idOf(active), pointer: pointerOver(active) });
+    const p = workspace.cursorPos;
+    const front = { active: idOf(active), pointer: pointerOver(active, p), at: [p.x, p.y] };
+    if (active) {
+        front.area = keptIn(active);
+    }
+    const json = JSON.stringify(front);
     if (always || json !== sentFront) {
         sentFront = json;
         callDBus(SERVICE, PATH, IFACE, "Front", TOKEN, json);
@@ -126,26 +155,44 @@ on("windowRemoved", "clientRemoved", function (w) {
 on("windowActivated", "clientActivated", function () {
     pushFront(false);
 });
+// Where the pointer is goes at most every 8 ms while it moves: a guest's
+// moves are cut from each position told (they slow near the game window's
+// edges until the next).
+const POINTER_MS = 8;
 if (workspace.cursorPosChanged) {
-    workspace.cursorPosChanged.connect(function () {
+    const soon = new QTimer();
+    soon.singleShot = true;
+    soon.interval = POINTER_MS;
+    soon.timeout.connect(function () {
         pushFront(false);
+    });
+    workspace.cursorPosChanged.connect(function () {
+        if (!soon.active) {
+            soon.start();
+        }
     });
 } else {
     // No signal for the pointer: looked at often instead.
     const pointer = new QTimer();
-    pointer.interval = 100;
+    pointer.interval = 2 * POINTER_MS;
     pointer.timeout.connect(function () {
         pushFront(false);
     });
     pointer.start();
 }
 
-// Every second: the list if it changed, and what is in front always, so the
-// app knows the script still speaks.
+// What is in front, and where the pointer is, always every 250 ms, so the app
+// knows the script still speaks, and that a pointer standing still (a game
+// locked it) stands still (P18's review); the list every second, if it
+// changed.
+let beats = 0;
 const beat = new QTimer();
-beat.interval = 1000;
+beat.interval = 250;
 beat.timeout.connect(function () {
-    pushWindows(null);
+    beats += 1;
+    if (beats % 4 === 0) {
+        pushWindows(null);
+    }
     pushFront(true);
 });
 beat.start();
