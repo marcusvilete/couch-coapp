@@ -25,6 +25,8 @@ pub const F1: HidUsage = HidUsage(0x3A);
 pub const F2: HidUsage = HidUsage(0x3B);
 pub const F3: HidUsage = HidUsage(0x3C);
 pub const F7: HidUsage = HidUsage(0x40);
+pub const F8: HidUsage = HidUsage(0x41);
+pub const F10: HidUsage = HidUsage(0x43);
 pub const L: HidUsage = HidUsage(0x0F);
 pub const T: HidUsage = HidUsage(0x17);
 pub const F4: HidUsage = HidUsage(0x3D);
@@ -65,15 +67,18 @@ pub fn key_allowed(key: HidUsage, held: &BTreeSet<HidUsage>) -> bool {
 /// that would take a guest's keys off the game without another window
 /// becoming active, so the helper telling what is in front couldn't see it
 /// (M16c-2): Ctrl+Alt+T (a terminal, on GNOME and KDE), Ctrl+Alt+L (the
-/// lock screen) and Ctrl+F7 to F12 (KDE's window overviews and the desktop).
-/// Refused only on a Linux host: on Windows, Ctrl+Alt+key is AltGr+key, a
-/// character on many layouts.
+/// lock screen) and Ctrl+F7 to F12 (KDE's window overviews and the desktop);
+/// and GNOME's Alt+F7 and Alt+F8 (moving and resizing the window by the
+/// keyboard, which takes the keys) and Alt+F10 (maximizing it), P18's VM
+/// run. Refused only on a Linux host: on Windows, Ctrl+Alt+key is
+/// AltGr+key, a character on many layouts.
 pub fn desktop_key(key: HidUsage, held: &BTreeSet<HidUsage>) -> bool {
     let any = |keys: [HidUsage; 2]| keys.iter().any(|k| held.contains(k));
     let ctrl = any([LEFT_CTRL, RIGHT_CTRL]);
     let alt = any([LEFT_ALT, RIGHT_ALT]);
     match key {
         T | L => ctrl && alt,
+        F7 | F8 | F10 => ctrl || alt,
         HidUsage(code) if (F7.0..=F12.0).contains(&code) => ctrl,
         _ => false,
     }
@@ -150,6 +155,22 @@ mod tests {
         assert!(!desktop_key(L, &held(&[LEFT_ALT])));
         assert!(!desktop_key(T, &held(&[])));
         assert!(!desktop_key(HidUsage(F1.0 + 5), &held(&[LEFT_CTRL])));
+        // GNOME's moving, resizing and maximizing by the keyboard (P18).
+        for f in [F7, F8, F10] {
+            assert!(desktop_key(f, &held(&[LEFT_ALT])));
+            assert!(desktop_key(f, &held(&[RIGHT_ALT])));
+        }
+        // Alt with the other F-keys stays the game's (Alt+F4 and F1 to F3
+        // are blocked everywhere, by `key_allowed`).
+        for f in [
+            HidUsage(0x3E),
+            HidUsage(0x3F),
+            HidUsage(0x42),
+            HidUsage(0x44),
+            F12,
+        ] {
+            assert!(!desktop_key(f, &held(&[LEFT_ALT])), "{f:?}");
+        }
     }
 
     #[test]

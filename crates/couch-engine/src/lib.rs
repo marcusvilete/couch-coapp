@@ -1416,6 +1416,8 @@ pub enum DriverState {
     ExtensionsOff,
     /// Installed, but this GNOME can't run it.
     Unsupported,
+    /// An older version is installed: Install updates it (P18).
+    Outdated,
     #[default]
     Missing,
 }

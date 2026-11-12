@@ -271,6 +271,7 @@ const STATES: Record<DriverState, { text: string; tone: "ok" | "warn" | "neutral
   off: { text: "Installed, turned off", tone: "neutral" },
   extensionsOff: { text: "GNOME's extensions are turned off (its Extensions app)", tone: "warn" },
   unsupported: { text: "Installed, but this GNOME can't run it", tone: "warn" },
+  outdated: { text: "An older version is installed", tone: "warn" },
   missing: { text: "Not installed", tone: "neutral" },
 };
 
@@ -278,6 +279,7 @@ const STATES: Record<DriverState, { text: string; tone: "ok" | "warn" | "neutral
 function installLabels(d: DriverView): [string, string] {
   if (d.driver === "uinput") return ["Set up", "Setting up…"];
   if (d.state === "off") return ["Turn on", "Turning on…"];
+  if (d.state === "outdated") return ["Update", "Updating…"];
   return ["Install", "Installing…"];
 }
 
@@ -327,7 +329,7 @@ export function DriversSection(props: { linux: boolean }) {
           </div>
           <div className="driver-state">
             <Badge tone={STATES[d.state].tone}>{STATES[d.state].text}</Badge>
-            {(d.state === "missing" || d.state === "off") &&
+            {(d.state === "missing" || d.state === "off" || d.state === "outdated") &&
               (d.installer ? (
                 <Button
                   variant="primary"

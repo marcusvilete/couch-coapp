@@ -476,9 +476,18 @@ impl Video {
             position.x.saturating_sub(crop.0 as i32),
             position.y.saturating_sub(crop.1 as i32),
         ));
-        // A new shape comes only when it changed.
+        // A new shape comes only when it changed. Where the desktop says its
+        // header is, checked before it is read (aligned, past the cursor's
+        // own, within the most room asked for); the room agreed may be less
+        // (a desktop offers one fixed size within our range): what lies
+        // within it is the compositor's word, trusted as it is for the
+        // picture itself (P18's review).
+        let header = meta.bitmap_offset() as usize;
+        let header_fits = header >= std::mem::size_of::<spa::sys::spa_meta_cursor>()
+            && header.is_multiple_of(std::mem::align_of::<spa::sys::spa_meta_bitmap>())
+            && header + std::mem::size_of::<spa::sys::spa_meta_bitmap>() <= CURSOR_META_BYTES;
         let mut reshaped = false;
-        if let Some(bitmap) = meta.bitmap() {
+        if header_fits && let Some(bitmap) = meta.bitmap() {
             let size = bitmap.size();
             let channels = match bitmap.format() {
                 VideoFormat::BGRA | VideoFormat::BGRx => Some(Channels::Bgra),
@@ -487,8 +496,8 @@ impl Video {
                 VideoFormat::ABGR | VideoFormat::xBGR => Some(Channels::Abgr),
                 _ => None,
             };
-            // Checked before anything is read: what the desktop wrote lies
-            // within the most asked for (`cursor_meta`).
+            // Checked before the pixels are read: they lie within the most
+            // asked for (`cursor_meta`).
             let fits = size.width <= cursor::MAX_SHAPE
                 && size.height <= cursor::MAX_SHAPE
                 && bitmap.stride() > 0
@@ -671,20 +680,26 @@ fn formats(fps: u32) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-/// The most room for the pointer's metadata, asked for: its position, then
-/// its shape of up to [`cursor::MAX_SHAPE`] pixels each way.
-const CURSOR_META_BYTES: usize = std::mem::size_of::<spa::sys::spa_meta_cursor>()
-    + std::mem::size_of::<spa::sys::spa_meta_bitmap>()
-    + (cursor::MAX_SHAPE * cursor::MAX_SHAPE * 4) as usize;
+/// The room for the pointer's metadata with a shape of `side` pixels each
+/// way: its position, then its shape.
+const fn cursor_meta_bytes(side: usize) -> usize {
+    std::mem::size_of::<spa::sys::spa_meta_cursor>()
+        + std::mem::size_of::<spa::sys::spa_meta_bitmap>()
+        + side * side * 4
+}
+
+/// The most room asked for the pointer's metadata, for a shape of up to
+/// 1,024 pixels each way (OBS's range). The desktops each offer one fixed
+/// size, which must fall inside ours or no pointer comes at all: KWin's for
+/// 256 pixels, Mutter's for 384 (P18's VM run: a range up to 256 met
+/// nothing on GNOME). PipeWire allocates no more than the size agreed, never
+/// more than this.
+const CURSOR_META_BYTES: usize = cursor_meta_bytes(1024);
 
 /// The pointer's metadata asked for (`SPA_META_Cursor`), with room for a
-/// shape of 64 pixels each way at first and up to [`cursor::MAX_SHAPE`].
+/// shape of 64 pixels each way at first and up to [`CURSOR_META_BYTES`].
 fn cursor_meta() -> Vec<u8> {
-    let bytes = |side: usize| {
-        (std::mem::size_of::<spa::sys::spa_meta_cursor>()
-            + std::mem::size_of::<spa::sys::spa_meta_bitmap>()
-            + side * side * 4) as i32
-    };
+    let bytes = |side: usize| cursor_meta_bytes(side) as i32;
     let object = Value::Object(spa::pod::Object {
         type_: SpaTypes::ObjectParamMeta.as_raw(),
         id: ParamType::Meta.as_raw(),
@@ -874,6 +889,20 @@ mod tests {
         assert!(Pod::from_bytes(&params).is_some());
         assert!(Pod::from_bytes(&crop_meta()).is_some());
         assert!(Pod::from_bytes(&cursor_meta()).is_some());
+    }
+
+    /// Each desktop offers the pointer's metadata at one fixed size: ours
+    /// must take both, or the shared picture comes without a pointer.
+    #[test]
+    fn the_pointers_room_takes_kwins_and_mutters_sizes() {
+        // KWin: a 256-pixel shape; Mutter: 384 (589,872 bytes, read from
+        // GNOME's port in the VM).
+        for side in [256, 384] {
+            let size = cursor_meta_bytes(side);
+            assert!(size <= CURSOR_META_BYTES, "{side}");
+            assert!(side as u32 <= cursor::MAX_SHAPE, "{side}");
+        }
+        assert_eq!(cursor_meta_bytes(384), 589_872);
     }
 
     /// GNOME shares a window inside a larger picture, its part marked by a

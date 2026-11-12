@@ -9,8 +9,9 @@
 //! Pure pixels: pictures are packed BGRA (`width * 4` bytes a row), shapes
 //! BGRA with straight alpha.
 
-/// The largest pointer shape taken (and asked for), in pixels each way.
-pub(crate) const MAX_SHAPE: u32 = 256;
+/// The largest pointer shape drawn, in pixels each way: Mutter's own
+/// largest (KWin's is 256).
+pub(crate) const MAX_SHAPE: u32 = 384;
 
 /// How a shape's bitmap orders its channels, in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

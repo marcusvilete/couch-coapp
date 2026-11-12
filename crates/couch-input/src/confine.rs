@@ -12,12 +12,15 @@
 //! makes of it (assumed at its worst, [`WORST_ACCELERATION`]), counting
 //! what was sent since. Every report of a new position starts the count
 //! again, so the pointer slows only near an edge, for as long as reports
-//! take. A pointer the game has locked doesn't follow our moves: once moves
-//! went unanswered for [`LOCKED_AFTER`], they pass whole, until the
-//! position changes again.
+//! take; but a report was read a moment before it came, so what was sent in
+//! the [`IN_FLIGHT`] before it still counts (P18's VM run: forgetting it
+//! gave an edge's room twice, and a fast move got out). A pointer the game
+//! has locked doesn't follow our moves: once moves went unanswered for
+//! [`LOCKED_AFTER`], they pass whole, until the position changes again.
 //!
 //! Pure: the caller gives the reports and the time.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::Bounds;
@@ -34,6 +37,21 @@ pub const LOCKED_AFTER: Duration = Duration::from_millis(200);
 /// …and at least this much motion went unanswered: a few units the desktop
 /// slowed below a pixel move nothing.
 pub const LOCKED_MOTION: i64 = 16;
+/// Moves sent this long before a report came may not be in it: the desktop
+/// read the position, then told us (both helpers as the pointer moves:
+/// GNOME's extension on the turn of its loop, KWin's script within 8 ms
+/// reading it as it sends; then the bus), and its own input may have waited
+/// a moment. They still count against the room the report gives. Longer
+/// makes the pointer stop and go near an edge (50 ms did, P18's VM run).
+pub const IN_FLIGHT: Duration = Duration::from_millis(20);
+/// The same position told again (the helpers repeat it every 250 ms) holds
+/// the moves sent this long before it was heard: they moved the pointer
+/// less than a pixel, and stop counting. A push read before our moves landed
+/// and heard late (our process busy) mustn't give the room back, nor prove a
+/// lock, so this is well past any lag (P18's second review).
+pub const STILL_AFTER: Duration = Duration::from_millis(100);
+/// The most moves remembered: past it, the last entry takes the new ones.
+const MAX_SENT: usize = 128;
 
 /// Where the desktop last said the pointer is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +63,12 @@ pub struct PointerReport {
     /// Counts the reported position's changes: a new count is a new
     /// position to start from.
     pub changes: u64,
+    /// When this position was first told (`None`: as the move is cut).
+    pub came: Option<Instant>,
+    /// When the helper last told it, the same or not (its heartbeat at least
+    /// every second; `None`: only when it came): what was sent well before
+    /// is in it.
+    pub told: Option<Instant>,
 }
 
 /// Cuts a guest's relative moves to the game window's area.
@@ -52,8 +76,22 @@ pub struct PointerReport {
 pub struct Confiner {
     /// The changes count of the position the motion below is counted from.
     from: Option<u64>,
-    /// Motion sent since that position, each way: right, left, down, up.
-    sent: [i64; 4],
+    /// When that position came.
+    came: Option<Instant>,
+    /// Motion that may not be in that position yet, each way (right, left,
+    /// down, up), and when it was sent: what was sent before it came only
+    /// for [`IN_FLIGHT`] (had it moved the pointer, a newer position would
+    /// have come by then; counted for longer, moves that came with the
+    /// position stopped the pointer short of the edge for good, P18's VM
+    /// run), and nothing sent [`IN_FLIGHT`] before the helper last told it
+    /// (the same position told again: those moves are in it, and moved it
+    /// less than a pixel; kept, jitter would use the room up both ways and
+    /// hold the pointer still for good).
+    sent: VecDeque<(Instant, [i64; 4])>,
+    /// Motion sent since that position came, net along each axis: whether
+    /// moves went unanswered (back and forth adds up to nothing, P18's
+    /// review).
+    fresh: [i64; 2],
     /// When motion was first sent since that position.
     since: Option<Instant>,
     /// The pointer doesn't follow our moves: they pass whole.
@@ -71,7 +109,8 @@ impl Confiner {
     }
 
     /// What of the move `(dx, dy)` to send, as of `report`. Without one
-    /// (the desktop says nothing of the pointer), the move passes whole.
+    /// (the desktop says nothing of the pointer, while the game counts as in
+    /// front), nothing goes: never the whole move (P18's review).
     pub fn cut(
         &mut self,
         report: Option<PointerReport>,
@@ -80,21 +119,37 @@ impl Confiner {
         now: Instant,
     ) -> (i32, i32) {
         let Some(report) = report else {
-            *self = Self::default();
-            return (dx, dy);
+            // What was sent is kept: it may still be on its way when the
+            // next report comes (P18's second review).
+            return (0, 0);
         };
         if self.from != Some(report.changes) {
-            // A new position: counted afresh, and followed again.
+            // A new position: followed again, counted from what may still
+            // be on its way.
             *self = Self {
                 from: Some(report.changes),
+                came: Some(report.came.unwrap_or(now)),
+                sent: std::mem::take(&mut self.sent),
                 ..Self::default()
             };
         }
+        let came = self.came.unwrap_or(now);
+        let told = report.told.unwrap_or(came).max(came);
+        self.sent.retain(|(at, _)| {
+            (*at >= came || now.saturating_duration_since(*at) < IN_FLIGHT)
+                && told.saturating_duration_since(*at) < STILL_AFTER
+        });
+        // Locked: moves went unanswered for a while, net, and the helper
+        // said so since, well after them, with nothing newer heard for a
+        // moment (a quiet desktop proves nothing, nor does one push that
+        // may have been read before the moves landed).
         if !self.locked
-            && self
-                .since
-                .is_some_and(|since| now.saturating_duration_since(since) >= LOCKED_AFTER)
-            && self.sent.iter().sum::<i64>() >= LOCKED_MOTION
+            && self.since.is_some_and(|since| {
+                now.saturating_duration_since(since) >= LOCKED_AFTER
+                    && told.saturating_duration_since(since) >= STILL_AFTER
+                    && now.saturating_duration_since(told) >= IN_FLIGHT
+            })
+            && self.fresh[0].abs() + self.fresh[1].abs() >= LOCKED_MOTION
         {
             self.locked = true;
         }
@@ -106,11 +161,35 @@ impl Confiner {
         let right = left + i64::from(area.width.max(1)) - 1;
         let bottom = top + i64::from(area.height.max(1)) - 1;
         let (x, y) = (i64::from(report.x), i64::from(report.y));
-        let [r, l, d, u] = &mut self.sent;
+        let mut sent = [0; 4];
+        for (_, moved) in &self.sent {
+            for (total, way) in sent.iter_mut().zip(moved) {
+                *total += way;
+            }
+        }
+        let before = sent;
+        let [r, l, d, u] = &mut sent;
         let cx = along(dx, x, left, right, r, l);
         let cy = along(dy, y, top, bottom, d, u);
-        if (cx, cy) != (0, 0) && self.since.is_none() {
-            self.since = Some(now);
+        if (cx, cy) != (0, 0) {
+            if self.since.is_none() {
+                self.since = Some(now);
+            }
+            let moved: [i64; 4] = std::array::from_fn(|i| sent[i] - before[i]);
+            self.fresh[0] += moved[0] - moved[1];
+            self.fresh[1] += moved[2] - moved[3];
+            let full = self.sent.len() >= MAX_SENT;
+            match self.sent.back_mut() {
+                // However fast moves come, a bounded history: the last entry
+                // takes them, its time now (kept longer, never shorter).
+                Some((at, last)) if full => {
+                    *at = now;
+                    for (total, way) in last.iter_mut().zip(moved) {
+                        *total += way;
+                    }
+                }
+                _ => self.sent.push_back((now, moved)),
+            }
         }
         (cx, cy)
     }
@@ -150,6 +229,16 @@ mod tests {
             y,
             area: AREA,
             changes,
+            came: None,
+            told: None,
+        })
+    }
+
+    /// The same, the helper having last told it at `told` (its heartbeat).
+    fn heard(x: i32, y: i32, changes: u64, told: Instant) -> Option<PointerReport> {
+        at(x, y, changes).map(|r| PointerReport {
+            told: Some(told),
+            ..r
         })
     }
 
@@ -157,10 +246,12 @@ mod tests {
         start + Duration::from_millis(ms)
     }
 
+    /// P18's review: with the game in front, nothing said of the pointer
+    /// lets nothing through, never the whole move.
     #[test]
-    fn without_a_report_moves_pass_whole() {
+    fn without_a_report_nothing_goes() {
         let mut c = Confiner::new();
-        assert_eq!(c.cut(None, 5000, -3000, Instant::now()), (5000, -3000));
+        assert_eq!(c.cut(None, 5000, -3000, Instant::now()), (0, 0));
     }
 
     #[test]
@@ -202,6 +293,77 @@ mod tests {
         assert!(x >= 896, "it gets there: {x}");
     }
 
+    /// The desktop reads the position, then tells us: moves sent meanwhile
+    /// aren't in the report. Fast moves at the worst acceleration, each
+    /// report 16 ms behind (a GNOME poll and the bus): never past the edge,
+    /// and still at it in the end. Forgetting what was on its way at each
+    /// report gave the edge's room again, and the pointer got out.
+    #[test]
+    fn a_report_behind_the_moves_never_lets_the_pointer_out() {
+        let mut c = Confiner::new();
+        let t = Instant::now();
+        // Where the pointer is after each 4 ms step, as the desktop has it.
+        let mut path = vec![500i32];
+        for step in 0..250u64 {
+            let now = ms(t, step * 4);
+            // The report: the position 4 steps (16 ms) ago, its count new
+            // whenever the position it gives changed (it only grows).
+            let seen = path[path.len().saturating_sub(5)];
+            let report = at(seen, 300, seen as u64);
+            // A steady fast move (a guest flinging the mouse): 30 units
+            // every 4 ms, 120 pixels at the worst acceleration.
+            let (dx, _) = c.cut(report, 30, 0, now);
+            let x = path.last().unwrap() + dx * WORST_ACCELERATION as i32;
+            assert!(x <= 899, "out at step {step}: {x}");
+            path.push(x);
+        }
+        assert!(*path.last().unwrap() >= 890, "it gets there: {path:?}");
+    }
+
+    #[test]
+    fn however_fast_moves_come_the_history_stays_bounded() {
+        let mut c = Confiner::new();
+        let t = Instant::now();
+        // Back and forth, a unit at a time: each move is sent.
+        for i in 0..10_000 {
+            let dx = if i % 2 == 0 { 1 } else { -1 };
+            c.cut(at(500, 300, 1), dx, 0, t + Duration::from_micros(i));
+        }
+        assert!(c.sent.len() <= MAX_SENT);
+        // Nothing of it was forgotten: a quarter of 399 to the right edge,
+        // of 400 to the left.
+        assert_eq!(c.sent.iter().map(|(_, m)| m[0]).sum::<i64>(), 99);
+        assert_eq!(c.sent.iter().map(|(_, m)| m[1]).sum::<i64>(), 100);
+    }
+
+    /// P18's VM run: a fast move towards an edge, and the position that
+    /// comes leaves less room than what was sent just before it. Nothing
+    /// more goes, so the pointer doesn't move and no newer position comes:
+    /// the moves sent before it must stop counting once they can't be on
+    /// their way any more, or the pointer stays short of the edge for as
+    /// long as the guest keeps moving.
+    #[test]
+    fn a_fast_move_near_an_edge_never_stalls() {
+        let mut c = Confiner::new();
+        let t = Instant::now();
+        // From 500, 30 units every 4 ms for 16 ms: 99 allowed of the 399 to
+        // the edge.
+        let mut sent = 0;
+        for step in 0..5 {
+            sent += c.cut(at(500, 300, 1), 30, 0, ms(t, step * 4)).0;
+        }
+        assert_eq!(sent, 99);
+        // The desktop moved it 2.5 times as far: 747, its room 152, a
+        // quarter of it 38, less than the 69 sent in the 20 ms before (which
+        // may still be on their way).
+        assert_eq!(c.cut(at(747, 300, 2), 30, 0, ms(t, 20)), (0, 0));
+        // The guest keeps moving, the position stays: within the time a
+        // move can be on its way, the room comes back.
+        let resumed = (6..20).find(|step| c.cut(at(747, 300, 2), 30, 0, ms(t, step * 4)).0 > 0);
+        let step = resumed.expect("the pointer moves again");
+        assert!(ms(t, step * 4) <= ms(t, 20) + IN_FLIGHT + Duration::from_millis(4));
+    }
+
     #[test]
     fn a_pointer_outside_only_comes_back() {
         let mut c = Confiner::new();
@@ -224,13 +386,93 @@ mod tests {
         assert_eq!(c.cut(at(500, 350, 1), 300, 0, t), (99, 0));
         assert_eq!(c.cut(at(500, 350, 1), 300, 0, ms(t, 100)), (0, 0));
         assert!(!c.locked());
-        // Unanswered for long enough: locked, and moves pass whole.
-        assert_eq!(c.cut(at(500, 350, 1), 300, 0, ms(t, 200)), (300, 0));
+        // Unanswered for long enough, but the helper hasn't spoken since:
+        // no lock.
+        assert_eq!(c.cut(at(500, 350, 1), 300, 0, ms(t, 200)), (0, 0));
+        assert!(!c.locked());
+        // It told the same position, well after the moves, and nothing newer
+        // came for a moment: locked, and moves pass whole.
+        assert_eq!(
+            c.cut(heard(500, 350, 1, ms(t, 150)), 300, 0, ms(t, 210)),
+            (300, 0)
+        );
         assert!(c.locked());
         assert_eq!(c.cut(at(500, 350, 1), -5000, 0, ms(t, 900)), (-5000, 0));
         // The heartbeat's report of the same position changes nothing; a
         // new position (the game let the pointer go) is followed again.
         assert_eq!(c.cut(at(500, 350, 2), 1000, 0, ms(t, 1000)), (99, 0));
+        assert!(!c.locked());
+    }
+
+    /// P18's review: a desktop that says nothing for a while (the Shell busy)
+    /// proves no lock: its input may have moved the pointer meanwhile.
+    #[test]
+    fn a_quiet_desktop_is_never_a_lock() {
+        let mut c = Confiner::new();
+        let t = Instant::now();
+        let mut sent = 0;
+        for i in 0..250 {
+            sent += c.cut(at(500, 350, 1), 30, 0, ms(t, i * 4)).0;
+        }
+        assert!(!c.locked());
+        assert!(sent <= 99, "never past the room: {sent}");
+    }
+
+    /// P18's review: back and forth that moves the pointer less than a pixel
+    /// (slow aiming) adds up to nothing, so it's no lock; and the heartbeat
+    /// telling the same position gives the room back, or the jitter would
+    /// use it up both ways and hold the pointer still.
+    #[test]
+    fn jitter_is_never_a_lock_nor_holds_the_pointer() {
+        let mut c = Confiner::new();
+        let t = Instant::now();
+        let mut last = (0, 0);
+        for i in 0..1000u64 {
+            let dx = if i % 2 == 0 { 1 } else { -1 };
+            // The helpers' beat: the same position told every 250 ms.
+            let told = ms(t, i * 4 / 250 * 250);
+            last = c.cut(heard(500, 350, 1, told), dx, 0, ms(t, i * 4));
+        }
+        assert!(!c.locked());
+        assert_ne!(last, (0, 0), "still moving after 4 s of jitter");
+    }
+
+    /// P18's second review: a push of the same position heard just after
+    /// moves (read, maybe, before they landed) holds them still.
+    #[test]
+    fn the_same_position_told_right_after_moves_keeps_them() {
+        let mut c = Confiner::new();
+        let t = Instant::now();
+        assert_eq!(c.cut(at(800, 300, 1), 1000, 0, t), (24, 0));
+        assert_eq!(
+            c.cut(heard(800, 300, 1, ms(t, 50)), 1000, 0, ms(t, 50)),
+            (0, 0)
+        );
+        // Well after them, it holds them: they moved the pointer less than a
+        // pixel, and the room comes back.
+        assert_eq!(
+            c.cut(heard(800, 300, 1, ms(t, 150)), 1000, 0, ms(t, 150)),
+            (24, 0)
+        );
+    }
+
+    /// P18's second review: a push read before the moves landed, heard late,
+    /// and the new position right behind it: never a lock, so nothing ever
+    /// passes whole.
+    #[test]
+    fn a_late_push_of_the_old_position_is_no_lock() {
+        let mut c = Confiner::new();
+        let t = Instant::now();
+        assert_eq!(c.cut(at(500, 350, 1), 300, 0, t), (99, 0));
+        // At 250 ms the old position is heard (read long before); a move cut
+        // at once must not pass whole.
+        assert_eq!(
+            c.cut(heard(500, 350, 1, ms(t, 250)), 300, 0, ms(t, 250)).0,
+            99
+        );
+        assert!(!c.locked());
+        // The new position comes right behind it: followed, room from there.
+        assert_eq!(c.cut(at(896, 350, 2), 300, 0, ms(t, 255)), (0, 0));
         assert!(!c.locked());
     }
 
@@ -257,12 +499,13 @@ mod tests {
     }
 
     #[test]
-    fn a_report_gone_starts_over() {
+    fn a_report_gone_a_moment_forgets_nothing() {
         let mut c = Confiner::new();
         let t = Instant::now();
         assert_eq!(c.cut(at(800, 300, 1), 1000, 0, t), (24, 0));
-        assert_eq!(c.cut(None, 1000, 0, t), (1000, 0));
-        assert_eq!(c.cut(at(800, 300, 1), 1000, 0, t), (24, 0));
+        assert_eq!(c.cut(None, 1000, 0, t), (0, 0));
+        // What was sent may still be on its way: no room again yet.
+        assert_eq!(c.cut(at(800, 300, 1), 1000, 0, t), (0, 0));
     }
 
     #[test]
@@ -278,6 +521,8 @@ mod tests {
                 height: 0,
             },
             changes: 1,
+            came: None,
+            told: None,
         });
         assert_eq!(c.cut(report, 50, -50, Instant::now()), (0, 0));
     }

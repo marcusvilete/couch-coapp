@@ -837,6 +837,16 @@ export const SCENARIOS: Record<string, Scenario> = {
         },
       }),
   },
+  "linux-extension-outdated": {
+    title: "Linux on GNOME: an older version of our extension, so no keyboard seat until it's updated (P18)",
+    world: () => ({
+      ...SCENARIOS["linux-host"].world(),
+      drivers: [
+        { driver: "uinput", state: "ready", installer: true },
+        { driver: "gnomeextension", state: "outdated", installer: true },
+      ],
+    }),
+  },
   "linux-home-pc": {
     title: "Linux: remote play at the home PC, an AppImage starting at sign-in (M16c)",
     world: () => {

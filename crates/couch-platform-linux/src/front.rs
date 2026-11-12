@@ -57,6 +57,11 @@ const KWIN_SCRIPT: &str = include_str!("../front/kwin.js");
 /// The GNOME extension's files.
 const EXTENSION_METADATA: &str = include_str!("../front/gnome/metadata.json");
 const EXTENSION_JS: &str = include_str!("../front/gnome/extension.js");
+/// The version in its `metadata.json`: GNOME runs the version it read at
+/// log-in, so a newer one installed since counts only after logging in again
+/// (an older one says nothing of the pointer, which keeps a guest's in the
+/// game window: P18).
+const EXTENSION_VERSION: f64 = 5.0;
 
 /// The largest push taken: a list of a few hundred windows.
 const MAX_PUSH: usize = 256 * 1024;
@@ -156,8 +161,9 @@ struct Told {
     at: Option<(i32, i32)>,
     area: Option<Bounds>,
     /// Counts the changes of `at`: a guest's moves are cut from each new
-    /// position (`couch_input::confine`).
+    /// position (`couch_input::confine`), from when it came.
     moves: u64,
+    moved_at: Option<Instant>,
     /// The lock screen is up, whatever the helper says: KWin keeps the
     /// active window while its lock screen takes the keys.
     locked: bool,
@@ -220,6 +226,7 @@ impl Told {
             .and_then(|[x, y]| Some((coordinate(x)?, coordinate(y)?)));
         if at.is_some() && at != self.at {
             self.moves += 1;
+            self.moved_at = Some(now);
         }
         self.at = at;
         self.area = pushed.area.and_then(|[x, y, width, height]| {
@@ -255,6 +262,8 @@ impl Told {
             y,
             area,
             changes: self.moves,
+            came: self.moved_at,
+            told: self.heard,
         })
     }
 
@@ -1060,9 +1069,12 @@ pub mod gnome {
     /// Where our extension stands.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ExtensionState {
-        /// Not installed, or an older version of it.
+        /// Not installed.
         Missing,
-        /// Installed, but GNOME reads extensions only when you log in.
+        /// An older version of it is installed: Install updates it.
+        Outdated,
+        /// Installed, but GNOME reads extensions only when you log in: it
+        /// doesn't know ours yet, or still runs an older version of it.
         NeedsLogout,
         /// Installed and known, but turned off.
         Off,
@@ -1083,11 +1095,16 @@ pub mod gnome {
         Some(data.join("gnome-shell/extensions").join(EXTENSION_UUID))
     }
 
-    /// Whether our files, as this build has them, are in place.
-    fn installed() -> bool {
-        let Some(folder) = folder() else { return false };
-        std::fs::read_to_string(folder.join("metadata.json")).is_ok_and(|m| m == EXTENSION_METADATA)
-            && std::fs::read_to_string(folder.join("extension.js")).is_ok_and(|j| j == EXTENSION_JS)
+    /// Whether our files, as this build has them, are in place: `Some(true)`;
+    /// others of ours (an older version): `Some(false)`; none: `None`.
+    fn installed() -> Option<bool> {
+        let folder = folder()?;
+        let metadata = std::fs::read_to_string(folder.join("metadata.json")).ok()?;
+        Some(
+            metadata == EXTENSION_METADATA
+                && std::fs::read_to_string(folder.join("extension.js"))
+                    .is_ok_and(|j| j == EXTENSION_JS),
+        )
     }
 
     /// Our extension's state; `None` off GNOME. Blocks briefly.
@@ -1108,16 +1125,20 @@ pub mod gnome {
     }
 
     pub(super) async fn look(bus: &zbus::Connection) -> ExtensionState {
-        if !installed() {
-            return ExtensionState::Missing;
+        match installed() {
+            None => return ExtensionState::Missing,
+            Some(false) => return ExtensionState::Outdated,
+            Some(true) => {}
         }
         if !user_extensions_on(bus).await {
             return ExtensionState::ExtensionsOff;
         }
-        match info_state(bus).await {
+        match info(bus).await {
             // Unknown to the Shell: installed since it started.
             None => ExtensionState::NeedsLogout,
-            Some(state) => match state as u32 {
+            // The Shell still runs the version it read at log-in.
+            Some((_, version)) if version != Some(EXTENSION_VERSION) => ExtensionState::NeedsLogout,
+            Some((state, _)) => match state as u32 {
                 1 => ExtensionState::Ready,
                 // Off, being turned off, or read but not yet on.
                 2 | 6 | 7 => ExtensionState::Off,
@@ -1129,8 +1150,9 @@ pub mod gnome {
     }
 
     /// The Shell's state for our extension (1 on, 2 off, 3 failed, 4 out of
-    /// date, 6 read, ...); `None` if it doesn't know it.
-    async fn info_state(bus: &zbus::Connection) -> Option<f64> {
+    /// date, 6 read, ...) and the version it read; `None` if it doesn't know
+    /// it.
+    async fn info(bus: &zbus::Connection) -> Option<(f64, Option<f64>)> {
         let reply = call(
             bus,
             SHELL,
@@ -1142,7 +1164,9 @@ pub mod gnome {
         .await
         .ok()?;
         let info: HashMap<String, OwnedValue> = reply.body().deserialize().ok()?;
-        f64::try_from(info.get("state")?).ok()
+        let state = f64::try_from(info.get("state")?).ok()?;
+        let version = info.get("version").and_then(|v| f64::try_from(v).ok());
+        Some((state, version))
     }
 
     async fn user_extensions_on(bus: &zbus::Connection) -> bool {
@@ -1424,6 +1448,21 @@ mod tests {
         assert!(EXTENSION_JS.contains(PATH) || EXTENSION_JS.contains("/com/couchcoapp/Front"));
         assert!(EXTENSION_JS.contains(&format!("'{IFACE}'")));
         assert!(EXTENSION_METADATA.contains(EXTENSION_UUID));
+        assert!(EXTENSION_METADATA.contains(&format!("\"version\": {EXTENSION_VERSION}")));
+    }
+
+    /// GNOME runs the extension it read at log-in, and the app tells an
+    /// older one by its version alone: a change to `extension.js` without a
+    /// new version would count as ready while GNOME still runs the old code
+    /// (P18's review). Changed it? Raise `metadata.json`'s version and
+    /// `EXTENSION_VERSION`, then put the new hash here.
+    #[test]
+    fn the_extensions_version_moves_with_its_code() {
+        let code = EXTENSION_JS.replace('\r', "");
+        let hash = code.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        assert_eq!((EXTENSION_VERSION, hash), (5.0, 0xed39_9fa7_a222_c2ae));
     }
 
     /// The whole path on a real bus, with a stand-in KWin: the script loaded

@@ -578,6 +578,7 @@ impl Backend for LinuxBackend {
 fn extension_state(state: ExtensionState) -> DriverState {
     match state {
         ExtensionState::Missing => DriverState::Missing,
+        ExtensionState::Outdated => DriverState::Outdated,
         ExtensionState::NeedsLogout => DriverState::NeedsLogout,
         ExtensionState::Off => DriverState::Off,
         ExtensionState::ExtensionsOff => DriverState::ExtensionsOff,
