@@ -10,7 +10,10 @@
 //! [`Effect::Revoke`], [`Effect::RevokeViewers`]) and only mirrors the outcome:
 //! the engine reports each of the router's grants and revocations to
 //! [`HostSession::seat_changed`], including those the router makes alone (a
-//! holder who went quiet too long).
+//! holder who went quiet too long). Each grant carries a [`GrantTicket`] and
+//! is answered exactly once, by the router's report of it or the input
+//! task's refusal ([`HostSession::grant_refused`]), matched by that ticket
+//! alone (P16).
 //!
 //! **Only viewers play, as many seats as they have controllers.** Requests
 //! come from viewers only. A grant goes only to a viewer, never while control
@@ -134,6 +137,12 @@ pub enum SessionError {
     Ended,
 }
 
+/// One grant, as the session numbered it (P16): the router's report of it,
+/// or the input task's refusal, carries it back, so each answers its own
+/// grant, never another of the same seat to the same member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GrantTicket(pub u64);
+
 /// What the engine must do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
@@ -156,6 +165,10 @@ pub enum Effect {
         member: MemberId,
         permissions: Permissions,
         controller: Option<u8>,
+        /// Comes back with the router's report of this grant
+        /// ([`HostSession::seat_changed`]) or its refusal
+        /// ([`HostSession::grant_refused`]): exactly one of them.
+        ticket: GrantTicket,
     },
     /// Ask the seat router to free `seat`: only if `holder` still holds it,
     /// or from whoever does with `None`. A request aimed at one viewer must
@@ -262,10 +275,13 @@ pub struct HostSession {
     drivers: BTreeMap<MemberId, Vec<(SeatId, u8)>>,
     /// The controller a viewer's pending request names (P13).
     asked_with: BTreeMap<MemberId, u8>,
-    /// Grants sent to the router and not yet reported back, in the order
-    /// sent: they count toward a viewer's seats too, so two quick grants
-    /// never give it more than its controllers allow.
+    /// Grants sent to the router and not yet answered, in the order sent:
+    /// they count toward a viewer's seats too, so two quick grants never
+    /// give it more than its controllers allow. Each leaves only on its own
+    /// answer, matched by ticket (P16), or at the end.
     pending: Vec<PendingGrant>,
+    /// The next grant's ticket.
+    next_ticket: u64,
     /// The viewer whose grant of the keyboard-and-mouse seat carries desktop
     /// control (M25b), as the engine last said.
     desktop: Option<MemberId>,
@@ -299,14 +315,16 @@ pub const RESYNC_EVERY: Duration = Duration::from_secs(1);
 /// A grant on its way to the router (M18).
 #[derive(Debug, Clone)]
 struct PendingGrant {
+    ticket: GrantTicket,
     seat: SeatId,
     member: MemberId,
     /// The member's other pad seats it frees (revoked first), so it never
     /// holds more than its controllers (P13: only as many as that takes).
     frees: Vec<SeatId>,
-    /// A later grant freed this one's seat (revoked right behind it): it no
-    /// longer counts toward the member's seats, but its report still
-    /// answers it, so that report frees nothing more (P13 review).
+    /// A later grant freed this one's seat (revoked right behind it), or
+    /// the panic key or the member's departure overtook it (P16): it no
+    /// longer counts toward the member's seats, but its report or refusal
+    /// still answers it, so that report frees nothing more (P13 review).
     cancelled: bool,
 }
 
@@ -355,6 +373,7 @@ impl HostSession {
             drivers: BTreeMap::new(),
             asked_with: BTreeMap::new(),
             pending: Vec::new(),
+            next_ticket: 1,
             desktop: None,
             board: Board::new(false),
             board_changed: false,
@@ -756,7 +775,9 @@ impl HostSession {
         self.controllers.remove(&member);
         self.drivers.remove(&member);
         self.asked_with.remove(&member);
-        self.pending.retain(|p| p.member != member);
+        // Its grants on their way are still answered (P16): kept until then,
+        // counting for nothing, so a late report of one answers it alone.
+        self.cancel_pending(|p| p.member == member);
         if self.desktop == Some(member) {
             self.desktop = None;
         }
@@ -905,29 +926,29 @@ impl HostSession {
         self.drivers.insert(member, drivers.to_vec());
     }
 
-    /// The seat router handed `seat` to `holder`, or back to the host.
-    pub fn seat_changed(&mut self, seat: SeatId, holder: Option<MemberId>) -> Vec<Effect> {
+    /// The seat router handed `seat` to `holder`, or back to the host;
+    /// `ticket` names the grant this report answers (P16), `None` for one
+    /// the session didn't number (a claim) and for a release.
+    pub fn seat_changed(
+        &mut self,
+        seat: SeatId,
+        holder: Option<MemberId>,
+        ticket: Option<GrantTicket>,
+    ) -> Vec<Effect> {
         if !self.has_seat(seat) {
             return Vec::new();
         }
-        // The router takes grants in order: a report of `holder` on this seat
-        // answers its grant, and any earlier one for the seat (overtaken).
-        // A release answers none: a grant may still follow it.
-        let answered = holder.and_then(|m| {
+        // A report answers its own grant alone, by ticket: matched by seat
+        // and member, an earlier grant's late report (one the panic key
+        // overtook) answered a later grant of the same seat to the same
+        // member, and the session then believed that seat free while the
+        // router held it (P16). A release answers none.
+        let answered = holder.zip(ticket).and_then(|(m, t)| {
             self.pending
                 .iter()
-                .position(|p| p.seat == seat && p.member == m)
+                .position(|p| p.ticket == t && p.seat == seat && p.member == m)
         });
-        let freed = answered.map(|i| {
-            let frees = self.pending[i].frees.clone();
-            let mut at = 0;
-            self.pending.retain(|p| {
-                let keep = at > i || p.seat != seat;
-                at += 1;
-                keep
-            });
-            frees
-        });
+        let freed = answered.map(|i| self.pending.remove(i).frees);
         let host = holder.is_some_and(|h| self.is_host(h));
         match holder {
             // A grant that crossed a departure, the panic key or the end:
@@ -977,6 +998,26 @@ impl HostSession {
                 fx.extend(self.reclaim());
                 fx
             }
+        }
+    }
+
+    /// The input task refused the grant `ticket` names (P16): the panic key
+    /// overtook it, the session is stopping, or the router refused it. No
+    /// report of it will come; it counts no more.
+    pub fn grant_refused(&mut self, ticket: GrantTicket) -> Vec<Effect> {
+        let Some(i) = self.pending.iter().position(|p| p.ticket == ticket) else {
+            return Vec::new();
+        };
+        self.pending.remove(i);
+        vec![Effect::Changed]
+    }
+
+    /// Marks the grants on their way that `which` picks as cancelled: they
+    /// count toward nothing, but each still waits for its own answer (P16).
+    fn cancel_pending(&mut self, which: impl Fn(&PendingGrant) -> bool) {
+        for p in self.pending.iter_mut().filter(|p| which(p)) {
+            p.cancelled = true;
+            p.frees.clear();
         }
     }
 
@@ -1175,6 +1216,10 @@ impl HostSession {
             .seat;
         // Held by the host as far as the mirror knows, with no viewer's
         // grant of it still on its way (that grant would take it from them).
+        // A cancelled one counts too (P16 review): the router may have run
+        // it before the panic key, and the release behind it would leave
+        // the seat empty while paused. The host's grant goes behind both,
+        // so at worst it re-grants a seat they hold.
         let held = |s: SeatId| {
             self.holders[usize::from(s.0)] == Some(host)
                 && !self.pending.iter().any(|p| p.seat == s && p.member != host)
@@ -1233,7 +1278,11 @@ impl HostSession {
             return fx;
         }
         let host = self.host();
-        self.pending.retain(|p| Some(p.member) == host);
+        // Viewers' grants on their way end at the router (refused, or
+        // granted and then revoked by `RevokeViewers` right behind them), but
+        // each is still answered: kept as cancelled until then, so its late
+        // report never answers a grant made after Allow (P16).
+        self.cancel_pending(|p| Some(p.member) != host);
         self.everything_taken_back();
         self.desktop = None;
         let waiting = std::mem::take(&mut self.requests);
@@ -1896,13 +1945,11 @@ impl HostSession {
         // (P13), on the same ordered channel, so the router never sees it
         // on more pad seats than its controllers.
         let (frees, _) = self.frees(member, seat, controller);
-        for p in &mut self.pending {
-            if p.member == member && frees.contains(&p.seat) {
-                p.cancelled = true;
-                p.frees.clear();
-            }
-        }
+        self.cancel_pending(|p| p.member == member && frees.contains(&p.seat));
+        let ticket = GrantTicket(self.next_ticket);
+        self.next_ticket += 1;
         self.pending.push(PendingGrant {
+            ticket,
             seat,
             member,
             frees: frees.clone(),
@@ -1934,6 +1981,7 @@ impl HostSession {
             member,
             permissions,
             controller: controller.filter(|_| !self.is_host(member)),
+            ticket,
         });
         fx
     }

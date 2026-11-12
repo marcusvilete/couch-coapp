@@ -71,6 +71,7 @@ use couch_proto::{
     media::{AudioDatagram, reset_code},
     session::SeatKind,
 };
+use couch_room::session::GrantTicket;
 use tokio::{
     sync::{mpsc, oneshot},
     task::AbortHandle,
@@ -253,12 +254,19 @@ pub enum HostEvent {
     /// plugged, or setting it up was given up (the log says which).
     PadsMissing { seats: Vec<SeatId> },
     /// The router handed `seat` to `member`: tell it (`SeatAssigned`).
+    /// `ticket` is the grant's, as [`HostPipeline::grant`] was given it
+    /// (P16); `None` for a claim.
     Granted {
         member: MemberId,
         seat: SeatId,
         epoch: SeatEpoch,
         permissions: Permissions,
+        ticket: Option<GrantTicket>,
     },
+    /// The input task refused the grant with this ticket (P16): the panic
+    /// key overtook it, the session is stopping, or the router refused it.
+    /// It has no other answer.
+    GrantRefused { ticket: GrantTicket },
     /// The router took `seat` back from `member`: tell it (`SeatReleased`).
     Revoked {
         member: MemberId,
@@ -1265,13 +1273,26 @@ impl HostPipeline {
     }
 
     /// Hands `seat` to `member`, ending any other hold on it first. Commands
-    /// reach the router in the order they were sent.
-    pub fn grant(&self, seat: SeatId, member: MemberId, permissions: Permissions) {
-        let _ = self.input.send(InputCmd::Grant {
-            seat,
-            member,
-            permissions,
-        });
+    /// reach the router in the order they were sent. A grant with a ticket
+    /// (P16) is answered once: [`HostEvent::Granted`] with that ticket, or
+    /// [`HostEvent::GrantRefused`]. Returns false when the input task is
+    /// gone, and with it any answer; one sent while the task is stopping
+    /// (after the session's end) may go unanswered.
+    pub fn grant(
+        &self,
+        seat: SeatId,
+        member: MemberId,
+        permissions: Permissions,
+        ticket: Option<GrantTicket>,
+    ) -> bool {
+        self.input
+            .send(InputCmd::Grant {
+                seat,
+                member,
+                permissions,
+                ticket,
+            })
+            .is_ok()
     }
 
     /// The host has `seat` again: from `holder` only if it still holds it,
@@ -2661,6 +2682,7 @@ enum InputCmd {
         seat: SeatId,
         member: MemberId,
         permissions: Permissions,
+        ticket: Option<GrantTicket>,
     },
     /// Only from this holder, or from whoever holds the seat.
     Revoke {
@@ -2827,6 +2849,12 @@ impl Inputs {
     /// Injects the effects and reports grants, revocations and status
     /// changes.
     fn deliver(&mut self, effects: Vec<Effect>) {
+        self.deliver_grant(effects, None);
+    }
+
+    /// [`Self::deliver`] for the effects of one grant: its report carries
+    /// the grant's ticket (P16). A router's grant has one `Granted`.
+    fn deliver_grant(&mut self, effects: Vec<Effect>, ticket: Option<GrantTicket>) {
         if let Err(e) = router::apply(&effects, &mut *self.kbm, &mut self.pads) {
             tracing::warn!("injection failed: {e}");
         }
@@ -2848,6 +2876,7 @@ impl Inputs {
                         seat,
                         epoch,
                         permissions,
+                        ticket,
                     });
                 }
                 Effect::Revoked {
@@ -3140,20 +3169,28 @@ async fn input_loop(
                     let at = st.shared.now();
                     st.shared.event(HostEvent::ViewerGone { member, at });
                 }
-                Some(InputCmd::Grant { seat, member, permissions }) => {
+                Some(InputCmd::Grant { seat, member, permissions, ticket }) => {
                     // The panic key gives control back to the host: their own
-                    // controller may still move between seats.
-                    if released {
+                    // controller may still move between seats. Every refusal
+                    // answers its grant (P16): no report of it will come.
+                    let refused = if released {
                         tracing::info!(member = ?member, "stopping: a grant was refused");
+                        true
                     } else if st.shared.grants_paused.load(Ordering::SeqCst) && Some(member) != host {
                         tracing::info!(member = ?member, "panic key: a grant on its way was refused");
+                        true
                     } else {
                         st.make_kbm(permissions);
                         let effects = st.router.grant(seat, member, permissions, Instant::now());
-                        if effects.is_empty() {
+                        let refused = effects.is_empty();
+                        if refused {
                             tracing::warn!(?seat, "the seat router refused a grant");
                         }
-                        st.deliver(effects);
+                        st.deliver_grant(effects, ticket);
+                        refused
+                    };
+                    if refused && let Some(ticket) = ticket {
+                        st.shared.event(HostEvent::GrantRefused { ticket });
                     }
                 }
                 Some(InputCmd::Revoke { seat, holder }) => {

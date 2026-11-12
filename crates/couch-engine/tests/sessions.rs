@@ -50,7 +50,12 @@ use couch_proto::{
     },
     session::{EndReason, SeatKind, StreamState},
 };
-use couch_room::{board::Replica, limits::LimitConfig, room::Timings, session::SessionError};
+use couch_room::{
+    board::Replica,
+    limits::LimitConfig,
+    room::Timings,
+    session::{GrantTicket, SessionError},
+};
 use couch_testkit::{
     FakeCapturer, FakeEncoder, FakeGpu, RecordingInjector, RecordingPadFactory, relay::TestRelay,
 };
@@ -3251,23 +3256,40 @@ async fn after_the_panic_key_no_grant_goes_through_until_allowed() {
         })
         .await;
     let guest = MemberId([9; 32]);
-    let granted = |events: &mut mpsc::UnboundedReceiver<HostEvent>| {
+    // Each grant is answered once, by its ticket (P16): its report or its
+    // refusal.
+    let answers = |events: &mut mpsc::UnboundedReceiver<HostEvent>| {
         std::iter::from_fn(|| events.try_recv().ok())
-            .any(|e| matches!(e, HostEvent::Granted { .. }))
+            .filter_map(|e| match e {
+                HostEvent::Granted { ticket, .. } => Some((true, ticket)),
+                HostEvent::GrantRefused { ticket } => Some((false, Some(ticket))),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
     };
+    let (first, second) = (GrantTicket(1), GrantTicket(2));
 
     stream.panic_handle().panic();
-    stream.grant(SeatId(0), guest, Permissions::GAMEPAD);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!granted(&mut events), "refused while paused");
+    assert!(stream.grant(SeatId(0), guest, Permissions::GAMEPAD, Some(first)));
+    let deadline = Instant::now() + WAIT;
+    let mut heard = Vec::new();
+    while heard.is_empty() {
+        assert!(Instant::now() < deadline, "the refusal");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        heard = answers(&mut events);
+    }
+    assert_eq!(heard, vec![(false, Some(first))], "refused while paused");
 
     stream.allow_grants();
-    stream.grant(SeatId(0), guest, Permissions::GAMEPAD);
+    assert!(stream.grant(SeatId(0), guest, Permissions::GAMEPAD, Some(second)));
     let deadline = Instant::now() + WAIT;
-    while !granted(&mut events) {
+    let mut heard = Vec::new();
+    while heard.is_empty() {
         assert!(Instant::now() < deadline, "granted once allowed");
         tokio::time::sleep(Duration::from_millis(10)).await;
+        heard = answers(&mut events);
     }
+    assert_eq!(heard, vec![(true, Some(second))]);
     stream.stop().await;
 }
 

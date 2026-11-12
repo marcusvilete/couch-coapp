@@ -36,7 +36,7 @@ use couch_proto::{
         ViewerControllers, seat_labels, seat_phrase,
     },
 };
-use couch_room::session::{Effect as SessionEffect, HostSession, SessionConfig};
+use couch_room::session::{Effect as SessionEffect, GrantTicket, HostSession, SessionConfig};
 
 use super::*;
 use crate::{
@@ -98,10 +98,11 @@ struct Hosting {
     /// last said (P12), for the patch bay.
     guest_controllers: BTreeMap<MemberId, ControllerReport>,
     /// The controller of theirs we chose for a seat we passed a viewer
-    /// (P12), until its grant goes out with it. Dropped when the seat is
-    /// taken back or revoked from them, or they go, so a later grant never
-    /// carries an old choice.
-    chosen: BTreeMap<(MemberId, SeatId), u8>,
+    /// (P12), by its grant's ticket (P16), with the viewer and the seat,
+    /// until that grant's report takes it or its refusal drops it: a report
+    /// of another grant of that seat never carries it. Also dropped when
+    /// the seat is taken back or they go.
+    chosen: BTreeMap<GrantTicket, (MemberId, SeatId, u8)>,
     /// The host keys' hook, in place while the stream runs, with the panic
     /// key it listens for ("Ctrl+Alt+Shift+Backspace"); `None` if it
     /// couldn't be installed.
@@ -1106,7 +1107,7 @@ impl Actor {
                         h.picture_readers.remove(&member);
                         h.viewer_codecs.remove(&member);
                         h.guest_controllers.remove(&member);
-                        h.chosen.retain(|(who, _), _| *who != member);
+                        h.chosen.retain(|_, (who, _, _)| *who != member);
                         if let Some(pipeline) = &h.pipeline {
                             pipeline.remove_viewer(member);
                         }
@@ -1117,17 +1118,25 @@ impl Actor {
                     member,
                     permissions,
                     controller,
+                    ticket,
                 } => {
                     // The controller that plays it goes with the grant's
                     // `SeatAssigned` (P12, P13), when the router reports it.
-                    if let Some(h) = self.sessions.hosting.as_mut() {
-                        match controller {
-                            Some(c) => h.chosen.insert((member, seat), c),
-                            None => h.chosen.remove(&(member, seat)),
-                        };
+                    if let Some(h) = self.sessions.hosting.as_mut()
+                        && let Some(c) = controller
+                    {
+                        h.chosen.insert(ticket, (member, seat, c));
                     }
-                    if let Some(pipeline) = self.pipeline() {
-                        pipeline.grant(seat, member, permissions);
+                    let sent = self
+                        .pipeline()
+                        .is_some_and(|p| p.grant(seat, member, permissions, Some(ticket)));
+                    // With no input task, nothing will answer it (P16).
+                    if !sent {
+                        let fx = self.hosting_mut().map(|h| {
+                            h.chosen.remove(&ticket);
+                            h.session.grant_refused(ticket)
+                        });
+                        more.extend(fx.unwrap_or_default());
                     }
                 }
                 SessionEffect::Revoke { seat, holder } => {
@@ -2031,6 +2040,7 @@ impl Actor {
                 seat,
                 epoch,
                 permissions,
+                ticket,
             } => {
                 // Desktop control the session no longer gives that member
                 // (a grant that crossed its end): taken straight back, never
@@ -2044,14 +2054,14 @@ impl Actor {
                         pipeline.revoke(seat, Some(member));
                     }
                 }
-                if h.session.is_viewer(member) {
-                    // The controller we chose goes with the grant it was for
-                    // (P12), once.
-                    let controller = self
-                        .sessions
-                        .hosting
-                        .as_mut()
-                        .and_then(|h| h.chosen.remove(&(member, seat)));
+                let viewer = h.session.is_viewer(member);
+                // The controller we chose goes with the grant it was for
+                // (P12), once, by its ticket (P16).
+                let controller = ticket
+                    .and_then(|t| self.sessions.hosting.as_mut()?.chosen.remove(&t))
+                    .filter(|(who, to, _)| *who == member && *to == seat)
+                    .map(|(_, _, c)| c);
+                if viewer {
                     let assigned = couch_proto::control::SeatAssigned {
                         seat,
                         seat_epoch: epoch,
@@ -2062,7 +2072,15 @@ impl Actor {
                 }
                 let fx = self
                     .hosting_mut()
-                    .map(|h| h.session.seat_changed(seat, Some(member)));
+                    .map(|h| h.session.seat_changed(seat, Some(member), ticket));
+                self.apply_session(room, fx.unwrap_or_default(), now);
+            }
+            // No report of that grant will come (P16).
+            HostEvent::GrantRefused { ticket } => {
+                let fx = self.hosting_mut().map(|h| {
+                    h.chosen.remove(&ticket);
+                    h.session.grant_refused(ticket)
+                });
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
             HostEvent::Revoked {
@@ -2070,9 +2088,6 @@ impl Actor {
                 seat,
                 epoch,
             } => {
-                if let Some(h) = self.sessions.hosting.as_mut() {
-                    h.chosen.remove(&(member, seat));
-                }
                 // Our own controller's seat needs no telling.
                 if member != self.me {
                     let released = couch_proto::control::SeatReleased {
@@ -2083,7 +2098,7 @@ impl Actor {
                 }
                 let fx = self
                     .hosting_mut()
-                    .map(|h| h.session.seat_changed(seat, None));
+                    .map(|h| h.session.seat_changed(seat, None, None));
                 self.apply_session(room, fx.unwrap_or_default(), now);
             }
             HostEvent::GameFocus(in_front) => {
@@ -2329,7 +2344,8 @@ impl Actor {
     ) -> Result<Response, EngineError> {
         // A choice for a grant still on its way goes with it (P12).
         if let Some(h) = self.sessions.hosting.as_mut() {
-            h.chosen.retain(|(_, to), _| seat.is_some_and(|s| s != *to));
+            h.chosen
+                .retain(|_, (_, to, _)| seat.is_some_and(|s| s != *to));
         }
         self.our_session(|s| Ok(s.take_back(seat)), now)
     }
