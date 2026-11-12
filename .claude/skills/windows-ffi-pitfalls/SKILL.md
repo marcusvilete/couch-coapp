@@ -105,6 +105,15 @@ Each item below cost time or nearly caused undefined behaviour in M1–M3. Check
 - **A pad Windows is still setting up answers `VIGEM_WAIT_DEVICE_READY` with `ERROR_DEVICE_HARDWARE_ERROR`, or not within 5 s.** Unplugging it then didn't take: it came up later, owned by nobody, and read as another program's pad. Keep it, its marker and its serial, and wait (`PendingPad`).
 - **Dropping a vigem-rust handle unplugs best-effort and says nothing on failure.** A marker must outlive any pad that might still be there while the host's controllers are followed (`PendingPad::give_up` hands it over).
 
+## A child window over the webview (P15)
+
+- **Snap layouts need `HTMAXBUTTON` from the window under the pointer,** and WebView2's own windows answer for themselves (Chromium's input routing; they can't be subclassed). `couch_platform_win::snap_button` is a child window of ours above the webview, never painting (the page shows through, measured), without `WS_EX_LAYERED` or `WS_EX_TRANSPARENT` (either drops it from hit-testing).
+- **Never pass its `WM_NCLBUTTONDOWN` to `DefWindowProcW`:** the caption button's tracking loop would send `SC_MAXIMIZE` to the child itself. It takes the press with `SetCapture`, and the release inside posts `SC_MAXIMIZE` or `SC_RESTORE` to the top-level window (`GA_ROOT`).
+- **Place it by the page's scale, not the window's:** WebView2 draws at the monitor's DPI times Windows' text size (`RasterizationScale`), so CSS pixels × the window's scale factor miss the page's button when text is enlarged. The page reports its `devicePixelRatio` (`title-bar-scale`). While not maximized, leave the top `SM_CYFRAME` to Tauri's resize band.
+- **A double click's second press arrives as `WM_NCLBUTTONDBLCLK`** even without `CS_DBLCLKS`: ignore it, or it toggles again.
+- Its state lives in `GWLP_USERDATA`, set after `CreateWindowExW` succeeds (no double free on a failed creation), freed in `WM_NCDESTROY`; the page's callback runs inside the window procedure, so under `catch_unwind`.
+- To check it without a person: `WindowFromPoint` over the button gives the class `CouchSnapButton`, `WM_NCHITTEST` 9; `WM_NCLBUTTONDOWN` then `WM_LBUTTONUP` sent to it maximize and restore the window.
+
 ## Taking the foreground (P11)
 
 - **A background process can't bring its own window to the front**: `SetForegroundWindow`, and SDL's `raise()`, only flash the taskbar button, unless the process in front allowed it with `AllowSetForegroundWindow(pid)` just before. The app does that for its stream window when its own button is clicked (it is in front then); a call from a process that isn't in front fails, which is harmless. Restore a minimized window before raising it.

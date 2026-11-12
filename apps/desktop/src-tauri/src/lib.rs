@@ -19,6 +19,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, FileDialogBuilder};
 use tokio::sync::broadcast::error::RecvError;
 
+mod title_bar;
 mod window_state;
 
 /// The event the UI listens on for `couch_engine::Event`s.
@@ -148,14 +149,21 @@ pub fn run() {
                 .find(|w| w.label == MAIN_WINDOW)
                 .cloned()
                 .ok_or("no main window in tauri.conf.json")?;
-            // Hidden until it is back where it was (M21).
-            let mut window = WebviewWindowBuilder::from_config(app.handle(), &config)?
+            let title = if window_profile.is_default() {
+                config.title.clone()
+            } else {
+                format!("{} · {}", config.title, window_profile.name())
+            };
+            // Hidden until it is back where it was (M21). On Windows without
+            // the system's frame: the page draws its own title bar (P15).
+            let window = WebviewWindowBuilder::from_config(app.handle(), &config)?
                 .data_directory(window_profile.data_dir().join("webview"))
-                .visible(false);
-            if !window_profile.is_default() {
-                window = window.title(format!("{} · {}", config.title, window_profile.name()));
-            }
-            let window = window.build()?;
+                .visible(false)
+                .title(&title)
+                .decorations(!title_bar::OWN)
+                .initialization_script(title_bar::script(&title))
+                .build()?;
+            title_bar::attach(&window);
             let file = window_state::path(window_profile.data_dir());
             // Started at sign-in (M25c): the notification area only, until
             // the window is first opened, which places it then.
@@ -272,6 +280,16 @@ pub fn run() {
                     let _ = window.hide();
                 }
                 tracing::info!("the window went to the notification area");
+            }
+        }
+        // The title bar's snap button follows the window (P15).
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. },
+            ..
+        } if label == MAIN_WINDOW => {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                title_bar::place(&window);
             }
         }
         // The board over the game (M27b) goes only when the engine closes it

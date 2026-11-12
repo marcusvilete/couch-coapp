@@ -7,6 +7,12 @@ import type { ReactNode } from "react";
 import { IconButton } from "./Button";
 import "./Dialog.css";
 
+/** Whether an event's target is in the window's own title bar (P15,
+ * `shell/TitleBar.tsx`). */
+function inTitleBar(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(".titlebar") != null;
+}
+
 export function Dialog(props: {
   title: string;
   /** One line under the title. */
@@ -24,6 +30,11 @@ export function Dialog(props: {
   const hold = (e: Event) => {
     if (busy) e.preventDefault();
   };
+  // Moving, minimizing or maximizing the window (its own title bar, P15)
+  // leaves a dialog open.
+  const holdOutside = (e: Event) => {
+    if (busy || inTitleBar(e.target)) e.preventDefault();
+  };
   return (
     <RD.Root open onOpenChange={(open) => !open && !busy && props.onClose()}>
       <RD.Portal>
@@ -31,8 +42,8 @@ export function Dialog(props: {
         <RD.Content
           className={`dialog dialog-${props.size ?? "m"}${props.fixed ? " dialog-fixed" : ""}`}
           onEscapeKeyDown={hold}
-          onPointerDownOutside={hold}
-          onInteractOutside={hold}
+          onPointerDownOutside={holdOutside}
+          onInteractOutside={holdOutside}
           onOpenAutoFocus={(e) => {
             // The first field, or what the dialog marks (`data-autofocus`:
             // Cancel, in a dialog that would destroy something; the first

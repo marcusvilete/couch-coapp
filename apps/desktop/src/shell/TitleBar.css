@@ -1,0 +1,125 @@
+/* The window's own title bar (P15, Windows): a fixed strip above the shell,
+   as tall as `--titlebar-h` (the app's word, `platform.ts`), which the layers
+   over the whole window leave free. The strip is the system's title bar
+   (`app-region: drag`); the buttons aren't. */
+.titlebar {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  flex: none;
+  height: var(--titlebar-h);
+  background: var(--bg-app);
+  app-region: drag;
+  /* A modal dialog turns the page's pointer off: the window's buttons
+     stay. */
+  pointer-events: auto;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  padding: 0 var(--s3);
+}
+
+.titlebar-mark {
+  display: grid;
+  flex: none;
+  width: 16px;
+  height: 16px;
+
+  & svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.titlebar-title {
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-buttons {
+  display: flex;
+  flex: none;
+}
+
+.caption {
+  display: grid;
+  place-items: center;
+  width: var(--caption-w);
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  font-size: 10px;
+  line-height: 1;
+  app-region: no-drag;
+  transition: background var(--fast) var(--ease);
+
+  /* The maximize button's look comes from the app's window over it
+     (`.hover`, `.pressed`); the others' from the pointer. */
+  &:hover,
+  &.hover {
+    background: var(--hover);
+  }
+
+  &:active,
+  &.pressed {
+    background: var(--active);
+  }
+}
+
+/* Windows' own close red. */
+.caption-close {
+  &:hover {
+    background: #c42b1c;
+    color: #ffffff;
+  }
+
+  &:active {
+    background: rgb(196 43 28 / 0.9);
+    color: rgb(255 255 255 / 0.8);
+  }
+}
+
+/* The window in the background: the title and glyphs fade, as Windows'
+   own do. */
+.titlebar.inactive {
+  & .titlebar-title,
+  & .caption:not(:hover, .hover) {
+    color: var(--text-faint);
+  }
+}
+
+@media (forced-colors: active) {
+  .titlebar {
+    border-bottom: 1px solid CanvasText;
+  }
+
+  .caption {
+    color: ButtonText;
+
+    &:hover,
+    &.hover,
+    &:active,
+    &.pressed {
+      forced-color-adjust: none;
+      background: Highlight;
+      color: HighlightText;
+    }
+  }
+
+  .caption-close:hover,
+  .caption-close:active {
+    background: Highlight;
+    color: HighlightText;
+  }
+}

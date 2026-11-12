@@ -1,3 +1,17 @@
+/* The window: its own title bar on Windows (P15), then the app. */
+.window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+
+  & > .shell,
+  & > .fatal {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+  }
+}
+
 /* The shell's fixed regions (the no-jump rule): the sidebar and the members
    panel never change size; only the room's own area scrolls. */
 .shell {

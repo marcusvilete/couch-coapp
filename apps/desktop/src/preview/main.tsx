@@ -1,8 +1,9 @@
 // The preview (development only, `preview.html`): the app on a fake engine,
 // in a scenario picked by `?scenario=`. Options: `nosplash`, `bare` (no
 // picker, for screenshots), `release` (a build that restarts itself),
-// `latency=0` (replies and events at once), `sheet` (the design system's
-// components instead of the app).
+// `latency=0` (replies and events at once), `systembar` (no title bar of
+// the app's, as on Linux), `sheet` (the design system's components instead
+// of the app).
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { installPlatform } from "../platform";
@@ -27,6 +28,9 @@ installPlatform(
   previewPlatform({
     release: scenario.release === true || params.has("release"),
     splash: !params.has("nosplash"),
+    // Windows' own title bar (P15); `systembar` lays the page out as on
+    // Linux, under the desktop's.
+    titleBar: !["systembar", "sheet", "board"].some((p) => params.has(p)),
   }),
 );
 installGuards(true);

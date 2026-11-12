@@ -3,7 +3,7 @@
    even with Windows' animations off (base.css leaves it out). */
 .splash {
   position: fixed;
-  inset: 0;
+  inset: var(--titlebar-h, 0px) 0 0;
   z-index: 90;
   display: flex;
   align-items: center;

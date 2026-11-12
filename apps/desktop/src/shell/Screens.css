@@ -115,7 +115,7 @@
 /* Over everything, the sidebar included, until the window closes. */
 .restart-cover {
   position: fixed;
-  inset: 0;
+  inset: var(--titlebar-h, 0px) 0 0;
   z-index: 100;
   display: flex;
   flex-direction: column;

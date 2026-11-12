@@ -33,6 +33,7 @@ The front end is M21's ([results](../../../docs/m21-results.md)): React and Type
 
 ## Pitfalls already met
 
+- **The window's own title bar (P15, Windows) takes the top `--titlebar-h`** of the page: a new layer over the whole window (`position: fixed; inset: 0`) starts below it (`inset: var(--titlebar-h, 0px) 0 0`), or it covers the window's buttons. Radix modals turn the page's pointer off: the bar turns it back on, and `Dialog` ignores clicks in it. A new popup takes its `collisionPadding` from `ui/popper.ts` (below the bar) and goes in `base.css`'s `app-region: no-drag` list: anything over the strip without it moves the window when clicked. The maximize button never sees the pointer in the app (a native window lies over it): its look comes from the app (`.hover`, `.pressed`). The preview draws the bar; `?systembar` lays the page out as Linux does.
 - **Radix Select treats an empty-string value as no value** (the trigger shows blank; an item can't have it): give "none" a sentinel (`model/sessions.ts`'s `EVERYTHING`).
 - **The target is ES2020** (`tsconfig.json`): no `Array.prototype.at` or `Object.hasOwn`. tsc says so; vitest runs them anyway.
 - **The engine's info arrives after the first render:** a hook choosing a mode from it (`useOverlay`'s overlay or notices) must follow a change of mode, not read it once; clean up with the mode current at unmount (a ref).

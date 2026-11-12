@@ -33,6 +33,7 @@ pub mod power;
 pub mod process;
 pub mod sendinput;
 pub mod session_lock;
+pub mod snap_button;
 pub mod startup;
 pub mod timer;
 pub mod top_windows;
