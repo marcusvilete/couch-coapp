@@ -9,6 +9,7 @@ import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
 import type { RoomView } from "../bindings/RoomView";
 import { needsUs, roomLine } from "../model/rooms";
+import { platform } from "../platform";
 import { isLive } from "../model/sessions";
 import { Avatar } from "../ui/Avatar";
 import { IconButton } from "../ui/Button";
@@ -51,18 +52,25 @@ export function Sidebar(props: {
 
   // A rail of icons in narrow windows: the names only in tooltips.
   const rail = useNarrow(900);
+  const ownTitleBar = platform().titleBar != null;
   const name = props.profile?.displayName ?? "…";
   const relay = props.network?.homeRelay ? hostOf(props.network.homeRelay) : null;
 
   return (
     <nav className="sidebar" aria-label="Rooms">
       <header className="sidebar-header">
-        <span className="brand" aria-hidden="true">
-          <span className="brand-mark">
-            <CouchMark />
+        {/* The window's own title bar carries the app's mark (P15); under
+            the desktop's, the sidebar does. */}
+        {ownTitleBar ? (
+          <h2 className="sidebar-title">Rooms</h2>
+        ) : (
+          <span className="brand" aria-hidden="true">
+            <span className="brand-mark">
+              <CouchMark />
+            </span>
+            <span className="brand-name">Couch Co-App</span>
           </span>
-          <span className="brand-name">Couch Co-App</span>
-        </span>
+        )}
         <IconButton label="Create or join a room" onClick={props.onAdd} className="sidebar-add">
           <Plus />
         </IconButton>

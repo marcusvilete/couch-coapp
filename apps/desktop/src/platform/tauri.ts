@@ -2,7 +2,7 @@
 // Tauri's API (the overlay's own page, `overlay/main.tsx`, listens on its
 // side).
 import { invoke } from "@tauri-apps/api/core";
-import { emitTo, listen } from "@tauri-apps/api/event";
+import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   availableMonitors,
@@ -28,7 +28,7 @@ import {
   type BoardPictureUp,
 } from "../board/events";
 import { OVERLAY_READY, OVERLAY_TOASTS } from "../overlay/events";
-import type { BoardHost, OverlayHost, Platform } from "../platform";
+import type { BoardHost, OverlayHost, Platform, TitleBarHost, WindowState } from "../platform";
 
 export const tauriPlatform: Platform = {
   command: (command: Command) => invoke<Response>("engine_command", { command }),
@@ -48,9 +48,81 @@ export const tauriPlatform: Platform = {
   canRestartItself: !import.meta.env.DEV,
   setTheme: (theme) => getCurrentWindow().setTheme(theme),
   splash: true,
+  titleBar: titleBarHost(),
   overlay: overlayHost(),
   board: boardHost(),
 };
+
+// ---- The window's own title bar (P15, Windows) ----
+//
+// The app says whether there is one before the page's scripts run
+// (`src-tauri/src/title_bar.rs`), and tells how to draw the maximize button
+// its own window lies over (snap layouts).
+
+type TitleBarWord = { title: string; height: number; buttonWidth: number } | null;
+
+const TITLE_BAR_LOOK = "title-bar-maximize";
+const TITLE_BAR_SCALE = "title-bar-scale";
+
+/** Tells the app the page's scale, now and on each change: WebView2 draws
+ * at the screen's scale times Windows' text size, which the app's window
+ * doesn't know, and the app lays its maximize window over the page's
+ * button by it. */
+function reportScale(): () => void {
+  let media: MediaQueryList | null = null;
+  const report = () => {
+    media?.removeEventListener("change", report);
+    void emit(TITLE_BAR_SCALE, window.devicePixelRatio).catch(() => {});
+    media = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    media.addEventListener("change", report);
+  };
+  report();
+  return () => media?.removeEventListener("change", report);
+}
+
+function titleBarHost(): TitleBarHost | null {
+  const word = (window as unknown as { __COUCH_TITLE_BAR__?: TitleBarWord }).__COUCH_TITLE_BAR__;
+  if (!word) return null;
+  return {
+    ...word,
+    minimize: () => void getCurrentWindow().minimize().catch(() => {}),
+    toggleMaximize: () => void getCurrentWindow().toggleMaximize().catch(() => {}),
+    // As the system's close: the app decides (the notification area keeps it).
+    close: () => void getCurrentWindow().close().catch(() => {}),
+    onState: async (handler) => {
+      const win = getCurrentWindow();
+      // The page's own focus: the window's would say "no" while its webview
+      // has the keys.
+      let state: WindowState = { maximized: false, focused: document.hasFocus(), hover: false, pressed: false };
+      const put = (next: Partial<WindowState>) => {
+        state = { ...state, ...next };
+        handler(state);
+      };
+      const maximized = () =>
+        win
+          .isMaximized()
+          .then((maximized) => put({ maximized }))
+          .catch(() => {});
+      const focus = () => put({ focused: true });
+      const blur = () => put({ focused: false });
+      window.addEventListener("focus", focus);
+      window.addEventListener("blur", blur);
+      const stopScale = reportScale();
+      const unlisten = await Promise.all([
+        win.onResized(() => void maximized()),
+        listen<{ hover: boolean; pressed: boolean }>(TITLE_BAR_LOOK, (e) => put(e.payload)),
+      ]);
+      handler(state);
+      await maximized();
+      return () => {
+        window.removeEventListener("focus", focus);
+        window.removeEventListener("blur", blur);
+        stopScale();
+        unlisten.forEach((u) => u());
+      };
+    },
+  };
+}
 
 // ---- The host's board overlay over the game (M27b) ----
 //

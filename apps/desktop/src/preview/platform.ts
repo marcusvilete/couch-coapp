@@ -2,7 +2,7 @@
 // restarting and the overlay window (drawn inside the page instead).
 import type { ScreenArea } from "../bindings/ScreenArea";
 import type { Toast } from "../model/overlay";
-import type { Platform, Theme } from "../platform";
+import type { Platform, Theme, TitleBarHost, WindowState } from "../platform";
 import * as engine from "./fakeEngine";
 
 type OverlayState = { show: boolean; area: ScreenArea | null; toasts: Toast[] };
@@ -24,7 +24,31 @@ export function watchOverlay(watcher: (state: OverlayState) => void): () => void
 
 export const taskbar = { flashing: false };
 
-export function previewPlatform(options: { release: boolean; splash: boolean }): Platform {
+/** The title bar as Windows has it (P15), in the page alone: the preview's
+ * window is the browser's, so its buttons only change how the bar looks. */
+function previewTitleBar(): TitleBarHost {
+  let state: WindowState = { maximized: false, focused: true, hover: false, pressed: false };
+  const watchers = new Set<(state: WindowState) => void>();
+  const put = (next: Partial<WindowState>) => {
+    state = { ...state, ...next };
+    watchers.forEach((w) => w(state));
+  };
+  return {
+    title: "Couch Co-App",
+    height: 32,
+    buttonWidth: 46,
+    minimize: () => {},
+    toggleMaximize: () => put({ maximized: !state.maximized }),
+    close: () => {},
+    onState: async (handler) => {
+      watchers.add(handler);
+      handler(state);
+      return () => watchers.delete(handler);
+    },
+  };
+}
+
+export function previewPlatform(options: { release: boolean; splash: boolean; titleBar: boolean }): Platform {
   return {
     command: engine.command,
     onEvent: engine.onEvent,
@@ -40,6 +64,7 @@ export function previewPlatform(options: { release: boolean; splash: boolean }):
     canRestartItself: options.release,
     setTheme: async (_theme: Theme | null) => {},
     splash: options.splash,
+    titleBar: options.titleBar ? previewTitleBar() : null,
     overlay: {
       set: async (show, area) => setOverlayState({ show, area }),
       send: (toasts) => setOverlayState({ toasts }),

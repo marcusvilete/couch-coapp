@@ -139,3 +139,14 @@ textarea {
     outline-color: Highlight;
   }
 }
+
+/* Popups and dialogs are never the window's drag strip, even over its own
+   title bar (P15, Windows: `app-region` makes the strip the system's title
+   bar, and anything over it without its own `no-drag` would move the window). */
+.menu,
+.select-menu,
+.tooltip,
+.why-popover,
+.dialog {
+  app-region: no-drag;
+}

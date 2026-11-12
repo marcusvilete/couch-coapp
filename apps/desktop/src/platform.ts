@@ -34,8 +34,37 @@ export interface Platform {
   setTheme(theme: Theme | null): Promise<void>;
   /** The splash at start; the preview's screenshots go without it. */
   splash: boolean;
+  /** The window's own title bar (P15, Windows), or `null` where the
+   * system draws it (Linux). */
+  titleBar: TitleBarHost | null;
   overlay: OverlayHost;
   board: BoardHost;
+}
+
+/** The main window's own title bar (P15): the page draws it, the window has
+ * no frame of the system's. Its maximize button lies under a window of the
+ * app's (Windows' snap layouts), which takes the pointer there and says how
+ * to draw it (`hover`, `pressed`). */
+export interface TitleBarHost {
+  /** The window's title (with the profile's name beside the default's). */
+  title: string;
+  /** Logical pixels: the bar's height and each button's width, which the
+   * app's maximize window is laid out by too. */
+  height: number;
+  buttonWidth: number;
+  minimize(): void;
+  toggleMaximize(): void;
+  close(): void;
+  /** The window's state, at once and on each change. */
+  onState(handler: (state: WindowState) => void): Promise<Unlisten>;
+}
+
+export interface WindowState {
+  maximized: boolean;
+  focused: boolean;
+  /** How to draw the maximize button. */
+  hover: boolean;
+  pressed: boolean;
 }
 
 /** The host's board overlay over the game (M27b): the engine makes, places
@@ -73,6 +102,12 @@ let installed: Platform | null = null;
 /** Called once, by the page's entry, before anything renders. */
 export function installPlatform(platform: Platform) {
   installed = platform;
+  // Before the first render: the bar's room is the page's from the start,
+  // and the layers over the whole window (dialogs, the splash) leave it.
+  const root = document.documentElement.style;
+  const bar = platform.titleBar;
+  root.setProperty("--titlebar-h", bar ? `${bar.height}px` : "0px");
+  if (bar) root.setProperty("--caption-w", `${bar.buttonWidth}px`);
 }
 
 export function platform(): Platform {

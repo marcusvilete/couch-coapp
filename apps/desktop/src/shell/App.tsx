@@ -45,6 +45,7 @@ import { RoomHeader } from "./RoomHeader";
 import { Fatal, RestartCover, Welcome } from "./Screens";
 import { Sidebar } from "./Sidebar";
 import { Splash } from "./Splash";
+import { TitleBar } from "./TitleBar";
 import { useNarrow } from "./useNarrow";
 import "./App.css";
 
@@ -226,7 +227,15 @@ export default function App() {
     if (orphan) setDialog(null);
   }, [orphan]);
 
-  if (lobby.failure) return <Fatal error={lobby.failure} />;
+  // The window's own title bar above it all (P15, Windows): this screen
+  // asks to close the window.
+  if (lobby.failure)
+    return (
+      <div className="window">
+        <TitleBar />
+        <Fatal error={lobby.failure} />
+      </div>
+    );
 
   const actions = room ? roomActions(room, ctx) : null;
   const myHere = room?.sessions.find((s) => s.role === "host");
@@ -234,107 +243,110 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      {/* Restarting: nothing behind the cover takes a click or a key. */}
-      <div className="shell" inert={restarting}>
-        <Sidebar
-          rooms={rooms}
-          selected={room?.id ?? null}
-          inSettings={view === "settings"}
-          onSelect={show}
-          onMove={move}
-          onAdd={() => setDialog({ kind: "add" })}
-          menuOf={(r, i) => roomMenu(r, roomActions(r, ctx), { index: i, count: rooms.length })}
-          profile={lobby.profile}
-          info={lobby.info}
-          network={network}
-          onEditName={() => setDialog({ kind: "name" })}
-          onSettings={() => setView("settings")}
-        />
-        <div className="main">
-          {host && (
-            <SessionBar
-              room={host.room}
-              session={host.session}
-              atConsole={view === "room" && room?.id === host.room.id}
-              onConsole={toConsole}
-              onRoom={lobby.putRoom}
-              notify={lobby.notify}
-            />
-          )}
-          {restoredDev && (
-            // A development build can't start itself again; until it does,
-            // the engine refuses creating, joining and renaming.
-            <div className="app-banner">
-              <Callout tone="warn">
-                A backup was restored into this profile: close the app and start it again to use it. Until then,
-                creating, joining and renaming are refused.
-              </Callout>
-            </div>
-          )}
-          {view === "settings" ? (
-            <SettingsPage
-              section={section}
-              onSection={setSection}
-              onClose={() => setView("room")}
-              busy={busy}
-              hasRooms={rooms.length > 0}
-              profile={lobby.profile}
-              info={lobby.info}
-              onProfile={lobby.setProfile}
-              theme={theme}
-              onTheme={setTheme}
-              capturing={capturing}
-              onCapturing={setCapturing}
-              onRestarting={setRestarting}
-              restoredDev={restoredDev}
-              onRestoredDev={() => setRestoredDev(true)}
-            />
-          ) : room && actions ? (
-            <>
-              <RoomHeader
-                room={room}
-                actions={actions}
-                menu={roomMenu(room, actions, { index, count: rooms.length })}
-                onMembers={drawerMode ? () => setDrawer(!drawer) : undefined}
+      <div className="window">
+        <TitleBar />
+        {/* Restarting: nothing behind the cover takes a click or a key. */}
+        <div className="shell" inert={restarting}>
+          <Sidebar
+            rooms={rooms}
+            selected={room?.id ?? null}
+            inSettings={view === "settings"}
+            onSelect={show}
+            onMove={move}
+            onAdd={() => setDialog({ kind: "add" })}
+            menuOf={(r, i) => roomMenu(r, roomActions(r, ctx), { index: i, count: rooms.length })}
+            profile={lobby.profile}
+            info={lobby.info}
+            network={network}
+            onEditName={() => setDialog({ kind: "name" })}
+            onSettings={() => setView("settings")}
+          />
+          <div className="main">
+            {host && (
+              <SessionBar
+                room={host.room}
+                session={host.session}
+                atConsole={view === "room" && room?.id === host.room.id}
+                onConsole={toConsole}
+                onRoom={lobby.putRoom}
+                notify={lobby.notify}
               />
-              <div className="room-body">
-                <div className="room-scroll" ref={scroller}>
-                  <div className="room-content">
-                    <RoomCallouts room={room} pausedUntil={lobby.pausedUntil[room.id]} actions={actions} />
-                    <Stage
-                      room={room}
-                      busy={busy}
-                      canHost={lobby.info?.capabilities.sessions ?? true}
-                      onStartSession={() => setDialog({ kind: "startSession", room: room.id })}
-                      onStream={() => setDialog({ kind: "streamPicker", room: room.id })}
-                      onInvite={actions.invite}
-                      onRoom={lobby.putRoom}
-                      notify={lobby.notify}
-                      confirm={(c) => setDialog({ kind: "confirm", ...c })}
-                      onUnlockRemote={(pc) => setDialog({ kind: "unlockRemote", room: room.id, member: pc })}
-                      onStartRemote={(pc) => setDialog({ kind: "startSession", room: room.id, remote: pc })}
-                      onStreamRemote={(pc) => setDialog({ kind: "streamPicker", room: room.id, remote: pc })}
-                    />
-                  </div>
-                </div>
-                {(!drawerMode || drawer) && (
-                  <MembersPanel
-                    room={room}
-                    actions={actions}
-                    hostEntries={myHere ? (m) => viewerEntries(room, myHere, m.id, members.run) : undefined}
-                    onClose={drawerMode ? () => setDrawer(false) : undefined}
-                  />
-                )}
+            )}
+            {restoredDev && (
+              // A development build can't start itself again; until it does,
+              // the engine refuses creating, joining and renaming.
+              <div className="app-banner">
+                <Callout tone="warn">
+                  A backup was restored into this profile: close the app and start it again to use it. Until then,
+                  creating, joining and renaming are refused.
+                </Callout>
               </div>
-            </>
-          ) : lobby.loaded ? (
-            <Welcome
-              name={lobby.profile?.displayName ?? null}
-              onCreate={() => setDialog({ kind: "create" })}
-              onJoin={() => setDialog({ kind: "join", invite: "" })}
-              onEditName={() => setDialog({ kind: "name" })}
-            />
-          ) : null}
+            )}
+            {view === "settings" ? (
+              <SettingsPage
+                section={section}
+                onSection={setSection}
+                onClose={() => setView("room")}
+                busy={busy}
+                hasRooms={rooms.length > 0}
+                profile={lobby.profile}
+                info={lobby.info}
+                onProfile={lobby.setProfile}
+                theme={theme}
+                onTheme={setTheme}
+                capturing={capturing}
+                onCapturing={setCapturing}
+                onRestarting={setRestarting}
+                restoredDev={restoredDev}
+                onRestoredDev={() => setRestoredDev(true)}
+              />
+            ) : room && actions ? (
+              <>
+                <RoomHeader
+                  room={room}
+                  actions={actions}
+                  menu={roomMenu(room, actions, { index, count: rooms.length })}
+                  onMembers={drawerMode ? () => setDrawer(!drawer) : undefined}
+                />
+                <div className="room-body">
+                  <div className="room-scroll" ref={scroller}>
+                    <div className="room-content">
+                      <RoomCallouts room={room} pausedUntil={lobby.pausedUntil[room.id]} actions={actions} />
+                      <Stage
+                        room={room}
+                        busy={busy}
+                        canHost={lobby.info?.capabilities.sessions ?? true}
+                        onStartSession={() => setDialog({ kind: "startSession", room: room.id })}
+                        onStream={() => setDialog({ kind: "streamPicker", room: room.id })}
+                        onInvite={actions.invite}
+                        onRoom={lobby.putRoom}
+                        notify={lobby.notify}
+                        confirm={(c) => setDialog({ kind: "confirm", ...c })}
+                        onUnlockRemote={(pc) => setDialog({ kind: "unlockRemote", room: room.id, member: pc })}
+                        onStartRemote={(pc) => setDialog({ kind: "startSession", room: room.id, remote: pc })}
+                        onStreamRemote={(pc) => setDialog({ kind: "streamPicker", room: room.id, remote: pc })}
+                      />
+                    </div>
+                  </div>
+                  {(!drawerMode || drawer) && (
+                    <MembersPanel
+                      room={room}
+                      actions={actions}
+                      hostEntries={myHere ? (m) => viewerEntries(room, myHere, m.id, members.run) : undefined}
+                      onClose={drawerMode ? () => setDrawer(false) : undefined}
+                    />
+                  )}
+                </div>
+              </>
+            ) : lobby.loaded ? (
+              <Welcome
+                name={lobby.profile?.displayName ?? null}
+                onCreate={() => setDialog({ kind: "create" })}
+                onJoin={() => setDialog({ kind: "join", invite: "" })}
+                onEditName={() => setDialog({ kind: "name" })}
+              />
+            ) : null}
+          </div>
         </div>
       </div>
 

@@ -5,6 +5,7 @@ import * as CM from "@radix-ui/react-context-menu";
 import * as DM from "@radix-ui/react-dropdown-menu";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
+import { popupPadding } from "./popper";
 import "./Menu.css";
 
 export type MenuEntry =
@@ -52,7 +53,7 @@ function entries(parts: Parts, items: MenuEntry[]): ReactNode {
             <ChevronRight className="menu-chevron" aria-hidden="true" />
           </parts.SubTrigger>
           <parts.Portal>
-            <parts.SubContent className="menu" sideOffset={4} collisionPadding={8}>
+            <parts.SubContent className="menu" sideOffset={4} collisionPadding={popupPadding()}>
               {entries(parts, item.items)}
             </parts.SubContent>
           </parts.Portal>
@@ -83,7 +84,7 @@ export function DropdownMenu(props: {
     <DM.Root modal={false} onOpenChange={props.onOpenChange}>
       <DM.Trigger asChild>{props.children}</DM.Trigger>
       <DM.Portal>
-        <DM.Content className="menu" align={props.align ?? "end"} sideOffset={4} collisionPadding={8}>
+        <DM.Content className="menu" align={props.align ?? "end"} sideOffset={4} collisionPadding={popupPadding()}>
           {entries(DM, props.items)}
         </DM.Content>
       </DM.Portal>
@@ -99,7 +100,7 @@ export function ContextMenu(props: { items: MenuEntry[]; children: ReactNode; on
     <CM.Root modal={false} onOpenChange={props.onOpenChange}>
       <CM.Trigger asChild>{props.children}</CM.Trigger>
       <CM.Portal>
-        <CM.Content className="menu" collisionPadding={8}>
+        <CM.Content className="menu" collisionPadding={popupPadding()}>
           {entries(CM, props.items)}
         </CM.Content>
       </CM.Portal>

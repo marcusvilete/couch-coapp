@@ -6,6 +6,7 @@ import * as RTabs from "@radix-ui/react-tabs";
 import * as RToggle from "@radix-ui/react-toggle-group";
 import { Check, ChevronDown } from "lucide-react";
 import type { ReactNode } from "react";
+import { popupPadding } from "./popper";
 import "./Controls.css";
 
 /** One of a few, side by side. */
@@ -69,7 +70,7 @@ export function Select<T extends string | number>(props: {
         </RSelect.Icon>
       </RSelect.Trigger>
       <RSelect.Portal>
-        <RSelect.Content className="select-menu" position="popper" sideOffset={4} collisionPadding={8}>
+        <RSelect.Content className="select-menu" position="popper" sideOffset={4} collisionPadding={popupPadding()}>
           <RSelect.Viewport>
             {props.options.map((o) => (
               <RSelect.Item key={String(o.value)} value={String(o.value)} className="select-item" disabled={o.disabled}>

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window, which also opens, places and closes the host overlay (M8), and sets its own title bar's theme (M21)",
+  "description": "Capability for the main window, which also opens, places and closes the host overlay (M8), sets its own theme (M21), and minimizes and maximizes itself from its own title bar (P15)",
   "windows": ["main"],
   "permissions": [
     "allow-engine-command",
@@ -11,6 +11,8 @@
     "core:window:allow-set-theme",
     "core:webview:allow-create-webview-window",
     "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
     "core:window:allow-set-position",
     "core:window:allow-set-ignore-cursor-events"
   ]

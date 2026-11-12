@@ -3,6 +3,7 @@
 import { Slot } from "@radix-ui/react-slot";
 import * as RT from "@radix-ui/react-tooltip";
 import { forwardRef, type HTMLAttributes, type ReactNode } from "react";
+import { popupPadding } from "./popper";
 import "./Tooltip.css";
 
 export function TooltipProvider(props: { children: ReactNode }) {
@@ -44,7 +45,7 @@ export const Tooltip = forwardRef<
         {children}
       </RT.Trigger>
       <RT.Portal>
-        <RT.Content className="tooltip" side={side ?? "top"} sideOffset={6} collisionPadding={8}>
+        <RT.Content className="tooltip" side={side ?? "top"} sideOffset={6} collisionPadding={popupPadding()}>
           {label}
         </RT.Content>
       </RT.Portal>
