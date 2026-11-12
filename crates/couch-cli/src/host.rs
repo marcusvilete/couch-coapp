@@ -236,7 +236,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     if let Some(free) = holders.iter().position(Option::is_none) {
                         holders[free] = Some(member);
                         let permissions = if free == first_guest_seat { args.permissions } else { Permissions::GAMEPAD };
-                        stream.grant(SeatId(free as u8), member, permissions);
+                        stream.grant(SeatId(free as u8), member, permissions, None);
                     }
                     viewers.insert(member, Viewer { conn, control, _channels: channels });
                 }
@@ -308,6 +308,7 @@ fn on_event(
             seat,
             epoch,
             permissions,
+            ..
         } => {
             if let Some(v) = viewers.get(&member) {
                 let _ = v.control.send(ControlMessage::SeatAssigned(SeatAssigned {
@@ -318,6 +319,8 @@ fn on_event(
                 }));
             }
         }
+        // Grants from here carry no ticket, so none is refused by one.
+        HostEvent::GrantRefused { .. } => {}
         HostEvent::Revoked {
             member,
             seat,
