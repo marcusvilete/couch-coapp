@@ -34,6 +34,12 @@ viewers: Array<string>,
  */
 viewerControllers: Array<number>, 
 /**
+ * For the host: the relay each viewer's connection goes through, by
+ * its server's name, in `viewers`' order; `None` on a direct path
+ * (M26a-2: a lower picture explained). Empty for others' sessions.
+ */
+viewerRelays: Array<string | null>, 
+/**
  * For the host: each viewer's controllers, by slot, in `viewers`'
  * order (P12); empty for others' sessions. The patch bay shows each as
  * a plug of its own.

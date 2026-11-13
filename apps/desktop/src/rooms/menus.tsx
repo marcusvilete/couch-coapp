@@ -3,6 +3,7 @@
 import { ArrowDown, ArrowUp, Ban, Crown, DoorOpen, KeyRound, Link2Off, LogOut, UserPlus } from "lucide-react";
 import type { MemberView } from "../bindings/MemberView";
 import type { RoomView } from "../bindings/RoomView";
+import { unreachableOf } from "../model/reasons";
 import { isConnected } from "../model/rooms";
 import type { MenuEntry } from "../ui/Menu";
 import type { RoomActions } from "./actions";
@@ -47,6 +48,12 @@ export function roomMenu(room: RoomView, a: RoomActions, place: { index: number;
  * while we host. Empty for ourselves outside a session. */
 export function memberMenu(room: RoomView, m: MemberView, a: RoomActions, hosting: MenuEntry[] = []): MenuEntry[] {
   const entries: MenuEntry[] = [...hosting];
+  // A code would let us reach them (M26a-2).
+  const why = unreachableOf(m);
+  if (why?.fix) {
+    const { host } = why.fix;
+    entries.push({ label: `Paste a code for ${host}…`, icon: <KeyRound />, onSelect: () => a.pasteCode(host, why.text) });
+  }
   const room_: MenuEntry[] = [];
   if (m.link !== "me" && room.canOffer && isConnected(m)) {
     room_.push({ label: "Make owner…", icon: <Crown />, onSelect: () => a.offer(m) });

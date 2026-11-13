@@ -150,6 +150,10 @@
   &.play {
     color: var(--accent-text);
   }
+
+  &.warn {
+    color: var(--warn);
+  }
 }
 
 .member-more {

@@ -13,7 +13,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, ty
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
-import { isLive, listed, nameOf, seatsOf } from "../model/sessions";
+import { isLive, listed, nameOf, seatsOf, viewerRelay } from "../model/sessions";
 import { Avatar, hueOf } from "../ui/Avatar";
 import { IconButton } from "../ui/Button";
 import { ContextMenu, DropdownMenu } from "../ui/Menu";
@@ -365,6 +365,8 @@ export function PatchBay(props: {
             const held = seatsOf(s, id);
             const controllers = controllersOf(s, id);
             const asking = s.requests.some((r) => r.member === id);
+            // Through a relay (M26a-2): their picture may be limited by it.
+            const relay = viewerRelay(s, id);
             // Their controllers, a plug each (P12), when there's a seat with
             // a pad to play.
             const theirs = s.seats.some((seat) => seat.pad) ? guestPads(s, id) : [];
@@ -385,6 +387,7 @@ export function PatchBay(props: {
                         <span>
                           {held.length > 0 ? `plays ${listed(held.map((i) => s.seats[i].label))}` : asking ? "asking to play" : "watching"}
                           {s.seats.length > 1 && theirs.length === 0 && ` · ${controllers === 1 ? "1 controller" : `${controllers} controllers`}`}
+                          {relay && ` · via ${relay}`}
                         </span>
                       </span>
                       <span className="bay-jack" ref={anchor(`viewer:${id}`)} style={{ "--hue": hueFor(id) } as React.CSSProperties} />

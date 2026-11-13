@@ -225,6 +225,12 @@
   font-size: var(--text-md);
 }
 
+/* Through a relay (M26a-2): their picture may be limited by it. */
+.together-via {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
 /* ---- Requests: a reserved strip ---- */
 .request-count {
   display: inline-grid;

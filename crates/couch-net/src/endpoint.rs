@@ -120,6 +120,14 @@ pub fn is_public_relay(url: &RelayUrl) -> bool {
     public_relays().iter().any(|config| config.url == *url)
 }
 
+/// iroh's public relays' addresses.
+pub fn public_relay_urls() -> Vec<RelayUrl> {
+    public_relays()
+        .into_iter()
+        .map(|config| config.url)
+        .collect()
+}
+
 /// Moves a running endpoint from the relays of `from` to those of `to`
 /// (M26a): each relay added, given another token, or gone. Our vendored
 /// iroh starts a changed relay's connection again, so a new token applies at

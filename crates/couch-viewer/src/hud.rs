@@ -36,7 +36,7 @@ use std::{
 
 use couch_input::shortcuts::{Shortcut, Shortcuts};
 use couch_proto::{
-    ipc::{HudRole, HudSeat, HudState, StreamVolume, UserAction},
+    ipc::{HudLink, HudRole, HudSeat, HudState, StreamVolume, UserAction},
     session::{EndReason, StreamState, seat_phrase},
 };
 use egui::{
@@ -325,6 +325,15 @@ impl Hud {
     /// What the user clicked since the last call.
     pub fn take_actions(&mut self) -> Vec<HudAction> {
         std::mem::take(&mut self.actions)
+    }
+
+    /// The relay we reach the host through, by its server's name (M26a-2),
+    /// for the stats card's Path row.
+    pub fn relay(&self) -> Option<&str> {
+        match &self.session.as_ref()?.link {
+            HudLink::Relay(host) => Some(host),
+            _ => None,
+        }
     }
 
     /// Whether the stats card shows, so its rows are worth building.
@@ -1520,12 +1529,16 @@ fn hints(ui: &mut Ui, s: &HudState, view: &BarView<'_>) {
 /// What the middle of the window says, if anything: why nothing is shown
 /// (M19: nothing streamed, or the last stream ended), or that the picture
 /// hasn't come yet. A second, smaller line with it. In the host's own
-/// window (`own`, M27d) the host is "you".
-fn centre_message(
-    s: &HudState,
-    waiting: bool,
-    own: bool,
-) -> Option<(String, Option<&'static str>)> {
+/// window (`own`, M27d) the host is "you". A lost connection comes first,
+/// with why when the app can tell (M26a-2).
+fn centre_message(s: &HudState, waiting: bool, own: bool) -> Option<(String, Option<String>)> {
+    if let HudLink::Reconnecting(why) = &s.link {
+        let more = match why {
+            Some(why) => format!("{why}."),
+            None => "The picture comes back with the connection.".into(),
+        };
+        return Some((format!("Reconnecting to {}…", s.host), Some(more)));
+    }
     let wait = if s.seats.is_empty() || own {
         "The next stream shows here."
     } else {
@@ -1546,19 +1559,20 @@ fn centre_message(
         StreamState::Stopped(_) if own => "You stopped streaming".into(),
         StreamState::Stopped(_) => format!("{} stopped streaming", s.host),
     };
-    let more = (s.stream != StreamState::Live).then_some(wait);
+    let more = (s.stream != StreamState::Live).then(|| wait.to_string());
     Some((first, more))
 }
 
 fn centre_card(
     ctx: &egui::Context,
     s: &HudState,
-    (first, more): &(String, Option<&'static str>),
+    (first, more): &(String, Option<String>),
     icons: bool,
     size: egui::Vec2,
 ) {
-    let icon = match s.stream {
-        StreamState::Stopped(_) => ICON_PAUSE,
+    let icon = match (&s.link, s.stream) {
+        (HudLink::Reconnecting(_), _) => ICON_WAIT,
+        (_, StreamState::Stopped(_)) => ICON_PAUSE,
         _ => ICON_WAIT,
     };
     egui::Area::new(egui::Id::new("centre"))
@@ -1587,7 +1601,7 @@ fn centre_card(
                                 .color(TEXT),
                         );
                         if let Some(more) = more {
-                            ui.label(RichText::new(*more).color(MUTED));
+                            ui.label(RichText::new(more.as_str()).color(MUTED));
                         }
                     });
                 });
@@ -1752,6 +1766,7 @@ mod tests {
             stream: StreamState::Live,
             note: String::new(),
             board: Default::default(),
+            link: HudLink::Direct,
         }
     }
 
@@ -1789,6 +1804,24 @@ mod tests {
         );
     }
 
+    /// M26a-2: a lost connection says so, before anything else, and why
+    /// when the app can tell.
+    #[test]
+    fn a_lost_connection_says_why() {
+        let mut s = session(vec![seat("Controller 1", None, false)], false);
+        s.link = HudLink::Reconnecting(Some("relay.example.com stopped answering".into()));
+        let (first, more) = centre_message(&s, false, false).unwrap();
+        assert_eq!(first, "Reconnecting to Ana…");
+        assert_eq!(
+            more.as_deref(),
+            Some("relay.example.com stopped answering.")
+        );
+        s.link = HudLink::Reconnecting(None);
+        assert!(centre_message(&s, false, false).unwrap().1.is_some());
+        s.link = HudLink::Relay("relay.example.com".into());
+        assert_eq!(centre_message(&s, false, false), None, "a picture is shown");
+    }
+
     /// M27d: the host's own window speaks to the host.
     #[test]
     fn the_hosts_own_window_says_you() {
@@ -1800,7 +1833,7 @@ mod tests {
         s.stream = StreamState::Waiting;
         let (first, more) = centre_message(&s, true, true).unwrap();
         assert_eq!(first, "You aren't streaming anything yet");
-        assert_eq!(more, Some("The next stream shows here."));
+        assert_eq!(more.as_deref(), Some("The next stream shows here."));
         s.stream = StreamState::Stopped(EndReason::HostStopped);
         assert_eq!(
             centre_message(&s, true, true).unwrap().0,

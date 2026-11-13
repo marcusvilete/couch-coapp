@@ -9,7 +9,10 @@
 
 use std::fmt::Write;
 
-use crate::{InternetView, MemberLink, NetworkTrouble, NetworkView, RelayStateView, RoomView};
+use crate::{
+    InternetView, MemberLink, MemberReason, NetworkTrouble, NetworkView, RelayStateView, RoomView,
+    UnreachableView,
+};
 
 /// What the text is made from.
 pub(crate) struct Facts<'a> {
@@ -115,17 +118,23 @@ pub(crate) fn text(facts: &Facts) -> String {
     );
     let _ = writeln!(out, "Rooms: {}", facts.rooms.len());
     for (i, room) in facts.rooms.iter().enumerate() {
-        let others: Vec<&str> = room
+        let others: Vec<String> = room
             .members
             .iter()
             .filter(|m| m.link != MemberLink::Me)
-            .map(|m| match (m.link, &m.other_version) {
-                (_, Some(v)) if v.newer => "on a newer version",
-                (_, Some(_)) => "on an older version",
-                (MemberLink::Direct, None) => "direct",
-                (MemberLink::Relay, None) => "through a relay",
-                (MemberLink::Online, None) => "online, not connected to us",
-                (MemberLink::Offline | MemberLink::Me, None) => "offline",
+            .map(|m| {
+                let link = match (m.link, &m.other_version) {
+                    (_, Some(v)) if v.newer => "on a newer version",
+                    (_, Some(_)) => "on an older version",
+                    (MemberLink::Direct, None) => "direct",
+                    (MemberLink::Relay, None) => "through a relay",
+                    (MemberLink::Online, None) => "online, not connected to us",
+                    (MemberLink::Offline | MemberLink::Me, None) => "offline",
+                };
+                match &m.unreachable {
+                    Some(u) => format!("{link}; {}", reason(u)),
+                    None => link.to_string(),
+                }
             })
             .collect();
         let mut marks = Vec::new();
@@ -152,6 +161,32 @@ pub(crate) fn text(facts: &Facts) -> String {
         }
     }
     out
+}
+
+/// Why a member can't be reached (M26a-2): relays by their server's name,
+/// as everywhere here; iroh's words scrubbed of addresses.
+fn reason(u: &UnreachableView) -> String {
+    let why = match &u.reason {
+        MemberReason::OurConnection => "our own connection".to_string(),
+        MemberReason::RelayUnreachable { host, ours, .. } => format!(
+            "their relay {} isn't answering ({})",
+            scrub(host),
+            if *ours { "one of ours" } else { "not ours" }
+        ),
+        MemberReason::RelayRefused { host, .. } => {
+            format!("their relay {} refuses our code", scrub(host))
+        }
+        MemberReason::NeedsCode { host, .. } => {
+            format!("their relay {} needs a code we lack", scrub(host))
+        }
+        MemberReason::RelayNotAllowed { host } => {
+            format!("their relay {} isn't one this build dials", scrub(host))
+        }
+    };
+    match &u.details {
+        Some(details) => format!("{why}: {}", scrub(details)),
+        None => why,
+    }
 }
 
 fn state(state: &RelayStateView) -> String {
@@ -277,6 +312,7 @@ mod tests {
             link,
             other_version: None,
             remote: None,
+            unreachable: None,
         }
     }
 
@@ -314,7 +350,16 @@ mod tests {
             members: vec![
                 member("Me Myself", MemberLink::Me),
                 member("Bia", MemberLink::Relay),
-                member("Caio", MemberLink::Offline),
+                MemberView {
+                    unreachable: Some(UnreachableView {
+                        reason: MemberReason::NeedsCode {
+                            url: "https://theirs.example/".into(),
+                            host: "theirs.example".into(),
+                        },
+                        details: Some("timed out dialing 198.51.100.4:7777".into()),
+                    }),
+                    ..member("Caio", MemberLink::Offline)
+                },
             ],
             joins_paused_for_secs: None,
             sessions: vec![],
@@ -324,6 +369,7 @@ mod tests {
             offering_to: None,
             offered: None,
             can_offer: true,
+            stale_invites: None,
         }];
         let text = text(&Facts {
             app_version: "0.35.0",
@@ -342,6 +388,7 @@ mod tests {
             "secret-room-id",
             "-id",
             "203.0.113",
+            "198.51.100",
         ] {
             assert!(!text.contains(secret), "{secret:?} in {text}");
         }
@@ -353,7 +400,7 @@ mod tests {
             "public relays: not in use; may stand in",
             "room 1 (ours):",
             "member 1: through a relay",
-            "member 2: offline",
+            "member 2: offline; their relay theirs.example needs a code we lack: timed out dialing <address>",
         ] {
             assert!(text.contains(said), "{said:?} not in {text}");
         }

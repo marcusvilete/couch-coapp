@@ -35,6 +35,7 @@ import {
   listed,
   nameOf,
   seatPhrase,
+  viewerRelay,
   waitsForGameAtPc,
 } from "../model/sessions";
 import { platform } from "../platform";
@@ -218,6 +219,7 @@ export function HostConsole(props: {
                 <li key={v} className="together-viewer">
                   <Avatar id={v} name={nameOf(room, v)} size={24} />
                   <span>{nameOf(room, v)}</span>
+                  {viewerRelay(s, v) && <span className="together-via">via {viewerRelay(s, v)}</span>}
                 </li>
               ))
             )}

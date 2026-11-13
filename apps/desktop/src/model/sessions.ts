@@ -22,6 +22,14 @@ export function busyIn(rooms: RoomView[]): Busy {
   };
 }
 
+/** For the host: the relay a viewer's connection goes through, by its
+ * server's name (M26a-2: a lower picture explained); `null` on a direct
+ * path. */
+export function viewerRelay(s: SessionView, member: string): string | null {
+  const i = s.viewers.indexOf(member);
+  return i < 0 ? null : (s.viewerRelays[i] ?? null);
+}
+
 export function nameOf(room: RoomView, member: string | null | undefined): string {
   return room.members.find((m) => m.id === member)?.name ?? "someone";
 }

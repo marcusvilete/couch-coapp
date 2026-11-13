@@ -16,6 +16,7 @@ mod diagnostics;
 mod network;
 pub mod pipeline;
 mod profile;
+mod reasons;
 pub mod relays;
 pub mod remote;
 mod rooms;
@@ -43,6 +44,7 @@ use couch_room::{
     session::SessionError,
 };
 pub use network::{InternetView, NetworkTimings, NetworkTrouble, RelayStateView};
+pub use reasons::{InviteRelay, InviteRelayView, JoinProblem, MemberReason, UnreachableView};
 pub use relays::RelayRules;
 use relays::SavedRelays;
 use serde::{Deserialize, Serialize};
@@ -112,6 +114,12 @@ pub enum Command {
     /// What an invite (a link or its bare payload) leads to, shown before
     /// asking for the password. Nothing is sent anywhere.
     PreviewInvite {
+        invite: String,
+    },
+    /// Connects to the relay an invite names, without a code, when nothing
+    /// is known of it yet (M26a-2): whether it wants a code we lack, shown
+    /// before the password. Answers [`Response::InviteRelay`].
+    CheckInviteRelay {
         invite: String,
     },
     /// The invite link the app was last opened with, if any. Taken: a
@@ -1256,6 +1264,10 @@ pub struct SessionView {
     /// passed to a viewer is added to theirs while they hold fewer pad seats
     /// than this, otherwise they move; a seat without one is always added.
     pub viewer_controllers: Vec<u8>,
+    /// For the host: the relay each viewer's connection goes through, by
+    /// its server's name, in `viewers`' order; `None` on a direct path
+    /// (M26a-2: a lower picture explained). Empty for others' sessions.
+    pub viewer_relays: Vec<Option<String>>,
     /// For the host: each viewer's controllers, by slot, in `viewers`'
     /// order (P12); empty for others' sessions. The patch bay shows each as
     /// a plug of its own.
@@ -1648,6 +1660,15 @@ pub enum Response {
         link: String,
     },
     InvitePreview(InvitePreview),
+    /// [`Command::CheckInviteRelay`]: `None` for an invite naming no relay.
+    InviteRelay {
+        relay: Option<InviteRelayView>,
+    },
+    /// A join didn't reach the room's owner, and this step is why
+    /// ([`Command::JoinRoom`], M26a-2).
+    JoinProblem {
+        problem: JoinProblem,
+    },
     OpenedInvite {
         link: Option<String>,
     },
@@ -1778,6 +1799,7 @@ impl fmt::Debug for Command {
                 .field("name", name)
                 .finish_non_exhaustive(),
             Self::PreviewInvite { .. } => f.write_str("PreviewInvite { .. }"),
+            Self::CheckInviteRelay { .. } => f.write_str("CheckInviteRelay { .. }"),
             Self::TakeOpenedInvite => f.write_str("TakeOpenedInvite"),
             // The invite holds the token that, with the password, lets one in.
             Self::JoinRoom { .. } => f.write_str("JoinRoom { .. }"),
@@ -2082,6 +2104,13 @@ impl fmt::Debug for Response {
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
             Self::RelayCode(code) => f.debug_tuple("RelayCode").field(code).finish(),
             Self::RelayCheck(check) => f.debug_tuple("RelayCheck").field(check).finish(),
+            Self::InviteRelay { relay } => {
+                f.debug_struct("InviteRelay").field("relay", relay).finish()
+            }
+            Self::JoinProblem { problem } => f
+                .debug_struct("JoinProblem")
+                .field("problem", problem)
+                .finish(),
             Self::RelayUse(used) => f.debug_tuple("RelayUse").field(used).finish(),
             Self::Diagnostics { text } => f
                 .debug_struct("Diagnostics")
@@ -2268,6 +2297,23 @@ pub struct RoomView {
     /// restore until confirmed, not with an offer standing, not past the
     /// 32 handovers a room's chain holds.
     pub can_offer: bool,
+    /// For the owner (M26a-2): open invite links that name a relay we are
+    /// no longer reachable through (our home relay moved since they were
+    /// made): a newcomer with one finds the relay without us on it.
+    pub stale_invites: Option<StaleInvites>,
+}
+
+/// Open invite links naming a relay we moved from (M26a-2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StaleInvites {
+    /// How many links still work but point at an old relay.
+    pub count: u32,
+    /// The relays they name, by their server's name.
+    pub hosts: Vec<String>,
+    /// The relay we are reachable through now, where new links point.
+    pub now: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -2284,6 +2330,9 @@ pub struct MemberView {
     /// They offered us remote play (M25): one of our own PCs, or asking to
     /// be.
     pub remote: Option<RemoteAccessView>,
+    /// Why we can't reach them, when we can tell (M26a-2): only while not
+    /// connected to us, and once a dial to them has failed.
+    pub unreachable: Option<UnreachableView>,
 }
 
 /// Another member's build, when it can't talk to ours (M10a).
@@ -2309,6 +2358,9 @@ pub struct InvitePreview {
     pub status: InviteStatus,
     /// Until the owner stops accepting it; 0 once expired.
     pub expires_in_secs: u32,
+    /// The relay it names, and what we know of it (M26a-2); `None` for
+    /// one naming none (addresses alone).
+    pub relay: Option<InviteRelayView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -2458,6 +2510,10 @@ pub enum EngineError {
         "couldn't reach the room's owner: invites work while the owner's Couch Co-App is running (try again in a moment if it is)"
     )]
     OwnerOffline,
+    /// The owner wasn't reached, and this step is why (M26a-2). A join
+    /// answers it as [`Response::JoinProblem`].
+    #[error("{0}")]
+    JoinProblem(JoinProblem),
     #[error("passwords can't be empty")]
     EmptyPassword,
     #[error("this room came back from a backup without its password: set a new one first")]
@@ -2669,6 +2725,9 @@ pub struct EngineOptions {
     pub backend: Arc<dyn pipeline::Backend>,
     /// How long a request to watch waits for the host's answer.
     pub join_wait: Duration,
+    /// How long reaching a member waits: joining a room (then telling which
+    /// step failed, M26a-2) and dialing a member. Tests shorten it.
+    pub join_connect: Duration,
     /// How long a streamed game may take to show a new window before its
     /// session ends ([`pipeline::source::REPLACE_GRACE`]).
     pub replace_grace: Duration,
@@ -2705,6 +2764,7 @@ impl EngineOptions {
             profile_wait: Duration::from_secs(5),
             backend: pipeline::platform_backend(),
             join_wait: Duration::from_secs(10),
+            join_connect: Duration::from_secs(15),
             replace_grace: pipeline::source::REPLACE_GRACE,
             reconnect_wait: Duration::from_secs(30),
             relay_only: false,
@@ -2891,16 +2951,6 @@ impl Engine {
         // Our own relays are in the dial rules before the actor's first dial.
         relays.refresh_dial();
         let (carrying_tx, carrying) = tokio::sync::watch::channel(Default::default());
-        let started = rooms::start(
-            &profile,
-            options,
-            relays.in_use.clone(),
-            events.clone(),
-            panic.clone(),
-            carrying_tx,
-            dial,
-        )
-        .await?;
         let network = Arc::new(Mutex::new(network::Network::new(
             relays
                 .rules
@@ -2909,8 +2959,22 @@ impl Engine {
             relays.rules.is_some(),
         )));
         relays.list_into(&mut network::lock(&network));
-        let relays = Arc::new(tokio::sync::Mutex::new(relays));
         let (poke, poked) = mpsc::channel(4);
+        let started = rooms::start(
+            &profile,
+            options,
+            relays.in_use.clone(),
+            events.clone(),
+            panic.clone(),
+            rooms::Links {
+                carrying: carrying_tx,
+                dial,
+                network: network.clone(),
+                poke: poke.clone(),
+            },
+        )
+        .await?;
+        let relays = Arc::new(tokio::sync::Mutex::new(relays));
         network::watch(
             network.clone(),
             relays.clone(),
@@ -3386,6 +3450,22 @@ impl Engine {
                     unchecked,
                 )
                 .await
+            }
+            Command::CheckInviteRelay { invite } => {
+                let invite = couch_proto::invite::Invite::parse(&invite)?;
+                let dial = self.relays.lock().await.dial.clone();
+                let rules = dial
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let relay = reasons::check_invite_relay(
+                    invite.addr.relay.as_deref(),
+                    &self.network,
+                    &rules,
+                    self.timings.check_timeout,
+                )
+                .await;
+                Ok(Response::InviteRelay { relay })
             }
             Command::ReadRelayCode { code } => {
                 let code = relays::code::RelayCode::parse(&code)?;

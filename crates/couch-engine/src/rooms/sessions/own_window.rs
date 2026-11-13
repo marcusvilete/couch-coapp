@@ -480,6 +480,7 @@ impl Actor {
         };
         let s = &h.session;
         own.window.set_hud(HudState {
+            link: couch_proto::ipc::HudLink::Direct,
             title: s.config().title.clone(),
             host: self.member_name(h.room, self.me),
             role: HudRole::Watching,

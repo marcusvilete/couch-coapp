@@ -2,11 +2,12 @@
 // connected to us, what they're doing (streaming, watching, playing), and
 // whether their Couch Co-App is another version; their menu (right-click or
 // "⋯") holds what can be done to them. Rows hold still while a menu is open.
-import { Crown, Eye, Gamepad2, MoreHorizontal, Radio, Tv, X } from "lucide-react";
+import { Crown, Eye, Gamepad2, MoreHorizontal, Radio, TriangleAlert, Tv, X } from "lucide-react";
 import { useRef, useState } from "react";
 import type { MemberView } from "../bindings/MemberView";
 import type { RoomView } from "../bindings/RoomView";
 import { LINKS, isOnline, otherVersionText } from "../model/rooms";
+import { unreachableOf } from "../model/reasons";
 import { isLive, playersOf } from "../model/sessions";
 import { Avatar } from "../ui/Avatar";
 import { IconButton } from "../ui/Button";
@@ -50,6 +51,8 @@ export function MembersPanel(props: {
     const hosting = room.sessions.find((s) => s.host === m.id);
     const plays = room.sessions.some((s) => playersOf(s).includes(m.id));
     const watches = room.sessions.some((s) => s.viewers.includes(m.id));
+    // Why we can't reach them, when the engine can tell (M26a-2).
+    const why = unreachableOf(m);
     return (
       <ContextMenu key={m.id} items={items} onOpenChange={holdRows}>
         <li className={`member${m.link === "offline" ? " away" : ""}`}>
@@ -69,12 +72,18 @@ export function MembersPanel(props: {
             </span>
             <span className="member-detail">
               {m.link === "me" ? "you" : LINKS[m.link].label}
+              {why && ` · ${why.short}`}
               {hosting && (isLive(hosting) ? " · streaming" : " · has a session")}
               {!hosting && plays && " · playing"}
               {!hosting && !plays && watches && " · watching"}
             </span>
           </span>
           <span className="member-status">
+            {why && !m.otherVersion && (
+              <Tooltip label={why.text}>
+                <TriangleAlert className="member-icon warn" aria-label={why.text} />
+              </Tooltip>
+            )}
             {m.otherVersion && (
               <Tooltip label={otherVersionText(m.name, m.otherVersion)}>
                 <span>

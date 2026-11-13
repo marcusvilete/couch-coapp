@@ -10,6 +10,7 @@ import type { RelayUseView } from "../bindings/RelayUseView";
 import type { RelayView } from "../bindings/RelayView";
 import { errorText, request } from "../engine";
 import { networkLine, RELAY_LINE, relayState, removeWarning, type Tone } from "../model/network";
+import { PERSONAL_WHY } from "../model/reasons";
 import { Button, IconButton } from "../ui/Button";
 import { Switch } from "../ui/Controls";
 import { Dialog } from "../ui/Dialog";
@@ -258,9 +259,12 @@ function RelayRow(props: { relay: RelayView; menu: MenuEntry[]; home: boolean; o
             {r.builtIn && <Badge tone="accent">this app's</Badge>}
             {!r.hasCode && <Badge>open to everyone</Badge>}
             {r.personal && (
-              <Badge tone="info" title="Given to you alone: never passed on">
-                personal
-              </Badge>
+              <>
+                <Badge tone="info" title="Given to you alone: never passed on">
+                  personal
+                </Badge>
+                <Why label="Details">{PERSONAL_WHY}</Why>
+              </>
             )}
           </span>
           <span className={`relay-state relay-state-${state.tone}`}>

@@ -372,6 +372,49 @@ export const SHOTS = [
     await click("Remind me later")(page);
     await page.getByRole("dialog", { name: /Create a room/ }).waitFor();
   }],
+  // M26a-2: why someone can't be reached, what to do, and the hints.
+  ["member-reasons-menu", "member-reasons", member("Caio")],
+  ["room-paste-code", "room-unreachable", async (page) => {
+    await click("Paste a code")(page);
+    await page.getByLabel(/Paste the code for/).waitFor();
+  }],
+  ["join-relay-needs-code", "join-needs-code", async (page) => {
+    await click("Join with an invite")(page);
+    await page.getByLabel("Invite link").fill("https://marcusvilete.github.io/couch-coapp/j/#v1.abc");
+    await page.getByText("which needs a code").waitFor();
+  }],
+  ["join-failed-needs-code", "join-needs-code", async (page) => {
+    await click("Join with an invite")(page);
+    await page.getByLabel("Invite link").fill("https://marcusvilete.github.io/couch-coapp/j/#v1.abc");
+    await page.getByText("which needs a code").waitFor();
+    await page.getByLabel("Password", { exact: true }).first().fill("pizza night");
+    await page.getByRole("button", { name: "Join", exact: true }).click();
+    await page.getByText("then join").waitFor();
+  }],
+  ["join-paste-code", "join-needs-code", async (page) => {
+    await click("Join with an invite")(page);
+    await page.getByLabel("Invite link").fill("https://marcusvilete.github.io/couch-coapp/j/#v1.abc");
+    await click("Paste a code")(page);
+    await page.getByLabel(/Paste the code for/).waitFor();
+  }],
+  ["join-failed-owner-away", "join-owner-away", async (page) => {
+    await click("Join with an invite")(page);
+    await page.getByLabel("Invite link").fill("https://marcusvilete.github.io/couch-coapp/j/#v1.abc");
+    await page.waitForTimeout(400);
+    await page.getByLabel("Password", { exact: true }).first().fill("offline");
+    await page.getByRole("button", { name: "Join", exact: true }).click();
+    await page.getByText("isn't on it").waitFor();
+  }],
+  ["dialog-invite-stale", "stale-links", click("Invite")],
+  ["dialog-create-public", "network-public-hint", async (page) => {
+    await click("Create or join a room")(page);
+    await click("Create a room")(page);
+  }],
+  ["dialog-invite-public", "network-public-hint", click("Invite")],
+  ["network-personal-why", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByRole("button", { name: "Details" }).first().click();
+  }],
   ["settings-drivers", "lobby", settings("Drivers")],
   ["settings-backup", "lobby", settings("Backup")],
   ["settings-backup-empty", "first-run", settings("Backup")],
@@ -537,6 +580,42 @@ export const STABLE = [
     [
       ["swap", async (page) => dragTo(page, `[aria-label="Bia's Xbox Wireless Controller: drag onto a seat"]`, ".bay-seat:has-text('Controller 4')", true)],
       ["back", async (page) => dragTo(page, `[aria-label="Bia's DualSense Wireless Controller 1: drag onto a seat"]`, ".bay-seat:has-text('Controller 4')", true)],
+    ],
+  ],
+  // M26a-2: the owner's relay, then the step a join failed at, in the row
+  // kept for them: the password below never moves.
+  [
+    "join relay row",
+    "join-needs-code",
+    [".dialog"],
+    [
+      ["open", click("Join with an invite")],
+      ["paste", async (page) => {
+        await page.getByLabel("Invite link").fill("https://marcusvilete.github.io/couch-coapp/j/#v1.abc");
+        await page.getByText("which needs a code").waitFor();
+      }],
+      ["join", async (page) => {
+        await page.getByLabel("Password", { exact: true }).first().fill("pizza night");
+        await page.getByRole("button", { name: "Join", exact: true }).click();
+        await page.getByText("then join").waitFor();
+      }],
+    ],
+  ],
+  [
+    "join owner away",
+    "join-owner-away",
+    [".dialog"],
+    [
+      ["open", click("Join with an invite")],
+      ["paste", async (page) => {
+        await page.getByLabel("Invite link").fill("https://marcusvilete.github.io/couch-coapp/j/#v1.abc");
+        await page.waitForTimeout(400);
+      }],
+      ["join", async (page) => {
+        await page.getByLabel("Password", { exact: true }).first().fill("offline");
+        await page.getByRole("button", { name: "Join", exact: true }).click();
+        await page.getByText("isn't on it").waitFor();
+      }],
     ],
   ],
   [

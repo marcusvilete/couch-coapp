@@ -3,6 +3,7 @@
 // paused (M13, P4).
 import { useEffect, useState } from "react";
 import type { RoomView } from "../bindings/RoomView";
+import { roomReason, staleInvitesText } from "../model/reasons";
 import { namesListed, owner } from "../model/rooms";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
@@ -100,6 +101,44 @@ export function RoomCallouts(props: { room: RoomView; pausedUntil: number | unde
     );
   }
   if (props.pausedUntil != null) callouts.push(<PausedCallout key="paused" until={props.pausedUntil} />);
+  // Nobody here can be reached, for one cause (M26a-2). Our own connection
+  // is the strip's to say, with its button.
+  const why = roomReason(room);
+  if (why) {
+    const fix = why.fix;
+    callouts.push(
+      <Callout
+        key="unreachable"
+        tone="warn"
+        actions={
+          fix && (
+            <Button size="sm" onClick={() => a.pasteCode(fix.host, why.text)}>
+              Paste a code…
+            </Button>
+          )
+        }
+      >
+        {why.text}
+      </Callout>,
+    );
+  }
+  // Links pointing at a relay we moved from (M26a-2).
+  if (room.staleInvites) {
+    callouts.push(
+      <Callout
+        key="stale-links"
+        tone="info"
+        actions={
+          <Button size="sm" onClick={a.invite}>
+            New link…
+          </Button>
+        }
+        why="Your app is reachable through one relay at a time, and an invite names it. With several relays it can move to a faster one when the app starts; links made before still lead to the old one."
+      >
+        {staleInvitesText(room.staleInvites)}
+      </Callout>,
+    );
+  }
 
   if (callouts.length === 0) return null;
   return <div className="callouts">{callouts}</div>;

@@ -14,7 +14,7 @@ import { defaultShortcuts, hostSession, seatsFor, type FakeRoom, type World } fr
 const ME = "a11ce000000000000000000000000001";
 
 function member(id: string, name: string, link: MemberLink, extra: Partial<MemberView> = {}): MemberView {
-  return { id, name, isOwner: false, link, otherVersion: null, remote: null, ...extra };
+  return { id, name, isOwner: false, link, otherVersion: null, remote: null, unreachable: null, ...extra };
 }
 
 const you = (owner: boolean): MemberView => member(ME, "Ana", "me", { isOwner: owner });
@@ -55,6 +55,7 @@ function room(id: string, name: string, over: Partial<FakeRoom> = {}): FakeRoom 
     offeringTo: null,
     offered: null,
     canOffer: true,
+    staleInvites: null,
     ...over,
   };
 }
@@ -75,6 +76,7 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
     maxViewers: 4,
     viewers: [],
     viewerControllers: [],
+    viewerRelays: [],
     viewerPads: [],
     ourControllers: [],
     seats,
@@ -200,6 +202,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
         name: "Old games",
         status: "expired",
         expiresInSecs: 0,
+        relay: null,
       },
     },
     myControllers: 1,
@@ -251,6 +254,8 @@ function hosting(over: Partial<SessionView> = {}, live = true): SessionView {
   const s = hostSession(ME, "Game night", 4, { controllers: 4, keyboardMouse: "ownSeat" }, ["DualSense Wireless Controller", "Xbox Wireless Controller"]);
   s.viewers = [bia.id, caio.id, dani.id];
   s.viewerControllers = [2, 1, 1];
+  // Caio is reached through a relay (M26a-2): the patch bay names it.
+  s.viewerRelays = [null, "relay.caio-plays.net", null];
   s.viewerPads = [
     [
       { slot: 0, name: "DualSense Wireless Controller" },
@@ -760,6 +765,7 @@ export const SCENARIOS: Record<string, Scenario> = {
       const s = hostSession(ME, "Movie night", 4, { controllers: 0, keyboardMouse: "none" }, []);
       s.viewers = [bia.id, caio.id, dani.id];
       s.viewerControllers = [0, 0, 0];
+      s.viewerRelays = [null, "relay.caio-plays.net", null];
       s.stream = { state: "live" };
       s.streaming = { name: "VLC media player", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
       s.gameInFront = true;
@@ -1063,6 +1069,79 @@ export const SCENARIOS: Record<string, Scenario> = {
           udp: null,
         }),
       }),
+  },
+  // M26a-2: why someone can't be reached, and what to do.
+  "member-reasons": {
+    title: "Members we can't reach, and why: a relay wanting a code (Paste a code in their menu), one of ours not answering",
+    world: () =>
+      base([
+        sofa({
+          members: [
+            you(true),
+            bia,
+            member("ca10", "Caio", "offline", {
+              unreachable: {
+                reason: { type: "needsCode", url: "https://relay.caio-plays.net/", host: "relay.caio-plays.net" },
+                details: "timed out dialing the member",
+              },
+            }),
+            member("dan1", "Dani", "online", {
+              unreachable: {
+                reason: { type: "relayUnreachable", url: "https://relay.friday-crew.org/", host: "relay.friday-crew.org", ours: true },
+                details: "no answer from relay.friday-crew.org",
+              },
+            }),
+            edu,
+          ],
+        }),
+      ]),
+  },
+  "room-unreachable": {
+    title: "A room nobody can be reached in, for one cause: said once at the top, with Paste a code",
+    world: () => {
+      const away = (id: string, name: string) =>
+        member(id, name, "offline", {
+          unreachable: {
+            reason: { type: "needsCode", url: "https://relay.rafa.games/", host: "relay.rafa.games" },
+            details: null,
+          },
+        });
+      return base([
+        friday({
+          members: [you(false), { ...away("ra4", "Rafa"), isOwner: true }, away("l1a", "Lia")],
+        }),
+      ]);
+    },
+  },
+  "stale-links": {
+    title: "The owner's open links name a relay they moved from: the room says so, and Invite too",
+    world: () =>
+      base([
+        sofa({ staleInvites: { count: 2, hosts: ["relay.friday-crew.org"], now: "couchrelay.duckdns.org" } }),
+      ]),
+  },
+  "join-needs-code": {
+    title: "Joining: the owner's relay wants a code we lack, said before the password (Paste a code); joining anyway fails there",
+    world: () =>
+      base([], {
+        inviteRelay: { url: "https://relay.rafa.games/", host: "relay.rafa.games", relay: { type: "unchecked" } },
+        relaysNeedingCodes: ["relay.rafa.games"],
+      }),
+  },
+  "join-owner-away": {
+    title: "Joining: the owner's relay answers, the owner isn't on it (type the password \"offline\"); a long relay name",
+    world: () =>
+      base([], {
+        inviteRelay: {
+          url: "https://relay.the-friday-night-games-crew.example.org/",
+          host: "relay.the-friday-night-games-crew.example.org",
+          relay: { type: "unchecked" },
+        },
+      }),
+  },
+  "network-public-hint": {
+    title: "Only the public relays, the wizard put off: Create a room and Invite say so in a line",
+    world: () => base([room("a10e", "Movie night")], { network: publicOnly({ askForRelay: false }) }),
   },
   "network-public": {
     title: "Network: only the public relays (a public build's start): the wizard on creating a room or an invite",
