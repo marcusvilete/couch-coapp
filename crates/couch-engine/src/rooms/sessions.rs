@@ -1335,10 +1335,11 @@ impl Actor {
             host_controllers: controllers.len() as u8,
         };
         let mut host_session = HostSession::new(session, config)?;
-        // The host draws over the game as itself (M27b), where it can.
-        if self.backend.draws_over_game() && self.board_windows.is_some() {
-            host_session.set_me(self.me);
-        }
+        // The host draws as itself: over the game (M27b) where it can, and in
+        // its own stream window (M27d) on every system. Named only where the
+        // board over the game exists, a Linux host's own window heard nothing
+        // and its drawing went nowhere (found after P18).
+        host_session.set_me(self.me);
         // Drawing on the stream starts as Settings says (M27a), before
         // anyone hears of the session: nobody to tell yet.
         let drawing = crate::store::drawing(&self.data_dir);
