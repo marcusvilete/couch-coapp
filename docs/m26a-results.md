@@ -36,7 +36,7 @@ iroh is vendored (`third_party/iroh/`, `PATCHED.md`) with about 50 lines that re
 - **Share its code** (`Command::ShareRelay`): copied natively, never through the webview, kept out of Windows' clipboard history and cloud sync (`couch_platform_win::clipboard`) and KDE's history (`couch_platform_linux::clipboard`, through `arboard`); never a personal code.
 - **Our own connection** (`couch_engine::network`): each relay's state (connected and home, connected, answers, not answering, refusing our code), the public relays as one row, the network's (offline, a sign-in page, no UDP), and the trouble that silently breaks every room (no internet, a sign-in page, a relay refusing our code, none of ours answering), shown only once it has lasted 10 s and gone at once.
 - **The public relays** (iroh's default relay map, never its DNS lookup): in use while nothing is registered or when kept on, standing in while none of ours works if the user allows it (off by default).
-- **Others' relay addresses** (a member's record, an invite) are dialed in release builds only as https to a dotted name (`couch_net::addr::DialRules`): never an IP literal, `localhost`, a single-label name or credentials. Before, a member could make others' apps send requests into their own network. An invite naming only such a relay is refused with why.
+- **Others' relay addresses** (a member's record, an invite) are dialed in release builds only as https on port 443 to a dotted name (`couch_net::addr::DialRules`): never an IP literal, `localhost`, a single-label name, a LAN suffix or credentials. Before, a member could aim others' apps at any address and port in their own network; now only a public-looking name on 443, and one resolving to a private address isn't caught (iroh resolves it). An invite naming only such a relay is refused with why.
 - **Backups carry the relays** (format 3, sealed with the passphrase); a restore writes them and freezes relay changes until the restart.
 - **Settings → Network**, rewritten: each relay with its state and Details; adding by code (what it names shown first) or by address and token; Share; Remove…, which names the rooms and members reached through it (`Command::RelayUse`) and warns while remote play is on; the public relays' two switches; Check again; Copy diagnostics (`couch_engine::diagnostics`) and Open the log folder (`Backend::open_folder`: Explorer, or the desktop's OpenURI portal on Linux, so an AppImage's environment never reaches the file manager).
 - **The strip** at the bottom of the main area (`shell/TroubleStrip.tsx`): one line and the button that fixes it (Check again, Paste a new code, Network settings), in a polite live region; nothing above it moves.
@@ -50,7 +50,7 @@ iroh is vendored (`third_party/iroh/`, `PATCHED.md`) with about 50 lines that re
 | What | How | Result |
 |---|---|---|
 | Lint, format | `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`, Windows and Linux (WSL) | clean |
-| Workspace tests, Windows | `cargo test --workspace` | pass (couch-engine: 162 unit, rooms 28, sessions 98, relay 12) |
+| Workspace tests, Windows | `cargo test --workspace` | pass (couch-engine: 163 unit, rooms 28, sessions 98, relay 12) |
 | Linux (WSL) | clippy, fmt, couch-engine and couch-net tests | pass |
 | Rooms, sessions, relay, three times (room-security-checks) | `cargo test -p couch-engine --test rooms`, `--test sessions`, `--test relay` | pass, 3 of 3 each; no flaky pass |
 | Relays changed while running | relay `registered` (10 tests: a token per relay, an open relay outside the list, a refused code, added before and after a dial, a new code for a refusing relay, the home relay removed, a removed relay gets no token) | pass; the three listed above fail unpatched |
@@ -73,7 +73,20 @@ iroh is vendored (`third_party/iroh/`, `PATCHED.md`) with about 50 lines that re
 
 ## The review
 
-(below)
+A fresh review agent read the whole branch (steps 1 to 8) against CLAUDE.md, the ADR and this page, and tried to break it. **Nothing serious:** no token reaches a log, a reply or event, a record, an invite, remote play or the diagnostics; each token goes to its own relay alone; the code parser can't panic; backups of format 1 and 2 still open and a failed restore is undone; no lock is held across a wait where it mustn't be; the Windows clipboard code frees and hands over its memory correctly. Its findings, each checked against the code; all held, and all were fixed but the last three:
+
+1. **A check's answer about an old code was kept** (medium): a check started before the user pasted a new code could come back after it, bench a relay whose new code works (the strip back for two minutes), or hide a wrong one for ten; and the check under way held up one with the new code. Each answer now carries the code it checked and counts only if that code is still held (`Network::checked_with`, the add's own answer too), and a new code starts its own check at once. Test `an_answer_about_an_old_code_is_dropped`, and the scheduling test's new cases.
+2. **The dial rule claimed more than it did** (medium): names with a LAN's suffix (`nas.local`, `router.lan`, `x.home.arpa`) and any port passed. Now refused, with others' relays on port 443 only (decimal and hex IP forms checked too). A public name resolving to a private address still isn't caught (iroh resolves it), and the docs (CLAUDE.md, protocol.md, the ADR, this page) now say "narrows" rather than "closes".
+3. **A relay without a token that refused us stayed set aside for the run** (low-medium): only relays with a token were checked again. Any relay that refused is now.
+4. **The diagnostics missed addresses after a word's colon or in brackets** (`host:10.0.0.5`, `[192.168.1.20]:3340`): now taken out, with tests.
+5. **"Save anyway" in the wizard** turned the public relays off at once for a relay that doesn't answer, right before an invite that needs one: the wizard no longer offers it (Settings still does).
+6. **Typing a personal relay's address again cleared its mark**: only a code decides it now; a typed address keeps it (engine test).
+7. **A crafted backup's relays were half-checked**: now checked as typed ones (no credentials) and each kept once; the log names a relay's server, never its whole address.
+8. **Our own relays reached the dial rules only after the room actor started**, so a first dial could strip one: filled before.
+9. **"The webview never sees a token"**: true of every reply and event, but a script could read the clipboard after Share, and a pasted code passes through a field. The docs say so now.
+10. **Smaller:** Explorer is started by its full path (a bare name is looked for beside our exe first); on Linux the log folder is opened by `desktop.log` or the folder itself, never another file of the profile's; the strip's dead "standing in" text is gone (while the public relays stand in nothing is wrong: no strip, Settings marks them), with a scenario of its own; a misplaced doc comment. **Left as they are:** the strip takes its line from the bottom of the room's area when it appears (nothing above it moves, which is the rule); the remote-play note in Add a relay appears a moment after the section on a home PC with remote play on; and our iroh patch's message uses iroh's own `try_send` (dropped only on a full channel of 256, as iroh's other relay messages).
+
+After the fixes: clippy and fmt clean on Windows and Linux; couch-engine's unit tests (163) on both; couch-net's; rooms, sessions and relay; the front end's checks and the network and wizard shots.
 
 ## Still to come
 

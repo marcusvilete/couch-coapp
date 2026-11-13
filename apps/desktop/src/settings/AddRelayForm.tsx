@@ -29,6 +29,9 @@ export function AddRelayForm(props: {
   hint?: string | null;
   /** Only the code (the wizard). */
   codeOnly?: boolean;
+  /** No "Save anyway" (the wizard): a relay that doesn't answer would turn
+   * the public relays off at once, just before an invite that needs one. */
+  noSaveAnyway?: boolean;
   autoFocus?: boolean;
 }) {
   const [mode, setMode] = useState<"code" | "address">("code");
@@ -118,7 +121,13 @@ export function AddRelayForm(props: {
       );
     }
     if (failed) {
-      return <FailedCheck failed={failed} working={working} onAnyway={() => void send(failed.anyway, failed.anyway)} />;
+      return (
+        <FailedCheck
+          failed={failed}
+          working={working}
+          onAnyway={props.noSaveAnyway ? undefined : () => void send(failed.anyway, failed.anyway)}
+        />
+      );
     }
     if (error) {
       return (
@@ -280,7 +289,7 @@ function CodePreview(props: { code: RelayCodeView }) {
 
 /** The check before saving failed: refused (ask for a new code), or no
  * answer (save anyway). */
-function FailedCheck(props: { failed: Failed; working: boolean; onAnyway: () => void }) {
+function FailedCheck(props: { failed: Failed; working: boolean; onAnyway?: () => void }) {
   const { check } = props.failed;
   if (check.outcome.type === "refused") {
     return (
@@ -307,9 +316,13 @@ function FailedCheck(props: { failed: Failed; working: boolean; onAnyway: () => 
           <span className="selectable">{details}</span>
         </Why>
       )}
-      <Button size="sm" disabled={props.working} onClick={props.onAnyway}>
-        Save anyway
-      </Button>
+      {props.onAnyway ? (
+        <Button size="sm" disabled={props.working} onClick={props.onAnyway}>
+          Save anyway
+        </Button>
+      ) : (
+        <span className="form-hint">Try again when it answers.</span>
+      )}
     </span>
   );
 }

@@ -17,7 +17,7 @@ export function TroubleStrip(props: {
   onFix: (fix: TroubleFix, trouble: NetworkTrouble) => void;
 }) {
   const trouble = props.network?.trouble ?? null;
-  const said = trouble ? troubleStrip(trouble, props.network?.fallingBack ?? false) : null;
+  const said = trouble ? troubleStrip(trouble) : null;
   return (
     <div className="trouble-region" role="status" aria-live="polite">
       {trouble && said && (

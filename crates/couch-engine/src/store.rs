@@ -520,9 +520,18 @@ impl Store {
         if let Some(json) = &contents.relays {
             match serde_json::from_slice::<SavedRelays>(json) {
                 Ok(mut saved) => {
-                    saved
-                        .relays
-                        .retain(|r| r.url.parse::<couch_net::RelayUrl>().is_ok());
+                    // As a relay the user typed: one this build takes (no
+                    // credentials, http only where allowed), each once, in
+                    // iroh's spelling.
+                    let test_build = crate::build_config::test_build();
+                    let mut seen = std::collections::BTreeSet::new();
+                    saved.relays.retain_mut(|r| {
+                        let Ok(url) = crate::relays::check_url(&r.url, test_build) else {
+                            return false;
+                        };
+                        r.url = url.to_string();
+                        seen.insert(r.url.clone())
+                    });
                     saved.relays.truncate(crate::relays::MAX_RELAYS);
                     let file = self.dir.join(RELAYS_FILE);
                     undo.files.push((file.clone(), fs::read(&file).ok()));
@@ -1125,6 +1134,13 @@ mod tests {
         let mut junk = many.relays[0].clone();
         junk.url = "not a url".into();
         many.relays.insert(0, junk);
+        // Credentials (shown and logged otherwise), and one spelled twice.
+        let mut secret = many.relays[1].clone();
+        secret.url = "https://user:pass@sneaky.example".into();
+        many.relays.insert(0, secret);
+        let mut twice = many.relays[2].clone();
+        twice.url = "https://R0.example/".into();
+        many.relays.insert(0, twice);
         contents.relays = Some(serde_json::to_vec(&many).unwrap());
         let again = tempfile::tempdir().unwrap();
         let target = Store::new(again.path(), Arc::new(Flip(0x22)));
@@ -1132,6 +1148,9 @@ mod tests {
         let restored = target.relays(&rules, 2);
         assert_eq!(restored.relays.len(), crate::relays::MAX_RELAYS);
         assert!(restored.relays.iter().all(|r| r.url != "not a url"));
+        assert!(restored.relays.iter().all(|r| !r.url.contains('@')));
+        let urls: std::collections::BTreeSet<_> = restored.relays.iter().map(|r| &r.url).collect();
+        assert_eq!(urls.len(), restored.relays.len(), "each relay once");
     }
 
     /// M13: whatever a crafted backup holds, no password key, invite or

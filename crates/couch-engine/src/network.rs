@@ -207,6 +207,27 @@ impl Network {
         );
     }
 
+    /// A check of `url` with `token` came back: kept only if the relay is
+    /// still held with that very code. A change since forgot the old
+    /// answer, and an answer about the old code must not come back after it
+    /// (it would bench a relay whose new code works, or hide a wrong one).
+    pub fn checked_with(
+        &mut self,
+        url: &str,
+        token: Option<&RelayToken>,
+        result: RelayCheck,
+        now: Instant,
+    ) -> bool {
+        let same = self
+            .listed
+            .iter()
+            .any(|l| l.view.url == url && l.token.as_ref() == token);
+        if same {
+            self.checked(url, result, now);
+        }
+        same
+    }
+
     /// "Check again": every code is due a check now. One that refused stays
     /// set aside until its check says otherwise, so iroh doesn't take it
     /// back as its home relay meanwhile.
@@ -566,8 +587,10 @@ pub(crate) fn watch(
     let mut health = watch_health(&endpoint);
     tokio::spawn(async move {
         let started = Instant::now();
-        let (done_tx, mut done) = mpsc::channel::<(String, RelayCheck)>(16);
-        let mut checking: BTreeSet<String> = BTreeSet::new();
+        let (done_tx, mut done) = mpsc::channel::<(String, Option<RelayToken>, RelayCheck)>(16);
+        // Each relay's check under way, with the code it checks: a new code
+        // starts a check of its own at once.
+        let mut checking: BTreeMap<String, Option<RelayToken>> = BTreeMap::new();
         let mut last = None;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
@@ -587,17 +610,16 @@ pub(crate) fn watch(
                     lock(&network).carrying = carrying.borrow_and_update().clone();
                 }
                 Some(()) = poke.recv() => {}
-                Some((url, result)) = done.recv() => {
-                    checking.remove(&url);
+                Some((url, token, result)) = done.recv() => {
+                    if checking.get(&url) == Some(&token) {
+                        checking.remove(&url);
+                    }
                     if result != RelayCheck::Accepted {
                         tracing::info!(%url, ?result, "a relay's code checked");
                     }
-                    let mut network = lock(&network);
                     // Still held with the same code: otherwise the change
                     // already forgot it, and this answer is old.
-                    if network.listed.iter().any(|l| l.view.url == url) {
-                        network.checked(&url, result, Instant::now());
-                    }
+                    lock(&network).checked_with(&url, token.as_ref(), result, Instant::now());
                 }
                 _ = tick.tick() => {}
             }
@@ -622,13 +644,13 @@ pub(crate) fn watch(
             }
             for relay in due {
                 let url = relay.url.to_string();
-                checking.insert(url.clone());
+                checking.insert(url.clone(), relay.token.clone());
                 let done = done_tx.clone();
                 tokio::spawn(async move {
                     let result = check_relay(&relay, timings.check_timeout)
                         .await
                         .unwrap_or_else(|e| RelayCheck::Unreachable(Some(e.to_string())));
-                    let _ = done.send((url, result)).await;
+                    let _ = done.send((url, relay.token, result)).await;
                 });
             }
             let view = lock(&network).view();
@@ -640,11 +662,13 @@ pub(crate) fn watch(
     });
 }
 
-/// The relays whose code is due a check: held with a token, not the home
-/// relay (iroh says itself whether that one refuses us), not being checked.
+/// The relays whose code is due a check: held with a token (or without one,
+/// once it refused us: else it would stay set aside for good), not the home
+/// relay (iroh says itself whether that one refuses us), not being checked
+/// with the code held now.
 fn due_checks(
     network: &Network,
-    checking: &BTreeSet<String>,
+    checking: &BTreeMap<String, Option<RelayToken>>,
     started: Instant,
     now: Instant,
     timings: &NetworkTimings,
@@ -656,8 +680,15 @@ fn due_checks(
     network
         .listed
         .iter()
-        .filter(|l| l.token.is_some() && Some(l.view.url.as_str()) != home)
-        .filter(|l| !checking.contains(&l.view.url))
+        .filter(|l| {
+            let refused = network.benched.contains(&l.view.url)
+                || matches!(
+                    network.checks.get(&l.view.url).map(|c| &c.result),
+                    Some(RelayCheck::Refused(_))
+                );
+            (l.token.is_some() || refused) && Some(l.view.url.as_str()) != home
+        })
+        .filter(|l| checking.get(&l.view.url) != Some(&l.token))
         .filter(|l| match network.checks.get(&l.view.url) {
             None => true,
             Some(c) => {
@@ -1024,7 +1055,7 @@ mod tests {
             ("https://open.example/", None),
         ]);
         n.endpoint.home = home(A, true, None);
-        let none = BTreeSet::new();
+        let none = BTreeMap::new();
         let due = |n: &Network, at: u64| -> Vec<String> {
             due_checks(n, &none, t0, t0 + Duration::from_secs(at), &timings)
                 .into_iter()
@@ -1043,7 +1074,56 @@ mod tests {
         );
         assert!(due(&n, 700).is_empty());
         assert_eq!(due(&n, 735), [B], "a refusal is checked again sooner");
-        let busy: BTreeSet<String> = [B.to_string()].into();
+        let busy: BTreeMap<String, Option<RelayToken>> =
+            [(B.to_string(), RelayToken::new("u"))].into();
         assert!(due_checks(&n, &busy, t0, t0 + Duration::from_secs(735), &timings).is_empty());
+        // A check under way with an old code doesn't hold up the new one.
+        let old: BTreeMap<String, Option<RelayToken>> =
+            [(B.to_string(), RelayToken::new("old"))].into();
+        assert_eq!(
+            due_checks(&n, &old, t0, t0 + Duration::from_secs(735), &timings)
+                .into_iter()
+                .map(|r| r.url.to_string())
+                .collect::<Vec<_>>(),
+            [B]
+        );
+        // A relay open to everyone that refused us is checked again too: it
+        // would stay set aside for good otherwise.
+        let open = "https://open.example/";
+        n.checked(
+            open,
+            RelayCheck::Refused("no".into()),
+            t0 + Duration::from_secs(615),
+        );
+        assert!(due(&n, 735).contains(&open.to_string()));
+    }
+
+    #[test]
+    fn an_answer_about_an_old_code_is_dropped() {
+        let mut n = network(&[(A, Some("new"))]);
+        let now = Instant::now();
+        // The check started before the code changed comes back refused.
+        assert!(!n.checked_with(
+            A,
+            RelayToken::new("old").as_ref(),
+            RelayCheck::Refused("no".into()),
+            now
+        ));
+        assert!(!n.checks.contains_key(A));
+        assert!(
+            !n.bench(now),
+            "nothing set aside for the old code's refusal"
+        );
+        // The new code's own answer counts.
+        assert!(n.checked_with(
+            A,
+            RelayToken::new("new").as_ref(),
+            RelayCheck::Accepted,
+            now
+        ));
+        assert!(n.checks.contains_key(A));
+        // So does an answer about a relay open to everyone.
+        let mut open = network(&[(B, None)]);
+        assert!(open.checked_with(B, None, RelayCheck::Accepted, now));
     }
 }

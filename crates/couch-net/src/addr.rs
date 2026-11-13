@@ -22,10 +22,13 @@ pub fn peer_addr(addr: &EndpointAddr) -> PeerAddr {
 
 /// Which relay addresses that came from others (a member's record, an
 /// invite, a received code) may be dialed (M26a, ADR 0014). In a release
-/// build only https to a name: never `localhost`, an IP address or a name
-/// without a dot (a LAN's), so a member can't make our app send requests
-/// into its own network. Our own relays are always fine, and development
-/// and test builds keep LAN relays.
+/// build only https on its own port to a public-looking name: never
+/// `localhost`, an IP address, a name without a dot or with a LAN's suffix
+/// (`.local`, `.lan`, `.home.arpa` and the like), so a member can't easily
+/// aim our app at services in its own network. A public name resolving to a
+/// private address isn't caught (iroh resolves it), and the request is only
+/// a TLS handshake carrying no token. Our own relays are always fine, and
+/// development and test builds keep LAN relays.
 #[derive(Debug, Clone, Default)]
 pub struct DialRules {
     /// LAN relays allowed: a development or test build.
@@ -45,15 +48,39 @@ impl DialRules {
         let Some(host) = url.host_str() else {
             return false;
         };
+        // https's own port only: a relay elsewhere would let a record aim
+        // our app at any service's port.
+        if url.port().is_some_and(|p| p != 443) {
+            return false;
+        }
         let name = host.trim_end_matches('.').to_ascii_lowercase();
         let bare = name.trim_start_matches('[').trim_end_matches(']');
         !name.is_empty()
             && bare.parse::<IpAddr>().is_err()
             && name != "localhost"
-            && !name.ends_with(".localhost")
             && name.contains('.')
+            && !LAN_SUFFIXES
+                .iter()
+                .any(|s| name.ends_with(s) || name == s[1..])
     }
 }
+
+/// Names only a local network answers (mDNS, routers' and companies' own).
+/// A public name that resolves to a private address isn't caught here: iroh
+/// resolves it itself.
+const LAN_SUFFIXES: &[&str] = &[
+    ".localhost",
+    ".local",
+    ".lan",
+    ".home",
+    ".home.arpa",
+    ".internal",
+    ".intranet",
+    ".localdomain",
+    ".corp",
+    ".private",
+    ".fritz.box",
+];
 
 /// Where to dial `member`. Unparsable parts are skipped, and so is a relay
 /// `rules` don't allow (its direct addresses are still dialed); `None` if
@@ -124,6 +151,7 @@ mod tests {
             "https://relay.example.com",
             "https://relay.example.com./",
             "https://use1-1.relay.n0.iroh.link./",
+            "https://relay.example.com:443/",
         ] {
             assert!(release.allows(&url(fine)), "{fine}");
         }
@@ -139,6 +167,17 @@ mod tests {
             "https://8.8.8.8",
             "http://127.0.0.1:3340",
             "https://user:pass@relay.example.com",
+            // LAN names, and other ports.
+            "https://nas.local:5000",
+            "https://nas.local",
+            "https://router.lan",
+            "https://fritz.box",
+            "https://x.home.arpa",
+            "https://host.internal",
+            "https://relay.example.com:8080",
+            // Numbers the URL parser reads as an IP address.
+            "https://3232235777",
+            "https://0xc0a80101",
         ] {
             assert!(!release.allows(&url(never)), "{never}");
         }

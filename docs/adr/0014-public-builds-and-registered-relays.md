@@ -18,6 +18,7 @@ The author's choices (2026-11-13):
 - **The public relays are iroh's default relay map entries,** never its DNS address lookup (`presets::Minimal` everywhere): records and invites already carry addresses.
 - **They may stand in** while none of ours works (refusing or not answering, once lasting), as a setting off by default (the author's choice); they go as soon as one of ours answers.
 - **Diagnostics are anonymous** (the author's choice): versions, relays by server name with states and errors (IP addresses scrubbed), the network, rooms and members numbered.
+- **Others' relay addresses are narrowed, not closed** (the review's finding): release builds dial them only as https on port 443 to a dotted name without a LAN suffix; a public name resolving to a private address isn't caught, as iroh resolves it. Checking resolved addresses would need a resolver of our own in iroh: left for later.
 - **Records don't follow a member to a relay nobody else holds:** with no connection left to send its new record on, the others keep dialing its old relay. M26a-1 warns before removing a relay others reach us through; M26a-2's reasons and M26b's codes must account for it.
 
 ## Context

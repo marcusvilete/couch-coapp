@@ -40,13 +40,12 @@ describe("our own connection in plain words", () => {
   });
 
   it("gives each trouble the button that fixes it", () => {
-    expect(troubleStrip({ type: "relayRefused", url: "https://r.example/", host: "r.example" }, false)).toMatchObject({
+    expect(troubleStrip({ type: "relayRefused", url: "https://r.example/", host: "r.example" })).toMatchObject({
       fix: "pasteCode",
       text: expect.stringContaining("r.example"),
     });
-    expect(troubleStrip({ type: "noInternet" }, false).fix).toBe("check");
-    expect(troubleStrip({ type: "noRelay" }, true).text).toMatch(/stand in/);
-    expect(troubleStrip({ type: "noRelay" }, false).fix).toBe("settings");
+    expect(troubleStrip({ type: "noInternet" }).fix).toBe("check");
+    expect(troubleStrip({ type: "noRelay" }).fix).toBe("settings");
   });
 
   it("warns before removing a relay others reach us through", () => {

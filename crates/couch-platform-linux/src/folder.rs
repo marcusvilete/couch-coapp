@@ -16,9 +16,10 @@ use ashpd::desktop::open_uri::OpenDirectoryRequest;
 const WAIT: Duration = Duration::from_secs(10);
 
 /// Opens `dir` in the file manager, with `file` in it selected. The portal
-/// opens the folder holding what it's given, so a file inside: `file` if
-/// it's there, else any file in `dir`, else `dir` itself (its parent opens,
-/// with it selected). Waits for the portal's answer.
+/// opens the folder holding what it's given: `file` if it's there, else
+/// `dir` itself (its parent opens, with it selected), never another file of
+/// the profile's (its identity key among them). Waits for the portal's
+/// answer.
 pub fn open(dir: &Path, file: &str) -> Result<(), String> {
     let target = inside(dir, file);
     let opened = std::fs::File::open(&target)
@@ -44,16 +45,8 @@ pub fn open(dir: &Path, file: &str) -> Result<(), String> {
 fn inside(dir: &Path, file: &str) -> PathBuf {
     let named = dir.join(file);
     if named.is_file() {
-        return named;
+        named
+    } else {
+        dir.to_path_buf()
     }
-    std::fs::read_dir(dir)
-        .ok()
-        .and_then(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_file())
-                .min()
-        })
-        .unwrap_or_else(|| dir.to_path_buf())
 }

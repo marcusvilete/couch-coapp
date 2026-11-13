@@ -2627,7 +2627,12 @@ impl RelayState {
         network.public_fallback = self.saved.public_fallback;
         network.public_offered = self.rules.as_ref().is_some_and(|r| r.public_relays);
         network.ask = self.saved.ask.clone();
-        // Our own relays are always dialed, a LAN one included.
+        self.refresh_dial();
+    }
+
+    /// Our own relays are always dialed, a LAN one included: given to the
+    /// dial rules before the room actor's first dial, and after each change.
+    pub(crate) fn refresh_dial(&self) {
         let ours = self
             .saved
             .relays
@@ -2883,6 +2888,8 @@ impl Engine {
         let backup_files = options.backup_files.clone();
         let timings = options.network;
         let tray = store::app(profile.data_dir()).tray;
+        // Our own relays are in the dial rules before the actor's first dial.
+        relays.refresh_dial();
         let (carrying_tx, carrying) = tokio::sync::watch::channel(Default::default());
         let started = rooms::start(
             &profile,
@@ -2997,11 +3004,12 @@ impl Engine {
     /// Adds a relay the user gave (typed, or from a code): checked first
     /// unless `unchecked`, outside the lock (it takes up to
     /// [`NetworkTimings::check_timeout`]), and saved only if it let us in.
+    /// `personal`: what a code says; `None` (typed) keeps a held relay's mark.
     async fn add_relay(
         &self,
         url: &str,
         token: Option<couch_net::endpoint::RelayToken>,
-        personal: bool,
+        personal: Option<bool>,
         unchecked: bool,
     ) -> Result<Response, EngineError> {
         let test_build = match &self.relays.lock().await.rules {
@@ -3037,7 +3045,15 @@ impl Engine {
                 }));
             }
         }
+        let checked = token.clone();
         self.change_relays(|state| {
+            let personal = personal.unwrap_or_else(|| {
+                state
+                    .saved
+                    .relays
+                    .iter()
+                    .any(|r| r.url == url.as_str() && r.personal)
+            });
             let added = state
                 .saved
                 .add(url.clone(), token, personal, remote::unix_now())?;
@@ -3046,9 +3062,12 @@ impl Engine {
         })
         .await?;
         if !unchecked {
-            // It let us in just now: no need to check it again soon.
-            network::lock(&self.network).checked(
+            // It let us in just now: no need to check it again soon. Only
+            // if it still holds that code: another add may have replaced it
+            // meanwhile.
+            network::lock(&self.network).checked_with(
                 url.as_str(),
+                checked.as_ref(),
                 couch_net::endpoint::RelayCheck::Accepted,
                 std::time::Instant::now(),
             );
@@ -3353,12 +3372,20 @@ impl Engine {
                 unchecked,
             } => {
                 let token = token.and_then(couch_net::endpoint::RelayToken::new);
-                self.add_relay(&url, token, personal, unchecked).await
+                // Typed: personal only if said so; else a held relay keeps
+                // its mark (a code alone decides it).
+                self.add_relay(&url, token, personal.then_some(true), unchecked)
+                    .await
             }
             Command::AddRelayCode { code, unchecked } => {
                 let code = relays::code::RelayCode::parse(&code)?;
-                self.add_relay(code.url.as_str(), code.token, code.personal, unchecked)
-                    .await
+                self.add_relay(
+                    code.url.as_str(),
+                    code.token,
+                    Some(code.personal),
+                    unchecked,
+                )
+                .await
             }
             Command::ReadRelayCode { code } => {
                 let code = relays::code::RelayCode::parse(&code)?;
@@ -4020,6 +4047,46 @@ mod tests {
         let replaced = view(engine.handle(add("http://localhost:3340", None)).await);
         assert_eq!(replaced.relays.len(), 1);
         assert!(!replaced.relays[0].has_code);
+        // A personal code marks it; typing its address again keeps the mark
+        // (only a code decides it, the review's finding), and a code that
+        // isn't personal lifts it.
+        let personal = relays::code::RelayCode {
+            url: "http://localhost:3340".parse().unwrap(),
+            token: couch_net::endpoint::RelayToken::new("mine"),
+            personal: true,
+        }
+        .encode();
+        let marked = view(
+            engine
+                .handle(Command::AddRelayCode {
+                    code: personal,
+                    unchecked: true,
+                })
+                .await,
+        );
+        assert!(marked.relays[0].personal);
+        let typed = view(
+            engine
+                .handle(add("http://localhost:3340", Some("again")))
+                .await,
+        );
+        assert!(typed.relays[0].personal, "a typed address keeps the mark");
+        let shared = relays::code::RelayCode {
+            url: "http://localhost:3340".parse().unwrap(),
+            token: None,
+            personal: false,
+        }
+        .encode();
+        let lifted = view(
+            engine
+                .handle(Command::AddRelayCode {
+                    code: shared,
+                    unchecked: true,
+                })
+                .await,
+        );
+        assert!(!lifted.relays[0].personal && !lifted.relays[0].has_code);
+        let replaced = lifted;
         let kept = view(engine.handle(Command::SetPublicRelays { on: true }).await);
         assert!(kept.keep_public);
         // Standing in when none of ours works: off by default, the user's

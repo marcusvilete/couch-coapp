@@ -217,7 +217,9 @@ impl SavedRelays {
                     saved.url.parse().ok()
                 } else {
                     check_url(&saved.url, rules.test_build)
-                        .inspect_err(|e| tracing::warn!("relay {}: {e}; left out", saved.url))
+                        .inspect_err(|e| {
+                            tracing::warn!("relay {}: {e}; left out", shown_host(&saved.url))
+                        })
                         .ok()
                 }?;
                 Some(Relay::new(
@@ -275,6 +277,15 @@ impl SavedRelays {
         self.relays.remove(at);
         Ok(())
     }
+}
+
+/// A saved relay's server, for the log: never the whole address, which
+/// could carry a user name and password if it came from elsewhere.
+fn shown_host(url: &str) -> String {
+    url.parse::<RelayUrl>()
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "(unreadable address)".into())
 }
 
 /// A relay address the user gives: https to a server; plain http only on

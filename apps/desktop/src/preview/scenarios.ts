@@ -1010,7 +1010,25 @@ export const SCENARIOS: Record<string, Scenario> = {
       }),
   },
   "network-no-relay": {
-    title: "Network: none of our relays answers, the public relays standing in",
+    title: "Network: none of our relays answers: the strip",
+    world: () =>
+      base([sofa(), friday()], {
+        network: network({
+          relays: [
+            relay(
+              "couchrelay.duckdns.org",
+              { type: "unreachable", details: "connecting to couchrelay.duckdns.org:443: timed out after 10 s" },
+              { builtIn: true },
+            ),
+            relay("relay.down.example", { type: "unreachable", details: "certificate expired" }),
+          ],
+          homeRelay: null,
+          trouble: { type: "noRelay" },
+        }),
+      }),
+  },
+  "network-standing-in": {
+    title: "Network: none of our relays answers, the public relays standing in (allowed): no strip",
     world: () =>
       base([sofa(), friday()], {
         network: network({
@@ -1027,7 +1045,6 @@ export const SCENARIOS: Record<string, Scenario> = {
           publicInUse: true,
           public: { type: "home" },
           homeRelay: "https://euc1-1.relay.n0.iroh-canary.iroh.link./",
-          trouble: { type: "noRelay" },
         }),
       }),
   },

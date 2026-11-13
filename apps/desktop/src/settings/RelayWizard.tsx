@@ -68,6 +68,7 @@ export function RelayWizard(props: {
         </p>
         <AddRelayForm
           codeOnly
+          noSaveAnyway
           autoFocus
           testBuild={props.testBuild}
           onAdded={(network) => {

@@ -1847,7 +1847,6 @@ impl Actor {
         self.send_own_hud();
     }
 
-    /// What the UI shows of a room; nothing for one we are leaving.
     /// Who reaches us through relay `url` (M26a, the warning before removing
     /// it): each room's members whose record names it, or whose connection
     /// with us runs through it now.
@@ -1900,6 +1899,7 @@ impl Actor {
         }
     }
 
+    /// What the UI shows of a room; nothing for one we are leaving.
     fn view(&self, room: RoomId, now: Instant) -> Option<RoomView> {
         let entry = self.rooms.get(&room).filter(|e| !e.room.is_leaving())?;
         let status = entry.room.status();

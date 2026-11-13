@@ -182,17 +182,30 @@ pub(crate) fn scrub(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut String| {
-        // A sentence's last dot or colon isn't part of it.
-        let core = word.trim_end_matches(['.', ':']);
-        if is_address(core) {
-            out.push_str("<address>");
-            out.push_str(&word[core.len()..]);
-        } else if is_address(word) {
-            // One ending in `::`.
-            out.push_str("<address>");
-        } else {
-            out.push_str(word);
+        // The word as it is (`::1`), then without the colons before it
+        // (`host:10.0.0.5`, whose `host` ended the word before).
+        let colons = word.len() - word.trim_start_matches(':').len();
+        for start in [0, colons] {
+            let from = &word[start..];
+            // A sentence's last dot or colon isn't part of it.
+            let core = from.trim_end_matches(['.', ':']);
+            let hit = if is_address(core) {
+                Some(core.len())
+            } else if is_address(from) {
+                // One ending in `::`.
+                Some(from.len())
+            } else {
+                None
+            };
+            if let Some(len) = hit {
+                out.push_str(&word[..start]);
+                out.push_str("<address>");
+                out.push_str(&from[len..]);
+                word.clear();
+                return;
+            }
         }
+        out.push_str(word);
         word.clear();
     };
     for c in text.chars() {
@@ -220,7 +233,8 @@ fn is_address(word: &str) -> bool {
     let bare = word.trim_start_matches('[');
     let bare = bare.split(']').next().unwrap_or(bare);
     let bare = bare.split('%').next().unwrap_or(bare);
-    bare.parse::<std::net::Ipv6Addr>().is_ok()
+    // `[192.168.1.20]:3340` too.
+    bare.parse::<std::net::IpAddr>().is_ok()
 }
 
 #[cfg(test)]
@@ -239,6 +253,11 @@ mod tests {
             "no route to <address>."
         );
         assert_eq!(scrub("fe80::1 timed out"), "<address> timed out");
+        // After a word's colon, and in brackets (the review's cases).
+        assert_eq!(scrub("host:192.168.1.2:443 down"), "host:<address> down");
+        assert_eq!(scrub("error:10.0.0.5"), "error:<address>");
+        assert_eq!(scrub("at [192.168.1.20]:3340."), "at <address>.");
+        assert_eq!(scrub("::1 refused"), "<address> refused");
         // Paths in error texts aren't addresses.
         assert_eq!(scrub("iroh::magicsock: gone"), "iroh::magicsock: gone");
         assert_eq!(scrub("dns error at 10.0.0.1."), "dns error at <address>.");

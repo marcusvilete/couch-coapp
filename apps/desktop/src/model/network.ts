@@ -60,10 +60,9 @@ export function networkLine(view: NetworkView): Said {
 export type TroubleFix = "check" | "pasteCode" | "settings";
 
 /** What the shell's strip says, and the button that fixes it. */
-export function troubleStrip(
-  trouble: NetworkTrouble,
-  fallingBack: boolean,
-): { text: string; fix: TroubleFix; label: string } {
+// While the public relays stand in, nothing is wrong: no strip (the engine
+// raises no trouble), and Settings marks them "standing in".
+export function troubleStrip(trouble: NetworkTrouble): { text: string; fix: TroubleFix; label: string } {
   switch (trouble.type) {
     case "noInternet":
       return { text: "You're not connected to the internet: nobody can reach you.", fix: "check", label: "Check again" };
@@ -81,9 +80,7 @@ export function troubleStrip(
       };
     case "noRelay":
       return {
-        text: fallingBack
-          ? "None of your relays answers: the public relays stand in for now."
-          : "None of your relays answers: friends may not reach you.",
+        text: "None of your relays answers: friends may not reach you.",
         fix: "settings",
         label: "Network settings",
       };

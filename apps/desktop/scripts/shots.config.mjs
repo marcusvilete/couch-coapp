@@ -299,6 +299,7 @@ export const SHOTS = [
   ["settings-network-refused", "network-refused", settings("Network")],
   ["settings-network-offline", "network-offline", settings("Network")],
   ["settings-network-no-relay", "network-no-relay", settings("Network")],
+  ["settings-network-standing-in", "network-standing-in", settings("Network")],
   ["settings-network-udp", "network-udp-blocked", settings("Network")],
   ["settings-network-checking", "network-checking", settings("Network")],
   ["settings-network-public", "network-public", settings("Network")],
