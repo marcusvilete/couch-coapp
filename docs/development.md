@@ -79,7 +79,7 @@ npm run shots              # every scenario in dark, light and High Contrast at 
 
 **The app's icon** is drawn in `apps\desktop\src-tauri\icons\source`: `icon.svg`, and drawings for 32, 24 and 16 px (the same purple tile since 0.27.2), which the taskbar and the notification area show; earlier icons are in `alternatives`. After changing one, `npm run icons` (in `apps\desktop`) renders every icon file from them, also with Edge, and `cargo clean -p couch-desktop` makes the next build take the new icon. The README shows `docs\images\icon.svg`, a copy of `icon.svg`.
 
-**The stream window and the developer CLI:** `couch-viewer` is the window that shows a stream. Its bar and cards can be seen without a session: `cargo run -p couch-viewer -- --hud-preview watching` (fifteen states, `drawing` among them), or all of them as screenshots with `cargo build -p couch-viewer` then `.\scripts\viewer-shots.ps1` (into `target\ui-shots\viewer`). `couch-cli` runs hosts, viewers and the measurements without the app.
+**The stream window and the developer CLI:** `couch-viewer` is the window that shows a stream. Its bar and cards can be seen without a session: `cargo run -p couch-viewer -- --hud-preview watching` (eighteen states, `drawing` among them), or all of them as screenshots with `cargo build -p couch-viewer` then `.\scripts\viewer-shots.ps1` (into `target\ui-shots\viewer`). `couch-cli` runs hosts, viewers and the measurements without the app.
 ```powershell
 cargo build --release -p couch-cli -p couch-viewer
 .\target\release\couch-cli.exe latency-probe --secs 30 --relay none   # end-to-end latency on this PC

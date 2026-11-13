@@ -7536,6 +7536,46 @@ async fn the_hosts_own_stream_window() {
     stop_all(&mut [&mut a, &mut b]).await;
 }
 
+/// A host that can't draw over the game (Linux) draws in its own stream
+/// window all the same, and sees there what viewers draw. Found after P18's
+/// merge in the VM: the host was named the board's author only where the
+/// board over the game exists, so a Linux host's own window heard nothing
+/// and its drawing went nowhere, though viewers saw each other's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_that_cant_draw_over_the_game_draws_in_its_own_window() {
+    let (mut a, mut b, mut c, room) = three().await;
+    assert!(
+        !a.fake.draws.load(Ordering::SeqCst),
+        "no board over the game"
+    );
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let (aid, bid) = (a.id(), b.id());
+    a.ok(Command::SetDrawing { on: true }).await;
+    a.ok(Command::OwnStreamWindow { open: true }).await;
+    wait("its window", || own_window(&a.fake).is_some()).await;
+    let own = own_window(&a.fake).unwrap();
+    wait("its HUD, the host its author", || {
+        own.hud()
+            .is_some_and(|h| h.board.on && h.board.me == Some(member_id(&a)))
+    })
+    .await;
+    // A viewer's drawing reaches it.
+    b_window.draw(&b, vec![a_box(1)]);
+    wait("the window hears B's", || {
+        own.board().contains(&(bid.clone(), 1))
+    })
+    .await;
+    // The host's reaches the viewer.
+    own.draw(&a, vec![a_box(1)]);
+    wait("B sees the host's", || {
+        b_window.board().contains(&(aid.clone(), 1))
+    })
+    .await;
+    c.stop().await;
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
 /// M27b, the author's choice: a session to watch together has no hook of
 /// the host's keys (M24), but while drawing is on, one with the drawing key
 /// alone.
