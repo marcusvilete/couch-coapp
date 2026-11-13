@@ -2,6 +2,7 @@
 // was opened with. Kept current by engine events.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EngineInfo } from "../bindings/EngineInfo";
+import type { NetworkView } from "../bindings/NetworkView";
 import type { Event as EngineEvent } from "../bindings/Event";
 import type { ProfileView } from "../bindings/ProfileView";
 import type { RoomGone } from "../bindings/RoomGone";
@@ -30,6 +31,11 @@ export type Lobby = {
   failure: string | null;
   notices: Notice[];
   opened: OpenedInvite | null;
+  /** Our own connection (M26a): relays, this network, the trouble the
+   * strip says. */
+  network: NetworkView | null;
+  /** Keeps a view the engine just answered a command with. */
+  setNetwork: (network: NetworkView) => void;
   /** Forgets the opened link once the UI has it. */
   clearOpened: () => void;
   setProfile: (profile: ProfileView) => void;
@@ -122,6 +128,7 @@ export function useLobby(): Lobby {
   const [failure, setFailure] = useState<string | null>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [opened, setOpened] = useState<OpenedInvite | null>(null);
+  const [network, setNetwork] = useState<NetworkView | null>(null);
   const roomsRef = useRef(rooms);
   roomsRef.current = rooms;
   /** Counts room events, so a room list fetched meanwhile is known stale. */
@@ -205,6 +212,13 @@ export function useLobby(): Lobby {
 
   useEffect(() => {
     let live = true;
+    const refreshNetwork = () => {
+      request({ type: "getNetwork" }, "network")
+        .then((v) => {
+          if (live) setNetwork(v);
+        })
+        .catch(() => {});
+    };
     const handle = (event: EngineEvent) => {
       if (!live) return;
       switch (event.type) {
@@ -277,6 +291,11 @@ export function useLobby(): Lobby {
           if (text) notify(text, event.reason === "ended" ? "info" : "warn");
           break;
         }
+        case "network": {
+          const { type: _, ...view } = event;
+          setNetwork(view);
+          break;
+        }
         case "inviteOpened":
           takeOpened().catch(() => {});
           break;
@@ -293,6 +312,7 @@ export function useLobby(): Lobby {
           request({ type: "getProfile" }, "profile"),
         ]);
         await refreshRooms();
+        refreshNetwork();
         if (!live) return;
         setInfo(infoReply);
         chimeByEngine(infoReply.platform === "linux");
@@ -305,6 +325,7 @@ export function useLobby(): Lobby {
     // window comes back.
     const onFocus = () => {
       refreshRooms().catch(() => {});
+      refreshNetwork();
     };
     window.addEventListener("focus", onFocus);
     return () => {
@@ -328,6 +349,8 @@ export function useLobby(): Lobby {
     failure,
     notices,
     opened,
+    network,
+    setNetwork,
     clearOpened,
     setProfile,
     putRoom,

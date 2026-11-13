@@ -1,7 +1,7 @@
 // Settings, as a page over the room (Esc goes back): your name, the look,
 // the keyboard shortcuts (each can move to another key), the overlay, the
-// stream window (P11), drawing on the stream (M27a), streaming (M29: HDR), the network (which relay, applied when the app
-// restarts), remote play (M25), the drivers, a backup of the profile (M13), and About. Each
+// stream window (P11), drawing on the stream (M27a), streaming (M29: HDR), the network (relays and
+// their states, M26a), remote play (M25), the drivers, a backup of the profile (M13), and About. Each
 // section is mounted only while shown: a passphrase leaves with its page, and
 // nothing polls behind it.
 import {
@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { EngineInfo } from "../bindings/EngineInfo";
+import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
 import type { Busy } from "../model/sessions";
 import { NameForm } from "../rooms/dialogs";
@@ -32,11 +33,11 @@ import {
   BackupSection,
   DrawingSection,
   DriversSection,
-  NetworkSection,
   OverlaySection,
   StreamingSection,
   StreamWindowSection,
 } from "./sections";
+import { NetworkSection, type PasteFor } from "./NetworkSection";
 import { RemotePlaySection } from "./RemotePlaySection";
 import { ShortcutsSection } from "./ShortcutsSection";
 import "./SettingsPage.css";
@@ -91,6 +92,10 @@ export function SettingsPage(props: {
    * Backup offers no second restore. */
   restoredDev: boolean;
   onRestoredDev: () => void;
+  network: NetworkView | null;
+  onNetwork: (network: NetworkView) => void;
+  /** The shell's strip asks for a relay's new code. */
+  pasteFor: PasteFor | null;
 }) {
   const canHost = props.info?.capabilities.sessions ?? true;
   const linux = props.info?.platform === "linux";
@@ -144,7 +149,14 @@ export function SettingsPage(props: {
             {section.id === "streamWindow" && <StreamWindowSection />}
             {section.id === "drawing" && <DrawingSection />}
             {section.id === "streaming" && <StreamingSection />}
-            {section.id === "network" && <NetworkSection busy={props.busy} onRestarting={props.onRestarting} />}
+            {section.id === "network" && (
+              <NetworkSection
+                network={props.network}
+                onNetwork={props.onNetwork}
+                pasteFor={props.pasteFor}
+                homePc={props.info?.homePc ?? false}
+              />
+            )}
             {section.id === "remotePlay" && <RemotePlaySection canHost={props.info?.homePc ?? true} linux={linux} />}
             {section.id === "drivers" && <DriversSection linux={linux} />}
             {section.id === "backup" && (

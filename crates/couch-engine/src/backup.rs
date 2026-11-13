@@ -40,9 +40,9 @@ use crate::store::RememberedRoom;
 pub const MIN_PASSPHRASE_CHARS: usize = 12;
 
 const MAGIC: &[u8; 4] = b"CCBK";
-/// The format written: 2 since M13 (rooms with their chain of handovers);
-/// format 1 still opens.
-const FORMAT: u8 = 2;
+/// The format written: 3 since M26a (the relays and their tokens); 2 (M13,
+/// rooms with their chain of handovers) and 1 still open.
+const FORMAT: u8 = 3;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = MAGIC.len() + 1 + 3 * 4 + SALT_LEN + NONCE_LEN;
@@ -112,6 +112,11 @@ pub struct Contents {
     pub rooms: Vec<RememberedRoom>,
     /// The settings files, by name (`settings.json`, `shortcuts.json`, …).
     pub files: Vec<(String, Vec<u8>)>,
+    /// The relays the profile holds, with their tokens (M26a, format 3): a
+    /// token is no more secret than the identity beside it, and a changed
+    /// one simply fails. Their JSON, as `relays.sealed` holds it unsealed;
+    /// `None` from older backups.
+    pub relays: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Contents {
@@ -127,6 +132,7 @@ impl std::fmt::Debug for Contents {
                     .map(|(n, _)| n.as_str())
                     .collect::<Vec<_>>(),
             )
+            .field("relays", &self.relays.as_ref().map(|_| ".."))
             .finish()
     }
 }
@@ -134,6 +140,9 @@ impl std::fmt::Debug for Contents {
 impl Drop for Contents {
     fn drop(&mut self) {
         self.identity.zeroize();
+        if let Some(relays) = &mut self.relays {
+            relays.zeroize();
+        }
     }
 }
 
@@ -254,6 +263,8 @@ pub fn open(bytes: &[u8], passphrase: &str) -> Result<Contents, BackupError> {
     let contents = match format {
         // From before M13: rooms as they were saved then.
         1 => postcard::from_bytes::<ContentsV1>(&body).map(Contents::from),
+        // From before M26a: no relays.
+        2 => postcard::from_bytes::<ContentsV2>(&body).map(Contents::from),
         _ => postcard::from_bytes(&body),
     }
     .map_err(|_| BackupError::WrongPassphrase);
@@ -279,6 +290,28 @@ impl From<ContentsV1> for Contents {
                 .map(Into::into)
                 .collect(),
             files: std::mem::take(&mut old.files),
+            relays: None,
+        };
+        old.identity.zeroize();
+        contents
+    }
+}
+
+/// What format 2 held (M13 to M26a): the same, without the relays.
+#[derive(Serialize, Deserialize)]
+struct ContentsV2 {
+    identity: [u8; 32],
+    rooms: Vec<RememberedRoom>,
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl From<ContentsV2> for Contents {
+    fn from(mut old: ContentsV2) -> Self {
+        let contents = Self {
+            identity: old.identity,
+            rooms: std::mem::take(&mut old.rooms),
+            files: std::mem::take(&mut old.files),
+            relays: None,
         };
         old.identity.zeroize();
         contents
@@ -297,6 +330,7 @@ mod tests {
                 "settings.json".into(),
                 b"{\"display_name\":\"Ana\"}".to_vec(),
             )],
+            relays: Some(br#"{"relays":[],"keep_public":true}"#.to_vec()),
         }
     }
 
@@ -426,8 +460,29 @@ mod tests {
         assert_eq!(opened.identity, [7; 32]);
         assert_eq!(opened.rooms, vec![remembered]);
         assert_eq!(opened.files, contents().files);
-        // And what is written now is format 2.
-        assert_eq!(seal(&contents(), PASSPHRASE).unwrap()[MAGIC.len()], 2);
+        // And what is written now is format 3.
+        assert_eq!(opened.relays, None);
+        assert_eq!(seal(&contents(), PASSPHRASE).unwrap()[MAGIC.len()], 3);
+    }
+
+    /// A backup made before M26a (format 2) still opens, without relays.
+    #[test]
+    fn a_format_2_backup_still_opens() {
+        let old = ContentsV2 {
+            identity: [7; 32],
+            rooms: Vec::new(),
+            files: contents().files.clone(),
+        };
+        let sealed = seal_body(2, &postcard::to_stdvec(&old).unwrap(), PASSPHRASE).unwrap();
+        let opened = open(&sealed, PASSPHRASE).unwrap();
+        assert_eq!(opened.identity, [7; 32]);
+        assert_eq!(opened.files, contents().files);
+        assert_eq!(opened.relays, None);
+    }
+
+    #[test]
+    fn the_relays_never_print() {
+        assert!(!format!("{:?}", contents()).contains("keep_public"));
     }
 
     #[test]

@@ -21,7 +21,9 @@ couch-media.workspace = true
 couch-proto.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
-iroh.workspace = true
+# The network report (M26a): whether UDP works, a sign-in page, which relays
+# answer. Unstable in iroh, which is pinned exactly (and vendored).
+iroh = { workspace = true, features = ["unstable-net-report"] }
 iroh-tickets.workspace = true
 serde.workspace = true
 sha2.workspace = true

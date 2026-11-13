@@ -98,6 +98,11 @@ struct Link {
 }
 
 impl Remote {
+    /// Remote play is on at this PC.
+    pub(super) fn on(&self) -> bool {
+        self.settings.on
+    }
+
     /// `can_host`: a system that can't host (M16b) never offers itself,
     /// whatever a profile from another build saved: its switch is hidden
     /// there, so it could never be turned off (the file stays as it was).

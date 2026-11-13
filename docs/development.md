@@ -67,7 +67,7 @@ To try rooms on one PC, start more profiles from that build (alice, bob and caro
 ```powershell
 .\scripts\profiles.ps1
 ```
-A development build uses iroh's public relays.
+A development build uses iroh's public relays until a relay is added in Settings → Network (a relay code, or an address; `scripts\relay.ps1`'s relay too, below).
 
 **The UI without the engine** (M21): a preview of the app on a fake engine, with a scenario for every state (an empty room, a full session, requests waiting, a handover…), so screens can be seen and changed without starting sessions:
 ```powershell

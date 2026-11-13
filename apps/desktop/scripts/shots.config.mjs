@@ -41,6 +41,15 @@ const settings = (section) => async (page) => {
   if (section) await page.getByRole("button", { name: section, exact: true }).click();
 };
 
+/** Settings scrolled back to its top: typing in a field scrolls it into
+ * view, which isn't a jump. */
+const settingsTop = (page) => page.locator(".settings-content").evaluate((el) => el.scrollTo(0, 0));
+
+/** A relay code as the engine writes it (M26a); the preview doesn't check
+ * its checksum. */
+const relayCode = (url, token, personal = false) =>
+  `couch-relay-1.${Buffer.from(`${url}\n${token}\n${personal ? "personal" : ""}`).toString("base64url")}.5eed1e55`;
+
 /** [name, scenario, steps]. A scenario of `sheet` shows the design
  * system's component sheet. */
 export const SHOTS = [
@@ -285,6 +294,84 @@ export const SHOTS = [
   ["remote-unlock", "remote-locked", async (page) => page.getByRole("button", { name: "Unlock…" }).click()],
   ["settings-network", "lobby", settings("Network")],
   ["settings-network-release", "release-build", settings("Network")],
+  // M26a: relays and their states, this network, adding, removing, the wizard.
+  ["settings-network-relays", "network-relays", settings("Network")],
+  ["settings-network-refused", "network-refused", settings("Network")],
+  ["settings-network-offline", "network-offline", settings("Network")],
+  ["settings-network-no-relay", "network-no-relay", settings("Network")],
+  ["settings-network-standing-in", "network-standing-in", settings("Network")],
+  ["settings-network-udp", "network-udp-blocked", settings("Network")],
+  ["settings-network-checking", "network-checking", settings("Network")],
+  ["settings-network-public", "network-public", settings("Network")],
+  ["network-code-read", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByLabel("Relay code").fill(relayCode("https://relay.caio-plays.net/", "s3cret", true));
+    await page.getByText("relay.caio-plays.net").waitFor();
+  }],
+  ["network-code-held", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByLabel("Relay code").fill(relayCode("https://relay.friday-crew.org/", "new-one"));
+    await page.getByText("adding gives it this new code").waitFor();
+  }],
+  ["network-code-damaged", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByLabel("Relay code").fill(relayCode("https://relay.caio-plays.net/", "s3cret").slice(0, 30));
+    await page.getByText("incomplete").waitFor();
+  }],
+  ["network-code-refused", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByLabel("Relay code").fill(relayCode("https://relay.caio-plays.net/", "an-old-code"));
+    await page.getByRole("button", { name: "Add", exact: true }).click();
+    await page.getByText("refused this code").waitFor();
+  }],
+  ["network-code-down", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByLabel("Relay code").fill(relayCode("https://relay.down.example/", "s3cret"));
+    await page.getByRole("button", { name: "Add", exact: true }).click();
+    await page.getByRole("button", { name: "Save anyway" }).waitFor();
+  }],
+  ["network-type-address", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByRole("radio", { name: "Type its address" }).click();
+  }],
+  ["network-relay-menu", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.locator(".relay-row", { hasText: "relay.friday-crew.org" }).click({ button: "right" });
+    await menuOpens(page);
+  }],
+  ["network-remove", "lobby", async (page) => {
+    await settings("Network")(page);
+    await page.getByRole("button", { name: "couchrelay.duckdns.org: options" }).click();
+    await menuOpens(page);
+    // The app's own relay stays: shown disabled, with why.
+  }],
+  ["network-remove-confirm", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.getByRole("button", { name: "relay.friday-crew.org: options" }).click();
+    await page.getByRole("menuitem", { name: /Remove/ }).click();
+    await page.getByText("Without it").first().waitFor();
+  }],
+  ["network-remove-unused", "network-relays", async (page) => {
+    await settings("Network")(page);
+    await page.locator(".relay-row", { hasText: "relay.bia-games.net" }).click({ button: "right" });
+    await page.getByRole("menuitem", { name: /Remove/ }).click();
+    await page.getByText("Nobody in your rooms").waitFor();
+  }],
+  // The strip's fix: Settings → Network, the code field asking for that relay's.
+  ["strip-paste-code", "network-refused", click("Paste a new code")],
+  ["wizard-create", "network-public-first-run", click("Create a room")],
+  ["wizard-invite", "network-public", click("Invite")],
+  ["wizard-code-read", "network-public-first-run", async (page) => {
+    await click("Create a room")(page);
+    await page.getByLabel("Relay code").fill(relayCode("https://relay.caio-plays.net/", "s3cret"));
+    await page.getByText("relay.caio-plays.net").waitFor();
+  }],
+  // Answered: the room's own dialog follows.
+  ["wizard-later", "network-public-first-run", async (page) => {
+    await click("Create a room")(page);
+    await click("Remind me later")(page);
+    await page.getByRole("dialog", { name: /Create a room/ }).waitFor();
+  }],
   ["settings-drivers", "lobby", settings("Drivers")],
   ["settings-backup", "lobby", settings("Backup")],
   ["settings-backup-empty", "first-run", settings("Backup")],
@@ -322,6 +409,50 @@ export const STABLE = [
     [
       ["open", settings(null)],
       ...SETTINGS.map((s) => [s, async (page) => page.getByRole("button", { name: s, exact: true }).click()]),
+    ],
+  ],
+  // M26a: what a pasted code holds, a refusal and the other form appear in
+  // reserved space: the relays above and the help below stay put.
+  [
+    "network add",
+    "network-relays",
+    [".relay-list", ".settings-content h3:last-of-type", ".settings-nav"],
+    [
+      ["open", settings("Network")],
+      [
+        "code",
+        async (page) => {
+          await page.getByLabel("Relay code").fill(relayCode("https://relay.caio-plays.net/", "s3cret", true));
+          await page.getByText("relay.caio-plays.net").waitFor();
+          await settingsTop(page);
+        },
+      ],
+      [
+        "refused",
+        async (page) => {
+          await page.getByLabel("Relay code").fill(relayCode("https://relay.caio-plays.net/", "an-old-code"));
+          await page.getByRole("button", { name: "Add", exact: true }).click();
+          await page.getByText("refused this code").waitFor();
+          await settingsTop(page);
+        },
+      ],
+      [
+        "address",
+        async (page) => {
+          await page.getByRole("radio", { name: "Type its address" }).click();
+          await settingsTop(page);
+        },
+      ],
+    ],
+  ],
+  // The trouble strip comes and goes at the bottom: the room above stays.
+  [
+    "trouble strip",
+    "network-refused",
+    [".sidebar", ".room-header", ".members-panel"],
+    [
+      ["Sofá", async (page) => page.getByRole("button", { name: /^Sofá/ }).click()],
+      ["Friday games", async (page) => page.getByRole("button", { name: /^Friday games/ }).click()],
     ],
   ],
   [

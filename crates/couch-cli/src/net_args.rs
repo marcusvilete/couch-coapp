@@ -6,7 +6,7 @@ use anyhow::{Context, bail};
 use clap::{Args, ValueEnum};
 use couch_net::{
     EndpointAddr, SecretKey,
-    endpoint::{Congestion, EndpointOptions, RelayChoice, RelayToken},
+    endpoint::{Congestion, EndpointOptions, Relay, RelayChoice, RelayToken},
     netem::{NetemConfig, NetemTransport},
 };
 
@@ -47,16 +47,16 @@ impl NetArgs {
     /// Options for binding, plus the netem transport if one is in use.
     pub fn options(&self) -> anyhow::Result<(EndpointOptions, Option<Arc<NetemTransport>>)> {
         let relays = match self.relay.as_str() {
-            "n0" => RelayChoice::N0Public,
+            "n0" | "none" if self.relay_token.is_some() => {
+                bail!("--relay-token goes with a relay URL in --relay")
+            }
+            "n0" => RelayChoice::public(),
             "none" => RelayChoice::Disabled,
-            url => RelayChoice::Custom {
-                urls: vec![url.parse().context("relay URL")?],
-                token: self.relay_token.clone(),
-            },
+            url => RelayChoice::ours(vec![Relay::new(
+                url.parse().context("relay URL")?,
+                self.relay_token.clone(),
+            )]),
         };
-        if self.relay_token.is_some() && !matches!(relays, RelayChoice::Custom { .. }) {
-            bail!("--relay-token goes with a relay URL in --relay");
-        }
         let mut options = EndpointOptions::new(SecretKey::generate(), relays);
         options.relay_only = self.relay_only;
         options.port = self.port;

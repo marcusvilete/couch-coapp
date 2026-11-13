@@ -54,7 +54,7 @@ export function Sidebar(props: {
   const rail = useNarrow(900);
   const ownTitleBar = platform().titleBar != null;
   const name = props.profile?.displayName ?? "…";
-  const relay = props.network?.homeRelay ? hostOf(props.network.homeRelay) : null;
+  const relay = homeName(props.network);
 
   return (
     <nav className="sidebar" aria-label="Rooms">
@@ -168,6 +168,15 @@ export function Sidebar(props: {
       </footer>
     </nav>
   );
+}
+
+/** The relay others reach us through, to show: one of ours by its name,
+ * else "the public relays" (M26a: their own names mean nothing to anyone). */
+function homeName(network: NetworkView | null): string | null {
+  const home = network?.homeRelay;
+  if (!home) return null;
+  if (network.relays.some((r) => r.url === home) || !network.publicInUse) return hostOf(home);
+  return "the public relays";
 }
 
 /** "couchrelay.duckdns.org" from its URL. */

@@ -91,8 +91,6 @@ type Reply = oneshot::Sender<Result<Response, EngineError>>;
 pub(crate) enum Input {
     Command(Command, Reply),
     Connections(String, oneshot::Sender<Vec<(String, bool)>>),
-    /// The relay we are reachable through now, if any.
-    HomeRelay(oneshot::Sender<Option<String>>),
     /// For tests: drop the connection with a member, as a dead path would.
     DropConnection(String, String),
     /// For tests: dial a member we are connected to again; the room keeps
@@ -353,6 +351,7 @@ struct Conn {
 pub(crate) struct Started {
     pub member_id: MemberId,
     pub inbox: mpsc::Sender<Input>,
+    pub endpoint: Endpoint,
 }
 
 struct Actor {
@@ -387,6 +386,10 @@ struct Actor {
     data_dir: std::path::PathBuf,
     /// Shared with the engine, for the panic key.
     panic: Arc<Mutex<Option<PanicHandle>>>,
+    /// The relays our connections go through now (M26a).
+    carrying: tokio::sync::watch::Sender<BTreeSet<String>>,
+    /// Which relay addresses from others we dial (M26a).
+    dial: Arc<std::sync::RwLock<addr::DialRules>>,
     sessions: sessions::Sessions,
     /// Members whose build we can't talk to: their wire revision and app
     /// version, until a connection with them works again.
@@ -442,8 +445,11 @@ fn default_name(profile: &Profile) -> String {
 pub(crate) async fn start(
     profile: &Profile,
     options: EngineOptions,
+    relays: RelayChoice,
     events: broadcast::Sender<Event>,
     panic: Arc<Mutex<Option<PanicHandle>>>,
+    carrying: tokio::sync::watch::Sender<BTreeSet<String>>,
+    dial: Arc<std::sync::RwLock<addr::DialRules>>,
 ) -> Result<Started, EngineError> {
     let store = Store::new(profile.data_dir(), options.secret_store.clone());
     let secret_key = store.identity()?;
@@ -462,8 +468,8 @@ pub(crate) async fn start(
             .id_blocked_for(addr::member_id(id), Instant::now())
             .map(|_| close_code::RATE_LIMITED)
     }));
-    let relays = !matches!(options.relays, RelayChoice::Disabled);
-    let mut endpoint_options = EndpointOptions::new(secret_key, options.relays.clone());
+    let has_relays = !matches!(relays, RelayChoice::Disabled);
+    let mut endpoint_options = EndpointOptions::new(secret_key, relays);
     endpoint_options.gate = Some(gate);
     endpoint_options.port = options.port;
     endpoint_options.relay_only = options.relay_only;
@@ -480,7 +486,7 @@ pub(crate) async fn start(
     let mut actor = Actor {
         addr: addr::peer_addr(&endpoint.addr()),
         endpoint: endpoint.clone(),
-        relays,
+        relays: has_relays,
         key,
         me,
         name,
@@ -504,6 +510,8 @@ pub(crate) async fn start(
         reconnect_wait: options.reconnect_wait,
         data_dir: profile.data_dir().to_path_buf(),
         panic,
+        carrying,
+        dial,
         sessions: sessions::Sessions::default(),
         other_versions: BTreeMap::new(),
         views: AtomicU64::new(0),
@@ -513,11 +521,12 @@ pub(crate) async fn start(
     actor.restore_rooms(now);
     // Awake from the start while remote play is on (M25c).
     actor.sync_awake();
-    tokio::spawn(accept_loop(endpoint, inbox.clone(), me));
+    tokio::spawn(accept_loop(endpoint.clone(), inbox.clone(), me));
     tokio::spawn(actor.run(inbox_rx));
     Ok(Started {
         member_id: me,
         inbox,
+        endpoint,
     })
 }
 
@@ -606,9 +615,6 @@ impl Actor {
                     })
                     .unwrap_or_default();
                 let _ = reply.send(list);
-            }
-            Input::HomeRelay(reply) => {
-                let _ = reply.send(self.addr.relay.clone());
             }
             Input::Restore(contents, reply) => {
                 let _ = reply.send(self.restore_backup(&contents));
@@ -882,6 +888,7 @@ impl Actor {
                 rooms.sort_by_key(|r| r.name.to_lowercase());
                 Ok(Response::Rooms { rooms })
             }
+            Command::RelayUse { url } => Ok(Response::RelayUse(self.relay_use(&url))),
             Command::CreateRoom { name, password } => self.create(&name, &password, now),
             Command::PreviewInvite { invite } => self.preview(&invite, now),
             Command::JoinRoom { invite, password } => {
@@ -921,7 +928,17 @@ impl Actor {
             | Command::SetShortcut { .. }
             | Command::ResetShortcuts { .. }
             | Command::GetNetwork
-            | Command::SetNetwork { .. }
+            | Command::AddRelay { .. }
+            | Command::RemoveRelay { .. }
+            | Command::SetPublicRelays { .. }
+            | Command::CheckNetwork
+            | Command::SetPublicFallback { .. }
+            | Command::ReadRelayCode { .. }
+            | Command::AddRelayCode { .. }
+            | Command::ShareRelay { .. }
+            | Command::DeferRelay { .. }
+            | Command::GetDiagnostics
+            | Command::OpenLogFolder
             | Command::GetStreamWindow
             | Command::GetTray
             | Command::SetTray { .. }
@@ -1269,6 +1286,7 @@ impl Actor {
             invite,
             room: id,
             me: self.me,
+            dial: self.dial_rules(),
         };
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
@@ -1692,12 +1710,20 @@ impl Actor {
         }
     }
 
+    /// Which relay addresses from others we dial now.
+    fn dial_rules(&self) -> addr::DialRules {
+        self.dial
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn spawn_dial(&self, room: RoomId, peer: MemberId, peer_addr: PeerAddr) {
         let Some(entry) = self.rooms.get(&room) else {
             return;
         };
         let inbox = self.inbox.clone();
-        let Some(target) = addr::endpoint_addr(peer, &peer_addr) else {
+        let Some(target) = addr::endpoint_addr(peer, &peer_addr, &self.dial_rules()) else {
             tokio::spawn(async move {
                 let error = AdmissionError::Protocol("not a valid member id".into());
                 let _ = inbox.send(Input::DialFailed { room, peer, error }).await;
@@ -1821,6 +1847,58 @@ impl Actor {
         self.send_own_hud();
     }
 
+    /// Who reaches us through relay `url` (M26a, the warning before removing
+    /// it): each room's members whose record names it, or whose connection
+    /// with us runs through it now.
+    fn relay_use(&self, url: &str) -> crate::RelayUseView {
+        let url = url.trim().parse::<couch_net::RelayUrl>().ok();
+        let mut rooms: Vec<crate::RelayUseRoom> = self
+            .rooms
+            .iter()
+            .filter(|(_, entry)| !entry.room.is_leaving())
+            .filter_map(|(id, entry)| {
+                let url = url.as_ref()?;
+                let conns: HashMap<MemberId, ConnId> = entry
+                    .room
+                    .connections()
+                    .into_iter()
+                    .map(|(peer, conn, _)| (peer, conn))
+                    .collect();
+                let status = entry.room.status();
+                let members: Vec<String> = status
+                    .members
+                    .into_iter()
+                    .filter(|m| m.link != LinkState::Me)
+                    .filter(|m| {
+                        let named = entry
+                            .room
+                            .member_addr(m.id)
+                            .and_then(|addr| addr.relay)
+                            .and_then(|relay| relay.parse::<couch_net::RelayUrl>().ok())
+                            .is_some_and(|relay| relay == *url);
+                        let through = conns
+                            .get(&m.id)
+                            .and_then(|c| self.conns.get(c))
+                            .and_then(|c| couch_net::health::selected_relay(&c.conn))
+                            .is_some_and(|relay| relay == *url);
+                        named || through
+                    })
+                    .map(|m| m.name)
+                    .collect();
+                (!members.is_empty()).then(|| crate::RelayUseRoom {
+                    room: id.to_hex(),
+                    name: status.name,
+                    members,
+                })
+            })
+            .collect();
+        rooms.sort_by_key(|r| r.name.to_lowercase());
+        crate::RelayUseView {
+            rooms,
+            remote_play: self.remote.on(),
+        }
+    }
+
     /// What the UI shows of a room; nothing for one we are leaving.
     fn view(&self, room: RoomId, now: Instant) -> Option<RoomView> {
         let entry = self.rooms.get(&room).filter(|e| !e.room.is_leaving())?;
@@ -1907,13 +1985,23 @@ impl Actor {
         if now >= self.next_path_check {
             self.next_path_check = now + PATH_CHECK_EVERY;
             let mut changed = BTreeSet::new();
+            let mut carrying = BTreeSet::new();
             for conn in self.conns.values_mut() {
                 let relayed = Some(couch_net::video::selected_path(&conn.conn).relayed);
                 if relayed != conn.relayed {
                     conn.relayed = relayed;
                     changed.insert(conn.room);
                 }
+                if let Some(relay) = couch_net::health::selected_relay(&conn.conn) {
+                    carrying.insert(relay.to_string());
+                }
             }
+            // Which relays carry a connection now (M26a, Settings → Network).
+            self.carrying.send_if_modified(|was| {
+                let new = *was != carrying;
+                *was = carrying;
+                new
+            });
             for room in changed {
                 self.announce(room, now);
             }
@@ -1977,12 +2065,24 @@ struct JoinJob {
     room: RoomId,
     password: PasswordKey,
     me: MemberId,
+    dial: addr::DialRules,
 }
 
 impl JoinJob {
     async fn run(self) -> Result<Box<JoinOutcome>, EngineError> {
         let owner = self.invite.owner;
-        let Some(target) = addr::endpoint_addr(owner, &self.invite.addr) else {
+        let relay = self
+            .invite
+            .addr
+            .relay
+            .as_deref()
+            .and_then(|u| u.parse().ok());
+        if self.invite.addr.ips.is_empty() && relay.as_ref().is_some_and(|r| !self.dial.allows(r)) {
+            return Err(EngineError::Refused(
+                "this invite names a relay this app won't use (only https to a named server): ask for a new one",
+            ));
+        }
+        let Some(target) = addr::endpoint_addr(owner, &self.invite.addr, &self.dial) else {
             return Err(EngineError::Refused(
                 "this invite is damaged; ask for a new one",
             ));

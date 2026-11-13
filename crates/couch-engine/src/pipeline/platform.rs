@@ -96,6 +96,25 @@ impl Backend for WindowsBackend {
         true
     }
 
+    fn copy_secret(&self, text: &str) -> Result<(), MediaError> {
+        couch_platform_win::clipboard::copy_secret(text)
+            .map_err(|e| MediaError::Backend(format!("the clipboard: {e}")))
+    }
+
+    fn open_folder(&self, dir: &std::path::Path) -> Result<(), MediaError> {
+        // Explorer answers 1 even when it opened the folder: only starting
+        // it counts. By its full path: a bare name is looked for beside our
+        // own exe first, and an install for one user can be written there.
+        let windows = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        std::process::Command::new(windows.join("explorer.exe"))
+            .arg(dir)
+            .spawn()
+            .map(drop)
+            .map_err(|e| MediaError::Backend(format!("Explorer: {e}")))
+    }
+
     fn sources(&self) -> Result<Sources, MediaError> {
         let mut elevated = std::collections::HashMap::new();
         let windows = capture::list_windows()?

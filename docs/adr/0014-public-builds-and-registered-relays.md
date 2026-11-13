@@ -11,6 +11,16 @@ The author's choices (2026-11-13):
 - **relay codes travel by themselves** between members of a room, and in invites (by default, with a switch per link), so nobody copies a code to play with their room;
 - **the wizard comes when it matters,** on creating a room or an invite while on the public relays only, not at every start.
 
+**Settled while building M26a-1** (2026-11-13; [results](../m26a-results.md)):
+- **A relay added, removed or given a new code applies while running,** with one change to iroh 1.3: a relay's connection reads its token once at start, so a new code for a refusing relay, a relay added after a refused dial, and a removed relay kept the old token (the home relay for good). iroh is vendored with ~50 lines that restart a relay's connection when its map entry changes (`third_party/iroh/PATCHED.md`, the author's choice); no restart is ever needed.
+- **iroh reports on the home relay only,** so the others' states come from its net report, the relays our connections run through, and checking each code now and then with a throwaway endpoint of a random key (our own key twice on one relay would have it replace our real connection).
+- **A relay refusing our code is benched** out of the endpoint's list until a check lets us in or its code changes: iroh picks its home relay by speed and keeps one that refuses us.
+- **The public relays are iroh's default relay map entries,** never its DNS address lookup (`presets::Minimal` everywhere): records and invites already carry addresses.
+- **They may stand in** while none of ours works (refusing or not answering, once lasting), as a setting off by default (the author's choice); they go as soon as one of ours answers.
+- **Diagnostics are anonymous** (the author's choice): versions, relays by server name with states and errors (IP addresses scrubbed), the network, rooms and members numbered.
+- **Others' relay addresses are narrowed, not closed** (the review's finding): release builds dial them only as https on port 443 to a dotted name without a LAN suffix; a public name resolving to a private address isn't caught, as iroh resolves it. Checking resolved addresses would need a resolver of our own in iroh: left for later.
+- **Records don't follow a member to a relay nobody else holds:** with no connection left to send its new record on, the others keep dialing its old relay. M26a-1 warns before removing a relay others reach us through; M26a-2's reasons and M26b's codes must account for it.
+
 ## Context
 
 **Only the builder can make a release today.** A release build carries its builder's relay and token (`release.toml`, ADR 0007), so every update is an installer built by hand on the maintainer's PC and handed out the same way. The token in it was never secret anyway: anyone with the installer can read it.

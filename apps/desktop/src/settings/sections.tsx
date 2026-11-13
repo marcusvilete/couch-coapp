@@ -1,24 +1,21 @@
-// Settings' sections but Shortcuts: the look, the overlay, the network, the
+// Settings' sections but Shortcuts: the look, the overlay, the
 // drivers, a backup of the profile (M13), and About.
-import { Download, Monitor, Moon, RotateCw, Sun, Upload } from "lucide-react";
+import { Download, Monitor, Moon, Sun, Upload } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { DriverName } from "../bindings/DriverName";
 import type { DriverState } from "../bindings/DriverState";
 import type { DriverView } from "../bindings/DriverView";
 import type { EngineInfo } from "../bindings/EngineInfo";
-import type { NetworkView } from "../bindings/NetworkView";
-import type { RelaySetting } from "../bindings/RelaySetting";
 import { errorText, request } from "../engine";
 import type { Busy } from "../model/sessions";
 import { platform } from "../platform";
-import { hostOf } from "../shell/Sidebar";
 import { overlaySettings, setOverlaySettings, type OverlaySettings } from "../state/overlaySettings";
 import type { ThemeChoice } from "../state/theme";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { Segmented, Switch } from "../ui/Controls";
 import { Badge, Skeleton } from "../ui/Feedback";
-import { Field, PasswordInput, TextArea, TextInput } from "../ui/Field";
+import { Field, PasswordInput, TextArea } from "../ui/Field";
 
 // ---- Appearance ----
 
@@ -366,169 +363,6 @@ export function DriversSection(props: { linux: boolean }) {
         </p>
       )}
     </div>
-  );
-}
-
-// ---- Network ----
-
-function same(a: RelaySetting | null, b: RelaySetting | null): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
-export function NetworkSection(props: { busy: Busy; onRestarting: (restarting: boolean) => void }) {
-  const [view, setView] = useState<NetworkView | null>(null);
-  /** Saving or restarting failed; stays until the next try. */
-  const [error, setError] = useState<string | null>(null);
-  /** The last poll failed; the next good one clears it. */
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"builtin" | "public" | "custom">("builtin");
-  const [url, setUrl] = useState("");
-  const [saving, setSaving] = useState(false);
-  /** Restarting would end a stream: asked once more first. */
-  const [confirmRestart, setConfirmRestart] = useState(false);
-  const canRestart = platform().canRestartItself;
-
-  const load = () =>
-    request({ type: "getNetwork" }, "network")
-      .then((v) => {
-        setView(v);
-        setLoadError(null);
-        return v;
-      })
-      .catch((e) => {
-        setLoadError(errorText(e));
-        return null;
-      });
-
-  useEffect(() => {
-    void load().then((v) => {
-      if (!v) return;
-      if (v.saved === "builtin" || v.saved === "public") {
-        setMode(v.saved);
-      } else {
-        setMode("custom");
-        setUrl(v.saved.custom);
-      }
-    });
-    // The home relay shows up a moment after the app starts: polled while
-    // this page is shown.
-    const timer = window.setInterval(load, 2000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  const wanted: RelaySetting = mode === "custom" ? { custom: url.trim() } : mode;
-  const changed = view != null && !same(wanted, view.saved);
-  // The engine compares them as iroh reads URLs, not as typed.
-  const pending = view?.restartNeeded ?? false;
-
-  const save = async (e: FormEvent) => {
-    e.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      await request({ type: "setNetwork", relay: wanted }, "done");
-      await load();
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const restart = async () => {
-    if ((props.busy.hosting || props.busy.watching) && !confirmRestart) {
-      setConfirmRestart(true);
-      return;
-    }
-    // Saying goodbye to the rooms takes a moment, and the window freezes
-    // while it happens: show that something is going on first, and let it
-    // paint before asking.
-    props.onRestarting(true);
-    await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
-    platform()
-      .restartApp()
-      .catch((e) => {
-        props.onRestarting(false);
-        setError(errorText(e));
-      });
-  };
-
-  const choice = (value: typeof mode, label: string, detail?: string) => (
-    <label className={mode === value ? "radio-card selected" : "radio-card"}>
-      <input type="radio" name="relay" checked={mode === value} onChange={() => setMode(value)} />
-      <span className="radio-text">
-        <span>{label}</span>
-        {detail && <span className="radio-detail">{detail}</span>}
-      </span>
-    </label>
-  );
-
-  return (
-    <form className="settings-section" onSubmit={save}>
-      <p className="settings-lead">
-        Couch Co-App always tries a direct connection first. A relay server starts each connection and carries it when
-        a direct path can't be found.
-      </p>
-      <div className="radio-cards" role="radiogroup" aria-label="Relay">
-        {choice(
-          "builtin",
-          view?.builtIn ? `Couch Co-App relay (${hostOf(view.builtIn)})` : "This build's default: iroh's public relays",
-          view?.builtIn ? undefined : "This build has no relay of its own.",
-        )}
-        {choice("public", "iroh's public relays", "For testing")}
-        {choice("custom", "My relay")}
-      </div>
-      {mode === "custom" && (
-        <TextInput
-          type="url"
-          placeholder={view?.testBuild ? "https://relay.example.com, or http://192.168.x.x:3340 on your LAN" : "https://relay.example.com"}
-          value={url}
-          autoFocus
-          onChange={(e) => setUrl(e.target.value)}
-          aria-label="Relay address"
-        />
-      )}
-      <p className="settings-note">
-        Everyone in a room should use the same choice here: between members on different relays, a connection that
-        can't go direct may not get through.
-      </p>
-      <p className="settings-note">
-        {view == null ? (
-          <Skeleton width={260} height={12} />
-        ) : (
-          <>
-            {view.homeRelay ? `Connected through ${hostOf(view.homeRelay)}.` : "Not connected to a relay yet."}
-            {view.inUse === "builtin" && " In use: the Couch Co-App relay."}
-            {view.inUse && typeof view.inUse === "object" && ` In use: your relay, ${hostOf(view.inUse.custom)}.`}
-          </>
-        )}
-      </p>
-      {(error ?? loadError) && (
-        <p className="field-error selectable" role="alert">
-          {error ?? loadError}
-        </p>
-      )}
-      <div className="settings-row">
-        <Button type="submit" disabled={!changed || saving || (mode === "custom" && url.trim() === "")}>
-          Save
-        </Button>
-        {pending && !canRestart && (
-          // `npm run tauri dev` stops with the app, and the page server with
-          // it, so a development build can't start itself again.
-          <span className="settings-warn">Applies when the app restarts: close it and start it again.</span>
-        )}
-        {pending && canRestart && (
-          <>
-            <span className="settings-warn">
-              {confirmRestart ? "Restarting ends what you're streaming or watching." : "Applies when the app restarts."}
-            </span>
-            <Button variant={confirmRestart ? "danger" : "primary"} icon={<RotateCw />} onClick={() => void restart()}>
-              {confirmRestart ? "Restart anyway" : "Restart now"}
-            </Button>
-          </>
-        )}
-      </div>
-    </form>
   );
 }
 

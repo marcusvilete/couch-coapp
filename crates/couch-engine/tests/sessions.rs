@@ -15,7 +15,7 @@ use std::{
 
 use couch_engine::{
     Command, Engine, EngineError, EngineOptions, Event, HidingView, HostCapabilities,
-    HostController, HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile,
+    HostController, HostControllerKind, InputSetup, KeyboardMouseSeat, MemberLink, Profile, Relays,
     RemoteAccessView, RemoteAction, Response, RoomView, SessionEnd, SessionRole, SessionView,
     SourceChoice, StreamStateView, StreamWindowRequest, StreamWindowSettingsView,
     StreamingSettingsView, WatchEnd,
@@ -40,7 +40,7 @@ use couch_media::{
     audio::ToneSource,
     clock::{Clock, ProcessClock},
 };
-use couch_net::endpoint::{RelayChoice, RelayToken};
+use couch_net::endpoint::{Relay, RelayChoice, RelayToken};
 use couch_proto::{
     board::{BoardOp, Element, ElementKind, Point, Refusal},
     ids::MemberId,
@@ -109,6 +109,8 @@ impl Drop for FakePending {
 
 #[derive(Default)]
 struct Fake {
+    /// What was copied to the clipboard as a secret (M26a).
+    copied: Mutex<Vec<String>>,
     kbm: RecordingInjector,
     pads: RecordingPadFactory,
     /// The next this many pads plugged come back pending, Windows still
@@ -564,6 +566,11 @@ impl Fake {
 impl Backend for Fake {
     fn clock(&self) -> Arc<dyn Clock> {
         self.clock.clone()
+    }
+
+    fn copy_secret(&self, text: &str) -> Result<(), MediaError> {
+        self.copied.lock().unwrap().push(text.to_string());
+        Ok(())
     }
 
     fn capabilities(&self) -> HostCapabilities {
@@ -1397,7 +1404,7 @@ impl FakeViewer {
 fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
     EngineOptions {
         port: Some(port),
-        relays: RelayChoice::Disabled,
+        relays: Relays::Fixed(RelayChoice::Disabled),
         secret_store: Arc::new(Unprotected),
         limits: LimitConfig::default(),
         timings: Timings {
@@ -1417,6 +1424,10 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
         backup_files: None,
         board_windows: Some(fake.clone()),
         start_at_sign_in: false,
+        network: couch_engine::NetworkTimings {
+            check_timeout: Duration::from_secs(2),
+            ..couch_engine::NetworkTimings::default()
+        },
     }
 }
 
@@ -1800,10 +1811,10 @@ async fn watching_and_playing_through_our_relay_alone() {
     const TOKEN: &str = "couch-test-token";
     let relay = TestRelay::start(Some(TOKEN)).await;
     let through = |options: EngineOptions| EngineOptions {
-        relays: RelayChoice::Custom {
-            urls: vec![relay.url.parse().unwrap()],
-            token: RelayToken::new(TOKEN),
-        },
+        relays: Relays::Fixed(RelayChoice::ours(vec![Relay::new(
+            relay.url.parse().unwrap(),
+            RelayToken::new(TOKEN),
+        )])),
         relay_only: true,
         ..options
     };
@@ -7560,7 +7571,9 @@ async fn a_host_that_cant_draw_over_the_game_draws_in_its_own_window() {
             .is_some_and(|h| h.board.on && h.board.me == Some(member_id(&a)))
     })
     .await;
-    // A viewer's drawing reaches it.
+    // A viewer's drawing reaches it, once the viewer heard drawing is on
+    // (drawn before that, the host rightly refuses it).
+    wait("B hears drawing is on", || drawing_on(&b_window, true)).await;
     b_window.draw(&b, vec![a_box(1)]);
     wait("the window hears B's", || {
         own.board().contains(&(bid.clone(), 1))
@@ -7642,4 +7655,66 @@ async fn a_board_window_that_cant_be_made_is_not_tried_over_and_over() {
     wait("opened", || board_count(&a.fake.board_opened) == 3).await;
     c.stop().await;
     stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// M26a: a relay's code goes to the clipboard through the system, as a
+/// secret (the fake records it), never to the webview; it reads back as
+/// the relay and its token, and a relay from a personal code isn't shared.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_is_shared_as_its_code() {
+    use couch_engine::{RelayRules, relays::code::RelayCode};
+
+    let mut a = Member::with("Ana", |o| EngineOptions {
+        relays: Relays::Profile(RelayRules {
+            built_in: None,
+            test_build: true,
+            public_relays: false,
+        }),
+        ..o
+    })
+    .await;
+    let add = |url: &str, personal| Command::AddRelay {
+        url: url.into(),
+        token: Some("s3cret".into()),
+        personal,
+        unchecked: true,
+    };
+    a.ok(add("https://relay.example.com", false)).await;
+    a.ok(Command::ShareRelay {
+        url: "https://relay.example.com".into(),
+    })
+    .await;
+    let copied = a.fake.copied.lock().unwrap().clone();
+    let [code] = copied.as_slice() else {
+        panic!("one copy: {copied:?}");
+    };
+    let read = RelayCode::parse(code).unwrap();
+    assert_eq!(read.url.as_str(), "https://relay.example.com/");
+    assert_eq!(read.token.as_ref().map(|t| t.reveal()), Some("s3cret"));
+    assert!(!read.personal);
+    match a
+        .handle(Command::ReadRelayCode { code: code.clone() })
+        .await
+    {
+        Ok(Response::RelayCode(view)) => {
+            assert!(view.held && view.same_code && view.has_code && !view.personal);
+            assert_eq!(view.host, "relay.example.com");
+        }
+        other => panic!("the code read: {other:?}"),
+    }
+
+    a.ok(add("https://mine.example", true)).await;
+    assert!(
+        a.handle(Command::ShareRelay {
+            url: "https://mine.example".into(),
+        })
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        a.fake.copied.lock().unwrap().len(),
+        1,
+        "a personal code stays"
+    );
+    a.stop().await;
 }

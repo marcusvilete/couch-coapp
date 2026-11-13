@@ -1,0 +1,207 @@
+/* Settings → Network (M26a). */
+.net-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-height: 32px;
+}
+
+.net-state {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  min-width: 0;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.net-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: var(--r-full);
+  background: var(--text-faint);
+  /* On the text's first line. */
+  transform: translateY(-1px);
+}
+
+.net-dot-ok {
+  background: var(--ok);
+}
+
+.net-dot-idle {
+  background: var(--link-online);
+}
+
+.net-dot-pending {
+  background: var(--text-faint);
+}
+
+.net-dot-warn {
+  background: var(--warn);
+}
+
+.net-dot-danger {
+  background: var(--danger);
+}
+
+.relay-list {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.relay-list:empty {
+  display: none;
+}
+
+.relay-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 56px;
+  padding: var(--s2) var(--s3);
+  background: var(--bg-raised-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+}
+
+.relay-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--active);
+  color: var(--text-muted);
+
+  & svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.relay-text {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.relay-name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.relay-host {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.relay-state {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+.relay-state-warn {
+  color: var(--warn);
+}
+
+.relay-state-danger {
+  color: var(--danger);
+}
+
+/* Adding a relay: the code, or the address. */
+.relay-add {
+  display: grid;
+  gap: var(--s3);
+  justify-items: start;
+}
+
+/* Both forms in one cell: the taller sets the height, whichever shows. */
+.relay-add-forms {
+  display: grid;
+  width: 100%;
+
+  & > .relay-add-form {
+    grid-area: 1 / 1;
+  }
+}
+
+.relay-add-form {
+  display: grid;
+  align-content: start;
+  gap: var(--s2);
+  width: 100%;
+}
+
+.relay-add-hidden {
+  visibility: hidden;
+}
+
+.relay-add-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+
+  & > :first-child {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+/* Reserved: what the code holds, or why it failed, never moving what's
+ * below. Two lines' worth. */
+.relay-code-preview {
+  display: flex;
+  align-items: flex-start;
+  min-height: 44px;
+  font-size: var(--text-sm);
+}
+
+.relay-preview,
+.relay-failed,
+.relay-working {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.relay-preview svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--text-muted);
+}
+
+.relay-preview-host {
+  font-weight: 600;
+}
+
+.relay-preview-note {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--text-muted);
+}
+
+.relay-working {
+  color: var(--text-muted);
+}

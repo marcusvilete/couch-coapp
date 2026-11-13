@@ -10,9 +10,9 @@ use std::{
 
 use couch_engine::{
     BackupFiles, Command, Engine, EngineError, EngineOptions, Event, InvitePreview, InviteStatus,
-    MemberLink, Profile, Response, RoomGone, RoomView, secrets::Unprotected,
+    MemberLink, Profile, RelayRules, Relays, Response, RoomGone, RoomView, secrets::Unprotected,
 };
-use couch_net::endpoint::{RelayChoice, RelayToken};
+use couch_net::endpoint::{Relay, RelayChoice, RelayToken};
 use couch_proto::{ids::MemberId, invite::Invite};
 use couch_room::{limits::LimitConfig, room::Timings};
 use couch_testkit::relay::TestRelay;
@@ -24,7 +24,7 @@ const WAIT: Duration = Duration::from_secs(20);
 fn options(port: u16) -> EngineOptions {
     EngineOptions {
         port: Some(port),
-        relays: RelayChoice::Disabled,
+        relays: Relays::Fixed(RelayChoice::Disabled),
         secret_store: Arc::new(Unprotected),
         limits: LimitConfig {
             first_backoff: Duration::from_millis(800),
@@ -1243,10 +1243,10 @@ async fn a_room_works_through_our_relay_alone() {
     const TOKEN: &str = "couch-test-token";
     let relay = TestRelay::start(Some(TOKEN)).await;
     let through = |port| EngineOptions {
-        relays: RelayChoice::Custom {
-            urls: vec![relay.url.parse().unwrap()],
-            token: RelayToken::new(TOKEN),
-        },
+        relays: Relays::Fixed(RelayChoice::ours(vec![Relay::new(
+            relay.url.parse().unwrap(),
+            RelayToken::new(TOKEN),
+        )])),
         relay_only: true,
         ..options(port)
     };
@@ -1283,6 +1283,118 @@ async fn a_room_works_through_our_relay_alone() {
     stop_all(&mut [&mut a, &mut b]).await;
 }
 
+/// Relays registered in the app (M26a) apply while it runs, in a room: both
+/// members on our relay through the profile's own list, one of them takes it
+/// away (cut off: no relay, no direct path) and adds it back, with its code,
+/// and the room comes back without a restart. A relay added beside it
+/// changes nothing for the room.
+#[tokio::test]
+async fn a_room_follows_relays_registered_while_running() {
+    const TOKEN: &str = "couch-test-token";
+    let relay = TestRelay::start(Some(TOKEN)).await;
+    let other = TestRelay::start(Some("another-token")).await;
+    let on_profile = |port| EngineOptions {
+        relays: Relays::Profile(RelayRules {
+            built_in: None,
+            test_build: true,
+            public_relays: false,
+        }),
+        relay_only: true,
+        ..options(port)
+    };
+    let mut a = Member::with_options("Ana", on_profile(free_port())).await;
+    let mut b = Member::with_options("Bia", on_profile(free_port())).await;
+    // Through the check before saving, as from Settings.
+    let add = |url: &str, token: &str| Command::AddRelay {
+        url: url.into(),
+        token: Some(token.into()),
+        personal: false,
+        unchecked: false,
+    };
+    let Ok(Response::RelayCheck(refused)) = a.handle(add(&relay.url, "an-old-token")).await else {
+        panic!("a wrong code is refused before it is saved");
+    };
+    assert!(matches!(
+        refused.outcome,
+        couch_engine::RelayCheckOutcome::Refused { .. }
+    ));
+    for member in [&a, &b] {
+        let added = member.handle(add(&relay.url, TOKEN)).await.unwrap();
+        assert!(matches!(added, Response::Network(_)), "{added:?}");
+    }
+    // The check's own connection was the one turned away.
+    let refused = relay.refused();
+    assert!(refused >= 1);
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+    b.join(&invite, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+    // Before removing it, Settings lists who is reached through it.
+    let Ok(Response::RelayUse(used)) = a
+        .handle(Command::RelayUse {
+            url: relay.url.clone(),
+        })
+        .await
+    else {
+        panic!("who uses the relay");
+    };
+    assert_eq!(used.rooms.len(), 1, "{used:?}");
+    assert_eq!(used.rooms[0].name, "Sofá");
+    assert_eq!(used.rooms[0].members, ["Bia"]);
+    assert!(!used.remote_play);
+    let Ok(Response::RelayUse(unused)) = a
+        .handle(Command::RelayUse {
+            url: other.url.clone(),
+        })
+        .await
+    else {
+        panic!("who uses the other relay");
+    };
+    assert!(unused.rooms.is_empty(), "{unused:?}");
+
+    // Another relay beside ours, and gone again: the room stays.
+    a.handle(add(&other.url, "another-token")).await.unwrap();
+    a.handle(Command::RemoveRelay {
+        url: other.url.clone(),
+    })
+    .await
+    .unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+
+    let bid = b.id();
+    let linked = |linked: bool| {
+        let bid = bid.clone();
+        move |v: Option<&RoomView>| {
+            v.is_some_and(|v| {
+                v.members.iter().any(|m| {
+                    m.id == bid
+                        && matches!(m.link, MemberLink::Relay | MemberLink::Direct) == linked
+                })
+            })
+        }
+    };
+    assert_eq!(relay.refused(), refused, "each sent its code");
+    b.handle(Command::RemoveRelay {
+        url: relay.url.clone(),
+    })
+    .await
+    .unwrap();
+    a.wait_for(&room, "Bia cut off without a relay", linked(false))
+        .await;
+    // Meanwhile Bia's app dials Ana at the relay without its code, refused:
+    // a removed relay is sent none.
+    b.handle(add(&relay.url, TOKEN)).await.unwrap();
+    a.wait_for(&room, "Bia back through the relay", linked(true))
+        .await;
+    full_mesh(&room, &[&a, &b]).await;
+    // With its code back, nothing is refused any more: the connection that
+    // went without one was started again (third_party/iroh/PATCHED.md).
+    let refused = relay.refused();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(relay.refused(), refused, "refused after the code came back");
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
 /// With relays configured, an invite never carries IP addresses, even right
 /// after startup before the relay is known. (The relay here doesn't exist,
 /// so the invite either names it or isn't made at all.)
@@ -1290,7 +1402,9 @@ async fn a_room_works_through_our_relay_alone() {
 async fn invites_carry_no_ip_addresses_when_relays_are_configured() {
     let dir = tempfile::tempdir().unwrap();
     let options = EngineOptions {
-        relays: RelayChoice::custom(vec!["https://relay.invalid./".parse().unwrap()]),
+        relays: Relays::Fixed(RelayChoice::custom(vec![
+            "https://relay.invalid./".parse().unwrap(),
+        ])),
         ..options(free_port())
     };
     let engine = Engine::start(Profile::new("test", dir.path()).unwrap(), options)
@@ -1472,7 +1586,7 @@ async fn bad_input_is_refused_politely() {
 #[ignore = "needs internet access (iroh's public relays)"]
 async fn joins_through_the_public_relay() {
     let online = |port| EngineOptions {
-        relays: RelayChoice::N0Public,
+        relays: Relays::Fixed(RelayChoice::public()),
         ..options(port)
     };
     let mut a = Member::with_options("Ana", online(free_port())).await;

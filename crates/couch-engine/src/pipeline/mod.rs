@@ -369,6 +369,24 @@ pub trait Backend: Send + Sync + 'static {
     /// Forgets that choice: the next stream asks in the dialog again.
     fn forget_shared_choice(&self) {}
 
+    /// Puts `text` on the clipboard as a secret (M26a: a relay code, which
+    /// holds its token): kept out of the clipboard's history and its sync
+    /// to other devices where the system has them (Windows; KDE's history).
+    /// Done here rather than in the webview, which never sees a token.
+    fn copy_secret(&self, _text: &str) -> Result<(), MediaError> {
+        Err(MediaError::Unsupported(
+            "the clipboard on this system".into(),
+        ))
+    }
+
+    /// Opens a profile's folder (its logs) in the system's file manager
+    /// (M26a, Settings → Network). The webview never names the path.
+    fn open_folder(&self, _dir: &std::path::Path) -> Result<(), MediaError> {
+        Err(MediaError::Unsupported(
+            "opening folders on this system".into(),
+        ))
+    }
+
     /// Whether a game in exclusive full screen is in front (Windows): no
     /// window of ours may come up over it, or it leaves full screen.
     fn exclusive_full_screen(&self) -> bool {
