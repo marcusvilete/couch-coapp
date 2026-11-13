@@ -16,6 +16,7 @@
 pub mod autostart;
 pub mod awake;
 pub mod chime;
+pub mod clipboard;
 pub mod clock;
 mod cursor;
 pub mod front;

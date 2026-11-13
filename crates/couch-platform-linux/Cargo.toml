@@ -13,6 +13,7 @@ couch-input.workspace = true
 couch-media.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+arboard.workspace = true
 ashpd.workspace = true
 evdev.workspace = true
 futures-util.workspace = true

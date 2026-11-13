@@ -43,6 +43,9 @@ couch-platform-linux.workspace = true
 
 [dev-dependencies]
 couch-testkit.workspace = true
+# Step 0 of M26a: iroh's relay map driven directly (a token per relay,
+# relays added and removed while running).
+iroh.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

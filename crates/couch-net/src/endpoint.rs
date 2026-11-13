@@ -6,7 +6,7 @@ use std::{
 };
 
 use iroh::{
-    Endpoint, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
+    Endpoint, EndpointId, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher,
     endpoint::{
         AfterHandshakeOutcome, Connection, EndpointHooks, QuicTransportConfig, Side, VarInt,
         presets,
@@ -16,51 +16,130 @@ use noq_proto::congestion;
 
 use crate::NetError;
 
-/// Which relays the endpoint registers with.
-#[derive(Debug, Clone)]
+/// One relay the endpoint holds, with the token it asks for, if any (M26a,
+/// ADR 0014: a token per relay, sent to that relay alone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relay {
+    pub url: RelayUrl,
+    pub token: Option<RelayToken>,
+}
+
+impl Relay {
+    pub fn new(url: RelayUrl, token: Option<RelayToken>) -> Self {
+        Self { url, token }
+    }
+
+    /// Its entry in iroh's relay map. Plain http is a relay on this PC or
+    /// the LAN (`--dev`), which has no QUIC address discovery.
+    fn config(&self) -> RelayConfig {
+        let config = if self.url.scheme() == "https" {
+            RelayConfig::from(self.url.clone())
+        } else {
+            RelayConfig::new(self.url.clone(), None)
+        };
+        match &self.token {
+            Some(token) => config.with_auth_token(token.0.clone()),
+            None => config,
+        }
+    }
+}
+
+/// Which relays the endpoint holds. Never any third-party address lookup
+/// (M26a): members' records and invites carry where each one is.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayChoice {
-    /// iroh's public relays and address lookup. Development only: their terms
-    /// cover hobby use, with unpublished rate limits.
-    N0Public,
-    /// Only these relays and no third-party address lookup. Production uses
-    /// our own `iroh-relay` (docs/architecture.md, M7), with its token.
-    Custom {
-        urls: Vec<RelayUrl>,
-        /// Sent to these relays only: iroh never sends it to a relay outside
-        /// its own list, such as another member's.
-        token: Option<RelayToken>,
-    },
+    /// Our relays, each with its own token, and iroh's public relays beside
+    /// them when `public` (their terms cover hobby use, with unpublished
+    /// rate limits). A member at any other relay is still reached there: the
+    /// list decides only the tokens sent and where our home relay can be.
+    Relays { ours: Vec<Relay>, public: bool },
     /// No relays: direct and LAN paths only. For tests.
     Disabled,
 }
 
 impl RelayChoice {
+    /// iroh's public relays alone.
+    pub fn public() -> Self {
+        Self::Relays {
+            ours: Vec::new(),
+            public: true,
+        }
+    }
+
+    /// These relays, each with its token.
+    pub fn ours(ours: Vec<Relay>) -> Self {
+        Self::Relays {
+            ours,
+            public: false,
+        }
+    }
+
     /// These relays, without a token.
     pub fn custom(urls: Vec<RelayUrl>) -> Self {
-        Self::Custom { urls, token: None }
+        Self::ours(urls.into_iter().map(|url| Relay::new(url, None)).collect())
+    }
+
+    /// Every entry of the relay map this choice binds with: ours over a
+    /// public one at the same address.
+    fn configs(&self) -> Vec<RelayConfig> {
+        let Self::Relays { ours, public } = self else {
+            return Vec::new();
+        };
+        let mut configs: Vec<RelayConfig> = ours.iter().map(Relay::config).collect();
+        if *public {
+            for config in public_relays() {
+                if !configs.iter().any(|c| c.url == config.url) {
+                    configs.push(config);
+                }
+            }
+        }
+        configs
     }
 
     fn mode(&self) -> RelayMode {
         match self {
-            Self::N0Public => RelayMode::Default,
-            Self::Custom { urls, token } => RelayMode::Custom(
-                urls.iter()
-                    .map(|url| {
-                        // Plain http is a relay on this PC or the LAN (`--dev`),
-                        // which has no QUIC address discovery.
-                        let config = if url.scheme() == "https" {
-                            RelayConfig::from(url.clone())
-                        } else {
-                            RelayConfig::new(url.clone(), None)
-                        };
-                        match token {
-                            Some(token) => config.with_auth_token(token.0.clone()),
-                            None => config,
-                        }
-                    })
-                    .collect::<RelayMap>(),
-            ),
+            Self::Relays { .. } => {
+                RelayMode::Custom(self.configs().into_iter().collect::<RelayMap>())
+            }
             Self::Disabled => RelayMode::Disabled,
+        }
+    }
+}
+
+/// iroh's public relays, as plain entries of our relay map.
+fn public_relays() -> Vec<RelayConfig> {
+    iroh::defaults::prod::default_relay_map()
+        .relays::<Vec<_>>()
+        .into_iter()
+        .map(|config| (*config).clone())
+        .collect()
+}
+
+/// Whether `url` is one of iroh's public relays.
+pub fn is_public_relay(url: &RelayUrl) -> bool {
+    public_relays().iter().any(|config| config.url == *url)
+}
+
+/// Moves a running endpoint from the relays of `from` to those of `to`
+/// (M26a): each relay added, given another token, or gone. Our vendored
+/// iroh starts a changed relay's connection again, so a new token applies at
+/// once (third_party/iroh/PATCHED.md). From or to `Disabled` changes
+/// nothing: an endpoint bound without relays has no relay transport.
+pub async fn change_relays(endpoint: &Endpoint, from: &RelayChoice, to: &RelayChoice) {
+    if matches!(from, RelayChoice::Disabled) || matches!(to, RelayChoice::Disabled) {
+        return;
+    }
+    let (before, after) = (from.configs(), to.configs());
+    for config in &before {
+        if !after.iter().any(|c| c.url == config.url) {
+            endpoint.remove_relay(&config.url).await;
+        }
+    }
+    for config in after {
+        if !before.contains(&config) {
+            endpoint
+                .insert_relay(config.url.clone(), Arc::new(config))
+                .await;
         }
     }
 }
@@ -197,11 +276,10 @@ pub fn transport_config(congestion: Congestion) -> QuicTransportConfig {
 
 /// Binds an endpoint that speaks the Couch Co-App ALPN.
 pub async fn bind(options: EndpointOptions) -> Result<Endpoint, NetError> {
-    let mut builder = match &options.relays {
-        RelayChoice::N0Public => Endpoint::builder(presets::N0),
-        other => Endpoint::builder(presets::Minimal).relay_mode(other.mode()),
-    };
-    builder = builder
+    // Never n0's preset: it publishes us to n0's DNS and looks peers up
+    // there (M26a), which records and invites make unnecessary.
+    let mut builder = Endpoint::builder(presets::Minimal)
+        .relay_mode(options.relays.mode())
         .secret_key(options.secret_key)
         .alpns(vec![couch_proto::ALPN.to_vec()])
         .transport_config(transport_config(options.congestion));
@@ -251,6 +329,58 @@ pub struct NetProbe {
     pub direct_addrs: usize,
 }
 
+/// What [`check_relay`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayCheck {
+    /// It let us in: with its token, or open to everyone.
+    Accepted,
+    /// It refused the token, for this reason (the relay's own words).
+    Refused(String),
+    /// Nothing let us in within the time: no relay there, or it didn't
+    /// answer. iroh's last error, if it had one.
+    Unreachable(Option<String>),
+}
+
+/// Connects to `relay` alone, with its token, and says whether it lets us
+/// in (M26a: a relay code is checked before it is saved). From a throwaway
+/// endpoint with an id of its own: with ours, the relay would replace our
+/// real connection with this one. Takes at most `timeout`.
+pub async fn check_relay(relay: &Relay, timeout: Duration) -> Result<RelayCheck, NetError> {
+    let mut options = EndpointOptions::new(
+        SecretKey::generate(),
+        RelayChoice::ours(vec![relay.clone()]),
+    );
+    options.relay_only = true;
+    let endpoint = bind(options).await?;
+    let mut status = endpoint.home_relay_status();
+    let seen = tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(ours) = status.get().iter().find(|s| *s.url() == relay.url) {
+                if ours.is_connected() {
+                    return RelayCheck::Accepted;
+                }
+                if let Some(reason) = ours.auth_denied_reason() {
+                    return RelayCheck::Refused(reason.to_string());
+                }
+            }
+            if status.updated().await.is_err() {
+                return RelayCheck::Unreachable(None);
+            }
+        }
+    })
+    .await;
+    let check = seen.unwrap_or_else(|_| {
+        RelayCheck::Unreachable(
+            status
+                .get()
+                .iter()
+                .find_map(|s| s.last_error().map(|e| format!("{e:#}"))),
+        )
+    });
+    endpoint.close().await;
+    Ok(check)
+}
+
 /// Binds a throwaway endpoint and waits for it to come online.
 pub async fn probe(relays: RelayChoice, timeout: Duration) -> Result<NetProbe, NetError> {
     let endpoint = bind(EndpointOptions::new(SecretKey::generate(), relays)).await?;
@@ -289,31 +419,99 @@ mod tests {
     #[test]
     fn a_relay_token_never_prints() {
         let token = RelayToken::new(" s3cret ").unwrap();
-        let choice = RelayChoice::Custom {
-            urls: vec!["https://relay.example.com".parse().unwrap()],
-            token: Some(token.clone()),
-        };
+        let choice = RelayChoice::ours(vec![Relay::new(
+            "https://relay.example.com".parse().unwrap(),
+            Some(token.clone()),
+        )]);
         assert!(!format!("{choice:?}").contains("s3cret"));
         assert_eq!(token.0, "s3cret");
         assert!(RelayToken::new("  ").is_none());
     }
 
     #[test]
-    fn the_token_goes_to_our_relays_only_and_plain_http_skips_quic() {
+    fn each_relay_gets_its_own_token_and_plain_http_skips_quic() {
         let https: RelayUrl = "https://relay.example.com".parse().unwrap();
+        let other: RelayUrl = "https://friends.example.org".parse().unwrap();
         let http: RelayUrl = "http://192.168.1.10:3340".parse().unwrap();
-        let choice = RelayChoice::Custom {
-            urls: vec![https.clone(), http.clone()],
-            token: RelayToken::new("t"),
-        };
+        let choice = RelayChoice::ours(vec![
+            Relay::new(https.clone(), RelayToken::new("t")),
+            Relay::new(other.clone(), RelayToken::new("u")),
+            Relay::new(http.clone(), None),
+        ]);
         let RelayMode::Custom(map) = choice.mode() else {
             panic!("a custom map");
         };
         let ours = map.get(&https).unwrap();
         assert_eq!(ours.auth_token.as_deref(), Some("t"));
         assert!(ours.quic.is_some());
-        assert!(map.get(&http).unwrap().quic.is_none());
-        let other: RelayUrl = "https://someone.else".parse().unwrap();
-        assert!(map.get(&other).is_none());
+        assert_eq!(map.get(&other).unwrap().auth_token.as_deref(), Some("u"));
+        let lan = map.get(&http).unwrap();
+        assert!(lan.quic.is_none() && lan.auth_token.is_none());
+        let stranger: RelayUrl = "https://someone.else".parse().unwrap();
+        assert!(map.get(&stranger).is_none());
+        assert!(!map.urls::<Vec<_>>().iter().any(is_public_relay));
+    }
+
+    #[test]
+    fn the_public_relays_sit_beside_ours_without_a_token() {
+        let ours: RelayUrl = "https://relay.example.com".parse().unwrap();
+        let choice = RelayChoice::Relays {
+            ours: vec![Relay::new(ours.clone(), RelayToken::new("t"))],
+            public: true,
+        };
+        let RelayMode::Custom(map) = choice.mode() else {
+            panic!("a custom map");
+        };
+        let public: Vec<RelayUrl> = map
+            .urls::<Vec<_>>()
+            .into_iter()
+            .filter(is_public_relay)
+            .collect();
+        assert!(!public.is_empty());
+        assert!(
+            public
+                .iter()
+                .all(|url| map.get(url).unwrap().auth_token.is_none())
+        );
+        assert_eq!(map.len(), public.len() + 1);
+        let RelayMode::Custom(alone) = RelayChoice::public().mode() else {
+            panic!("a custom map");
+        };
+        assert_eq!(alone.len(), public.len());
+    }
+
+    #[tokio::test]
+    async fn a_changed_relay_list_reaches_the_running_endpoint() {
+        let a: RelayUrl = "http://127.0.0.1:1/".parse().unwrap();
+        let b: RelayUrl = "http://127.0.0.1:2/".parse().unwrap();
+        let from = RelayChoice::ours(vec![
+            Relay::new(a.clone(), RelayToken::new("old")),
+            Relay::new(b.clone(), None),
+        ]);
+        let endpoint = bind(EndpointOptions::new(SecretKey::generate(), from.clone()))
+            .await
+            .unwrap();
+        let c: RelayUrl = "http://127.0.0.1:3/".parse().unwrap();
+        let to = RelayChoice::ours(vec![
+            Relay::new(a.clone(), RelayToken::new("new")),
+            Relay::new(c.clone(), None),
+        ]);
+        change_relays(&endpoint, &from, &to).await;
+        // What the endpoint holds now: inserting each again returns it.
+        let held = |url: &RelayUrl| {
+            let endpoint = endpoint.clone();
+            let url = url.clone();
+            async move {
+                let config = endpoint.remove_relay(&url).await;
+                if let Some(config) = &config {
+                    endpoint.insert_relay(url, config.clone()).await;
+                }
+                config
+            }
+        };
+        assert_eq!(held(&a).await.unwrap().auth_token.as_deref(), Some("new"));
+        assert!(held(&b).await.is_none());
+        assert!(held(&c).await.is_some());
+        endpoint.close().await;
     }
 }

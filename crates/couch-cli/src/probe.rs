@@ -156,7 +156,7 @@ fn probe_gpu_frames() -> Result<(), String> {
 }
 
 async fn probe_network(report: &mut Report, timeout: Duration) {
-    match couch_net::endpoint::probe(RelayChoice::N0Public, timeout).await {
+    match couch_net::endpoint::probe(RelayChoice::public(), timeout).await {
         Ok(net) => match net.online_after {
             Some(after) => report.line(
                 Status::Ok,

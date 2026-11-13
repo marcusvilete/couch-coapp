@@ -451,6 +451,11 @@ impl Backend for LinuxBackend {
         couch_platform_linux::chime::play();
     }
 
+    fn copy_secret(&self, text: &str) -> Result<(), MediaError> {
+        couch_platform_linux::clipboard::copy_secret(text)
+            .map_err(|e| MediaError::Backend(format!("the clipboard: {e}")))
+    }
+
     /// The desktop's dialog comes when the host starts the stream, once:
     /// never over the game when a guest arrives, nor again each time
     /// someone comes back.

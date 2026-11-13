@@ -2,7 +2,10 @@
 //! - `identity.key`: the endpoint's secret key, sealed.
 //! - `settings.json`: the display name. Nothing secret.
 //! - `shortcuts.json`: the shortcut keys the user moved off their defaults.
-//! - `network.json`: the relay to use (applies when the engine starts).
+//! - `network.json`: the relay setting of before M26a, read once to carry it
+//!   over into `relays.sealed`, and left as it is for older versions.
+//! - `relays.sealed`: the relays this profile holds, with their tokens,
+//!   sealed (M26a, `crate::relays`).
 //! - `audio.json`: the stream window's volume (P6).
 //! - `host-audio.json`: how loud guests hear our stream's sound (P7).
 //! - `stream-window.json`: how stream windows open: with the bar or not (P11).
@@ -34,12 +37,31 @@ use couch_proto::{ids::RoomId, ipc::StreamVolume};
 use couch_room::room::{RestoreMark, SavedRoom};
 use serde::{Deserialize, Serialize};
 
-use crate::{RelaySetting, backup, secrets::SecretStore};
+use crate::{
+    backup,
+    relays::{RelayRules, SavedRelays},
+    secrets::SecretStore,
+};
 
-/// `network.json`.
+/// `network.json`: the relay setting of before M26a.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct NetworkSettings {
-    pub relay: RelaySetting,
+    pub relay: LegacyRelaySetting,
+}
+
+/// The one relay a profile used before M26a; [`SavedRelays::carried_over`]
+/// turns it into registered relays.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LegacyRelaySetting {
+    /// The relay this build was made with, or iroh's public relays in a
+    /// build without one.
+    #[default]
+    Builtin,
+    /// iroh's public relays.
+    Public,
+    /// One relay server by URL, without a token.
+    Custom(String),
 }
 
 const IDENTITY_FILE: &str = "identity.key";
@@ -52,6 +74,9 @@ const STREAM_WINDOW_FILE: &str = "stream-window.json";
 const APP_FILE: &str = "app.json";
 const DRAWING_FILE: &str = "drawing.json";
 const STREAMING_FILE: &str = "streaming.json";
+const RELAYS_FILE: &str = "relays.sealed";
+/// Leads the sealed JSON of `relays.sealed`.
+const RELAYS_MAGIC: &[u8] = b"CCL1";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
 /// recognized rather than misread. `CCR3` (M13) adds the chain of
@@ -160,6 +185,67 @@ impl Store {
             }
             Err(source) => Err(StoreError::Io { path, source }),
         }
+    }
+
+    /// The relays this profile holds (M26a): read, or carried over from
+    /// `network.json` the first time, the build's own relay written in, and
+    /// saved when that changed anything. A file that can't be read (sealed
+    /// by another Windows user, damaged) is set aside as
+    /// `relays.sealed.unreadable`, never overwritten, and the relays start
+    /// again from the build's.
+    pub fn relays(&self, rules: &RelayRules, now_unix: u64) -> SavedRelays {
+        let path = self.dir.join(RELAYS_FILE);
+        let (mut saved, mut changed) = match fs::read(&path) {
+            Ok(sealed) => match self.read_relays(&sealed) {
+                Some(saved) => (saved, false),
+                None => {
+                    tracing::error!(
+                        "{} is damaged or was sealed by another Windows user; set aside",
+                        path.display()
+                    );
+                    let aside = path.with_extension("sealed.unreadable");
+                    if let Err(e) = fs::rename(&path, &aside) {
+                        tracing::error!("{}: {e}", aside.display());
+                    }
+                    (SavedRelays::default(), true)
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let old = network(&self.dir).relay;
+                (SavedRelays::carried_over(&old, rules, now_unix), true)
+            }
+            Err(e) => {
+                // Not written over: it may be there, unreadable for now.
+                tracing::error!("{}: {e}", path.display());
+                let mut saved = SavedRelays::default();
+                saved.keep_built_in(rules.built_in.as_ref(), now_unix);
+                return saved;
+            }
+        };
+        changed |= saved.keep_built_in(rules.built_in.as_ref(), now_unix);
+        if changed && let Err(e) = self.save_relays(&saved) {
+            tracing::error!("could not save the relays: {e}");
+        }
+        saved
+    }
+
+    fn read_relays(&self, sealed: &[u8]) -> Option<SavedRelays> {
+        let bytes = self.secrets.unprotect(sealed).ok()?;
+        serde_json::from_slice(bytes.strip_prefix(RELAYS_MAGIC)?).ok()
+    }
+
+    pub fn save_relays(&self, relays: &SavedRelays) -> Result<(), StoreError> {
+        let path = self.dir.join(RELAYS_FILE);
+        let mut bytes = RELAYS_MAGIC.to_vec();
+        bytes.extend(serde_json::to_vec(relays).expect("relays serialize"));
+        let sealed = self
+            .secrets
+            .protect(&bytes)
+            .map_err(|source| StoreError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        write_atomic(&path, &sealed)
     }
 
     pub fn settings(&self) -> Settings {
@@ -349,10 +435,16 @@ impl Store {
                     .map(|bytes| ((*name).to_string(), bytes))
             })
             .collect();
+        // The relays with their tokens (M26a): none if they can't be read.
+        let relays = fs::read(self.dir.join(RELAYS_FILE))
+            .ok()
+            .and_then(|sealed| self.read_relays(&sealed))
+            .map(|saved| serde_json::to_vec(&saved).expect("relays serialize"));
         Ok(backup::Contents {
             identity,
             rooms,
             files,
+            relays,
         })
     }
 
@@ -421,6 +513,24 @@ impl Store {
                 write_atomic(&file, bytes)?;
             }
         }
+        // The relays (M26a), sealed for this user. Only what a backup
+        // carries: at most the cap, addresses that read. Which one is this
+        // build's own is settled at the next start (`Self::relays`), never
+        // taken from the file.
+        if let Some(json) = &contents.relays {
+            match serde_json::from_slice::<SavedRelays>(json) {
+                Ok(mut saved) => {
+                    saved
+                        .relays
+                        .retain(|r| r.url.parse::<couch_net::RelayUrl>().is_ok());
+                    saved.relays.truncate(crate::relays::MAX_RELAYS);
+                    let file = self.dir.join(RELAYS_FILE);
+                    undo.files.push((file.clone(), fs::read(&file).ok()));
+                    self.save_relays(&saved)?;
+                }
+                Err(e) => tracing::warn!("the backup's relays don't read: {e}; left out"),
+            }
+        }
         // The identity last: a failure before it is undone above, and the
         // profile keeps its own identity.
         write_atomic(&path, &sealed)?;
@@ -469,6 +579,7 @@ pub(crate) fn network(dir: &Path) -> NetworkSettings {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn save_network(dir: &Path, network: &NetworkSettings) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(network).expect("settings serialize");
     write_atomic(&dir.join(NETWORK_FILE), &bytes)
@@ -961,6 +1072,68 @@ mod tests {
         assert_eq!(target.identity().unwrap().to_bytes(), before);
     }
 
+    /// M26a: the relays travel in a backup with their codes, sealed again
+    /// for the new user; past the cap, or naming nothing, they don't.
+    #[test]
+    fn a_backup_carries_the_relays() {
+        use couch_net::endpoint::RelayToken;
+
+        let from = tempfile::tempdir().unwrap();
+        let source = Store::new(from.path(), Arc::new(Flip(0x11)));
+        source.identity().unwrap();
+        let mut relays = SavedRelays::default();
+        relays
+            .add(
+                "https://relay.example.com".parse().unwrap(),
+                RelayToken::new("s3cret"),
+                true,
+                1,
+            )
+            .unwrap();
+        source.save_relays(&relays).unwrap();
+        let mut contents = source.backup_contents().unwrap();
+        assert!(contents.relays.is_some());
+
+        let to = tempfile::tempdir().unwrap();
+        let target = Store::new(to.path(), Arc::new(Flip(0x22)));
+        target.restore(&contents).unwrap();
+        let rules = RelayRules {
+            built_in: None,
+            test_build: false,
+            public_relays: true,
+        };
+        let restored = target.relays(&rules, 2);
+        assert_eq!(restored.relays, relays.relays, "with its code, personal");
+        let sealed = fs::read(to.path().join(RELAYS_FILE)).unwrap();
+        assert!(!sealed.windows(6).any(|w| w == b"s3cret"), "sealed again");
+
+        // A crafted one: past the cap and naming nothing.
+        let mut many = SavedRelays::default();
+        for i in 0..crate::relays::MAX_RELAYS {
+            many.add(
+                format!("https://r{i}.example").parse().unwrap(),
+                None,
+                false,
+                1,
+            )
+            .unwrap();
+        }
+        // add() stops at the cap; a crafted file doesn't.
+        for _ in 0..3 {
+            many.relays.push(many.relays[0].clone());
+        }
+        let mut junk = many.relays[0].clone();
+        junk.url = "not a url".into();
+        many.relays.insert(0, junk);
+        contents.relays = Some(serde_json::to_vec(&many).unwrap());
+        let again = tempfile::tempdir().unwrap();
+        let target = Store::new(again.path(), Arc::new(Flip(0x22)));
+        target.restore(&contents).unwrap();
+        let restored = target.relays(&rules, 2);
+        assert_eq!(restored.relays.len(), crate::relays::MAX_RELAYS);
+        assert!(restored.relays.iter().all(|r| r.url != "not a url"));
+    }
+
     /// M13: whatever a crafted backup holds, no password key, invite or
     /// room being left is restored.
     #[test]
@@ -972,6 +1145,7 @@ mod tests {
         leaving.leave(std::time::Instant::now()).unwrap();
         let contents = backup::Contents {
             identity: [7; 32],
+            relays: None,
             rooms: vec![
                 RememberedRoom {
                     saved: room.saved(),
@@ -1000,6 +1174,7 @@ mod tests {
         let room = owned_room(1);
         let contents = backup::Contents {
             identity: [7; 32],
+            relays: None,
             rooms: vec![RememberedRoom {
                 saved: room.saved(),
                 password: None,
@@ -1068,6 +1243,7 @@ mod tests {
         }];
         let contents = backup::Contents {
             identity: [7; 32],
+            relays: None,
             rooms: vec![RememberedRoom {
                 saved: saved.clone(),
                 password: None,
@@ -1203,12 +1379,12 @@ mod tests {
     #[test]
     fn network_settings_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(network(dir.path()).relay, RelaySetting::Builtin);
+        assert_eq!(network(dir.path()).relay, LegacyRelaySetting::Builtin);
         // A choice saved before M7 keeps applying.
         fs::write(dir.path().join(NETWORK_FILE), br#"{"relay": "public"}"#).unwrap();
-        assert_eq!(network(dir.path()).relay, RelaySetting::Public);
+        assert_eq!(network(dir.path()).relay, LegacyRelaySetting::Public);
         let custom = NetworkSettings {
-            relay: RelaySetting::Custom("https://relay.example.com".into()),
+            relay: LegacyRelaySetting::Custom("https://relay.example.com".into()),
         };
         save_network(dir.path(), &custom).unwrap();
         assert_eq!(network(dir.path()), custom);
@@ -1219,6 +1395,78 @@ mod tests {
         );
         fs::write(dir.path().join(NETWORK_FILE), b"{}").unwrap();
         assert_eq!(network(dir.path()), NetworkSettings::default());
+    }
+
+    /// A store whose seal is a fixed byte flip, so a file sealed by "another
+    /// user" fails to open as it would with DPAPI.
+    struct Flip(u8);
+
+    impl SecretStore for Flip {
+        fn protect(&self, data: &[u8]) -> io::Result<Vec<u8>> {
+            Ok(data.iter().map(|b| b ^ self.0).collect())
+        }
+
+        fn unprotect(&self, sealed: &[u8]) -> io::Result<Vec<u8>> {
+            Ok(sealed.iter().map(|b| b ^ self.0).collect())
+        }
+    }
+
+    #[test]
+    fn relays_carry_over_once_and_stay_sealed() {
+        use couch_net::endpoint::RelayToken;
+
+        use crate::build_config::BuiltInRelay;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rules = RelayRules {
+            built_in: Some(BuiltInRelay {
+                url: "https://relay.couch.example".parse().unwrap(),
+                token: RelayToken::new("build-token"),
+            }),
+            test_build: false,
+            public_relays: true,
+        };
+        let custom = NetworkSettings {
+            relay: LegacyRelaySetting::Custom("https://mine.example".into()),
+        };
+        save_network(dir.path(), &custom).unwrap();
+        let store = Store::new(dir.path(), Arc::new(Flip(0x5a)));
+
+        let first = store.relays(&rules, 1);
+        let urls: Vec<&str> = first.relays.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://relay.couch.example/", "https://mine.example/"]
+        );
+        // network.json stays for the version before.
+        assert_eq!(network(dir.path()), custom);
+        let sealed = fs::read(dir.path().join(RELAYS_FILE)).unwrap();
+        assert!(!sealed.windows(11).any(|w| w == b"build-token"), "sealed");
+
+        // Carried over once: a later change of network.json is ignored.
+        save_network(dir.path(), &NetworkSettings::default()).unwrap();
+        let mut again = store.relays(&rules, 2);
+        assert_eq!(again, first);
+        again.keep_public = true;
+        store.save_relays(&again).unwrap();
+        assert!(store.relays(&rules, 3).keep_public);
+
+        // Sealed by someone else: set aside, never written over, and the
+        // build's relay again.
+        let other = Store::new(dir.path(), Arc::new(Flip(0x33)));
+        let fresh = other.relays(&rules, 4);
+        assert_eq!(fresh.relays.len(), 1);
+        assert!(fresh.relays[0].built_in);
+        assert_eq!(
+            fs::read(dir.path().join("relays.sealed.unreadable")).unwrap(),
+            sealed_again(&store, &again)
+        );
+    }
+
+    fn sealed_again(store: &Store, relays: &SavedRelays) -> Vec<u8> {
+        let mut bytes = RELAYS_MAGIC.to_vec();
+        bytes.extend(serde_json::to_vec(relays).unwrap());
+        store.secrets.protect(&bytes).unwrap()
     }
 
     /// M16b, on Unix: what the profile keeps is its owner's alone (ADR 0011),

@@ -12,8 +12,10 @@
 pub mod backup;
 pub mod board;
 pub mod build_config;
+mod network;
 pub mod pipeline;
 mod profile;
+pub mod relays;
 pub mod remote;
 mod rooms;
 pub mod secrets;
@@ -28,7 +30,6 @@ use std::{
     time::Duration,
 };
 
-use build_config::BuiltInRelay;
 use couch_input::{
     local::ControllerKind,
     shortcuts::{ShortcutError, Shortcuts},
@@ -40,6 +41,9 @@ use couch_room::{
     room::{RoomError, Timings},
     session::SessionError,
 };
+pub use network::{InternetView, NetworkTimings, NetworkTrouble, RelayStateView};
+pub use relays::RelayRules;
+use relays::SavedRelays;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use ts_rs::TS;
@@ -162,12 +166,56 @@ pub enum Command {
     ResetShortcuts {
         id: Option<String>,
     },
-    /// The relay setting, saved and in use, and the relay we are reachable
-    /// through now.
+    /// The relays this profile holds, and the one we are reachable through
+    /// now.
     GetNetwork,
-    /// Saves the relay setting; it applies when the app starts again.
-    SetNetwork {
-        relay: RelaySetting,
+    /// Registers a relay (M26a), or gives one already held a new token:
+    /// first checked (does it let us in with that token?), then saved and in
+    /// use at once. Answers with [`Response::Network`], or
+    /// [`Response::RelayCheck`] when the check failed and nothing changed.
+    AddRelay {
+        url: String,
+        token: Option<String>,
+        /// From a personal code: never passed on (M26b).
+        personal: bool,
+        /// Saved without the check: "save anyway", for a relay that is down
+        /// for now.
+        unchecked: bool,
+    },
+    /// "Check again" (M26a): every relay's code checked anew, and a new
+    /// look at the network. Answers with [`Response::Network`] at once; the
+    /// results follow as [`Event::Network`].
+    CheckNetwork,
+    /// What a pasted relay code holds, to show before adding it.
+    ReadRelayCode {
+        code: String,
+    },
+    /// Adds the relay a code names, with its token, as
+    /// [`Command::AddRelay`] does.
+    AddRelayCode {
+        code: String,
+        unchecked: bool,
+    },
+    /// Copies a relay's code to the clipboard, as a secret (out of the
+    /// clipboard's history and sync), for the user to hand to friends. Not
+    /// for a relay from a personal code.
+    ShareRelay {
+        url: String,
+    },
+    /// Takes a relay away, at once; the build's own can't be. Answers with
+    /// [`Response::Network`].
+    RemoveRelay {
+        url: String,
+    },
+    /// Keeps iroh's public relays on beside ours (they are on anyway while
+    /// nothing is registered). Answers with [`Response::Network`].
+    SetPublicRelays {
+        on: bool,
+    },
+    /// Lets iroh's public relays stand in while none of ours works (off by
+    /// default). Answers with [`Response::Network`].
+    SetPublicFallback {
+        on: bool,
     },
     /// Whether ViGEmBus and HidHide are installed.
     GetDrivers,
@@ -779,101 +827,103 @@ pub enum ShortcutScope {
     Host,
 }
 
-/// Which relay server the app uses to start connections and to carry them
-/// when a direct path fails. Saved per profile; applies at the next start.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub enum RelaySetting {
-    /// The relay this build was made with (ours, with its token), or
-    /// iroh's public relays in a build without one (development). The
-    /// default, so a profile that never chose follows the build.
-    #[default]
-    Builtin,
-    /// iroh's public relays: for testing only (their terms cover hobby use).
-    Public,
-    /// One relay server by URL, such as your own (`iroh-relay`). No
-    /// third-party address lookup, and no token.
-    Custom(String),
-}
-
-impl RelaySetting {
-    /// What the endpoint binds with, in this build.
-    pub fn choice(&self) -> Result<RelayChoice, EngineError> {
-        self.choice_in(build_config::relay().as_ref(), build_config::test_build())
-    }
-
-    /// What the endpoint binds with in a build with `built_in` as its relay.
-    /// A custom URL must be https; a test build also takes http on this PC
-    /// or a private (LAN) address, and any build takes http on this PC.
-    fn choice_in(
-        &self,
-        built_in: Option<&BuiltInRelay>,
-        test_build: bool,
-    ) -> Result<RelayChoice, EngineError> {
-        match self {
-            Self::Builtin => {
-                Ok(
-                    built_in.map_or(RelayChoice::N0Public, |relay| RelayChoice::Custom {
-                        urls: vec![relay.url.clone()],
-                        token: relay.token.clone(),
-                    }),
-                )
-            }
-            Self::Public => Ok(RelayChoice::N0Public),
-            Self::Custom(url) => {
-                let invalid = |why: &str| EngineError::InvalidRelay(why.to_string());
-                let parsed: couch_net::RelayUrl = url
-                    .trim()
-                    .parse()
-                    .map_err(|_| invalid("that isn't a web address"))?;
-                let host = parsed.host_str().unwrap_or_default();
-                let local = matches!(host, "localhost" | "127.0.0.1");
-                let lan = host
-                    .parse::<std::net::Ipv4Addr>()
-                    .is_ok_and(|ip| ip.is_private());
-                match parsed.scheme() {
-                    "https" => {}
-                    "http" if local || (lan && test_build) => {}
-                    _ => return Err(invalid("it must start with https://")),
-                }
-                if parsed.host_str().is_none_or(str::is_empty) {
-                    return Err(invalid("it names no server"));
-                }
-                // The setting is logged and shown: no credentials in it.
-                if !parsed.username().is_empty() || parsed.password().is_some() {
-                    return Err(invalid("it can't carry a user name or password"));
-                }
-                Ok(RelayChoice::custom(vec![parsed]))
-            }
-        }
-    }
-}
-
-/// Answer to [`Command::GetNetwork`].
+/// Answer to [`Command::GetNetwork`] and the relay commands (M26a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct NetworkView {
-    /// What applies at the next start.
-    pub saved: RelaySetting,
-    /// The relay this build was made with (its URL), shown for
-    /// [`RelaySetting::Builtin`]; `None` in development builds, where that
-    /// choice means iroh's public relays.
-    pub built_in: Option<String>,
+    /// The relays this profile holds, the build's own first; empty where
+    /// they are fixed ([`Self::changeable`] false).
+    pub relays: Vec<RelayView>,
+    /// iroh's public relays are in use: nothing is registered, or the user
+    /// keeps them on beside ours.
+    pub public_in_use: bool,
+    /// The user keeps iroh's public relays on beside ours.
+    pub keep_public: bool,
+    /// The user lets iroh's public relays stand in while none of ours works
+    /// (off by default).
+    pub public_fallback: bool,
+    /// They stand in now: none of our relays works.
+    pub falling_back: bool,
+    /// iroh's public relays as one row, while they are in use.
+    pub public: Option<RelayStateView>,
+    /// The relay we are reachable through now; `None` until connected.
+    pub home_relay: Option<String>,
+    /// The network this PC is on.
+    pub internet: InternetView,
+    /// Direct connections are possible (UDP works); `false`: everything
+    /// goes through a relay, with more delay and a lower picture. `None`
+    /// until known.
+    pub udp: Option<bool>,
+    /// What silently breaks every room, once it has lasted: the shell's
+    /// strip and the tray say it.
+    pub trouble: Option<NetworkTrouble>,
     /// Plain http relays at private (LAN) addresses are allowed: a
     /// development or test build.
     pub test_build: bool,
-    /// What this run uses; `None` without relays (tests). A saved setting
-    /// this build doesn't take runs as the build's own, so the two can
-    /// differ.
-    pub in_use: Option<RelaySetting>,
-    /// The relay we are reachable through now; `None` until connected.
-    pub home_relay: Option<String>,
-    /// The saved setting differs from the one in use: it applies at the
-    /// next start. Compared as iroh reads URLs (`https://a.b` is in use as
-    /// `https://a.b/`), never as typed.
-    pub restart_needed: bool,
+    /// Relays can be added and removed here (the app); not where they were
+    /// fixed when the engine started (tests).
+    pub changeable: bool,
+}
+
+/// What a pasted relay code holds, before the user adds it (M26a). Never
+/// the token itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RelayCodeView {
+    pub url: String,
+    pub host: String,
+    /// It carries a token; a code for a relay open to everyone doesn't.
+    pub has_code: bool,
+    /// Given to this user alone: never passed on.
+    pub personal: bool,
+    /// The relay is in our list already: adding gives it this code.
+    pub held: bool,
+    /// ... with this very code: adding changes nothing.
+    pub same_code: bool,
+}
+
+/// Why a relay wasn't added (M26a): checked before saving, it didn't let us
+/// in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RelayCheckView {
+    pub url: String,
+    pub host: String,
+    pub outcome: RelayCheckOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export)]
+pub enum RelayCheckOutcome {
+    /// The relay refused the code (rotated, revoked, or never its): ask its
+    /// owner for a new one. The relay's own words.
+    Refused { reason: String },
+    /// Nothing let us in: no relay at that address, or it didn't answer
+    /// (down for now?). It can be saved anyway. iroh's error, for Details.
+    Unreachable { details: Option<String> },
+}
+
+/// One relay this profile holds. Its token never leaves the engine: only
+/// whether it has one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RelayView {
+    /// As iroh writes it (`https://relay.example.com/`).
+    pub url: String,
+    /// Its server's name, to show.
+    pub host: String,
+    /// This build's own relay: it can't be removed.
+    pub built_in: bool,
+    /// It has a code (a token); a relay open to everyone has none.
+    pub has_code: bool,
+    /// From a personal code: never passed on.
+    pub personal: bool,
+    pub state: RelayStateView,
 }
 
 /// A window or screen from [`Command::ListSources`].
@@ -1565,6 +1615,11 @@ pub enum Response {
         drawing_keys: Vec<DrawingKeyView>,
     },
     Network(NetworkView),
+    /// What a pasted relay code holds ([`Command::ReadRelayCode`]).
+    RelayCode(RelayCodeView),
+    /// A relay wasn't added: it didn't let us in with its code
+    /// ([`Command::AddRelay`], [`Command::AddRelayCode`]).
+    RelayCheck(RelayCheckView),
     StreamWindow(StreamWindowSettingsView),
     Tray(TrayView),
     Drawing(DrawingSettingsView),
@@ -1696,8 +1751,32 @@ impl fmt::Debug for Command {
                 f.debug_struct("ResetShortcuts").field("id", id).finish()
             }
             Self::GetNetwork => f.write_str("GetNetwork"),
-            Self::SetNetwork { relay } => {
-                f.debug_struct("SetNetwork").field("relay", relay).finish()
+            Self::AddRelay {
+                url,
+                token,
+                personal,
+                unchecked,
+            } => f
+                .debug_struct("AddRelay")
+                .field("url", url)
+                .field("token", &token.as_ref().map(|_| ".."))
+                .field("personal", personal)
+                .field("unchecked", unchecked)
+                .finish(),
+            Self::CheckNetwork => f.write_str("CheckNetwork"),
+            Self::SetPublicFallback { on } => {
+                f.debug_struct("SetPublicFallback").field("on", on).finish()
+            }
+            Self::ReadRelayCode { .. } => f.write_str("ReadRelayCode { .. }"),
+            Self::AddRelayCode { unchecked, .. } => f
+                .debug_struct("AddRelayCode")
+                .field("code", &"..")
+                .field("unchecked", unchecked)
+                .finish(),
+            Self::ShareRelay { url } => f.debug_struct("ShareRelay").field("url", url).finish(),
+            Self::RemoveRelay { url } => f.debug_struct("RemoveRelay").field("url", url).finish(),
+            Self::SetPublicRelays { on } => {
+                f.debug_struct("SetPublicRelays").field("on", on).finish()
             }
             Self::GetDrivers => f.write_str("GetDrivers"),
             Self::SharedChoice { forget } => f
@@ -1940,6 +2019,8 @@ impl fmt::Debug for Response {
                 .field("shortcuts", &shortcuts.len())
                 .finish_non_exhaustive(),
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
+            Self::RelayCode(code) => f.debug_tuple("RelayCode").field(code).finish(),
+            Self::RelayCheck(check) => f.debug_tuple("RelayCheck").field(check).finish(),
             Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
             Self::Tray(tray) => f.debug_tuple("Tray").field(tray).finish(),
             Self::Drawing(d) => f.debug_tuple("Drawing").field(d).finish(),
@@ -2227,6 +2308,9 @@ pub enum Event {
         room: String,
         reason: RoomGone,
     },
+    /// Our connection changed (M26a): a relay's state, the network's, or
+    /// the trouble the shell's strip and the tray show.
+    Network(NetworkView),
     /// Too many wrong passwords: newcomers can't join our room for a while.
     JoinsPaused {
         room: String,
@@ -2341,6 +2425,9 @@ pub enum EngineError {
     Shortcut(#[from] ShortcutError),
     #[error("that relay address won't work: {0}")]
     InvalidRelay(String),
+    /// A pasted relay code can't be read (M26a); the text says why.
+    #[error(transparent)]
+    RelayCode(#[from] relays::code::CodeError),
     #[error("the driver wasn't installed: {0}")]
     DriverInstall(String),
     #[error("the licence notices can't be read: {0}")]
@@ -2383,10 +2470,114 @@ pub trait BackupFiles: Send + Sync {
     fn open_from(&self) -> Option<std::path::PathBuf>;
 }
 
+/// Where the engine's relays come from (M26a).
+#[derive(Debug, Clone)]
+pub enum Relays {
+    /// The profile's registered relays, changed while running from Settings
+    /// (the app).
+    Profile(RelayRules),
+    /// Exactly these, for the whole run (tests, which also turn them off).
+    Fixed(RelayChoice),
+}
+
+/// A relay's server name, to show: `relay.example.com` for
+/// `https://relay.example.com./`; the address itself if it has none.
+fn relay_host(url: &str) -> String {
+    url.parse::<couch_net::RelayUrl>()
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.trim_end_matches('.').to_string()))
+        .unwrap_or_else(|| url.to_string())
+}
+
+/// The relays a running engine holds.
+pub(crate) struct RelayState {
+    /// What this build allows; `None` where the relays are fixed.
+    rules: Option<RelayRules>,
+    saved: SavedRelays,
+    /// What the endpoint holds now.
+    in_use: RelayChoice,
+    /// Which relay addresses from others the rooms dial; ours among them.
+    dial: Arc<std::sync::RwLock<couch_net::addr::DialRules>>,
+    /// A backup was restored: its relays are on disk, taken at the next
+    /// start; no change meanwhile.
+    frozen: bool,
+}
+
+impl RelayState {
+    /// Moves the endpoint to the saved relays, less those set aside for
+    /// refusing our code (`benched`): iroh picks its home relay by speed
+    /// alone and keeps one that refuses us, which would leave us reachable
+    /// nowhere while a working relay sits beside it. iroh's public relays
+    /// join while `falling_back` (none of ours works, and the user lets
+    /// them stand in). Nothing where the relays are fixed.
+    pub(crate) async fn apply(
+        &mut self,
+        endpoint: &couch_net::Endpoint,
+        benched: &std::collections::BTreeSet<String>,
+        falling_back: bool,
+    ) {
+        let Some(rules) = &self.rules else {
+            return;
+        };
+        let to = match self.saved.choice(rules) {
+            RelayChoice::Relays { ours, public } => RelayChoice::Relays {
+                ours: ours
+                    .into_iter()
+                    .filter(|r| !benched.contains(r.url.as_str()))
+                    .collect(),
+                public: public || (falling_back && rules.public_relays),
+            },
+            RelayChoice::Disabled => RelayChoice::Disabled,
+        };
+        if to != self.in_use {
+            couch_net::endpoint::change_relays(endpoint, &self.in_use, &to).await;
+            self.in_use = to;
+        }
+    }
+
+    /// Lists them in the network view (their states come from its watch).
+    pub(crate) fn list_into(&self, network: &mut network::Network) {
+        network.listed = self
+            .saved
+            .relays
+            .iter()
+            .map(|relay| network::Listed {
+                view: RelayView {
+                    host: relay_host(&relay.url),
+                    url: relay.url.clone(),
+                    built_in: relay.built_in,
+                    has_code: relay.token.is_some(),
+                    personal: relay.personal,
+                    state: RelayStateView::Checking,
+                },
+                token: relay
+                    .token
+                    .clone()
+                    .and_then(couch_net::endpoint::RelayToken::new),
+            })
+            .collect();
+        network.public_in_use = matches!(self.in_use, RelayChoice::Relays { public: true, .. });
+        network.keep_public = self.saved.keep_public;
+        network.public_fallback = self.saved.public_fallback;
+        network.public_offered = self.rules.as_ref().is_some_and(|r| r.public_relays);
+        // Our own relays are always dialed, a LAN one included.
+        let ours = self
+            .saved
+            .relays
+            .iter()
+            .filter_map(|r| r.url.parse().ok())
+            .collect();
+        self.dial
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ours = ours;
+    }
+}
+
 /// How the engine runs. Tests shorten the timings and turn relays off.
 #[derive(Clone)]
 pub struct EngineOptions {
-    pub relays: RelayChoice,
+    pub relays: Relays,
     pub secret_store: Arc<dyn SecretStore>,
     pub limits: LimitConfig,
     pub timings: Timings,
@@ -2423,14 +2614,16 @@ pub struct EngineOptions {
     /// Whether this app may start itself when the user signs in (M25c):
     /// Settings offers it only then.
     pub start_at_sign_in: bool,
+    /// How our own connection is watched (M26a).
+    pub network: NetworkTimings,
 }
 
 impl EngineOptions {
-    /// The desktop app with iroh's public relays, which are for development
-    /// only.
+    /// The desktop app on this profile's relays (iroh's public ones while it
+    /// has none, as in a development build), with this machine's backend.
     pub fn development() -> Self {
         Self {
-            relays: RelayChoice::N0Public,
+            relays: Relays::Profile(RelayRules::of_this_build()),
             secret_store: secrets::platform_store(),
             limits: LimitConfig::default(),
             timings: Timings::default(),
@@ -2446,30 +2639,20 @@ impl EngineOptions {
             backup_files: None,
             board_windows: None,
             start_at_sign_in: false,
+            network: NetworkTimings::default(),
         }
     }
 
-    /// The desktop app: [`Self::development`] with the profile's saved relay
-    /// setting (Settings → Network), by default the relay this build was
-    /// made with ([`build_config`]). A saved setting this build doesn't take
-    /// (a typo, or a LAN http relay saved by a test build) is logged and the
-    /// build's own relay is used; Settings shows both.
+    /// The desktop app: [`Self::development`] on this profile, its relays
+    /// those it registered (Settings → Network), the build's own among them
+    /// ([`build_config`]).
     pub fn desktop(profile: &Profile) -> Self {
-        let saved = store::network(profile.data_dir()).relay;
         if let Some(url) = build_config::unreadable_relay() {
             tracing::error!(
                 "this build's relay URL {url:?} doesn't parse; it has no relay of its own"
             );
         }
-        let built_in = build_config::relay();
-        let relays = saved
-            .choice_in(built_in.as_ref(), build_config::test_build())
-            .unwrap_or_else(|e| {
-                tracing::warn!("the saved relay setting: {e}; using this build's own");
-                fallback_relays(built_in.as_ref())
-            });
         Self {
-            relays,
             // An installed app's default profile only (M25c): a development
             // build would start the debug exe, which needs the dev server,
             // and a Run entry can't name another profile. On Linux, an
@@ -2495,24 +2678,6 @@ fn installed_for_sign_in() -> bool {
     cfg!(windows)
 }
 
-/// What a running endpoint uses, as a setting. The built-in relay is told
-/// from the same URL typed as your own by its token.
-fn relay_in_use(relays: &RelayChoice, built_in: Option<&BuiltInRelay>) -> Option<RelaySetting> {
-    match relays {
-        RelayChoice::N0Public => Some(RelaySetting::Public),
-        RelayChoice::Custom { urls, token } => {
-            let url = urls.first()?;
-            let ours = built_in.is_some_and(|b| b.url == *url && b.token == *token);
-            Some(if ours {
-                RelaySetting::Builtin
-            } else {
-                RelaySetting::Custom(url.to_string())
-            })
-        }
-        RelayChoice::Disabled => None,
-    }
-}
-
 /// The third-party licences, installed next to the app's exe
 /// (`cargo xtask notices`, then `stage-dlls`; the installer ships them).
 const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
@@ -2527,31 +2692,6 @@ fn read_notices(path: &std::path::Path) -> Result<String, EngineError> {
             )),
             _ => EngineError::Notices(e.to_string()),
         })
-}
-
-/// What runs when the saved setting doesn't apply in this build: the
-/// build's own relay, never iroh's public ones in a build that has one.
-fn fallback_relays(built_in: Option<&BuiltInRelay>) -> RelayChoice {
-    RelaySetting::Builtin
-        .choice_in(built_in, false)
-        .expect("the built-in choice always applies")
-}
-
-/// Whether `saved` would start differently from what runs, in a build
-/// with `built_in` as its relay: both as iroh reads them, so a URL typed
-/// without iroh's trailing slash still matches. A saved setting this build
-/// doesn't take runs as the build's own ([`EngineOptions::desktop`]), so a
-/// restart wouldn't change that.
-fn restart_needed(
-    saved: &RelaySetting,
-    in_use: &Option<RelaySetting>,
-    built_in: Option<&BuiltInRelay>,
-    test_build: bool,
-) -> bool {
-    let applies_as = saved
-        .choice_in(built_in, test_build)
-        .unwrap_or_else(|_| fallback_relays(built_in));
-    relay_in_use(&applies_as, built_in) != *in_use
 }
 
 /// Takes the profile's lock file, waiting up to `wait` for another engine
@@ -2611,8 +2751,15 @@ pub struct Engine {
     backend: Arc<dyn pipeline::Backend>,
     /// While we stream: releases every seat without waiting for the actor.
     panic: Arc<Mutex<Option<pipeline::host::PanicHandle>>>,
-    /// The relay setting this run's endpoint was bound with.
-    relay_in_use: Option<RelaySetting>,
+    /// The relays the endpoint holds, and where they come from (M26a): one
+    /// change at a time, saved and then applied to the running endpoint.
+    relays: Arc<tokio::sync::Mutex<RelayState>>,
+    timings: NetworkTimings,
+    /// What we can tell about our own connection, kept by its watch.
+    network: network::Shared,
+    /// Wakes the watch after the relays changed.
+    poke: mpsc::Sender<()>,
+    endpoint: couch_net::Endpoint,
     /// Held while the shortcut keys are read, changed and written, so two
     /// changes at once can't lose one.
     shortcuts_edit: Mutex<()>,
@@ -2638,11 +2785,67 @@ impl Engine {
         }
         let (events, _) = broadcast::channel(256);
         let panic = Arc::new(Mutex::new(None));
-        let relay_in_use = relay_in_use(&options.relays, build_config::relay().as_ref());
         let secrets = options.secret_store.clone();
+        let dial = Arc::new(std::sync::RwLock::new(couch_net::addr::DialRules {
+            lan: match &options.relays {
+                Relays::Profile(rules) => rules.test_build,
+                Relays::Fixed(_) => build_config::test_build(),
+            },
+            ours: Default::default(),
+        }));
+        let relays = match &options.relays {
+            Relays::Profile(rules) => {
+                let store = store::Store::new(profile.data_dir(), secrets.clone());
+                let saved = store.relays(rules, remote::unix_now());
+                RelayState {
+                    in_use: saved.choice(rules),
+                    rules: Some(rules.clone()),
+                    saved,
+                    dial: dial.clone(),
+                    frozen: false,
+                }
+            }
+            Relays::Fixed(choice) => RelayState {
+                rules: None,
+                saved: SavedRelays::default(),
+                in_use: choice.clone(),
+                dial: dial.clone(),
+                frozen: false,
+            },
+        };
         let backup_files = options.backup_files.clone();
+        let timings = options.network;
         let tray = store::app(profile.data_dir()).tray;
-        let started = rooms::start(&profile, options, events.clone(), panic.clone()).await?;
+        let (carrying_tx, carrying) = tokio::sync::watch::channel(Default::default());
+        let started = rooms::start(
+            &profile,
+            options,
+            relays.in_use.clone(),
+            events.clone(),
+            panic.clone(),
+            carrying_tx,
+            dial,
+        )
+        .await?;
+        let network = Arc::new(Mutex::new(network::Network::new(
+            relays
+                .rules
+                .as_ref()
+                .map_or_else(build_config::test_build, |r| r.test_build),
+            relays.rules.is_some(),
+        )));
+        relays.list_into(&mut network::lock(&network));
+        let relays = Arc::new(tokio::sync::Mutex::new(relays));
+        let (poke, poked) = mpsc::channel(4);
+        network::watch(
+            network.clone(),
+            relays.clone(),
+            started.endpoint.clone(),
+            carrying,
+            poked,
+            events.clone(),
+            timings,
+        );
         Ok(Self {
             profile,
             secrets,
@@ -2654,7 +2857,11 @@ impl Engine {
             opened: Mutex::new(None),
             backend,
             panic,
-            relay_in_use,
+            relays,
+            timings,
+            network,
+            poke,
+            endpoint: started.endpoint,
             shortcuts_edit: Mutex::new(()),
             installing_driver: AtomicBool::new(false),
             tray: AtomicBool::new(tray),
@@ -2667,6 +2874,124 @@ impl Engine {
     /// without waiting on the engine.
     pub fn tray_on(&self) -> bool {
         self.tray.load(Ordering::SeqCst)
+    }
+
+    /// Changes the profile's relays (M26a): `change` edits them, then they
+    /// are saved, and the running endpoint moves to them (our vendored iroh
+    /// starts a relay's connection again when its token changes or it
+    /// goes). Refused where the relays were fixed at start.
+    async fn change_relays(
+        &self,
+        change: impl FnOnce(&mut RelayState) -> Result<(), EngineError>,
+    ) -> Result<Response, EngineError> {
+        let mut state = self.relays.lock().await;
+        if state.rules.is_none() {
+            return Err(EngineError::Refused(
+                "this app's relays were fixed when it started",
+            ));
+        }
+        if state.frozen {
+            return Err(EngineError::Refused(
+                "a backup was restored: start the app again before changing relays",
+            ));
+        }
+        let before = state.saved.clone();
+        change(&mut state)?;
+        if state.saved != before {
+            let store = store::Store::new(self.profile.data_dir(), self.secrets.clone());
+            if let Err(e) = store.save_relays(&state.saved) {
+                state.saved = before;
+                return Err(e.into());
+            }
+            let benched = {
+                let mut network = network::lock(&self.network);
+                // What was learned of a relay that came, went, or whose code
+                // changed no longer holds: it is tried again.
+                let same = |a: &relays::SavedRelay, b: &relays::SavedRelay| {
+                    a.url == b.url && a.token == b.token
+                };
+                for relay in before.relays.iter().chain(&state.saved.relays) {
+                    let kept = before.relays.iter().any(|r| same(r, relay))
+                        && state.saved.relays.iter().any(|r| same(r, relay));
+                    if !kept {
+                        network.forget_check(&relay.url);
+                    }
+                }
+                (network.benched.clone(), network.falling_back())
+            };
+            state.apply(&self.endpoint, &benched.0, benched.1).await;
+            state.list_into(&mut network::lock(&self.network));
+        }
+        drop(state);
+        let _ = self.poke.try_send(());
+        Ok(self.network_view())
+    }
+
+    /// Adds a relay the user gave (typed, or from a code): checked first
+    /// unless `unchecked`, outside the lock (it takes up to
+    /// [`NetworkTimings::check_timeout`]), and saved only if it let us in.
+    async fn add_relay(
+        &self,
+        url: &str,
+        token: Option<couch_net::endpoint::RelayToken>,
+        personal: bool,
+        unchecked: bool,
+    ) -> Result<Response, EngineError> {
+        let test_build = match &self.relays.lock().await.rules {
+            Some(rules) => rules.test_build,
+            None => {
+                return Err(EngineError::Refused(
+                    "this app's relays were fixed when it started",
+                ));
+            }
+        };
+        let url = relays::check_url(url, test_build)?;
+        if !unchecked {
+            let relay = couch_net::endpoint::Relay::new(url.clone(), token.clone());
+            let outcome =
+                match couch_net::endpoint::check_relay(&relay, self.timings.check_timeout).await {
+                    Ok(couch_net::endpoint::RelayCheck::Accepted) => None,
+                    Ok(couch_net::endpoint::RelayCheck::Refused(reason)) => {
+                        Some(RelayCheckOutcome::Refused { reason })
+                    }
+                    Ok(couch_net::endpoint::RelayCheck::Unreachable(details)) => {
+                        Some(RelayCheckOutcome::Unreachable { details })
+                    }
+                    Err(e) => Some(RelayCheckOutcome::Unreachable {
+                        details: Some(e.to_string()),
+                    }),
+                };
+            if let Some(outcome) = outcome {
+                tracing::info!(%url, ?outcome, "relay not added: the check failed");
+                return Ok(Response::RelayCheck(RelayCheckView {
+                    host: relay_host(url.as_str()),
+                    url: url.to_string(),
+                    outcome,
+                }));
+            }
+        }
+        self.change_relays(|state| {
+            let added = state
+                .saved
+                .add(url.clone(), token, personal, remote::unix_now())?;
+            tracing::info!(%url, ?added, unchecked, "relay registered");
+            Ok(())
+        })
+        .await?;
+        if !unchecked {
+            // It let us in just now: no need to check it again soon.
+            network::lock(&self.network).checked(
+                url.as_str(),
+                couch_net::endpoint::RelayCheck::Accepted,
+                std::time::Instant::now(),
+            );
+        }
+        Ok(self.network_view())
+    }
+
+    /// What we can tell about our own connection, now.
+    fn network_view(&self) -> Response {
+        Response::Network(network::lock(&self.network).view())
     }
 
     /// Runs a backup or restore, one at a time, with the app's dialogs.
@@ -2750,12 +3075,18 @@ impl Engine {
             let Some((path, contents)) = opened else {
                 return Ok(Response::Backup { path: None });
             };
+            // Held through the restore: no relay change may write over the
+            // relays it brings, and none is taken until the app starts again
+            // with them (M26a).
+            let mut relays = self.relays.lock().await;
             let (reply, response) = oneshot::channel();
             self.actor
                 .send(rooms::Input::Restore(Box::new(contents), reply))
                 .await
                 .map_err(|_| EngineError::Stopped)?;
             response.await.map_err(|_| EngineError::Stopped)??;
+            relays.frozen = true;
+            drop(relays);
             tracing::info!("restored a backup into this profile");
             Ok(Response::Backup {
                 path: Some(path.display().to_string()),
@@ -2910,40 +3241,106 @@ impl Engine {
                     Ok(())
                 }
             }),
-            Command::GetNetwork => {
-                let (reply, home) = oneshot::channel();
-                self.actor
-                    .send(rooms::Input::HomeRelay(reply))
+            Command::GetNetwork => Ok(self.network_view()),
+            Command::CheckNetwork => {
+                network::lock(&self.network).forget_checks();
+                self.endpoint.network_change().await;
+                let _ = self.poke.try_send(());
+                Ok(self.network_view())
+            }
+            Command::AddRelay {
+                url,
+                token,
+                personal,
+                unchecked,
+            } => {
+                let token = token.and_then(couch_net::endpoint::RelayToken::new);
+                self.add_relay(&url, token, personal, unchecked).await
+            }
+            Command::AddRelayCode { code, unchecked } => {
+                let code = relays::code::RelayCode::parse(&code)?;
+                self.add_relay(code.url.as_str(), code.token, code.personal, unchecked)
                     .await
-                    .map_err(|_| EngineError::Stopped)?;
-                let saved = store::network(self.profile.data_dir()).relay;
-                let built_in = build_config::relay();
-                let test_build = build_config::test_build();
-                Ok(Response::Network(NetworkView {
-                    restart_needed: restart_needed(
-                        &saved,
-                        &self.relay_in_use,
-                        built_in.as_ref(),
-                        test_build,
-                    ),
-                    saved,
-                    built_in: built_in.map(|relay| relay.url.to_string()),
-                    test_build,
-                    in_use: self.relay_in_use.clone(),
-                    home_relay: home.await.map_err(|_| EngineError::Stopped)?,
+            }
+            Command::ReadRelayCode { code } => {
+                let code = relays::code::RelayCode::parse(&code)?;
+                let state = self.relays.lock().await;
+                let held = state
+                    .saved
+                    .relays
+                    .iter()
+                    .find(|r| r.url == code.url.as_str());
+                Ok(Response::RelayCode(RelayCodeView {
+                    url: code.url.to_string(),
+                    host: relay_host(code.url.as_str()),
+                    has_code: code.token.is_some(),
+                    personal: code.personal,
+                    held: held.is_some(),
+                    same_code: held.is_some_and(|r| {
+                        r.token.as_deref() == code.token.as_ref().map(|t| t.reveal())
+                    }),
                 }))
             }
-            Command::SetNetwork { relay } => {
-                // Checked now, so a typo shows here rather than at the next
-                // start.
-                relay.choice()?;
-                let relay = match relay {
-                    RelaySetting::Custom(url) => RelaySetting::Custom(url.trim().to_string()),
-                    other => other,
+            Command::ShareRelay { url } => {
+                let code = {
+                    let state = self.relays.lock().await;
+                    let url: couch_net::RelayUrl = url
+                        .trim()
+                        .parse()
+                        .map_err(|_| EngineError::Refused("that relay isn't in your list"))?;
+                    let Some(relay) = state.saved.relays.iter().find(|r| r.url == url.as_str())
+                    else {
+                        return Err(EngineError::Refused("that relay isn't in your list"));
+                    };
+                    if relay.personal {
+                        return Err(EngineError::Refused(
+                            "this relay's code is personal: it was given to you alone, so it isn't shared",
+                        ));
+                    }
+                    relays::code::RelayCode {
+                        url,
+                        token: relay
+                            .token
+                            .clone()
+                            .and_then(couch_net::endpoint::RelayToken::new),
+                        personal: false,
+                    }
+                    .encode()
                 };
-                let dir = self.profile.data_dir();
-                store::save_network(dir, &store::NetworkSettings { relay })?;
+                self.backend
+                    .copy_secret(&code)
+                    .map_err(|e| EngineError::Media(e.to_string()))?;
                 Ok(Response::Done)
+            }
+            Command::RemoveRelay { url } => {
+                self.change_relays(|state| {
+                    let url: couch_net::RelayUrl = url
+                        .trim()
+                        .parse()
+                        .map_err(|_| EngineError::Refused("that relay isn't in your list"))?;
+                    state.saved.remove(&url)?;
+                    tracing::info!(%url, "relay removed");
+                    Ok(())
+                })
+                .await
+            }
+            Command::SetPublicRelays { on } => {
+                self.change_relays(|state| {
+                    state.saved.keep_public = on;
+                    Ok(())
+                })
+                .await
+            }
+            Command::SetPublicFallback { on } => {
+                if !on {
+                    // Off now, not once the watch notices.
+                    network::lock(&self.network).stop_falling_back();
+                }
+                self.change_relays(|state| {
+                    state.saved.public_fallback = on;
+                    Ok(())
+                })
+                .await
             }
             Command::GetStreamWindow => Ok(Response::StreamWindow(StreamWindowSettingsView {
                 bar: store::stream_window(self.profile.data_dir()).bar,
@@ -3196,7 +3593,7 @@ mod tests {
 
     async fn engine(dir: &std::path::Path) -> Engine {
         let options = EngineOptions {
-            relays: RelayChoice::Disabled,
+            relays: Relays::Fixed(RelayChoice::Disabled),
             secret_store: Arc::new(secrets::Unprotected),
             ..EngineOptions::development()
         };
@@ -3278,7 +3675,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = engine(dir.path()).await;
         let options = EngineOptions {
-            relays: RelayChoice::Disabled,
+            relays: Relays::Fixed(RelayChoice::Disabled),
             secret_store: Arc::new(secrets::Unprotected),
             profile_wait: Duration::from_millis(300),
             ..EngineOptions::development()
@@ -3399,192 +3796,153 @@ mod tests {
         engine.shutdown().await;
     }
 
-    #[test]
-    fn a_relay_url_in_use_matches_it_as_typed() {
-        let restart = |saved: &RelaySetting, in_use: &Option<RelaySetting>| {
-            restart_needed(saved, in_use, None, false)
-        };
-        let typed = RelaySetting::Custom("https://relay.example.com".into());
-        let running = relay_in_use(&typed.choice_in(None, false).unwrap(), None);
-        assert_eq!(
-            running,
-            Some(RelaySetting::Custom("https://relay.example.com/".into())),
-            "iroh's own form"
-        );
-        assert!(!restart(&typed, &running));
-        assert!(restart(&RelaySetting::Public, &running));
-        assert!(restart(&typed, &Some(RelaySetting::Public)));
-        assert!(!restart(&RelaySetting::Public, &Some(RelaySetting::Public)));
-        // Broken: it runs as public, and restarting changes nothing.
-        let broken = RelaySetting::Custom("nonsense".into());
-        assert!(!restart(&broken, &Some(RelaySetting::Public)));
-    }
-
-    fn ours() -> BuiltInRelay {
-        BuiltInRelay {
-            url: "https://relay.couch.example".parse().unwrap(),
-            token: couch_net::endpoint::RelayToken::new("t"),
-        }
-    }
-
-    #[test]
-    fn the_default_follows_the_build() {
-        // A development build has no relay: the default is iroh's.
-        let dev = RelaySetting::Builtin.choice_in(None, true).unwrap();
-        assert!(matches!(dev, RelayChoice::N0Public));
-        assert_eq!(relay_in_use(&dev, None), Some(RelaySetting::Public));
-        assert!(!restart_needed(
-            &RelaySetting::Builtin,
-            &Some(RelaySetting::Public),
-            None,
-            true
-        ));
-
-        // A release build: ours, with its token.
-        let built_in = ours();
-        let release = RelaySetting::Builtin
-            .choice_in(Some(&built_in), false)
-            .unwrap();
-        let RelayChoice::Custom { urls, token } = &release else {
-            panic!("expected our relay");
-        };
-        assert_eq!(urls, std::slice::from_ref(&built_in.url));
-        assert_eq!(token, &built_in.token);
-        let running = relay_in_use(&release, Some(&built_in));
-        assert_eq!(running, Some(RelaySetting::Builtin));
-        assert!(!restart_needed(
-            &RelaySetting::Builtin,
-            &running,
-            Some(&built_in),
-            false
-        ));
-
-        // Choices saved before keep applying.
-        assert!(matches!(
-            RelaySetting::Public.choice_in(Some(&built_in), false),
-            Ok(RelayChoice::N0Public)
-        ));
-        assert!(restart_needed(
-            &RelaySetting::Public,
-            &running,
-            Some(&built_in),
-            false
-        ));
-        // A LAN relay a test build saved doesn't apply in a release build:
-        // it runs on ours, never on iroh's, and restarting changes nothing.
-        let lan = RelaySetting::Custom("http://192.168.1.10:3340".into());
-        assert!(lan.choice_in(Some(&built_in), false).is_err());
-        assert!(matches!(
-            fallback_relays(Some(&built_in)),
-            RelayChoice::Custom { .. }
-        ));
-        assert!(!restart_needed(&lan, &running, Some(&built_in), false));
-
-        // Our URL typed as your own carries no token, so it isn't ours.
-        let typed = RelaySetting::Custom(built_in.url.to_string());
-        let typed = typed.choice_in(Some(&built_in), false).unwrap();
-        assert!(matches!(
-            relay_in_use(&typed, Some(&built_in)),
-            Some(RelaySetting::Custom(_))
-        ));
-    }
-
-    #[test]
-    fn plain_http_relays_on_the_lan_only_in_test_builds() {
-        let at = |url: &str, test_build| {
-            RelaySetting::Custom(url.into())
-                .choice_in(None, test_build)
-                .is_ok()
-        };
-        for lan in [
-            "http://192.168.1.10:3340",
-            "http://10.0.0.5:3340",
-            "http://172.20.1.1:3340",
-        ] {
-            assert!(at(lan, true), "{lan}");
-            assert!(!at(lan, false), "{lan}");
-        }
-        for anywhere in ["http://localhost:3340", "http://127.0.0.1:3340"] {
-            assert!(at(anywhere, false), "{anywhere}");
-        }
-        for never in [
-            "http://8.8.8.8:3340",
-            "http://172.32.0.1:3340",
-            "http://relay.example.com",
-        ] {
-            assert!(!at(never, true), "{never}");
-        }
-    }
-
     #[tokio::test]
-    async fn the_relay_setting_is_checked_saved_and_applies_at_start() {
+    async fn relays_are_registered_replaced_and_removed_while_running() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = engine(dir.path()).await;
-        let network = || async {
-            let Response::Network(view) = engine.handle(Command::GetNetwork).await.unwrap() else {
-                panic!("expected the network view");
-            };
-            view
+        let options = EngineOptions {
+            relays: Relays::Profile(RelayRules {
+                built_in: None,
+                test_build: true,
+                public_relays: false,
+            }),
+            secret_store: Arc::new(secrets::Unprotected),
+            network: NetworkTimings {
+                check_timeout: Duration::from_secs(2),
+                ..NetworkTimings::default()
+            },
+            ..EngineOptions::development()
         };
-        let first = network().await;
-        assert_eq!(first.saved, RelaySetting::Builtin);
-        assert_eq!(first.built_in, None, "a development build");
-        assert!(first.test_build);
-        assert_eq!(first.in_use, None, "the tests run without relays");
+        let start = || async {
+            Engine::start(Profile::new("test", dir.path()).unwrap(), options.clone())
+                .await
+                .unwrap()
+        };
+        let view = |response: Result<Response, EngineError>| match response.unwrap() {
+            Response::Network(view) => view,
+            other => panic!("expected the network view, got {other:?}"),
+        };
+        let add = |url: &str, token: Option<&str>| Command::AddRelay {
+            url: url.into(),
+            token: token.map(str::to_string),
+            personal: false,
+            unchecked: true,
+        };
+
+        let engine = start().await;
+        let first = view(engine.handle(Command::GetNetwork).await);
+        assert!(first.relays.is_empty() && first.changeable && first.test_build);
+        assert!(!first.public_in_use, "tests offer no public relays");
+
+        // Checked first: nothing there, so nothing added, and saying so.
+        let gone = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let nowhere = format!("http://127.0.0.1:{gone}");
+        let checked = engine
+            .handle(Command::AddRelay {
+                url: nowhere.clone(),
+                token: Some("s3cret".into()),
+                personal: false,
+                unchecked: false,
+            })
+            .await
+            .unwrap();
+        let Response::RelayCheck(check) = checked else {
+            panic!("expected the check's answer, got {checked:?}");
+        };
+        assert_eq!(check.host, "127.0.0.1");
+        assert!(matches!(
+            check.outcome,
+            RelayCheckOutcome::Unreachable { .. }
+        ));
+        assert!(
+            view(engine.handle(Command::GetNetwork).await)
+                .relays
+                .is_empty()
+        );
+        // A code that doesn't read says why, and adds nothing.
+        let damaged = engine
+            .handle(Command::AddRelayCode {
+                code: "couch-relay-1.aGVsbG8.00000000".into(),
+                unchecked: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(damaged.to_string().contains("copy it again"), "{damaged}");
         assert_eq!(first.home_relay, None);
 
         for bad in [
             "relay.example.com",
             "http://relay.example.com",
-            "ftp://relay.example.com",
             "https://",
             "https://user:token@relay.example.com",
         ] {
-            assert!(
-                engine
-                    .handle(Command::SetNetwork {
-                        relay: RelaySetting::Custom(bad.into()),
-                    })
-                    .await
-                    .is_err(),
-                "{bad}"
-            );
+            assert!(engine.handle(add(bad, None)).await.is_err(), "{bad}");
         }
-        // The last one is checked at the next start, below.
-        for good in [
-            " https://relay.example.com ",
-            "http://192.168.1.10:3340",
-            "http://localhost:3340",
-        ] {
+        let added = view(
             engine
-                .handle(Command::SetNetwork {
-                    relay: RelaySetting::Custom(good.into()),
+                .handle(add(" http://localhost:3340 ", Some("s3cret")))
+                .await,
+        );
+        let [relay] = added.relays.as_slice() else {
+            panic!("one relay: {:?}", added.relays);
+        };
+        assert_eq!(relay.url, "http://localhost:3340/");
+        assert_eq!(relay.host, "localhost");
+        assert!(relay.has_code && !relay.built_in && !relay.personal);
+        assert!(!format!("{added:?}").contains("s3cret"));
+        assert!(!format!("{:?}", add("http://localhost:3340", Some("s3cret"))).contains("s3cret"));
+
+        // A new code for the same relay replaces the old one.
+        let replaced = view(engine.handle(add("http://localhost:3340", None)).await);
+        assert_eq!(replaced.relays.len(), 1);
+        assert!(!replaced.relays[0].has_code);
+        let kept = view(engine.handle(Command::SetPublicRelays { on: true }).await);
+        assert!(kept.keep_public);
+        // Standing in when none of ours works: off by default, the user's
+        // to allow (here never acting: these tests offer no public relays).
+        assert!(!kept.public_fallback);
+        let allowed = view(engine.handle(Command::SetPublicFallback { on: true }).await);
+        assert!(allowed.public_fallback && !allowed.falling_back);
+        engine.shutdown().await;
+        drop(engine);
+
+        // The next start holds them.
+        let engine = start().await;
+        let again = view(engine.handle(Command::GetNetwork).await);
+        assert_eq!(again.relays, replaced.relays);
+        assert!(again.keep_public);
+        assert!(again.public_fallback, "kept");
+        let removed = view(
+            engine
+                .handle(Command::RemoveRelay {
+                    url: "http://localhost:3340".into(),
+                })
+                .await,
+        );
+        assert!(removed.relays.is_empty());
+        assert!(
+            engine
+                .handle(Command::RemoveRelay {
+                    url: "http://localhost:3340".into(),
                 })
                 .await
-                .unwrap();
-            assert_eq!(
-                network().await.saved,
-                RelaySetting::Custom(good.trim().into())
-            );
-        }
+                .is_err()
+        );
         engine.shutdown().await;
+        drop(engine);
 
-        // The next start binds with it.
-        let profile = Profile::new("test", dir.path()).unwrap();
-        let RelayChoice::Custom { urls, .. } = EngineOptions::desktop(&profile).relays else {
-            panic!("expected our relay");
-        };
-        assert_eq!(urls[0].host_str(), Some("localhost"));
-        // A hand-edited file that no longer parses falls back to public.
-        std::fs::write(
-            profile.data_dir().join("network.json"),
-            br#"{"relay": {"custom": "nonsense"}}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            EngineOptions::desktop(&profile).relays,
-            RelayChoice::N0Public
-        ));
+        // Relays fixed at start (tests) can't be changed.
+        let fixed = super::tests::engine(dir.path()).await;
+        assert!(!view(fixed.handle(Command::GetNetwork).await).changeable);
+        assert!(
+            fixed
+                .handle(add("http://localhost:3340", None))
+                .await
+                .is_err()
+        );
+        fixed.shutdown().await;
     }
 
     #[test]

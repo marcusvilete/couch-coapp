@@ -5,7 +5,6 @@ import type { DriverName } from "./DriverName";
 import type { HostController } from "./HostController";
 import type { InputSetup } from "./InputSetup";
 import type { NoticeView } from "./NoticeView";
-import type { RelaySetting } from "./RelaySetting";
 import type { RemoteAction } from "./RemoteAction";
 import type { SourceChoice } from "./SourceChoice";
 import type { StreamWindowRequest } from "./StreamWindowRequest";
@@ -14,7 +13,16 @@ import type { StreamWindowRequest } from "./StreamWindowRequest";
  * Everything the UI can ask of the engine. Its `Debug` leaves out passwords
  * and invites.
  */
-export type Command = { "type": "getInfo" } | { "type": "ping", nonce: number, } | { "type": "getProfile" } | { "type": "setDisplayName", name: string, } | { "type": "listRooms" } | { "type": "createRoom", name: string, password: string, } | { "type": "previewInvite", invite: string, } | { "type": "takeOpenedInvite" } | { "type": "joinRoom", invite: string, password: string, } | { "type": "getInvite", room: string, } | { "type": "changePassword", room: string, password: string, } | { "type": "revokeInvites", room: string, } | { "type": "leaveRoom", room: string, } | { "type": "banMember", room: string, member: string, } | { "type": "getShortcuts" } | { "type": "setShortcut", id: string, code: string, } | { "type": "resetShortcuts", id: string | null, } | { "type": "getNetwork" } | { "type": "setNetwork", relay: RelaySetting, } | { "type": "getDrivers" } | { "type": "sharedChoice", forget: boolean, } | { "type": "playChime" } | { "type": "fullScreenGame" } | { "type": "getNotices" } | { "type": "exportProfile", passphrase: string, } | { "type": "restoreProfile", passphrase: string, } | { "type": "stopCatchingUp", room: string, } | { "type": "offerRoom", room: string, member: string, } | { "type": "withdrawOffer", room: string, } | { "type": "answerOffer", room: string, accept: boolean, password: string | null, } | { "type": "installDriver", driver: DriverName, } | { "type": "listSources" } | { "type": "startSession", room: string, 
+export type Command = { "type": "getInfo" } | { "type": "ping", nonce: number, } | { "type": "getProfile" } | { "type": "setDisplayName", name: string, } | { "type": "listRooms" } | { "type": "createRoom", name: string, password: string, } | { "type": "previewInvite", invite: string, } | { "type": "takeOpenedInvite" } | { "type": "joinRoom", invite: string, password: string, } | { "type": "getInvite", room: string, } | { "type": "changePassword", room: string, password: string, } | { "type": "revokeInvites", room: string, } | { "type": "leaveRoom", room: string, } | { "type": "banMember", room: string, member: string, } | { "type": "getShortcuts" } | { "type": "setShortcut", id: string, code: string, } | { "type": "resetShortcuts", id: string | null, } | { "type": "getNetwork" } | { "type": "addRelay", url: string, token: string | null, 
+/**
+ * From a personal code: never passed on (M26b).
+ */
+personal: boolean, 
+/**
+ * Saved without the check: "save anyway", for a relay that is down
+ * for now.
+ */
+unchecked: boolean, } | { "type": "checkNetwork" } | { "type": "readRelayCode", code: string, } | { "type": "addRelayCode", code: string, unchecked: boolean, } | { "type": "shareRelay", url: string, } | { "type": "removeRelay", url: string, } | { "type": "setPublicRelays", on: boolean, } | { "type": "setPublicFallback", on: boolean, } | { "type": "getDrivers" } | { "type": "sharedChoice", forget: boolean, } | { "type": "playChime" } | { "type": "fullScreenGame" } | { "type": "getNotices" } | { "type": "exportProfile", passphrase: string, } | { "type": "restoreProfile", passphrase: string, } | { "type": "stopCatchingUp", room: string, } | { "type": "offerRoom", room: string, member: string, } | { "type": "withdrawOffer", room: string, } | { "type": "answerOffer", room: string, accept: boolean, password: string | null, } | { "type": "installDriver", driver: DriverName, } | { "type": "listSources" } | { "type": "startSession", room: string, 
 /**
  * What the room sees it called (1 to 96 bytes).
  */

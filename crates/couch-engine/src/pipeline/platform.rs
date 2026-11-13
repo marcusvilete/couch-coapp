@@ -96,6 +96,11 @@ impl Backend for WindowsBackend {
         true
     }
 
+    fn copy_secret(&self, text: &str) -> Result<(), MediaError> {
+        couch_platform_win::clipboard::copy_secret(text)
+            .map_err(|e| MediaError::Backend(format!("the clipboard: {e}")))
+    }
+
     fn sources(&self) -> Result<Sources, MediaError> {
         let mut elevated = std::collections::HashMap::new();
         let windows = capture::list_windows()?

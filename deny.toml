@@ -48,6 +48,12 @@ exceptions = [
     # HUD. Font licenses that allow bundling with software under any license;
     # their texts must ship with the installer's notices (M10).
     { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+    # arboard's Windows backend (M26a). arboard is a Linux-only dependency
+    # (couch-platform-linux's clipboard), so these are never built; cargo-deny
+    # counts them because it merges the targets above per crate. BSL-1.0 is
+    # permissive and GPL-compatible anyway.
+    { crate = "clipboard-win", allow = ["BSL-1.0"] },
+    { crate = "error-code", allow = ["BSL-1.0"] },
 ]
 
 [licenses.private]

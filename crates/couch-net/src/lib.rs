@@ -14,6 +14,7 @@ pub mod congestion;
 pub mod control;
 pub mod datagrams;
 pub mod endpoint;
+pub mod health;
 pub mod input;
 #[cfg(feature = "netem")]
 pub mod netem;

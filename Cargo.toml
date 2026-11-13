@@ -56,6 +56,9 @@ futures-util = "0.3"
 # PipeWire (M16c): the shared picture and the PC's sound on a Linux host.
 # Linked against the system's libpipewire (Ubuntu 24.04: 1.0), never bundled.
 pipewire = "0.10"
+# The clipboard on Linux (M26a): a relay code copied as a secret, kept out of
+# clipboard managers' history (KDE's x-kde-passwordManagerHint). No images.
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 
 # Viewer rendering
 egui = "0.36"
@@ -133,6 +136,10 @@ debug = false
 # kept rather than unplugged (third_party/vigem-rust/PATCHED.md).
 # evdev with its UI_SET_PHYS fixed, which a Linux host's virtual controllers
 # name themselves with (third_party/evdev/PATCHED.md).
+# iroh with relay connections started again when the relay map changes, so a
+# relay registered, given a new code or removed while running applies at once
+# (M26a; third_party/iroh/PATCHED.md).
 [patch.crates-io]
+iroh = { path = "third_party/iroh" }
 vigem-rust = { path = "third_party/vigem-rust" }
 evdev = { path = "third_party/evdev" }
