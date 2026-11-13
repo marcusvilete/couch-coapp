@@ -27,8 +27,8 @@ use couch_proto::{
     control::{KeyframeReason, KeyframeRequest},
     ids::SeatEpoch,
     ipc::{
-        BoardNews, HudBoard, HudRole, HudSeat, HudState, ShortcutKeys, StreamVolume, UserAction,
-        WindowState,
+        BoardNews, HudBoard, HudLink, HudRole, HudSeat, HudState, ShortcutKeys, StreamVolume,
+        UserAction, WindowState,
     },
     session::{
         Cancel, ControlCancel, ControlRequest, ControllerReport, EndReason, GameFocus, JoinResult,
@@ -3062,6 +3062,19 @@ impl Actor {
             game_in_front: w.in_front,
             stream: status.map_or(StreamState::Waiting, |s| s.stream),
             note: w.note.clone(),
+            link: match w.state {
+                WatchState::Reconnecting(_) => HudLink::Reconnecting(
+                    self.reasons
+                        .get(&w.room)
+                        .and_then(|r| r.get(&w.host))
+                        .map(|u| crate::reasons::short(&u.reason)),
+                ),
+                _ => self
+                    .conns
+                    .get(&w.conn)
+                    .and_then(|c| c.relay.clone())
+                    .map_or(HudLink::Direct, HudLink::Relay),
+            },
             board: HudBoard {
                 on: w.board_on,
                 stopped: w.board_stopped,
@@ -3081,6 +3094,17 @@ impl Actor {
                     .unwrap_or_default(),
             },
         })
+    }
+
+    /// Tells our stream window again, if the session it watches is in one
+    /// of `rooms` (M26a-2: the path or a reason changed there).
+    pub(super) fn hud_if_watching_in<'a>(&self, rooms: impl IntoIterator<Item = &'a RoomId>) {
+        let Some(room) = self.sessions.watching.as_ref().map(|w| w.room) else {
+            return;
+        };
+        if rooms.into_iter().any(|r| *r == room) {
+            self.send_hud();
+        }
     }
 
     fn send_hud(&self) {
@@ -3303,6 +3327,15 @@ impl Actor {
                 max_viewers: s.config().max_viewers,
                 viewers: s.viewers().iter().map(MemberId::to_hex).collect(),
                 viewer_controllers: s.viewers().iter().map(|v| s.controllers_of(*v)).collect(),
+                viewer_relays: s
+                    .viewers()
+                    .iter()
+                    .map(|v| {
+                        self.current_conn(room, *v)
+                            .and_then(|c| self.conns.get(&c))
+                            .and_then(|c| c.relay.clone())
+                    })
+                    .collect(),
                 our_controllers: Vec::new(),
                 viewer_pads: s
                     .viewers()
@@ -3457,6 +3490,7 @@ impl Actor {
                 title: listing.announce.title.clone(),
                 max_viewers: listing.announce.max_viewers,
                 viewers: viewers.iter().map(MemberId::to_hex).collect(),
+                viewer_relays: Vec::new(),
                 viewer_controllers: if console.is_some() {
                     viewers
                         .iter()

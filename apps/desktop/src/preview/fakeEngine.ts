@@ -11,6 +11,8 @@ import type { Event as EngineEvent } from "../bindings/Event";
 import type { HostController } from "../bindings/HostController";
 import type { InputSetup } from "../bindings/InputSetup";
 import type { InvitePreview } from "../bindings/InvitePreview";
+import type { InviteRelay } from "../bindings/InviteRelay";
+import type { InviteRelayView } from "../bindings/InviteRelayView";
 import type { MemberView } from "../bindings/MemberView";
 import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
@@ -55,6 +57,10 @@ export type World = {
   /** What known invite links lead to; any other link looks like a fresh
    * invite to "Movie night". */
   invites: Record<string, InvitePreview>;
+  /** The relay "Movie night"'s invite names (M26a-2); none if left out. */
+  inviteRelay?: InviteRelayView;
+  /** Relays, by host, that want a code we lack (M26a-2). */
+  relaysNeedingCodes?: string[];
   /** How many controllers our stream window has, for seats we're passed. */
   myControllers: number;
   /** How the hosts we watch answer our requests. */
@@ -195,21 +201,51 @@ function nameProblem(name: string): string | null {
 }
 
 function self(): MemberView {
-  return { id: me(), name: w().profile.displayName, isOwner: true, link: "me", otherVersion: null, remote: null };
+  return {
+    id: me(),
+    name: w().profile.displayName,
+    isOwner: true,
+    link: "me",
+    otherVersion: null,
+    remote: null,
+    unreachable: null,
+  };
 }
 
 function linkFor(room: FakeRoom): string {
   return `https://marcusvilete.github.io/couch-coapp/j/#v1.${room.id}.${encodeURIComponent(room.name)}.Zm9vYmFyYmF6cXV4`;
 }
 
+/** What the fake knows of a relay an invite names (M26a-2): ours once
+ * added, wanting a code if the scenario says, else open to all. */
+function relayKnown(host: string): InviteRelay {
+  if (w().network.relays.some((r) => r.host === host)) return { type: "ours" };
+  if ((w().relaysNeedingCodes ?? []).includes(host)) return { type: "needsCode" };
+  return { type: "open" };
+}
+
+/** The invite's relay as the preview shows it at once: ours, or not
+ * checked yet. */
+function previewRelay(relay: InviteRelayView | null): InviteRelayView | null {
+  if (relay == null) return null;
+  return { ...relay, relay: relayKnown(relay.host).type === "ours" ? { type: "ours" } : { type: "unchecked" } };
+}
+
 function preview(invite: string): InvitePreview {
   const link = invite.trim();
   const known = w().invites[link];
-  if (known) return known;
+  if (known) return { ...known, relay: previewRelay(known.relay) };
   if (!/^(couchco:\/\/|https?:\/\/)/.test(link)) throw "that isn't an invite";
   const own = w().rooms.find((r) => link.includes(r.id));
-  if (own) return { room: own.id, name: own.name, status: own.isOwner ? "own" : "member", expiresInSecs: 0 };
-  return { room: "f00dfacecafe0001", name: "Movie night", status: "ready", expiresInSecs: 6 * 86400 + 3600 };
+  if (own)
+    return { room: own.id, name: own.name, status: own.isOwner ? "own" : "member", expiresInSecs: 0, relay: null };
+  return {
+    room: "f00dfacecafe0001",
+    name: "Movie night",
+    status: "ready",
+    expiresInSecs: 6 * 86400 + 3600,
+    relay: previewRelay(w().inviteRelay ?? null),
+  };
 }
 
 // ---- Sessions ----
@@ -260,6 +296,7 @@ export function hostSession(
     maxViewers,
     viewers: [],
     viewerControllers: [],
+    viewerRelays: [],
     viewerPads: [],
     ourControllers: [],
     seats,
@@ -817,12 +854,17 @@ function handle(cmd: Command): Response | Promise<Response> {
         offeringTo: null,
         offered: null,
         canOffer: true,
+        staleInvites: null,
       };
       world.rooms.push(room);
       return roomReply(room);
     }
     case "previewInvite":
       return { type: "invitePreview", ...preview(cmd.invite) };
+    case "checkInviteRelay": {
+      const p = preview(cmd.invite);
+      return { type: "inviteRelay", relay: p.relay ? { ...p.relay, relay: relayKnown(p.relay.host) } : null };
+    }
     case "takeOpenedInvite": {
       const link = world.openedInvite;
       world.openedInvite = null;
@@ -834,6 +876,14 @@ function handle(cmd: Command): Response | Promise<Response> {
       if (p.status === "expired") throw "the owner has closed this room";
       if (cmd.password.trim() === "") throw "passwords can't be empty";
       if (cmd.password === "wrong") throw "wrong password";
+      // Which step failed (M26a-2): a relay wanting a code we lack, or the
+      // owner not on theirs ("offline").
+      if (p.relay && relayKnown(p.relay.host).type === "needsCode") {
+        return { type: "joinProblem", problem: { type: "needsCode", url: p.relay.url, host: p.relay.host } };
+      }
+      if (p.relay && cmd.password === "offline") {
+        return { type: "joinProblem", problem: { type: "ownerNotOnRelay", host: p.relay.host } };
+      }
       if (cmd.password === "offline") throw "couldn't reach the room's owner: invites work while the owner's Couch Co-App is running (try again in a moment if it is)";
       const room: FakeRoom = {
         id: p.room,
@@ -841,8 +891,8 @@ function handle(cmd: Command): Response | Promise<Response> {
         isOwner: false,
         members: [
           { ...self(), isOwner: false },
-          { id: "0wner", name: "Rafa", isOwner: true, link: "direct", otherVersion: null, remote: null },
-          { id: "m1", name: "Lia", isOwner: false, link: "relay", otherVersion: null, remote: null },
+          { id: "0wner", name: "Rafa", isOwner: true, link: "direct", otherVersion: null, remote: null, unreachable: null },
+          { id: "m1", name: "Lia", isOwner: false, link: "relay", otherVersion: null, remote: null, unreachable: null },
         ],
         joinsPausedForSecs: null,
         sessions: [],
@@ -852,6 +902,7 @@ function handle(cmd: Command): Response | Promise<Response> {
         offeringTo: null,
         offered: null,
         canOffer: false,
+        staleInvites: null,
       };
       world.rooms.push(room);
       return roomReply(room);

@@ -26,8 +26,8 @@ use couch_proto::{
     board::{BoardOp, Refusal},
     ids::MemberId,
     ipc::{
-        BoardNews, Draw, FrameTiming, HudBoard, HudRole, HudSeat, HudState, LocalInput, NetStats,
-        PictureUp, StreamVolume, UserAction, WindowRequest, WindowState,
+        BoardNews, Draw, FrameTiming, HudBoard, HudLink, HudRole, HudSeat, HudState, LocalInput,
+        NetStats, PictureUp, StreamVolume, UserAction, WindowRequest, WindowState,
     },
     session::StreamState,
 };
@@ -161,10 +161,12 @@ pub enum Preview {
     /// The host's own window of its stream, drawing (M27d): no seats, no
     /// volume, Close.
     Own,
+    /// The connection to the host lost, and why (M26a-2).
+    Reconnecting,
 }
 
 impl Preview {
-    pub const NAMES: [(&'static str, Preview); 18] = [
+    pub const NAMES: [(&'static str, Preview); 19] = [
         ("watching", Preview::Watching),
         ("asking", Preview::Asking),
         ("controlling", Preview::Controlling),
@@ -183,6 +185,7 @@ impl Preview {
         ("typing", Preview::Typing),
         ("drawing-hidden", Preview::DrawingHidden),
         ("own", Preview::Own),
+        ("reconnecting", Preview::Reconnecting),
     ];
 
     pub fn named(name: &str) -> Option<Self> {
@@ -1282,7 +1285,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
                     video_pass.scaler.name()
                 ),
                 decoded.replaced_count() + behind.load(Ordering::Relaxed),
-                *net.lock().unwrap(),
+                (*net.lock().unwrap(), hud.relay()),
             );
             stat_rows.insert(2, ("Input".into(), input.hud_line()));
             stat_rows.insert(
@@ -1426,6 +1429,7 @@ fn preview_session(preview: Preview) -> HudState {
         stream: StreamState::Live,
         note: String::new(),
         board: Default::default(),
+        link: HudLink::Direct,
     };
     let bob = |seat: &mut HudSeat| {
         seat.holder = Some("Bob".into());
@@ -1490,6 +1494,10 @@ fn preview_session(preview: Preview) -> HudState {
         }
         // The host's own window (M27d): what the engine sends it, no seats,
         // the host drawing as itself.
+        P::Reconnecting => {
+            s.link = HudLink::Reconnecting(Some("relay.example.com stopped answering".into()));
+            s.note = "Reconnecting to Alice…".into();
+        }
         P::Own => {
             s.seats = Vec::new();
             s.board = HudBoard {
@@ -2315,13 +2323,22 @@ impl Stats {
         adapter: &str,
         presentation: &str,
         dropped: u64,
-        net: Option<NetStats>,
+        (net, relay): (Option<NetStats>, Option<&str>),
     ) -> Vec<(String, String)> {
         let fmt = |v: Option<f32>| v.map_or("–".to_string(), |v| format!("{v:.1} ms"));
+        // The relay by name (M26a-2): a lower picture explained.
+        let through = match relay {
+            Some(host) => format!("Relay {host}"),
+            None => "Relay".to_string(),
+        };
         let path = net.map_or("–".to_string(), |n| {
             format!(
                 "{} · rtt {:.1} ms · {:.1} Mbit/s",
-                if n.relayed { "Relay" } else { "Direct" },
+                if n.relayed {
+                    through.as_str()
+                } else {
+                    "Direct"
+                },
                 f64::from(n.rtt_us) / 1000.0,
                 f64::from(n.receive_bps) / 1e6
             )

@@ -114,6 +114,13 @@ pub enum NetworkTrouble {
 /// ignored at most: its connection starts again within moments.
 const FRESH_FOR: Duration = Duration::from_secs(5);
 
+/// How long what a probe found is kept once no member needs it (M26a-2):
+/// a member whose connection comes and goes isn't probed each time.
+const PROBE_KEEP: Duration = Duration::from_secs(10 * 60);
+
+/// Probes at once, at most: each binds an endpoint of its own.
+const PROBES_AT_ONCE: usize = 4;
+
 fn is_fresh(fresh: &BTreeMap<String, Instant>, url: &str) -> bool {
     fresh
         .get(url)
@@ -127,6 +134,34 @@ struct Checked {
     at: Instant,
     /// Due again at once ("Check again").
     stale: bool,
+}
+
+/// What probing a relay we don't hold found (M26a-2): connecting without a
+/// code tells one that wants a code from one open to all, or not answering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Probe {
+    /// It let us in without a code: open to all.
+    Open,
+    /// It wants a code we don't have.
+    NeedsCode,
+    /// It didn't answer; iroh's error, for Details.
+    Unreachable(Option<String>),
+}
+
+impl From<RelayCheck> for Probe {
+    fn from(check: RelayCheck) -> Self {
+        match check {
+            RelayCheck::Accepted => Self::Open,
+            RelayCheck::Refused(_) => Self::NeedsCode,
+            RelayCheck::Unreachable(details) => Self::Unreachable(details),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Probed {
+    probe: Probe,
+    at: Instant,
 }
 
 /// One relay we hold, as the network view lists it (its state aside).
@@ -163,6 +198,14 @@ pub(crate) struct Network {
     /// Relays whose code just changed: a refusal iroh reported before the
     /// change is old news until it reports on them again.
     fresh: BTreeMap<String, Instant>,
+    /// Relays members we can't reach are on, which we don't hold (M26a-2):
+    /// probed without a code now and then, to say why.
+    wanted: BTreeSet<String>,
+    probes: BTreeMap<String, Probed>,
+    /// Grows whenever a relay's state, the trouble or a probe changes: the
+    /// rooms' actor looks at it on its tick and works out its members'
+    /// reasons again.
+    pub generation: u64,
 }
 
 impl Network {
@@ -184,7 +227,71 @@ impl Network {
             trouble: Debounce::default(),
             benched: BTreeSet::new(),
             fresh: BTreeMap::new(),
+            wanted: BTreeSet::new(),
+            probes: BTreeMap::new(),
+            generation: 0,
         }
+    }
+
+    /// The relay `url`, if we hold it: its state now.
+    pub fn held(&self, url: &str) -> Option<RelayStateView> {
+        let facts = self.facts();
+        self.listed
+            .iter()
+            .any(|l| l.view.url == url)
+            .then(|| relay_state(url, &facts))
+    }
+
+    /// Our code for relay `url`, if we hold it with one.
+    pub fn token(&self, url: &str) -> Option<RelayToken> {
+        self.listed
+            .iter()
+            .find(|l| l.view.url == url)
+            .and_then(|l| l.token.clone())
+    }
+
+    /// iroh's public relays' state, while they are in use.
+    pub fn public(&self) -> Option<RelayStateView> {
+        self.public_in_use.then(|| public_state(&self.facts()))
+    }
+
+    /// The trouble that breaks every room, as shown (once it has lasted).
+    pub fn trouble(&self) -> Option<&NetworkTrouble> {
+        self.trouble.shown.as_ref()
+    }
+
+    /// The relays the rooms want probed: those of members we can't reach
+    /// that we don't hold, nor iroh's public ones (open to all). What was
+    /// found of a relay no longer wanted is forgotten. Whether one is new
+    /// (the watch should look at once).
+    pub fn want_probes(&mut self, urls: BTreeSet<String>) -> bool {
+        let wanted: BTreeSet<String> = urls
+            .into_iter()
+            .filter(|url| !self.listed.iter().any(|l| l.view.url == *url))
+            .filter(|url| !url.parse::<RelayUrl>().is_ok_and(|u| is_public_relay(&u)))
+            .collect();
+        self.probes
+            .retain(|url, p| wanted.contains(url) || p.at.elapsed() < PROBE_KEEP);
+        let new = wanted.iter().any(|url| !self.wanted.contains(url));
+        self.wanted = wanted;
+        new
+    }
+
+    /// What probing `url` found, if it was.
+    pub fn probe(&self, url: &str) -> Option<&Probe> {
+        self.probes.get(url).map(|p| &p.probe)
+    }
+
+    /// A probe came back; kept only while the relay is still wanted.
+    /// Whether what is known of it changed.
+    pub(crate) fn probed(&mut self, url: &str, probe: Probe, now: Instant) -> bool {
+        if !self.wanted.contains(url) {
+            return false;
+        }
+        let changed = self.probes.get(url).is_none_or(|p| p.probe != probe);
+        self.probes
+            .insert(url.to_string(), Probed { probe, at: now });
+        changed
     }
 
     /// The relay's code changed or it went: what was learned of it before
@@ -591,6 +698,9 @@ pub(crate) fn watch(
         // Each relay's check under way, with the code it checks: a new code
         // starts a check of its own at once.
         let mut checking: BTreeMap<String, Option<RelayToken>> = BTreeMap::new();
+        // Relays others are on, probed without a code (M26a-2).
+        let (probe_tx, mut probe_done) = mpsc::channel::<(String, RelayCheck)>(16);
+        let mut probing: BTreeSet<String> = BTreeSet::new();
         let mut last = None;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
@@ -621,6 +731,15 @@ pub(crate) fn watch(
                     // already forgot it, and this answer is old.
                     lock(&network).checked_with(&url, token.as_ref(), result, Instant::now());
                 }
+                Some((url, result)) = probe_done.recv() => {
+                    probing.remove(&url);
+                    let probe = Probe::from(result);
+                    tracing::debug!(%url, ?probe, "a member's relay probed");
+                    let mut network = lock(&network);
+                    if network.probed(&url, probe, Instant::now()) {
+                        network.generation += 1;
+                    }
+                }
                 _ = tick.tick() => {}
             }
             let now = Instant::now();
@@ -636,6 +755,20 @@ pub(crate) fn watch(
                     rebench,
                 )
             };
+            let probes = due_probes(&lock(&network), &probing, now, &timings);
+            for url in probes {
+                let Ok(parsed) = url.parse::<RelayUrl>() else {
+                    continue;
+                };
+                probing.insert(url.clone());
+                let done = probe_tx.clone();
+                tokio::spawn(async move {
+                    let result = check_relay(&Relay::new(parsed, None), timings.check_timeout)
+                        .await
+                        .unwrap_or_else(|e| RelayCheck::Unreachable(Some(e.to_string())));
+                    let _ = done.send((url, result)).await;
+                });
+            }
             if let Some((benched, falling_back)) = rebench {
                 let mut relays = relays.lock().await;
                 relays.apply(&endpoint, &benched, falling_back).await;
@@ -653,13 +786,57 @@ pub(crate) fn watch(
                     let _ = done.send((url, relay.token, result)).await;
                 });
             }
-            let view = lock(&network).view();
+            let view = {
+                let mut network = lock(&network);
+                let view = network.view();
+                if last.as_ref() != Some(&view) {
+                    network.generation += 1;
+                }
+                view
+            };
             if last.as_ref() != Some(&view) {
                 let _ = events.send(Event::Network(view.clone()));
                 last = Some(view);
             }
         }
     });
+}
+
+/// The relays others are on that are due a probe (M26a-2): wanted by the
+/// rooms, not being probed, and not probed lately (one that answered, open
+/// or wanting a code, at `check_every`; one that didn't, at
+/// `recheck_after`). None while the network is down: the strip says that,
+/// and every probe would fail.
+fn due_probes(
+    network: &Network,
+    probing: &BTreeSet<String>,
+    now: Instant,
+    timings: &NetworkTimings,
+) -> Vec<String> {
+    let down = matches!(
+        internet(&network.facts()),
+        InternetView::Offline | InternetView::SignIn | InternetView::Unknown
+    );
+    if down {
+        return Vec::new();
+    }
+    network
+        .wanted
+        .iter()
+        .filter(|url| !probing.contains(*url))
+        .filter(|url| match network.probes.get(*url) {
+            None => true,
+            Some(p) => {
+                let wait = match p.probe {
+                    Probe::Unreachable(_) => timings.recheck_after,
+                    Probe::Open | Probe::NeedsCode => timings.check_every,
+                };
+                now.duration_since(p.at) >= wait
+            }
+        })
+        .take(PROBES_AT_ONCE.saturating_sub(probing.len()))
+        .cloned()
+        .collect()
 }
 
 /// The relays whose code is due a check: held with a token (or without one,
@@ -705,7 +882,7 @@ fn due_checks(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use couch_net::health::{HomeRelay, NetReportSummary};
 
     use super::*;
@@ -713,7 +890,7 @@ mod tests {
     const A: &str = "https://a.example/";
     const B: &str = "https://b.example/";
 
-    fn listed(url: &str, token: Option<&str>) -> Listed {
+    pub(crate) fn listed(url: &str, token: Option<&str>) -> Listed {
         Listed {
             view: RelayView {
                 url: url.into(),
@@ -755,6 +932,41 @@ mod tests {
 
     fn states(network: &Network) -> Vec<RelayStateView> {
         network.view().relays.into_iter().map(|r| r.state).collect()
+    }
+
+    /// The probes due now (M26a-2), on a network that is up (none are, on
+    /// one down or not known yet).
+    pub(crate) fn due_probes_now(network: &mut Network) -> Vec<String> {
+        network.endpoint.report = report(true, &[]);
+        due_probes(
+            network,
+            &BTreeSet::new(),
+            Instant::now(),
+            &NetworkTimings::default(),
+        )
+    }
+
+    #[test]
+    fn at_most_four_relays_are_probed_at_once_and_none_offline() {
+        let mut network = Network::new(false, true);
+        let urls: BTreeSet<String> = (0..6).map(|i| format!("https://r{i}.example/")).collect();
+        network.want_probes(urls);
+        let none = due_probes(
+            &network,
+            &BTreeSet::new(),
+            Instant::now(),
+            &NetworkTimings::default(),
+        );
+        assert!(none.is_empty(), "nothing while the network isn't known");
+        assert_eq!(due_probes_now(&mut network).len(), 4);
+        let probing: BTreeSet<String> = ["https://r0.example/".to_string()].into();
+        let due = due_probes(
+            &network,
+            &probing,
+            Instant::now(),
+            &NetworkTimings::default(),
+        );
+        assert_eq!(due.len(), 3, "one under way: three more");
     }
 
     #[test]

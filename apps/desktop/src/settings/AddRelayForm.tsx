@@ -14,6 +14,7 @@ import { Button } from "../ui/Button";
 import { Segmented } from "../ui/Controls";
 import { Badge, Spinner } from "../ui/Feedback";
 import { PasswordInput, TextInput } from "../ui/Field";
+import { PERSONAL_WHY } from "../model/reasons";
 import { Why } from "../ui/Why";
 
 /** A check that failed, and the command to save it anyway. */
@@ -268,9 +269,12 @@ function CodePreview(props: { code: RelayCodeView }) {
       <span className="relay-preview-host selectable">{c.host}</span>
       {c.hasCode ? <Badge>with a code</Badge> : <Badge>open to everyone</Badge>}
       {c.personal && (
-        <Badge tone="info" title="Given to you alone: never passed on">
-          personal
-        </Badge>
+        <>
+          <Badge tone="info" title="Given to you alone: never passed on">
+            personal
+          </Badge>
+          <Why label="Details">{PERSONAL_WHY}</Why>
+        </>
       )}
       <span className="relay-preview-note">
         {c.sameCode ? (

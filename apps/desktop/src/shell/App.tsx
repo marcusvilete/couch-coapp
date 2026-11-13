@@ -35,6 +35,7 @@ import { StartSessionDialog } from "../sessions/StartSessionDialog";
 import { StreamPicker } from "../sessions/StreamPicker";
 import { useRun } from "../sessions/useRun";
 import type { PasteFor } from "../settings/NetworkSection";
+import { PasteCodeDialog } from "../settings/PasteCodeDialog";
 import { RelayWizard } from "../settings/RelayWizard";
 import { SettingsPage, type SettingsSection } from "../settings/SettingsPage";
 import { useLobby } from "../state/lobby";
@@ -109,6 +110,8 @@ export default function App() {
   // asks for a relay of the user's own first (M26a, the wizard), then goes
   // on.
   const askRelay = lobby.network?.askForRelay ?? false;
+  // No relay of the user's own: Create a room and Invite say so (M26a-2).
+  const publicOnly = lobby.network != null && lobby.network.relays.length === 0 && lobby.network.publicInUse;
   const open = useCallback(
     (next: AppDialog) =>
       setDialog(askRelay && (next.kind === "create" || next.kind === "invite") ? { kind: "relayWizard", then: next } : next),
@@ -382,8 +385,27 @@ export default function App() {
           onClose={close}
         />
       )}
+      {dialog?.kind === "pasteCode" && (
+        <PasteCodeDialog
+          host={dialog.host}
+          why={dialog.why}
+          testBuild={lobby.network?.testBuild ?? false}
+          onAdded={(network, host) => {
+            lobby.setNetwork(network);
+            lobby.notify(
+              host === dialog.host
+                ? `${host} added: your rooms reach it now.`
+                : `${host} added, but that code isn't ${dialog.host}'s, which still needs its own.`,
+              host === dialog.host ? "info" : "warn",
+            );
+            setDialog(null);
+          }}
+          onClose={close}
+        />
+      )}
       {dialog?.kind === "create" && (
         <CreateRoomDialog
+          publicRelays={publicOnly}
           onClose={close}
           onCreated={(created) => {
             lobby.putRoom(created);
@@ -397,6 +419,8 @@ export default function App() {
           initialInvite={dialog.invite}
           offered={pendingLink}
           onTakeOffer={() => setPendingLink(null)}
+          testBuild={lobby.network?.testBuild ?? false}
+          onNetwork={lobby.setNetwork}
           onClose={close}
           onJoined={(joined) => {
             lobby.putRoom(joined);
@@ -409,7 +433,7 @@ export default function App() {
           }}
         />
       )}
-      {dialog?.kind === "invite" && dialogRoom && <InviteDialog room={dialogRoom} onClose={close} />}
+      {dialog?.kind === "invite" && dialogRoom && <InviteDialog room={dialogRoom} publicRelays={publicOnly} onClose={close} />}
       {dialog?.kind === "password" && dialogRoom && (
         <PasswordDialog
           room={dialogRoom}

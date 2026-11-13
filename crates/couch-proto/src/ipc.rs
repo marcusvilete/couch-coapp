@@ -16,7 +16,7 @@ use crate::{
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 20;
+pub const IPC_VERSION: u16 = 21;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -308,6 +308,23 @@ pub struct HudState {
     pub note: String,
     /// Drawing on the stream (M27a).
     pub board: HudBoard,
+    /// How we reach the host (M26a-2): a picture through a relay may be
+    /// limited, and a lost connection says why when it can.
+    pub link: HudLink,
+}
+
+/// How the stream window's member reaches the host (M26a-2).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HudLink {
+    /// A direct path (or the host's own window).
+    #[default]
+    Direct,
+    /// Through this relay, by its server's name: more delay, and a picture
+    /// its bandwidth may limit.
+    Relay(String),
+    /// The connection went; waiting for it to come back. Why, when we can
+    /// tell ("relay.example.com stopped answering").
+    Reconnecting(Option<String>),
 }
 
 /// Drawing on the stream, as the window needs it (M27a).
@@ -807,6 +824,7 @@ mod tests {
                 names: vec![(crate::ids::MemberId([2; 32]), "Bia".into())],
                 pictures: true,
             },
+            link: HudLink::Reconnecting(Some("relay.example.com stopped answering".into())),
         };
         assert_eq!(from_payload(&to_payload(&hud)), Some(hud));
         use crate::board::*;

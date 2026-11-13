@@ -46,8 +46,8 @@ use couch_proto::{
     ids::MemberId,
     input::PadSnapshot,
     ipc::{
-        BoardNews, Draw, HudState, LocalInput, SeatState, ShortcutKeys, StreamVolume, UserAction,
-        VideoFrameHeader, WindowRequest, WindowState,
+        BoardNews, Draw, HudLink, HudState, LocalInput, SeatState, ShortcutKeys, StreamVolume,
+        UserAction, VideoFrameHeader, WindowRequest, WindowState,
     },
     session::{EndReason, SeatKind, StreamState},
 };
@@ -1418,6 +1418,7 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
         profile_wait: Duration::from_secs(2),
         backend: fake.clone(),
         join_wait: Duration::from_secs(5),
+        join_connect: Duration::from_secs(6),
         replace_grace: Duration::from_millis(500),
         reconnect_wait: Duration::from_secs(5),
         relay_only: false,
@@ -3419,6 +3420,18 @@ async fn watching_resumes_when_the_connection_to_the_host_comes_back() {
     let before = window.frames();
     wait("frames again", || window.frames() > before + 5).await;
     assert_eq!(b.fake.viewers.lock().unwrap().len(), 1, "the same window");
+    // M26a-2: the window knows its path again (loopback: direct), and the
+    // host's console names each viewer's relay, none here.
+    wait("the window's path direct", || {
+        window.hud().is_some_and(|h| h.link == HudLink::Direct)
+    })
+    .await;
+    a.wait_session(&room, &a, "each viewer's path", |s| {
+        s.is_some_and(|s| {
+            s.viewer_relays.len() == s.viewers.len() && s.viewer_relays.iter().all(Option::is_none)
+        })
+    })
+    .await;
     // Asking works as before.
     give_control(&room, &mut a, &b, &window).await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;

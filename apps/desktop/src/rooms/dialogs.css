@@ -173,3 +173,33 @@
   border-radius: var(--r-sm);
   background: var(--bg-input);
 }
+
+/* The owner's relay, or the step a join failed at (M26a-2): three lines
+   kept even when empty, so the password below never moves. */
+.invite-relay {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 4.5em;
+  margin-top: calc(-1 * var(--s2));
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
+
+  &.warn .invite-relay-text {
+    color: var(--warn);
+  }
+
+  & > button {
+    flex: none;
+  }
+}
+
+.invite-relay-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.form-hint.warn {
+  color: var(--warn);
+}

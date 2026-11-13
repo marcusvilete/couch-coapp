@@ -2,6 +2,7 @@
 import type { MemberLink } from "./MemberLink";
 import type { OtherVersion } from "./OtherVersion";
 import type { RemoteAccessView } from "./RemoteAccessView";
+import type { UnreachableView } from "./UnreachableView";
 
 export type MemberView = { id: string, name: string, isOwner: boolean, link: MemberLink, 
 /**
@@ -13,4 +14,9 @@ otherVersion: OtherVersion | null,
  * They offered us remote play (M25): one of our own PCs, or asking to
  * be.
  */
-remote: RemoteAccessView | null, };
+remote: RemoteAccessView | null, 
+/**
+ * Why we can't reach them, when we can tell (M26a-2): only while not
+ * connected to us, and once a dial to them has failed.
+ */
+unreachable: UnreachableView | null, };

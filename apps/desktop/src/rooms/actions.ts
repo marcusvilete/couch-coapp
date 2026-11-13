@@ -22,7 +22,9 @@ export type AppDialog =
   | { kind: "unlockRemote"; room: string; member: string }
   | ({ kind: "confirm" } & Confirm)
   /** A relay of the user's own first (M26a), then `then`. */
-  | { kind: "relayWizard"; then: AppDialog };
+  | { kind: "relayWizard"; then: AppDialog }
+  /** A relay's code, where something needs it (M26a-2). */
+  | { kind: "pasteCode"; host: string; why: string };
 
 export type RoomActions = {
   invite: () => void;
@@ -39,6 +41,8 @@ export type RoomActions = {
   accept: () => void;
   decline: () => void;
   moveBy: (delta: number) => void;
+  /** Paste the code of a relay members are on (M26a-2). */
+  pasteCode: (host: string, why: string) => void;
 };
 
 export type Context = {
@@ -128,5 +132,6 @@ export function roomActions(room: RoomView, ctx: Context): RoomActions {
     decline: () =>
       answer(() => request({ type: "answerOffer", room: room.id, accept: false, password: null }, "room")),
     moveBy: (delta) => ctx.move(room.id, delta),
+    pasteCode: (host, why) => ctx.open({ kind: "pasteCode", host, why }),
   };
 }

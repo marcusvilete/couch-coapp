@@ -5,6 +5,8 @@ import type { DriverView } from "./DriverView";
 import type { EngineInfo } from "./EngineInfo";
 import type { GameWindowView } from "./GameWindowView";
 import type { InvitePreview } from "./InvitePreview";
+import type { InviteRelayView } from "./InviteRelayView";
+import type { JoinProblem } from "./JoinProblem";
 import type { NetworkView } from "./NetworkView";
 import type { ProfileView } from "./ProfileView";
 import type { RelayCheckView } from "./RelayCheckView";
@@ -21,7 +23,7 @@ import type { TrayView } from "./TrayView";
 /**
  * The reply to a [`Command`]. Its `Debug` leaves out invite links.
  */
-export type Response = { "type": "info" } & EngineInfo | { "type": "pong", nonce: number, } | { "type": "profile" } & ProfileView | { "type": "rooms", rooms: Array<RoomView>, } | { "type": "room" } & RoomView | { "type": "invite", link: string, } | { "type": "invitePreview" } & InvitePreview | { "type": "openedInvite", link: string | null, } | { "type": "sources" } & SourceList | { "type": "soundSources", programs: Array<string>, } | { "type": "shortcuts", shortcuts: Array<ShortcutView>, 
+export type Response = { "type": "info" } & EngineInfo | { "type": "pong", nonce: number, } | { "type": "profile" } & ProfileView | { "type": "rooms", rooms: Array<RoomView>, } | { "type": "room" } & RoomView | { "type": "invite", link: string, } | { "type": "invitePreview" } & InvitePreview | { "type": "inviteRelay", relay: InviteRelayView | null, } | { "type": "joinProblem", problem: JoinProblem, } | { "type": "openedInvite", link: string | null, } | { "type": "sources" } & SourceList | { "type": "soundSources", programs: Array<string>, } | { "type": "shortcuts", shortcuts: Array<ShortcutView>, 
 /**
  * The drawing editor's own keys (M27a): fixed, listed only.
  */

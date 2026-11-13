@@ -3,9 +3,13 @@
 import { Check as CheckIcon, Clock, Copy, DoorOpen, Link2, Plus, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { InvitePreview } from "../bindings/InvitePreview";
+import type { InviteRelayView } from "../bindings/InviteRelayView";
+import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
 import type { RoomView } from "../bindings/RoomView";
-import { errorText, request } from "../engine";
+import { engineCommand, errorText, request } from "../engine";
+import { inviteRelayText, joinProblemText, PUBLIC_RELAYS_HINT, staleInvitesText, type Said } from "../model/reasons";
+import { PasteCodeDialog } from "../settings/PasteCodeDialog";
 import { takesOfferItself } from "../state/openedLink";
 import { Avatar } from "../ui/Avatar";
 import { Button } from "../ui/Button";
@@ -50,7 +54,12 @@ function passwordProblem(password: string, again: string): string | null {
   return (password.trim() === "" ? "Choose a password." : null) ?? (password !== again ? "The passwords don't match." : null);
 }
 
-export function CreateRoomDialog(props: { onClose: () => void; onCreated: (room: RoomView) => void }) {
+export function CreateRoomDialog(props: {
+  onClose: () => void;
+  onCreated: (room: RoomView) => void;
+  /** Only iroh's public relays are in use: a line says so (M26a-2). */
+  publicRelays: boolean;
+}) {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [again, setAgain] = useState("");
@@ -109,6 +118,7 @@ export function CreateRoomDialog(props: { onClose: () => void; onCreated: (room:
           Couch Co-App is running. The password isn't saved anywhere: note it down. You can change it later from the
           room's menu.
         </p>
+        {props.publicRelays && <p className="form-hint">{PUBLIC_RELAYS_HINT}</p>}
         <p className="field-error" role={error ? "alert" : undefined}>
           {error ?? " "}
         </p>
@@ -132,9 +142,19 @@ export function JoinRoomDialog(props: {
   onClose: () => void;
   onJoined: (room: RoomView) => void;
   onOpenRoom: (room: string) => void;
+  /** For pasting a relay's code (M26a-2). */
+  testBuild: boolean;
+  onNetwork: (network: NetworkView) => void;
 }) {
   const [invite, setInvite] = useState(props.initialInvite);
   const [preview, setPreview] = useState<InvitePreview | null>(null);
+  // The owner's relay, checked without a code (M26a-2), and the step a
+  // join failed at; the code pasted for it.
+  const [relay, setRelay] = useState<InviteRelayView | null>(null);
+  const [checkingRelay, setCheckingRelay] = useState(false);
+  const [problem, setProblem] = useState<Said | null>(null);
+  const [pasting, setPasting] = useState<{ host: string; why: string } | null>(null);
+  const [relayAgain, setRelayAgain] = useState(0);
   const [checking, setChecking] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [password, setPassword] = useState("");
@@ -161,6 +181,8 @@ export function JoinRoomDialog(props: {
     setError(null);
     setPreview(null);
     setInviteError(null);
+    setRelay(null);
+    setProblem(null);
     if (invite.trim() === "") {
       setChecking(false);
       return;
@@ -179,6 +201,26 @@ export function JoinRoomDialog(props: {
     };
   }, [invite]);
 
+  // The owner's relay, when nothing is known of it yet (or a code was just
+  // pasted for it): whether it wants a code we lack, before the password.
+  useEffect(() => {
+    setRelay(preview?.relay ?? null);
+    if (preview?.status !== "ready" || preview.relay == null) return;
+    if (preview.relay.relay.type !== "unchecked" && relayAgain === 0) return;
+    let live = true;
+    setCheckingRelay(true);
+    request({ type: "checkInviteRelay", invite }, "inviteRelay")
+      .then((r) => live && setRelay(r.relay))
+      .catch(() => {})
+      .finally(() => live && setCheckingRelay(false));
+    return () => {
+      live = false;
+    };
+    // The invite goes with its preview.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview, relayAgain]);
+  const relaySaid = problem ?? (relay ? inviteRelayText(relay, checkingRelay) : null);
+
   const ready = preview?.status === "ready";
   // The field is always there (no jump), so it takes the focus itself once
   // the invite checks out.
@@ -196,8 +238,17 @@ export function JoinRoomDialog(props: {
     }
     setBusy(true);
     setError(null);
+    setProblem(null);
     try {
-      props.onJoined(await request({ type: "joinRoom", invite, password }, "room"));
+      const reply = await engineCommand({ type: "joinRoom", invite, password });
+      if (reply.type === "room") {
+        props.onJoined(reply);
+        return;
+      }
+      // The owner wasn't reached: which step failed (M26a-2).
+      if (reply.type !== "joinProblem") throw new Error(`The engine answered ${reply.type}, not room.`);
+      setProblem(joinProblemText(reply.problem));
+      setBusy(false);
     } catch (e) {
       setError(errorText(e));
       setBusy(false);
@@ -301,6 +352,26 @@ export function JoinRoomDialog(props: {
             </>
           )}
         </div>
+        {/* The owner's relay, or the step a join failed at (M26a-2): kept
+            even when empty, so nothing below moves. */}
+        <div className={`invite-relay${problem || relaySaid?.fix ? " warn" : ""}`} aria-live="polite">
+          {relaySaid ? (
+            <>
+              <span className="invite-relay-text selectable">{relaySaid.text}</span>
+              {relaySaid.fix && (
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => setPasting({ host: relaySaid.fix!.host, why: relaySaid.text })}
+                >
+                  Paste a code…
+                </Button>
+              )}
+            </>
+          ) : (
+            " "
+          )}
+        </div>
         <Field label="Password" error={error} reserveError>
           {(id) => (
             <PasswordInput
@@ -313,11 +384,32 @@ export function JoinRoomDialog(props: {
           )}
         </Field>
       </form>
+      {pasting && (
+        <PasteCodeDialog
+          host={pasting.host}
+          why={pasting.why}
+          testBuild={props.testBuild}
+          onAdded={(network) => {
+            // The relay is checked again: a code for another relay leaves
+            // this one wanting its own.
+            props.onNetwork(network);
+            setPasting(null);
+            setProblem(null);
+            setRelayAgain((n) => n + 1);
+          }}
+          onClose={() => setPasting(null)}
+        />
+      )}
     </Dialog>
   );
 }
 
-export function InviteDialog(props: { room: RoomView; onClose: () => void }) {
+export function InviteDialog(props: {
+  room: RoomView;
+  onClose: () => void;
+  /** Only iroh's public relays are in use: a line says so (M26a-2). */
+  publicRelays: boolean;
+}) {
   const [link, setLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -379,6 +471,10 @@ export function InviteDialog(props: { room: RoomView; onClose: () => void }) {
           Anyone with both can join for a week, until five wrong passwords, or until you revoke invites. Treat the link
           like half of the password.
         </p>
+        {props.room.staleInvites && (
+          <p className="form-hint warn">{staleInvitesText(props.room.staleInvites, true)}</p>
+        )}
+        {props.publicRelays && <p className="form-hint">{PUBLIC_RELAYS_HINT}</p>}
         <p className="field-error" role={error ? "alert" : undefined}>
           {error ?? " "}
         </p>

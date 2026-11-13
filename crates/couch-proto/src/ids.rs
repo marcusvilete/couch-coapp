@@ -77,6 +77,13 @@ impl fmt::Debug for InviteToken {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct InviteTag(pub [u8; 16]);
 
+impl InviteTag {
+    /// Lowercase hex: a hash of the invite's token, never the token.
+    pub fn to_hex(&self) -> String {
+        hex(&self.0)
+    }
+}
+
 impl fmt::Debug for InviteTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "InviteTag({})", short_hex(&self.0))

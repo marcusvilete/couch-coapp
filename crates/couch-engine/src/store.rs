@@ -14,6 +14,10 @@
 //! - `app.json`: whether the app keeps an icon in the notification area
 //!   (M25c).
 //! - `streaming.json`: how a host captures: HDR converted to SDR (M29).
+//! - `invite-relays.json`: for rooms we own, the relay each open invite
+//!   names, by the invite's tag (a hash of its token, never the token), so
+//!   links made before our home relay moved are marked (M26a-2). Never
+//!   backed up, like the invites.
 //!
 //! The room actor rewrites `settings.json` whole, so what the engine itself
 //! writes has files of its own.
@@ -73,6 +77,7 @@ const HOST_AUDIO_FILE: &str = "host-audio.json";
 const STREAM_WINDOW_FILE: &str = "stream-window.json";
 const APP_FILE: &str = "app.json";
 const DRAWING_FILE: &str = "drawing.json";
+const INVITE_RELAYS_FILE: &str = "invite-relays.json";
 const STREAMING_FILE: &str = "streaming.json";
 const RELAYS_FILE: &str = "relays.sealed";
 /// Leads the sealed JSON of `relays.sealed`.
@@ -671,6 +676,26 @@ pub(crate) fn drawing(dir: &Path) -> DrawingSettings {
 pub(crate) fn save_drawing(dir: &Path, settings: DrawingSettings) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
     write_atomic(&dir.join(DRAWING_FILE), &bytes)
+}
+
+/// `invite-relays.json` (M26a-2): by room (hex), each open invite's tag
+/// (hex) and the relay it names.
+pub(crate) type InviteRelays = BTreeMap<String, BTreeMap<String, String>>;
+
+pub(crate) fn invite_relays(dir: &Path) -> InviteRelays {
+    let path = dir.join(INVITE_RELAYS_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            InviteRelays::default()
+        }),
+        Err(_) => InviteRelays::default(),
+    }
+}
+
+pub(crate) fn save_invite_relays(dir: &Path, relays: &InviteRelays) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(relays).expect("invite relays serialize");
+    write_atomic(&dir.join(INVITE_RELAYS_FILE), &bytes)
 }
 
 /// `streaming.json` (M29): how a host captures what it streams.

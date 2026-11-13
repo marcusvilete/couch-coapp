@@ -90,6 +90,11 @@ pub enum AdmissionError {
     Timeout,
     #[error("no answer from the other member")]
     Unreachable,
+    /// The connection to the other member couldn't be made at all (iroh's
+    /// own words): unlike [`Self::Connection`], they were never reached
+    /// (M26a-2: only this and `Unreachable` make a join look at the relay).
+    #[error("couldn't reach the other member: {0}")]
+    NotReached(String),
     #[error("protocol: {0}")]
     Protocol(String),
     #[error("connection: {0}")]
@@ -387,7 +392,7 @@ fn connect_error(e: &ConnectError) -> AdmissionError {
     };
     match closed_by_peer {
         Some(code) => AdmissionError::Refused(u32::try_from(code.into_inner()).unwrap_or(u32::MAX)),
-        None => AdmissionError::Connection(e.to_string()),
+        None => AdmissionError::NotReached(e.to_string()),
     }
 }
 

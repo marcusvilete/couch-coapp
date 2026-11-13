@@ -913,6 +913,16 @@ impl Room {
         Ok((invite, vec![Effect::Save]))
     }
 
+    /// The owner's invites still usable: not expired, not worn out by
+    /// wrong passwords (M26a-2: which links point where).
+    pub fn open_invites(&self, now_unix: u64) -> Vec<InviteTag> {
+        self.invites
+            .iter()
+            .filter(|(_, i)| i.expires > now_unix && i.failures < MAX_INVITE_FAILURES)
+            .map(|(tag, _)| *tag)
+            .collect()
+    }
+
     /// Owner only: every outstanding invite stops working.
     pub fn revoke_invites(&mut self) -> Result<Vec<Effect>, RoomError> {
         if !self.is_owner() {

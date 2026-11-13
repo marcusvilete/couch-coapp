@@ -13,6 +13,7 @@ function view(over: Partial<SessionView>): SessionView {
     maxViewers: 4,
     viewers: [],
     viewerControllers: [],
+    viewerRelays: [],
     viewerPads: [],
     ourControllers: [],
     seats: [

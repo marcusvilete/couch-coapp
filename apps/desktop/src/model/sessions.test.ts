@@ -41,6 +41,7 @@ function session(seats: SeatView[], hostOnSeats = true): SessionView {
     maxViewers: 4,
     viewers: ["a", "b"],
     viewerControllers: [2, 1],
+    viewerRelays: [null, null],
     viewerPads: [
       [
         { slot: 0, name: "DualSense" },

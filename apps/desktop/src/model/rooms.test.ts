@@ -8,7 +8,7 @@ function room(id: string, over: Partial<RoomView> = {}): RoomView {
     revision: 1,
     name: id,
     isOwner: true,
-    members: [{ id: "me", name: "Ana", isOwner: true, link: "me", otherVersion: null, remote: null }],
+    members: [{ id: "me", name: "Ana", isOwner: true, link: "me", otherVersion: null, remote: null, unreachable: null }],
     joinsPausedForSecs: null,
     sessions: [],
     catchingUp: false,
@@ -17,6 +17,7 @@ function room(id: string, over: Partial<RoomView> = {}): RoomView {
     offeringTo: null,
     offered: null,
     canOffer: true,
+    staleInvites: null,
     ...over,
   };
 }
@@ -43,9 +44,9 @@ describe("a room's line", () => {
 
   it("counts who else is online", () => {
     const members = [
-      { id: "me", name: "Ana", isOwner: true, link: "me" as const, otherVersion: null, remote: null },
-      { id: "b", name: "Bia", isOwner: false, link: "relay" as const, otherVersion: null, remote: null },
-      { id: "c", name: "Caio", isOwner: false, link: "offline" as const, otherVersion: null, remote: null },
+      { id: "me", name: "Ana", isOwner: true, link: "me" as const, otherVersion: null, remote: null, unreachable: null },
+      { id: "b", name: "Bia", isOwner: false, link: "relay" as const, otherVersion: null, remote: null, unreachable: null },
+      { id: "c", name: "Caio", isOwner: false, link: "offline" as const, otherVersion: null, remote: null, unreachable: null },
     ];
     expect(roomLine(room("a", { members }))).toBe("1 online");
     expect(roomLine(room("a"))).toBe("Only you");

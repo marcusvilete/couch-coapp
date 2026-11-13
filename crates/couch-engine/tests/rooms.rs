@@ -41,6 +41,7 @@ fn options(port: u16) -> EngineOptions {
         tick: Duration::from_millis(50),
         invite_valid_for: Duration::from_secs(3600),
         profile_wait: Duration::from_secs(2),
+        join_connect: Duration::from_secs(6),
         ..EngineOptions::development()
     }
 }
@@ -1393,6 +1394,241 @@ async fn a_room_follows_relays_registered_while_running() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(relay.refused(), refused, "refused after the code came back");
     stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// Why a member can't be reached (M26a-2): Ana holds an open relay, Bia one
+/// with a code Ana lacks, so they meet only because Bia dials Ana. With
+/// Bia away, Ana's dials to Bia's relay fail; probing it without a code
+/// tells Ana that it wants one. Given its code, Ana has nothing to say:
+/// Bia may simply be away.
+#[tokio::test]
+async fn a_member_on_a_relay_wanting_a_code_we_lack_is_said_so() {
+    use couch_engine::MemberReason;
+
+    let open = TestRelay::start(None).await;
+    let theirs = TestRelay::start(Some("bias-token")).await;
+    let on_profile = |port| EngineOptions {
+        relays: Relays::Profile(RelayRules {
+            built_in: None,
+            test_build: true,
+            public_relays: false,
+        }),
+        relay_only: true,
+        ..options(port)
+    };
+    let mut a = Member::with_options("Ana", on_profile(free_port())).await;
+    let mut b = Member::with_options("Bia", on_profile(free_port())).await;
+    let add = |url: &str, token: Option<&str>| Command::AddRelay {
+        url: url.into(),
+        token: token.map(Into::into),
+        personal: false,
+        unchecked: false,
+    };
+    a.handle(add(&open.url, None)).await.unwrap();
+    b.handle(add(&theirs.url, Some("bias-token")))
+        .await
+        .unwrap();
+    // Bia's record names the relay it is on as it joins.
+    tokio::time::timeout(WAIT, async {
+        while !matches!(
+            b.handle(Command::GetNetwork).await,
+            Ok(Response::Network(n)) if n.home_relay.is_some()
+        ) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Bia on its relay");
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+    b.join(&invite, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+    let bid = b.id();
+    let reason = |v: Option<&RoomView>| {
+        v.and_then(|v| v.members.iter().find(|m| m.id == bid))
+            .and_then(|m| m.unreachable.clone())
+    };
+    assert_eq!(reason(a.room(&room).await.as_ref()), None);
+
+    b.stop().await;
+    a.wait_for(&room, "Bia's relay wanting a code", |v| {
+        matches!(
+            reason(v).map(|u| u.reason),
+            Some(MemberReason::NeedsCode { host, .. }) if host == "127.0.0.1" || host == "localhost"
+        )
+    })
+    .await;
+    let details = reason(a.room(&room).await.as_ref()).unwrap().details;
+    assert!(details.is_some(), "the dial's error, for Details");
+
+    // Given the code, it is one of ours and works: nothing to say.
+    a.handle(add(&theirs.url, Some("bias-token")))
+        .await
+        .unwrap();
+    a.wait_for(&room, "no reason left", |v| reason(v).is_none())
+        .await;
+    b.engine = Some(start_with(b.dir.path(), b.name, on_profile(b.port)).await);
+    full_mesh(&room, &[&a, &b]).await;
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// A join says which step failed (M26a-2). Ana's invite names her relay,
+/// which wants a code Bia lacks: the preview names it, checking it says so
+/// before the password, and joining anyway fails at that step. With its
+/// code Bia joins. Ana away, a link to her new room finds the relay
+/// answering without her on it.
+#[tokio::test]
+async fn a_join_says_which_step_failed() {
+    use couch_engine::{InviteRelay, JoinProblem};
+
+    let anas = TestRelay::start(Some("anas-token")).await;
+    let open = TestRelay::start(None).await;
+    let on_profile = |port| EngineOptions {
+        relays: Relays::Profile(RelayRules {
+            built_in: None,
+            test_build: true,
+            public_relays: false,
+        }),
+        relay_only: true,
+        ..options(port)
+    };
+    let mut a = Member::with_options("Ana", on_profile(free_port())).await;
+    let mut b = Member::with_options("Bia", on_profile(free_port())).await;
+    let add = |url: &str, token: Option<&str>| Command::AddRelay {
+        url: url.into(),
+        token: token.map(Into::into),
+        personal: false,
+        unchecked: false,
+    };
+    a.handle(add(&anas.url, Some("anas-token"))).await.unwrap();
+    b.handle(add(&open.url, None)).await.unwrap();
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+
+    let Ok(Response::InvitePreview(preview)) = b
+        .handle(Command::PreviewInvite {
+            invite: invite.clone(),
+        })
+        .await
+    else {
+        panic!("a preview");
+    };
+    let relay = preview.relay.expect("the invite names Ana's relay");
+    assert_eq!(relay.relay, InviteRelay::Unchecked);
+    let Ok(Response::InviteRelay {
+        relay: Some(checked),
+    }) = b
+        .handle(Command::CheckInviteRelay {
+            invite: invite.clone(),
+        })
+        .await
+    else {
+        panic!("the relay checked");
+    };
+    assert_eq!(checked.relay, InviteRelay::NeedsCode);
+    let joined = b
+        .handle(Command::JoinRoom {
+            invite: invite.clone(),
+            password: PASSWORD.into(),
+        })
+        .await;
+    assert!(
+        matches!(
+            &joined,
+            Ok(Response::JoinProblem { problem: JoinProblem::NeedsCode { url, .. } }) if *url == relay.url
+        ),
+        "{joined:?}"
+    );
+
+    // With its code, the relay is ours, and the join goes through.
+    b.handle(add(&anas.url, Some("anas-token"))).await.unwrap();
+    let Ok(Response::InvitePreview(preview)) = b
+        .handle(Command::PreviewInvite {
+            invite: invite.clone(),
+        })
+        .await
+    else {
+        panic!("a preview");
+    };
+    assert_eq!(preview.relay.map(|r| r.relay), Some(InviteRelay::Ours));
+    b.join(&invite, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+
+    // Ana away: the relay answers, she isn't on it.
+    let other = a.create("Mesa").await.id;
+    let invite = a.invite(&other).await;
+    a.stop().await;
+    let joined = b
+        .handle(Command::JoinRoom {
+            invite,
+            password: PASSWORD.into(),
+        })
+        .await;
+    assert!(
+        matches!(
+            &joined,
+            Ok(Response::JoinProblem {
+                problem: JoinProblem::OwnerNotOnRelay { .. }
+            })
+        ),
+        "{joined:?}"
+    );
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// Links that go stale are marked at the owner (M26a-2): Ana's link names
+/// the relay she was on; she moves to another, and her room counts that
+/// link as pointing at the old one. A new link names the new relay; once
+/// she revokes her links, nothing is stale.
+#[tokio::test]
+async fn links_naming_a_relay_the_owner_left_are_marked() {
+    let first = TestRelay::start(None).await;
+    let second = TestRelay::start(None).await;
+    let options = EngineOptions {
+        relays: Relays::Profile(RelayRules {
+            built_in: None,
+            test_build: true,
+            public_relays: false,
+        }),
+        relay_only: true,
+        ..options(free_port())
+    };
+    let mut a = Member::with_options("Ana", options).await;
+    let add = |url: &str| Command::AddRelay {
+        url: url.into(),
+        token: None,
+        personal: false,
+        unchecked: false,
+    };
+    a.handle(add(&first.url)).await.unwrap();
+    let room = a.create("Sofá").await.id;
+    a.invite(&room).await;
+    assert_eq!(a.room(&room).await.unwrap().stale_invites, None);
+
+    // Moved: only the second relay is left.
+    a.handle(add(&second.url)).await.unwrap();
+    a.handle(Command::RemoveRelay {
+        url: first.url.clone(),
+    })
+    .await
+    .unwrap();
+    a.wait_for(&room, "the old link marked", |v| {
+        v.and_then(|v| v.stale_invites.as_ref())
+            .is_some_and(|s| s.count == 1)
+    })
+    .await;
+    // A new link names where Ana is now: still one old.
+    a.invite(&room).await;
+    let stale = a.room(&room).await.unwrap().stale_invites.unwrap();
+    assert_eq!(stale.count, 1, "{stale:?}");
+    a.handle(Command::RevokeInvites { room: room.clone() })
+        .await
+        .unwrap();
+    a.wait_for(&room, "nothing stale", |v| {
+        v.is_some_and(|v| v.stale_invites.is_none())
+    })
+    .await;
+    stop_all(&mut [&mut a]).await;
 }
 
 /// With relays configured, an invite never carries IP addresses, even right
