@@ -47,11 +47,13 @@ We still recommend your own, for regular play:
 - **iroh offers its public relays for testing and hobby use,** with limits it doesn't publish and no promise they stay up;
 - **with your own,** only your installers can use it, and it keeps working as long as you keep it running.
 
-**To use iroh's public relays instead:**
-- **For a whole build:** skip step 2, and build with `.\scripts\build-installer.ps1 -TestRelay` in step 3 (no `relay_url` needed). Those installers use iroh's public relays by default, and their names end in `-test`.
-- **For one PC, in any build:** **Settings → Network → "iroh's public relays (for testing)"**, then Restart now. "My relay" in the same place takes any relay's address instead.
+**To use iroh's public relays instead:** skip step 2, and build with `.\scripts\build-installer.ps1 -TestRelay` in step 3 (no `relay_url` needed). Those installers use iroh's public relays while no relay is added, and their names end in `-test`.
 
-**Everyone in a room should use the same choice.** When two PCs can't connect directly, each sends through the other's relay. Your own relay accepts only your installers, so a friend on a different setting may not get through.
+**Relays in the app** (Settings → Network, since 0.35.0):
+- **A profile holds several relays at once,** each with its own code, and they all apply at once, no restart. Whoever runs a relay gives its **relay code** (one line); you paste it under Add a relay, and the app connects with it before saving. A relay open to everyone is added by its address.
+- **Share its code** (in a relay's ⋯ menu) copies the code for a friend, kept out of the clipboard's history. Your own relay's code can also be made on the server ([deploy/relay/README.md](../deploy/relay/README.md#relay-codes)).
+- **The public relays** are used while a profile has no relay of its own, and can be kept on beside yours, or let stand in when none of yours answers.
+- **A friend reaches you through your relay only with its code,** or a build carrying it: your relay accepts only clients with its token. When two PCs can't connect directly, either holding the other's relay is enough.
 
 ## 2. Set up your relay (once)
 
@@ -133,7 +135,7 @@ Optional. A Linux PC or a Steam Deck **watches and plays** sessions, and runs a 
 
 ## How to know it worked
 
-- **Settings → Network** shows "Couch Co-App relay (<your relay's name>)", and "Connected through" it.
+- **Settings → Network** lists your relay, marked "this app's", with "Connected: others reach you through it".
 - **Settings → About** shows the version and the commit it was built from.
 
 | Settings → Network | Settings → About |
@@ -141,7 +143,7 @@ Optional. A Linux PC or a Steam Deck **watches and plays** sessions, and runs a 
 | ![Settings, Network tab: the Couch Co-App relay chosen and connected](images/settings-network.png) | ![Settings, About tab: the version, the commit and the licences](images/settings-about.png) |
 - **Your friends can join your room** from an invite link and the password, from their own networks.
 
-Everyone in a room needs an installer from the same build of yours. A different build shows "Needs update" in the member list. Other people's builds can't use your relay, because they don't have your token.
+Everyone in a room needs an installer from the same build of yours. A different build shows "Needs update" in the member list. Other people's builds can't use your relay, because they don't have your token, unless you give them its code.
 
 ## What you can skip
 

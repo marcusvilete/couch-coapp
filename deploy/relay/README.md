@@ -1,6 +1,6 @@
 # Your own relay
 
-Couch Co-App always tries a direct connection between two PCs first. A relay starts each connection, helps the two ends find each other, and carries the traffic when no direct path works (some home routers and most phone networks). There are no official installers or relay ([ADR 0009](../../docs/adr/0009-source-only-releases.md)): whoever builds installers for their friends runs a relay for them. iroh's public relays are for testing only.
+Couch Co-App always tries a direct connection between two PCs first. A relay starts each connection, helps the two ends find each other, and carries the traffic when no direct path works (some home routers and most phone networks). There are no official installers or relay ([ADR 0009](../../docs/adr/0009-source-only-releases.md)): whoever builds installers for their friends runs a relay for them, built into the installer or handed out as a relay code that anyone pastes into the app ([ADR 0014](../../docs/adr/0014-public-builds-and-registered-relays.md)). iroh's public relays work too, shared by everyone, with limits nobody publishes.
 
 The relay is iroh's own server, `iroh-relay`, at the version the app's iroh pin names (`iroh = "=X.Y.Z"` in the root `Cargo.toml`; 1.3.0 now). It forwards encrypted traffic it can't read. Admission to rooms happens between the PCs, never at the relay.
 
@@ -14,6 +14,7 @@ The relay is iroh's own server, `iroh-relay`, at the version the app's iroh pin 
 - `iroh-relay.service`: the systemd unit (its own user, sandboxed).
 - `install.sh`: builds and installs it on Debian or Ubuntu.
 - `dev.toml`: the same limits and access for running it on this PC (`scripts\relay.ps1`).
+- `relay-code.sh`: makes a relay code, the one line your friends paste into the app (below).
 
 It runs on Oracle Cloud's free tier for the maintainer's friends (October 2026). That setup is the worked example at the end.
 
@@ -57,7 +58,35 @@ Let's Encrypt needs a DNS name pointing at the server.
 5. **Try it from your PC.** Run `couch-cli latency-probe --relay https://<name> --relay-token <token> --relay-only --secs 20`. The HUD shows "Relay", and the probe finishes.
 
    The same command without `--relay-token` must fail to connect: that proves the token is required.
-6. **Point the app at it.** Set `relay_url = "https://<name>"` in `release.toml`, bump the version, and build an installer with `scripts\build-installer.ps1`. Friends install it. Their Settings → Network shows "Couch Co-App relay".
+6. **Point the app at it**, in either of two ways:
+   - **Built in:** set `relay_url = "https://<name>"` in `release.toml`, bump the version, and build an installer with `scripts\build-installer.ps1`. Friends install it. Their Settings → Network lists it marked "this app's", and it can't be removed.
+   - **By its code** (since 0.35.0): give each friend the relay's code (below). They paste it in Settings → Network → Add a relay, in any build. The app connects with it before saving, and says so if the relay refuses it.
+
+## Relay codes
+
+A relay code is the relay's address and a token on one line, such as `couch-relay-1.aHR0cHM6Ly9yZWxh….3f9a01c2`. The app checks it whole: a code cut short when copied is caught and said. Since 0.35.0 a profile holds several relays at once, each with its own code, so a friend can be on yours and on someone else's.
+
+- **Making one:**
+  - on the server, from this folder: `./relay-code.sh https://<name>/ <token>`;
+  - or in the app: Settings → Network → the relay's **⋯** → **Share its code**. It copies the code, kept out of Windows' clipboard history and its sync to other devices (and out of KDE's clipboard history on Linux). It works for any relay you hold, the built-in one included, except a personal one.
+- **Sending one:** the code lets whoever holds it use the relay. Send it privately (a direct message), never in a public channel, and only to people you'd let use your server's bandwidth.
+- **Using one:** paste it in Settings → Network → Add a relay. The app shows which relay it names and whether it holds a token, before anything is saved. Creating a room or an invite on a profile with no relay of its own also asks for one.
+- **Friends of your friends:** anyone who reaches you through your relay needs its code too, or a build carrying it. A friend on another relay reaches you as long as one of you holds the other's.
+
+## Personal codes: one per friend
+
+The shared token can't be taken back from one person, only changed for everyone. To be able to cut one friend off, give each a token of their own:
+
+1. **Make a token per friend:** `openssl rand -hex 32` on the server, once per friend. Keep the list in your password manager, with who has which.
+2. **List them all** in `/etc/iroh-relay/iroh-relay.toml`, the shared one first:
+   ```toml
+   access.shared_token = ["<shared>", "<bia's>", "<caio's>"]
+   ```
+   Then comment out the line in `/etc/iroh-relay/token.env` (its variable would replace the list) and restart: `sudo systemctl restart iroh-relay`. The config file is readable by every user on the server; on a server only you log into, that's fine.
+3. **Make each friend's code personal:** `./relay-code.sh https://<name>/ <bia's token> --personal`. Their app never passes a personal code on: Share is off for it.
+4. **To cut someone off:** take their token out of the list and restart. Their app then says the relay "no longer accepts your code: ask its owner for a new one", and their connections through it stop. Ban them from your rooms too: a direct path, or another member's relay, still reaches the rooms.
+
+Don't run `install.sh` while the list is in the config: it puts back the empty list from this folder, and with `token.env` commented out the relay would then refuse to start. Put the list back after an update.
 
 ## The token
 
@@ -73,8 +102,9 @@ Let's Encrypt needs a DNS name pointing at the server.
   1. Write `access.shared_token = ["<old>", "<new>"]` in `/etc/iroh-relay/iroh-relay.toml`. Then comment out the line in `token.env`, since that variable would replace the list, and restart.
 
      The config file is readable by every user on the server (the service's dynamic user needs it). That's acceptable for this token, which ships in every installer anyway.
-  2. Ship builds with the new token, and give everyone time to update.
-  3. Go back to the new token alone in `token.env`, and restart.
+  2. Hand out the new token: builds with it built in (`release.toml`; a new build replaces the built-in token, but never a code the user pasted for the same relay), and the new code (`./relay-code.sh https://<name>/ <new>`) to whoever pasted the old one. They paste it in Settings → Network: pasting a code for a relay already in the list gives it the new code.
+  3. **Keep both for a while,** until everyone has the new one. A PC run from afar (remote play) is the one to wait for: nobody is at it to paste a code, and with the old token gone it can't be reached until someone is.
+  4. Go back to the new token alone in `token.env`, and restart. Anyone still on the old code sees "no longer accepts your code" in Settings → Network and the strip at the bottom of the app's window, with Paste a new code.
 
   Don't run `install.sh` during a rotation: it puts back the empty list from this folder, and with `token.env` commented out the relay would then refuse to start.
 
@@ -89,7 +119,14 @@ Let's Encrypt needs a DNS name pointing at the server.
   - each client may send 2 MB/s, bursting to 4 MB: a host relaying to 7 viewers needs about 1.75 MB/s;
   - new connections are limited to 20 a second, bursting to 100.
 - **The log has noise.** Within minutes of starting, scanners from all over probe any HTTPS server. They show up as harmless errors: handshakes cut short, or plain HTTP sent to 443. Without the token, they can't use the relay.
-- **If it goes away** (the VM stopped, a reboot), it comes back by itself once the VM runs again: the service starts at boot with its saved certificate. Running apps reconnect on their own. Meanwhile, Settings → Network says "Not connected to a relay yet", and copying an invite fails.
+- **If it goes away** (the VM stopped, a reboot), it comes back by itself once the VM runs again: the service starts at boot with its saved certificate. Running apps reconnect on their own. Meanwhile, Settings → Network shows it "Not answering"; on a PC with no other relay that answers, a strip at the bottom of the window says so once it has lasted 10 seconds, and the notification area icon gets a warning dot. A user can let the public relays stand in meanwhile (Settings → Network, off by default).
+
+## Watching its load
+
+- **The provider's traffic graph** is the number that costs money; keep its bandwidth alert (above).
+- **The relay's own counters:** `curl -s http://127.0.0.1:9090/metrics | grep -i relay` on the server (or over the SSH tunnel above) shows how many clients are connected and how many bytes it has relayed since it started.
+- **The rate limits** keep any one client from flooding it; `journalctl -u iroh-relay` shows clients being throttled.
+- **Too much traffic:** give personal codes (above) and take back the ones you didn't mean to hand out, or rotate the shared token.
 
 ## Worked example: Oracle Cloud's free tier
 
