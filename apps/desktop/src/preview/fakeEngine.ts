@@ -18,6 +18,7 @@ import type { RemoteAccessView } from "../bindings/RemoteAccessView";
 import type { RemoteAction } from "../bindings/RemoteAction";
 import type { RemotePlayView } from "../bindings/RemotePlayView";
 import type { Response } from "../bindings/Response";
+import type { RelayView } from "../bindings/RelayView";
 import type { RoomView } from "../bindings/RoomView";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
@@ -389,6 +390,217 @@ function streamLevels() {
   }
 }
 
+// ---- Network (M26a) ----
+
+/** A relay code as the engine writes it: `couch-relay-1.` then the address,
+ * the token and the flags, base64url, then a checksum (the preview doesn't
+ * check it). */
+export function fakeRelayCode(url: string, token: string | null, personal = false): string {
+  const payload = btoa(`${url}\n${token ?? ""}\n${personal ? "personal" : ""}`)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `couch-relay-1.${payload}.5eed1e55`;
+}
+
+type ReadCode = { url: string; host: string; token: string | null; personal: boolean };
+
+function readCode(text: string): ReadCode {
+  const code = text.replace(/\s+/g, "");
+  if (!code.startsWith("couch-relay-")) throw "that isn't a relay code: relay codes start with couch-relay-1.";
+  const parts = code.split(".");
+  if (parts[0] !== "couch-relay-1") throw "this relay code comes from a newer Couch Co-App: update this one first";
+  if (parts.length !== 3 || !/^[0-9a-f]{8}$/.test(parts[2])) {
+    throw "this relay code is incomplete or was changed: copy it again, whole";
+  }
+  let fields: string[];
+  try {
+    fields = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")).split("\n");
+  } catch {
+    throw "this relay code is incomplete or was changed: copy it again, whole";
+  }
+  const [url, token, flags] = fields;
+  let host: string;
+  try {
+    const parsed = new URL(url);
+    host = parsed.host;
+  } catch {
+    throw "this relay code names no relay this app can use";
+  }
+  return { url: url.endsWith("/") ? url : `${url}/`, host, token: token || null, personal: flags === "personal" };
+}
+
+/** A public relay, as our home while nothing of ours is. */
+const PUBLIC_HOME = "https://euc1-1.relay.n0.iroh-canary.iroh.link./";
+
+/** The codes the preview's relays were added with, by address. */
+const relayTokens = new Map<string, string | null>();
+
+type NetworkCommand = Extract<
+  Command,
+  {
+    type:
+      | "getNetwork"
+      | "addRelay"
+      | "checkNetwork"
+      | "readRelayCode"
+      | "addRelayCode"
+      | "shareRelay"
+      | "removeRelay"
+      | "setPublicRelays"
+      | "setPublicFallback"
+      | "relayUse"
+      | "deferRelay"
+      | "getDiagnostics"
+      | "openLogFolder";
+  }
+>;
+
+/** The public relays' row and our home follow the list, as in the engine. */
+function settleNetwork(n: NetworkView) {
+  n.publicInUse = n.relays.length === 0 || n.keepPublic || n.fallingBack;
+  n.public = n.publicInUse ? (n.public ?? { type: n.relays.length === 0 ? "home" : "idle" }) : null;
+  if (n.relays.length > 0) n.askForRelay = false;
+  if (n.trouble?.type === "relayRefused" && !n.relays.some((r) => r.state.type === "refused")) n.trouble = null;
+}
+
+function networkReply(): Response {
+  const n = w().network;
+  settleNetwork(n);
+  emit({ type: "network", ...structuredClone(n) });
+  return { type: "network", ...structuredClone(n) };
+}
+
+/** Checking a relay takes a moment; a host with "down" in it never
+ * answers, a code with "old" in it is refused. */
+function addChecked(url: string, host: string, token: string | null, personal: boolean, unchecked: boolean): Promise<Response> {
+  return new Promise((resolve) =>
+    later(unchecked ? 0 : 1400, () => {
+      const n = w().network;
+      if (!unchecked && token?.includes("old")) {
+        resolve({ type: "relayCheck", url, host, outcome: { type: "refused", reason: "401 Unauthorized: unknown token" } });
+        return;
+      }
+      if (!unchecked && host.includes("down")) {
+        resolve({
+          type: "relayCheck",
+          url,
+          host,
+          outcome: { type: "unreachable", details: `connecting to ${host}: timed out after 10 s` },
+        });
+        return;
+      }
+      relayTokens.set(url, token);
+      const state: RelayView["state"] = host.includes("down") ? { type: "unreachable", details: null } : { type: "idle" };
+      const held = n.relays.find((r) => r.url === url);
+      if (held) Object.assign(held, { hasCode: token != null, personal, state });
+      else n.relays.push({ url, host, builtIn: false, hasCode: token != null, personal, state });
+      resolve(networkReply());
+    }),
+  );
+}
+
+function networkCommand(cmd: NetworkCommand): Response | Promise<Response> {
+  const world = w();
+  const n = world.network;
+  const held = (url: string) => {
+    const relay = n.relays.find((r) => r.url === url);
+    if (!relay) throw "that relay isn't in your list";
+    return relay;
+  };
+  switch (cmd.type) {
+    case "getNetwork":
+      settleNetwork(n);
+      return { type: "network", ...structuredClone(n) };
+    case "checkNetwork":
+      // A look again: what was checking settles.
+      later(1200, () => {
+        for (const r of n.relays) if (r.state.type === "checking") r.state = { type: "idle" };
+        networkReply();
+      });
+      return { type: "network", ...structuredClone(n) };
+    case "readRelayCode": {
+      const code = readCode(cmd.code);
+      const relay = n.relays.find((r) => r.url === code.url);
+      return {
+        type: "relayCode",
+        url: code.url,
+        host: code.host,
+        hasCode: code.token != null,
+        personal: code.personal,
+        held: relay != null,
+        sameCode: relay != null && relayTokens.get(code.url) === code.token,
+      };
+    }
+    case "addRelayCode": {
+      const code = readCode(cmd.code);
+      return addChecked(code.url, code.host, code.token, code.personal, cmd.unchecked);
+    }
+    case "addRelay": {
+      let parsed: URL;
+      try {
+        parsed = new URL(cmd.url.trim());
+      } catch {
+        throw "that relay address won't work: that isn't a web address";
+      }
+      if (parsed.protocol !== "https:" && !(n.testBuild && parsed.protocol === "http:")) {
+        throw "that relay address won't work: it must start with https://";
+      }
+      return addChecked(parsed.href, parsed.host, cmd.token, cmd.personal, cmd.unchecked);
+    }
+    case "shareRelay": {
+      if (held(cmd.url).personal) {
+        throw "this relay's code is personal: it was given to you alone, so it isn't shared";
+      }
+      return { type: "done" };
+    }
+    case "removeRelay": {
+      if (held(cmd.url).builtIn) throw "this app's own relay can't be removed";
+      n.relays = n.relays.filter((r) => r.url !== cmd.url);
+      // Our home went: the next relay of ours, or a public one.
+      if (n.homeRelay === cmd.url) {
+        n.homeRelay = n.relays[0]?.url ?? PUBLIC_HOME;
+        if (n.relays[0]) n.relays[0].state = { type: "home" };
+      }
+      return networkReply();
+    }
+    case "setPublicRelays":
+      n.keepPublic = cmd.on;
+      return networkReply();
+    case "setPublicFallback":
+      n.publicFallback = cmd.on;
+      if (!cmd.on) n.fallingBack = false;
+      return networkReply();
+    case "deferRelay":
+      n.askForRelay = false;
+      return networkReply();
+    case "relayUse": {
+      // Whoever is online reaches us through our home relay, or one
+      // carrying a connection, in the preview.
+      const through = cmd.url === n.homeRelay || n.relays.some((r) => r.url === cmd.url && r.state.type === "connected");
+      const rooms = through
+        ? world.rooms
+            .map((room) => ({
+              room: room.id,
+              name: room.name,
+              members: room.members.filter((m) => m.link === "relay" || m.link === "direct").map((m) => m.name),
+            }))
+            .filter((r) => r.members.length > 0)
+        : [];
+      return { type: "relayUse", rooms, remotePlay: world.remotePlay.on };
+    }
+    case "getDiagnostics":
+      return {
+        type: "diagnostics",
+        text: `Couch Co-App ${world.info.appVersion} (preview), wire revision ${world.info.protocol}\nRelays:\n${n.relays
+          .map((r) => `  ${r.host}: ${r.state.type}`)
+          .join("\n")}\n`,
+      };
+    case "openLogFolder":
+      return { type: "done" };
+  }
+}
+
 // ---- Remote play (M25) ----
 
 /** The PIN every PC in the preview unlocks with. */
@@ -753,7 +965,19 @@ function handle(cmd: Command): Response | Promise<Response> {
       }
       return { type: "shortcuts", shortcuts: world.shortcuts, drawingKeys: DRAWING_KEYS };
     case "getNetwork":
-      return { type: "network", ...world.network };
+    case "addRelay":
+    case "checkNetwork":
+    case "readRelayCode":
+    case "addRelayCode":
+    case "shareRelay":
+    case "removeRelay":
+    case "setPublicRelays":
+    case "setPublicFallback":
+    case "relayUse":
+    case "deferRelay":
+    case "getDiagnostics":
+    case "openLogFolder":
+      return networkCommand(cmd);
     case "getStreamWindow":
       return { type: "streamWindow", bar: world.streamWindowBar };
     case "getTray":
@@ -847,14 +1071,6 @@ function handle(cmd: Command): Response | Promise<Response> {
         if (r.type === "showStats") win.stats = r.on;
         changed(room);
       });
-      return { type: "done" };
-    }
-    case "setNetwork": {
-      if (typeof cmd.relay === "object" && !/^https?:\/\/[^/\s]+/.test(cmd.relay.custom)) {
-        throw "that relay address won't work: relative URL without a base";
-      }
-      world.network.saved = cmd.relay;
-      world.network.restartNeeded = JSON.stringify(world.network.saved) !== JSON.stringify(world.network.inUse);
       return { type: "done" };
     }
     case "getDrivers":

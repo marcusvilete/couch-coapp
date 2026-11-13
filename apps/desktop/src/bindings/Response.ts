@@ -9,6 +9,7 @@ import type { NetworkView } from "./NetworkView";
 import type { ProfileView } from "./ProfileView";
 import type { RelayCheckView } from "./RelayCheckView";
 import type { RelayCodeView } from "./RelayCodeView";
+import type { RelayUseView } from "./RelayUseView";
 import type { RemotePlayView } from "./RemotePlayView";
 import type { RoomView } from "./RoomView";
 import type { ShortcutView } from "./ShortcutView";
@@ -24,4 +25,4 @@ export type Response = { "type": "info" } & EngineInfo | { "type": "pong", nonce
 /**
  * The drawing editor's own keys (M27a): fixed, listed only.
  */
-drawingKeys: Array<DrawingKeyView>, } | { "type": "network" } & NetworkView | { "type": "relayCode" } & RelayCodeView | { "type": "relayCheck" } & RelayCheckView | { "type": "streamWindow" } & StreamWindowSettingsView | { "type": "tray" } & TrayView | { "type": "drawing" } & DrawingSettingsView | { "type": "streaming" } & StreamingSettingsView | { "type": "drivers", drivers: Array<DriverView>, } | { "type": "gameWindows", windows: Array<GameWindowView>, } | { "type": "sharedChoice", remembered: boolean, } | { "type": "fullScreenGame", on: boolean, } | { "type": "notices", text: string, } | { "type": "backup", path: string | null, } | { "type": "remotePlay" } & RemotePlayView | { "type": "done" };
+drawingKeys: Array<DrawingKeyView>, } | { "type": "network" } & NetworkView | { "type": "relayCode" } & RelayCodeView | { "type": "relayCheck" } & RelayCheckView | { "type": "relayUse" } & RelayUseView | { "type": "diagnostics", text: string, } | { "type": "streamWindow" } & StreamWindowSettingsView | { "type": "tray" } & TrayView | { "type": "drawing" } & DrawingSettingsView | { "type": "streaming" } & StreamingSettingsView | { "type": "drivers", drivers: Array<DriverView>, } | { "type": "gameWindows", windows: Array<GameWindowView>, } | { "type": "sharedChoice", remembered: boolean, } | { "type": "fullScreenGame", on: boolean, } | { "type": "notices", text: string, } | { "type": "backup", path: string | null, } | { "type": "remotePlay" } & RemotePlayView | { "type": "done" };

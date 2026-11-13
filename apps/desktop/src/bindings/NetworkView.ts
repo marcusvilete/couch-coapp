@@ -63,4 +63,10 @@ testBuild: boolean,
  * Relays can be added and removed here (the app); not where they were
  * fixed when the engine started (tests).
  */
-changeable: boolean, };
+changeable: boolean, 
+/**
+ * Only iroh's public relays are in use and the user hasn't put the
+ * question off: creating a room or an invite asks for a relay of their
+ * own first (the wizard; [`Command::DeferRelay`]).
+ */
+askForRelay: boolean, };

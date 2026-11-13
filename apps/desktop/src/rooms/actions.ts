@@ -20,7 +20,9 @@ export type AppDialog =
   | { kind: "startSession"; room: string; remote?: string }
   | { kind: "streamPicker"; room: string; remote?: string }
   | { kind: "unlockRemote"; room: string; member: string }
-  | ({ kind: "confirm" } & Confirm);
+  | ({ kind: "confirm" } & Confirm)
+  /** A relay of the user's own first (M26a), then `then`. */
+  | { kind: "relayWizard"; then: AppDialog };
 
 export type RoomActions = {
   invite: () => void;

@@ -1,0 +1,29 @@
+/* The shell's strip (M26a): at the bottom of the main area, one line. */
+.trouble-region {
+  flex: none;
+}
+
+.trouble-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 44px;
+  padding: var(--s2) var(--s4) var(--s2) var(--s5);
+  background: var(--warn-soft);
+  border-top: 1px solid var(--warn);
+  color: var(--text);
+
+  & > svg {
+    width: 17px;
+    height: 17px;
+    flex: none;
+    color: var(--warn);
+  }
+}
+
+.trouble-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}

@@ -12,6 +12,7 @@
 pub mod backup;
 pub mod board;
 pub mod build_config;
+mod diagnostics;
 mod network;
 pub mod pipeline;
 mod profile;
@@ -217,6 +218,26 @@ pub enum Command {
     SetPublicFallback {
         on: bool,
     },
+    /// Who reaches us through a relay: the rooms and members whose record
+    /// names it, or whose connection with us runs through it now; and
+    /// whether remote play is on. Answers with [`Response::RelayUse`].
+    RelayUse {
+        url: String,
+    },
+    /// The wizard asking for a relay is put off: "Remind me later" (in 7
+    /// days, or at the next version), or with `never`, "Stay on the public
+    /// relays". Answers with [`Response::Network`].
+    DeferRelay {
+        never: bool,
+    },
+    /// What to copy when asking someone for help with the connection:
+    /// versions, relays by address with their states, the network, and each
+    /// room's members' links, numbered. No names, IP addresses, tokens,
+    /// passwords or invites. Answers with [`Response::Diagnostics`].
+    GetDiagnostics,
+    /// Opens the folder holding this profile's logs in the system's file
+    /// manager. The webview never names the path.
+    OpenLogFolder,
     /// Whether ViGEmBus and HidHide are installed.
     GetDrivers,
     /// Whether this PC shares again, without asking, what was last chosen
@@ -864,6 +885,34 @@ pub struct NetworkView {
     /// Relays can be added and removed here (the app); not where they were
     /// fixed when the engine started (tests).
     pub changeable: bool,
+    /// Only iroh's public relays are in use and the user hasn't put the
+    /// question off: creating a room or an invite asks for a relay of their
+    /// own first (the wizard; [`Command::DeferRelay`]).
+    pub ask_for_relay: bool,
+}
+
+/// Who reaches us through a relay ([`Command::RelayUse`]), for the warning
+/// before removing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RelayUseView {
+    /// The rooms with members on it.
+    pub rooms: Vec<RelayUseRoom>,
+    /// Remote play is on: a device of the user's may be cut off from this
+    /// PC, with nobody here to fix it.
+    pub remote_play: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RelayUseRoom {
+    pub room: String,
+    pub name: String,
+    /// The members whose record names the relay, or whose connection with
+    /// us runs through it now, by name.
+    pub members: Vec<String>,
 }
 
 /// What a pasted relay code holds, before the user adds it (M26a). Never
@@ -1620,6 +1669,12 @@ pub enum Response {
     /// A relay wasn't added: it didn't let us in with its code
     /// ([`Command::AddRelay`], [`Command::AddRelayCode`]).
     RelayCheck(RelayCheckView),
+    /// Who reaches us through a relay ([`Command::RelayUse`]).
+    RelayUse(RelayUseView),
+    /// [`Command::GetDiagnostics`]: plain text, to copy.
+    Diagnostics {
+        text: String,
+    },
     StreamWindow(StreamWindowSettingsView),
     Tray(TrayView),
     Drawing(DrawingSettingsView),
@@ -1778,6 +1833,12 @@ impl fmt::Debug for Command {
             Self::SetPublicRelays { on } => {
                 f.debug_struct("SetPublicRelays").field("on", on).finish()
             }
+            Self::RelayUse { url } => f.debug_struct("RelayUse").field("url", url).finish(),
+            Self::DeferRelay { never } => {
+                f.debug_struct("DeferRelay").field("never", never).finish()
+            }
+            Self::GetDiagnostics => f.write_str("GetDiagnostics"),
+            Self::OpenLogFolder => f.write_str("OpenLogFolder"),
             Self::GetDrivers => f.write_str("GetDrivers"),
             Self::SharedChoice { forget } => f
                 .debug_struct("SharedChoice")
@@ -2021,6 +2082,11 @@ impl fmt::Debug for Response {
             Self::Network(network) => f.debug_tuple("Network").field(network).finish(),
             Self::RelayCode(code) => f.debug_tuple("RelayCode").field(code).finish(),
             Self::RelayCheck(check) => f.debug_tuple("RelayCheck").field(check).finish(),
+            Self::RelayUse(used) => f.debug_tuple("RelayUse").field(used).finish(),
+            Self::Diagnostics { text } => f
+                .debug_struct("Diagnostics")
+                .field("bytes", &text.len())
+                .finish(),
             Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
             Self::Tray(tray) => f.debug_tuple("Tray").field(tray).finish(),
             Self::Drawing(d) => f.debug_tuple("Drawing").field(d).finish(),
@@ -2560,6 +2626,7 @@ impl RelayState {
         network.keep_public = self.saved.keep_public;
         network.public_fallback = self.saved.public_fallback;
         network.public_offered = self.rules.as_ref().is_some_and(|r| r.public_relays);
+        network.ask = self.saved.ask.clone();
         // Our own relays are always dialed, a LAN one included.
         let ours = self
             .saved
@@ -2994,6 +3061,37 @@ impl Engine {
         Response::Network(network::lock(&self.network).view())
     }
 
+    /// The trouble the shell's strip and the tray say now (M26a), read
+    /// without waiting on the engine.
+    pub fn network_trouble(&self) -> Option<NetworkTrouble> {
+        network::lock(&self.network).view().trouble
+    }
+
+    /// [`Command::GetDiagnostics`].
+    async fn diagnostics(&self) -> Result<Response, EngineError> {
+        let rooms = match self.forward(Command::ListRooms).await? {
+            Response::Rooms { rooms } => rooms,
+            _ => Vec::new(),
+        };
+        let network = network::lock(&self.network).view();
+        let text = diagnostics::text(&diagnostics::Facts {
+            app_version: env!("CARGO_PKG_VERSION"),
+            commit: build_config::commit(),
+            build: if cfg!(debug_assertions) {
+                "development build"
+            } else if build_config::test_build() {
+                "test build"
+            } else {
+                "release build"
+            },
+            system: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            wire: couch_proto::PROTOCOL_MINOR,
+            network: &network,
+            rooms: &rooms,
+        });
+        Ok(Response::Diagnostics { text })
+    }
+
     /// Runs a backup or restore, one at a time, with the app's dialogs.
     async fn backing_up<F>(
         &self,
@@ -3341,6 +3439,30 @@ impl Engine {
                     Ok(())
                 })
                 .await
+            }
+            Command::DeferRelay { never } => {
+                self.change_relays(|state| {
+                    state.saved.ask = if never {
+                        relays::AskForRelay::Never
+                    } else {
+                        relays::AskForRelay::Later {
+                            until: remote::unix_now() + relays::ASK_LATER_SECS,
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                        }
+                    };
+                    Ok(())
+                })
+                .await
+            }
+            Command::GetDiagnostics => self.diagnostics().await,
+            Command::OpenLogFolder => {
+                let dir = self.profile.data_dir().to_path_buf();
+                let backend = self.backend.clone();
+                tokio::task::spawn_blocking(move || backend.open_folder(&dir))
+                    .await
+                    .map_err(|e| EngineError::Media(e.to_string()))?
+                    .map_err(|e| EngineError::Media(e.to_string()))?;
+                Ok(Response::Done)
             }
             Command::GetStreamWindow => Ok(Response::StreamWindow(StreamWindowSettingsView {
                 bar: store::stream_window(self.profile.data_dir()).bar,
@@ -3903,6 +4025,15 @@ mod tests {
         // Standing in when none of ours works: off by default, the user's
         // to allow (here never acting: these tests offer no public relays).
         assert!(!kept.public_fallback);
+        // Putting the wizard off is saved with the relays.
+        engine
+            .handle(Command::DeferRelay { never: true })
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.relays.lock().await.saved.ask,
+            relays::AskForRelay::Never
+        );
         let allowed = view(engine.handle(Command::SetPublicFallback { on: true }).await);
         assert!(allowed.public_fallback && !allowed.falling_back);
         engine.shutdown().await;

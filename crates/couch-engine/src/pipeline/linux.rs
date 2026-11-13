@@ -456,6 +456,10 @@ impl Backend for LinuxBackend {
             .map_err(|e| MediaError::Backend(format!("the clipboard: {e}")))
     }
 
+    fn open_folder(&self, dir: &std::path::Path) -> Result<(), MediaError> {
+        couch_platform_linux::folder::open(dir, "desktop.log").map_err(MediaError::Backend)
+    }
+
     /// The desktop's dialog comes when the host starts the stream, once:
     /// never over the game when a guest arrives, nor again each time
     /// someone comes back.

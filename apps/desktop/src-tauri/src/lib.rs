@@ -208,6 +208,9 @@ pub fn run() {
                 loop {
                     match events.recv().await {
                         Ok(event) => {
+                            if let couch_engine::Event::Network(network) = &event {
+                                tray_trouble(&handle, network.trouble.as_ref());
+                            }
                             if let Err(e) = handle.emit(ENGINE_EVENT, &event) {
                                 tracing::warn!("could not forward engine event: {e}");
                             }
@@ -261,6 +264,8 @@ pub fn run() {
         RunEvent::Ready => {
             let tray = tray_kept(app);
             show_tray(app, tray);
+            let trouble = app.state::<Engine>().network_trouble();
+            tray_trouble(app, trouble.as_ref());
             if background && !tray {
                 show_main_window(app);
             }
@@ -620,6 +625,86 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
     // Hidden until the engine says the user keeps it (after `build`).
     tray.build(app)?.set_visible(false)?;
     Ok(())
+}
+
+/// The tray says what silently breaks every room (M26a), in its picture and
+/// its tooltip: a PC whose window is closed to the notification area is
+/// exactly one whose friends can't reach it without anyone seeing the
+/// shell's strip. Changed only when the trouble does.
+fn tray_trouble(app: &AppHandle, trouble: Option<&couch_engine::NetworkTrouble>) {
+    use couch_engine::NetworkTrouble;
+    static SHOWN: std::sync::Mutex<Option<Option<NetworkTrouble>>> = std::sync::Mutex::new(None);
+    let Some(tray) = app.tray_by_id(TRAY) else {
+        return;
+    };
+    {
+        let mut shown = SHOWN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shown.as_ref() == Some(&trouble.cloned()) {
+            return;
+        }
+        *shown = Some(trouble.cloned());
+    }
+    let tooltip = match trouble {
+        None => "Couch Co-App".to_string(),
+        Some(NetworkTrouble::NoInternet) => "Couch Co-App: not connected to the internet".into(),
+        Some(NetworkTrouble::SignIn) => "Couch Co-App: this network wants you to sign in".into(),
+        Some(NetworkTrouble::RelayRefused { host, .. }) => {
+            format!("Couch Co-App: {host} no longer accepts your code")
+        }
+        Some(NetworkTrouble::NoRelay) => "Couch Co-App: can't reach your relay".into(),
+    };
+    let icon = tray_icon(app).map(|icon| match trouble {
+        Some(_) => with_warning(&icon),
+        None => icon,
+    });
+    if let Err(e) = tray.set_tooltip(Some(&tooltip)) {
+        tracing::warn!("the notification area icon's tooltip: {e}");
+    }
+    if let Some(icon) = icon
+        && let Err(e) = tray.set_icon(Some(icon))
+    {
+        tracing::warn!("the notification area icon: {e}");
+    }
+}
+
+/// The icon with a warning dot in its lower right corner: amber, ringed in
+/// near-black so it reads on a light taskbar and a dark one.
+fn with_warning(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+    let (w, h) = (icon.width(), icon.height());
+    let mut rgba = icon.rgba().to_vec();
+    let size = w.min(h) as f32;
+    let radius = size * 0.3;
+    let ring = (size / 16.0).max(1.0);
+    let (cx, cy) = (w as f32 - radius - 0.25, h as f32 - radius - 0.25);
+    for y in 0..h {
+        for x in 0..w {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            // Coverage, smoothed over a pixel at each edge.
+            let outer = (radius + 0.5 - d).clamp(0.0, 1.0);
+            if outer == 0.0 {
+                continue;
+            }
+            let inner = (radius - ring + 0.5 - d).clamp(0.0, 1.0);
+            let colour = |amber: f32, dark: f32| amber * inner + dark * (1.0 - inner);
+            let paint = [colour(245.0, 24.0), colour(166.0, 24.0), colour(35.0, 27.0)];
+            let at = ((y * w + x) * 4) as usize;
+            let pixel = &mut rgba[at..at + 4];
+            let under = pixel[3] as f32 / 255.0;
+            let alpha = outer + under * (1.0 - outer);
+            for c in 0..3 {
+                let mixed = paint[c] * outer + pixel[c] as f32 * under * (1.0 - outer);
+                pixel[c] = if alpha > 0.0 {
+                    (mixed / alpha).round() as u8
+                } else {
+                    0
+                };
+            }
+            pixel[3] = (alpha * 255.0).round() as u8;
+        }
+    }
+    tauri::image::Image::new_owned(rgba, w, h)
 }
 
 /// The tray's icon: the exe's icon at the notification area's size (16 px

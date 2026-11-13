@@ -2,6 +2,9 @@
 // seeing. Picked by `?scenario=<name>` or the preview's picker.
 import type { MemberLink } from "../bindings/MemberLink";
 import type { MemberView } from "../bindings/MemberView";
+import type { NetworkView } from "../bindings/NetworkView";
+import type { RelayStateView } from "../bindings/RelayStateView";
+import type { RelayView } from "../bindings/RelayView";
 import type { RemoteAccessView } from "../bindings/RemoteAccessView";
 import type { SessionView } from "../bindings/SessionView";
 import type { StreamWindowView } from "../bindings/StreamWindowView";
@@ -109,6 +112,47 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
   };
 }
 
+// ---- Our own connection (M26a) ----
+
+const BUILT_IN = "https://couchrelay.duckdns.org/";
+
+function relay(host: string, state: RelayStateView, over: Partial<RelayView> = {}): RelayView {
+  return { url: `https://${host}/`, host, builtIn: false, hasCode: true, personal: false, state, ...over };
+}
+
+/** A friends' build: its own relay, home, nothing wrong. */
+function network(over: Partial<NetworkView> = {}): NetworkView {
+  return {
+    relays: [relay("couchrelay.duckdns.org", { type: "home" }, { builtIn: true })],
+    publicInUse: false,
+    keepPublic: false,
+    publicFallback: false,
+    fallingBack: false,
+    public: null,
+    homeRelay: BUILT_IN,
+    internet: "online",
+    udp: true,
+    trouble: null,
+    testBuild: false,
+    changeable: true,
+    askForRelay: false,
+    ...over,
+  };
+}
+
+/** A public build's start: nothing registered, the public relays carry
+ * everything, and the wizard asks on creating a room or an invite. */
+function publicOnly(over: Partial<NetworkView> = {}): NetworkView {
+  return network({
+    relays: [],
+    publicInUse: true,
+    public: { type: "home" },
+    homeRelay: "https://euc1-1.relay.n0.iroh-canary.iroh.link./",
+    askForRelay: true,
+    ...over,
+  });
+}
+
 function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
   return {
     info: {
@@ -125,14 +169,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     profile: { displayName: "Ana", memberId: ME },
     rooms,
     shortcuts: defaultShortcuts(),
-    network: {
-      saved: "builtin",
-      builtIn: "https://couchrelay.duckdns.org/",
-      testBuild: false,
-      inUse: "builtin",
-      homeRelay: "https://couchrelay.duckdns.org/",
-      restartNeeded: false,
-    },
+    network: network(),
     drivers: [
       { driver: "vigembus", state: "ready", installer: true },
       { driver: "hidhide", state: "missing", installer: true },
@@ -907,6 +944,116 @@ export const SCENARIOS: Record<string, Scenario> = {
       });
       return base([sofa({ members: [you(false), pc, bia, caio], sessions: [s] })]);
     },
+  },
+  // ---- Our own connection (M26a) ----
+  "network-relays": {
+    title: "Network: the app's relay, a friend's (personal), another carrying a connection, the public relays kept on",
+    world: () =>
+      base([sofa(), friday()], {
+        network: network({
+          relays: [
+            relay("couchrelay.duckdns.org", { type: "home" }, { builtIn: true }),
+            relay("relay.bia-games.net", { type: "idle" }, { personal: true }),
+            relay("relay.friday-crew.org", { type: "connected" }),
+            relay("lan-relay.example", { type: "checking" }, { hasCode: false }),
+          ],
+          keepPublic: true,
+          publicInUse: true,
+          public: { type: "idle" },
+        }),
+      }),
+  },
+  "network-refused": {
+    title: "Network: the app's relay refuses our code (rotated): the strip, and Paste a new code",
+    world: () =>
+      base([sofa(), friday()], {
+        network: network({
+          relays: [
+            relay("couchrelay.duckdns.org", { type: "refused", reason: "401 Unauthorized: unknown token" }, { builtIn: true }),
+            relay("relay.friday-crew.org", { type: "home" }),
+          ],
+          homeRelay: "https://relay.friday-crew.org/",
+          trouble: { type: "relayRefused", url: BUILT_IN, host: "couchrelay.duckdns.org" },
+        }),
+      }),
+  },
+  "network-offline": {
+    title: "Network: not connected to the internet: the strip",
+    world: () =>
+      base([sofa(), friday()], {
+        network: network({
+          relays: [
+            relay(
+              "couchrelay.duckdns.org",
+              { type: "unreachable", details: "failed to resolve couchrelay.duckdns.org: no such host is known" },
+              { builtIn: true },
+            ),
+          ],
+          homeRelay: null,
+          internet: "offline",
+          udp: null,
+          trouble: { type: "noInternet" },
+        }),
+      }),
+  },
+  "network-sign-in": {
+    title: "Network: behind a sign-in page (a hotel's Wi-Fi): the strip",
+    world: () =>
+      base([sofa()], {
+        network: network({
+          relays: [relay("couchrelay.duckdns.org", { type: "unreachable", details: null }, { builtIn: true })],
+          homeRelay: null,
+          internet: "signIn",
+          udp: null,
+          trouble: { type: "signIn" },
+        }),
+      }),
+  },
+  "network-no-relay": {
+    title: "Network: none of our relays answers, the public relays standing in",
+    world: () =>
+      base([sofa(), friday()], {
+        network: network({
+          relays: [
+            relay(
+              "couchrelay.duckdns.org",
+              { type: "unreachable", details: "connecting to couchrelay.duckdns.org:443: timed out after 10 s" },
+              { builtIn: true },
+            ),
+            relay("relay.down.example", { type: "unreachable", details: "certificate expired" }),
+          ],
+          publicFallback: true,
+          fallingBack: true,
+          publicInUse: true,
+          public: { type: "home" },
+          homeRelay: "https://euc1-1.relay.n0.iroh-canary.iroh.link./",
+          trouble: { type: "noRelay" },
+        }),
+      }),
+  },
+  "network-udp-blocked": {
+    title: "Network: this network blocks direct connections (no UDP)",
+    world: () => base([sofa()], { network: network({ udp: false }) }),
+  },
+  "network-checking": {
+    title: "Network: just started, nothing known yet",
+    world: () =>
+      base([sofa()], {
+        network: network({
+          relays: [relay("couchrelay.duckdns.org", { type: "checking" }, { builtIn: true })],
+          homeRelay: null,
+          internet: "unknown",
+          udp: null,
+        }),
+      }),
+  },
+  "network-public": {
+    title: "Network: only the public relays (a public build's start): the wizard on creating a room or an invite",
+    world: () => base([room("a10e", "Movie night")], { network: publicOnly() }),
+  },
+  "network-public-first-run": {
+    title: "Network: only the public relays, no rooms yet: Create a room asks for a relay first",
+    world: () => base([], { network: publicOnly() }),
   },
   "release-build": {
     title: "A release build (restarts itself)",

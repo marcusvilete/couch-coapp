@@ -379,6 +379,14 @@ pub trait Backend: Send + Sync + 'static {
         ))
     }
 
+    /// Opens a profile's folder (its logs) in the system's file manager
+    /// (M26a, Settings → Network). The webview never names the path.
+    fn open_folder(&self, _dir: &std::path::Path) -> Result<(), MediaError> {
+        Err(MediaError::Unsupported(
+            "opening folders on this system".into(),
+        ))
+    }
+
     /// Whether a game in exclusive full screen is in front (Windows): no
     /// window of ours may come up over it, or it leaves full screen.
     fn exclusive_full_screen(&self) -> bool {

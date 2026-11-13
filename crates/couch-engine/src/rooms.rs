@@ -888,6 +888,7 @@ impl Actor {
                 rooms.sort_by_key(|r| r.name.to_lowercase());
                 Ok(Response::Rooms { rooms })
             }
+            Command::RelayUse { url } => Ok(Response::RelayUse(self.relay_use(&url))),
             Command::CreateRoom { name, password } => self.create(&name, &password, now),
             Command::PreviewInvite { invite } => self.preview(&invite, now),
             Command::JoinRoom { invite, password } => {
@@ -935,6 +936,9 @@ impl Actor {
             | Command::ReadRelayCode { .. }
             | Command::AddRelayCode { .. }
             | Command::ShareRelay { .. }
+            | Command::DeferRelay { .. }
+            | Command::GetDiagnostics
+            | Command::OpenLogFolder
             | Command::GetStreamWindow
             | Command::GetTray
             | Command::SetTray { .. }
@@ -1844,6 +1848,58 @@ impl Actor {
     }
 
     /// What the UI shows of a room; nothing for one we are leaving.
+    /// Who reaches us through relay `url` (M26a, the warning before removing
+    /// it): each room's members whose record names it, or whose connection
+    /// with us runs through it now.
+    fn relay_use(&self, url: &str) -> crate::RelayUseView {
+        let url = url.trim().parse::<couch_net::RelayUrl>().ok();
+        let mut rooms: Vec<crate::RelayUseRoom> = self
+            .rooms
+            .iter()
+            .filter(|(_, entry)| !entry.room.is_leaving())
+            .filter_map(|(id, entry)| {
+                let url = url.as_ref()?;
+                let conns: HashMap<MemberId, ConnId> = entry
+                    .room
+                    .connections()
+                    .into_iter()
+                    .map(|(peer, conn, _)| (peer, conn))
+                    .collect();
+                let status = entry.room.status();
+                let members: Vec<String> = status
+                    .members
+                    .into_iter()
+                    .filter(|m| m.link != LinkState::Me)
+                    .filter(|m| {
+                        let named = entry
+                            .room
+                            .member_addr(m.id)
+                            .and_then(|addr| addr.relay)
+                            .and_then(|relay| relay.parse::<couch_net::RelayUrl>().ok())
+                            .is_some_and(|relay| relay == *url);
+                        let through = conns
+                            .get(&m.id)
+                            .and_then(|c| self.conns.get(c))
+                            .and_then(|c| couch_net::health::selected_relay(&c.conn))
+                            .is_some_and(|relay| relay == *url);
+                        named || through
+                    })
+                    .map(|m| m.name)
+                    .collect();
+                (!members.is_empty()).then(|| crate::RelayUseRoom {
+                    room: id.to_hex(),
+                    name: status.name,
+                    members,
+                })
+            })
+            .collect();
+        rooms.sort_by_key(|r| r.name.to_lowercase());
+        crate::RelayUseView {
+            rooms,
+            remote_play: self.remote.on(),
+        }
+    }
+
     fn view(&self, room: RoomId, now: Instant) -> Option<RoomView> {
         let entry = self.rooms.get(&room).filter(|e| !e.room.is_leaving())?;
         let status = entry.room.status();

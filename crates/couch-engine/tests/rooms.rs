@@ -1329,6 +1329,28 @@ async fn a_room_follows_relays_registered_while_running() {
     let invite = a.invite(&room).await;
     b.join(&invite, PASSWORD).await.unwrap();
     full_mesh(&room, &[&a, &b]).await;
+    // Before removing it, Settings lists who is reached through it.
+    let Ok(Response::RelayUse(used)) = a
+        .handle(Command::RelayUse {
+            url: relay.url.clone(),
+        })
+        .await
+    else {
+        panic!("who uses the relay");
+    };
+    assert_eq!(used.rooms.len(), 1, "{used:?}");
+    assert_eq!(used.rooms[0].name, "Sofá");
+    assert_eq!(used.rooms[0].members, ["Bia"]);
+    assert!(!used.remote_play);
+    let Ok(Response::RelayUse(unused)) = a
+        .handle(Command::RelayUse {
+            url: other.url.clone(),
+        })
+        .await
+    else {
+        panic!("who uses the other relay");
+    };
+    assert!(unused.rooms.is_empty(), "{unused:?}");
 
     // Another relay beside ours, and gone again: the room stays.
     a.handle(add(&other.url, "another-token")).await.unwrap();

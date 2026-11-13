@@ -3,8 +3,9 @@
 // dialogs, notices, the splash. The engine decides everything: this keeps
 // what is shown, and sends commands.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { NetworkView } from "../bindings/NetworkView";
-import { request } from "../engine";
+import type { NetworkTrouble } from "../bindings/NetworkTrouble";
+import { errorText, request } from "../engine";
+import type { TroubleFix } from "../model/network";
 import { hosted } from "../model/overlay";
 import { moved, ordered, owner } from "../model/rooms";
 import { busyIn } from "../model/sessions";
@@ -33,6 +34,8 @@ import { UnlockRemoteDialog } from "../sessions/RemotePanel";
 import { StartSessionDialog } from "../sessions/StartSessionDialog";
 import { StreamPicker } from "../sessions/StreamPicker";
 import { useRun } from "../sessions/useRun";
+import type { PasteFor } from "../settings/NetworkSection";
+import { RelayWizard } from "../settings/RelayWizard";
 import { SettingsPage, type SettingsSection } from "../settings/SettingsPage";
 import { useLobby } from "../state/lobby";
 import { LINK_WAITS_TEXT, linkOpened, opensJoin, type Surface } from "../state/openedLink";
@@ -46,6 +49,7 @@ import { Fatal, RestartCover, Welcome } from "./Screens";
 import { Sidebar } from "./Sidebar";
 import { Splash } from "./Splash";
 import { TitleBar } from "./TitleBar";
+import { TroubleStrip } from "./TroubleStrip";
 import { useNarrow } from "./useNarrow";
 import "./App.css";
 
@@ -61,7 +65,9 @@ export default function App() {
   const [restarting, setRestarting] = useState(false);
   const [restoredDev, setRestoredDev] = useState(false);
   const [drawer, setDrawer] = useState(false);
-  const [network, setNetwork] = useState<NetworkView | null>(null);
+  /** The strip asks Settings → Network for a relay's new code. */
+  const [pasteFor, setPasteFor] = useState<PasteFor | null>(null);
+  const [checking, setChecking] = useState(false);
   const [splash, setSplash] = useState(() => platform().splash);
   const endSplash = useCallback(() => setSplash(false), []);
   const close = useCallback(() => setDialog(null), []);
@@ -86,29 +92,6 @@ export default function App() {
   }, [room?.id]);
   useEffect(() => setDrawer(false), [room?.id, drawerMode]);
 
-  // The relay we're reachable through, for your card: asked until there is
-  // one, then again whenever the window comes back.
-  useEffect(() => {
-    let live = true;
-    let timer = 0;
-    const ask = () =>
-      request({ type: "getNetwork" }, "network")
-        .then((v) => {
-          if (!live) return;
-          setNetwork(v);
-          if (v.homeRelay == null) timer = window.setTimeout(ask, 2000);
-        })
-        .catch(() => {});
-    void ask();
-    const onFocus = () => void ask();
-    window.addEventListener("focus", onFocus);
-    return () => {
-      live = false;
-      window.clearTimeout(timer);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, []);
-
   const move = useCallback(
     (id: string, to: number) => {
       const next = moved(
@@ -122,8 +105,35 @@ export default function App() {
     [rooms],
   );
 
+  // Creating a room or an invite while only the public relays are in use
+  // asks for a relay of the user's own first (M26a, the wizard), then goes
+  // on.
+  const askRelay = lobby.network?.askForRelay ?? false;
+  const open = useCallback(
+    (next: AppDialog) =>
+      setDialog(askRelay && (next.kind === "create" || next.kind === "invite") ? { kind: "relayWizard", then: next } : next),
+    [askRelay],
+  );
+
+  // The strip's button: check the network again, or Settings → Network.
+  const fixTrouble = (fix: TroubleFix, trouble: NetworkTrouble) => {
+    if (fix === "check") {
+      setChecking(true);
+      request({ type: "checkNetwork" }, "network")
+        .then(lobby.setNetwork)
+        .catch((e) => lobby.notify(errorText(e), "warn"))
+        .finally(() => window.setTimeout(() => setChecking(false), 1500));
+      return;
+    }
+    setSection("network");
+    setView("settings");
+    if (fix === "pasteCode" && trouble.type === "relayRefused") {
+      setPasteFor((was) => ({ host: trouble.host, seq: (was?.seq ?? 0) + 1 }));
+    }
+  };
+
   const ctx: Context = {
-    open: setDialog,
+    open,
     notify: lobby.notify,
     putRoom: lobby.putRoom,
     move: (id, delta) => move(id, rooms.findIndex((r) => r.id === id) + delta),
@@ -257,7 +267,7 @@ export default function App() {
             menuOf={(r, i) => roomMenu(r, roomActions(r, ctx), { index: i, count: rooms.length })}
             profile={lobby.profile}
             info={lobby.info}
-            network={network}
+            network={lobby.network}
             onEditName={() => setDialog({ kind: "name" })}
             onSettings={() => setView("settings")}
           />
@@ -299,6 +309,9 @@ export default function App() {
                 onRestarting={setRestarting}
                 restoredDev={restoredDev}
                 onRestoredDev={() => setRestoredDev(true)}
+                network={lobby.network}
+                onNetwork={lobby.setNetwork}
+                pasteFor={pasteFor}
               />
             ) : room && actions ? (
               <>
@@ -341,11 +354,12 @@ export default function App() {
             ) : lobby.loaded ? (
               <Welcome
                 name={lobby.profile?.displayName ?? null}
-                onCreate={() => setDialog({ kind: "create" })}
+                onCreate={() => open({ kind: "create" })}
                 onJoin={() => setDialog({ kind: "join", invite: "" })}
                 onEditName={() => setDialog({ kind: "name" })}
               />
             ) : null}
+            <TroubleStrip network={lobby.network} working={checking} onFix={fixTrouble} />
           </div>
         </div>
       </div>
@@ -355,8 +369,17 @@ export default function App() {
       {dialog?.kind === "add" && (
         <AddRoomDialog
           onClose={close}
-          onCreate={() => setDialog({ kind: "create" })}
+          onCreate={() => open({ kind: "create" })}
           onJoin={() => setDialog({ kind: "join", invite: "" })}
+        />
+      )}
+      {dialog?.kind === "relayWizard" && (
+        <RelayWizard
+          testBuild={lobby.network?.testBuild ?? false}
+          repository={lobby.info?.repository ?? null}
+          onNetwork={lobby.setNetwork}
+          onDone={() => setDialog(dialog.then)}
+          onClose={close}
         />
       )}
       {dialog?.kind === "create" && (

@@ -25,7 +25,7 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, watch};
 use ts_rs::TS;
 
-use crate::{Event, NetworkView, RelayState, RelayView};
+use crate::{Event, NetworkView, RelayState, RelayView, relays::AskForRelay};
 
 /// How the watch is timed. Tests shorten it.
 #[derive(Debug, Clone, Copy)]
@@ -151,6 +151,8 @@ pub(crate) struct Network {
     fallback_since: Option<Instant>,
     pub test_build: bool,
     pub changeable: bool,
+    /// Whether to ask for a relay of the user's own (the wizard).
+    pub ask: AskForRelay,
     endpoint: EndpointHealth,
     carrying: BTreeSet<String>,
     checks: BTreeMap<String, Checked>,
@@ -175,6 +177,7 @@ impl Network {
             fallback_since: None,
             test_build,
             changeable,
+            ask: AskForRelay::Never,
             endpoint: EndpointHealth::default(),
             carrying: BTreeSet::new(),
             checks: BTreeMap::new(),
@@ -334,7 +337,17 @@ impl Network {
             trouble: self.trouble.shown.clone(),
             test_build: self.test_build,
             changeable: self.changeable,
+            ask_for_relay: self.asks_for_relay(crate::remote::unix_now()),
         }
+    }
+
+    /// The wizard asks for a relay while only iroh's public relays are in
+    /// use (nothing registered) and the user hasn't put the question off.
+    pub fn asks_for_relay(&self, now_unix: u64) -> bool {
+        self.changeable
+            && self.public_offered
+            && self.listed.is_empty()
+            && self.ask.due(now_unix, env!("CARGO_PKG_VERSION"))
     }
 
     fn facts(&self) -> Facts<'_> {
@@ -711,6 +724,43 @@ mod tests {
 
     fn states(network: &Network) -> Vec<RelayStateView> {
         network.view().relays.into_iter().map(|r| r.state).collect()
+    }
+
+    #[test]
+    fn the_wizard_asks_only_on_the_public_relays_and_until_put_off() {
+        const NOW: u64 = 1_800_000_000;
+        let version = env!("CARGO_PKG_VERSION");
+        let mut n = network(&[]);
+        n.public_offered = true;
+        n.ask = AskForRelay::Now;
+        assert!(n.asks_for_relay(NOW));
+        // A relay of the user's own: never.
+        n.listed = vec![listed(A, Some("t"))];
+        assert!(!n.asks_for_relay(NOW));
+        n.listed.clear();
+        // Remind me later: 7 days, or the next version.
+        n.ask = AskForRelay::Later {
+            until: NOW + crate::relays::ASK_LATER_SECS,
+            version: version.into(),
+        };
+        assert!(!n.asks_for_relay(NOW));
+        assert!(!n.asks_for_relay(NOW + crate::relays::ASK_LATER_SECS - 1));
+        assert!(n.asks_for_relay(NOW + crate::relays::ASK_LATER_SECS));
+        n.ask = AskForRelay::Later {
+            until: NOW + crate::relays::ASK_LATER_SECS,
+            version: "0.0.1".into(),
+        };
+        assert!(n.asks_for_relay(NOW));
+        // Stay on the public relays.
+        n.ask = AskForRelay::Never;
+        assert!(!n.asks_for_relay(NOW));
+        // Nowhere relays can't change, nor without the public relays.
+        n.ask = AskForRelay::Now;
+        n.changeable = false;
+        assert!(!n.asks_for_relay(NOW));
+        n.changeable = true;
+        n.public_offered = false;
+        assert!(!n.asks_for_relay(NOW));
     }
 
     #[test]

@@ -92,6 +92,41 @@ pub(crate) struct SavedRelays {
     /// Off by default: our traffic goes through relays we chose.
     #[serde(default)]
     pub public_fallback: bool,
+    /// Whether the app asks for a relay of the user's own while only
+    /// iroh's public relays are in use (the wizard, on creating a room or
+    /// an invite).
+    #[serde(default)]
+    pub ask: AskForRelay,
+}
+
+/// The wizard's answer: ask now, later, or never again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AskForRelay {
+    #[default]
+    Now,
+    /// "Remind me later": until then (seconds since 1970, UTC), or a
+    /// version other than this one, whichever comes first.
+    Later { until: u64, version: String },
+    /// "Stay on the public relays": Settings still offers adding one.
+    Never,
+}
+
+/// "Remind me later" puts the question off this long.
+pub const ASK_LATER_SECS: u64 = 7 * 24 * 60 * 60;
+
+impl AskForRelay {
+    /// Whether to ask now, `version` being this app's.
+    pub fn due(&self, now_unix: u64, version: &str) -> bool {
+        match self {
+            Self::Now => true,
+            Self::Later {
+                until,
+                version: then,
+            } => now_unix >= *until || then != version,
+            Self::Never => false,
+        }
+    }
 }
 
 /// What [`SavedRelays::add`] did.

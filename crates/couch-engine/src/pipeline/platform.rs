@@ -101,6 +101,16 @@ impl Backend for WindowsBackend {
             .map_err(|e| MediaError::Backend(format!("the clipboard: {e}")))
     }
 
+    fn open_folder(&self, dir: &std::path::Path) -> Result<(), MediaError> {
+        // Explorer answers 1 even when it opened the folder: only starting
+        // it counts.
+        std::process::Command::new("explorer.exe")
+            .arg(dir)
+            .spawn()
+            .map(drop)
+            .map_err(|e| MediaError::Backend(format!("Explorer: {e}")))
+    }
+
     fn sources(&self) -> Result<Sources, MediaError> {
         let mut elevated = std::collections::HashMap::new();
         let windows = capture::list_windows()?
