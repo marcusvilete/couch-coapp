@@ -2,6 +2,8 @@
 
 **Status:** accepted (2026-10-08), the user's decision. It replaces the plan for a public binary release (M10b as first planned) and the updater (M11).
 
+**Amended by [ADR 0014](0014-public-builds-and-registered-relays.md) (2026-11-13, M26):** public installers come back, built by CI and published as GitHub Releases, unsigned, with no secret in them; the app tells of new versions. The updater, signing and the wire freeze stay dropped, and the private route below stays.
+
 ## Context
 
 M10b was planned as a public binary release, with:

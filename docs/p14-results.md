@@ -61,6 +61,6 @@ Also fixed from it: the `app-manual-run` skill and `chime.ts` still said the ove
 
 ## Still to come
 
-- **Your run over a real exclusive full-screen game:** a guest asking and someone joining or leaving must leave the game in full screen with no toast; the same game borderless shows the toasts. And how the desktop-control banner behaves there.
+- ~~**Your run over a real exclusive full-screen game**~~: done, the author's (2026-11-12): no overlay over a real game in exclusive full screen.
 - **The Deck's gaps themselves** may come from its Wi-Fi power saving, which this doesn't touch: worth trying with power saving off for that network (NetworkManager's `wifi.powersave`).
 - The other field findings: a Windows host with HDR on gives washed-out colours; the Deck's Desktop Mode can't host (X11, M28).
