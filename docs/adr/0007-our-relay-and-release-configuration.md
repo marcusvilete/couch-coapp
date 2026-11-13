@@ -1,6 +1,6 @@
 # ADR 0007: Our relay admits only our app with a shared token; release values stay out of git
 
-**Status:** accepted (2026-10-08), M7.
+**Status:** accepted (2026-10-08), M7. **Amended by [ADR 0014](0014-public-builds-and-registered-relays.md)** (2026-11-13, M26): a relay's token is something the user registers (several relays, each with its own token, all used at once), and a build's own relay is the first one registered; the relay and its token stay out of git as below.
 
 ## Context
 

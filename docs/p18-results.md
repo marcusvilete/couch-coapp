@@ -76,7 +76,7 @@ A fresh agent went over the whole branch against main. Nothing weakened the inpu
 
 ## Still to come
 
-- **On GNOME, the reviews' fixes** (the extension's version 5, after its Update and a log-out): its 250 ms beat, slow aiming jitter (no freeze, no lock), the dock's edge again.
-- **In drawing mode, the click that focuses the stream window** drawing nothing.- **A desktop at 200% on GNOME** (the VM's 2560×1600 mode, scaled 200%: Mutter's integer scaling may multiply relative motion by the scale): fling at an edge; if the pointer overshoots, the moves are multiplied past `WORST_ACCELERATION`. KDE's 200% wasn't tried (the VM's minimal Plasma has no KScreen to change it), and KWin works in logical pixels.
+- **Dropped by the author (2026-11-12):** on GNOME, the reviews' fixes (the extension's version 5 after its Update: its 250 ms beat, slow aiming jitter, the dock's edge again); in drawing mode, the click that focuses the stream window drawing nothing; and a desktop at 200% on GNOME, below. Left here for whoever meets them.
+- **A desktop at 200% on GNOME** (the VM's 2560×1600 mode, scaled 200%: Mutter's integer scaling may multiply relative motion by the scale): fling at an edge; if the pointer overshoots, the moves are multiplied past `WORST_ACCELERATION`. KDE's 200% wasn't tried (the VM's minimal Plasma has no KScreen to change it), and KWin works in logical pixels.
 - **A game that locks the pointer** (mouse-look): our moves passing whole while it's locked. SuperTuxKart's races use no mouse, and no such game was at hand.
 - **Another monitor** beside the game's (the pointer kept off it), and a window share inside a larger picture checked for the crop corner: the VM has one monitor, and GNOME shared each window at its own size.
