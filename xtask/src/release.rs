@@ -98,7 +98,7 @@ Neither is signed. To check a download against `SHA256SUMS`: on Windows, `Get-Fi
 
 Couch Co-App is free software under the GNU GPL, version 3. Its source for exactly these packages: {source}.
 
-The licences of everything each package carries are in `THIRD-PARTY-NOTICES-windows.txt` and `THIRD-PARTY-NOTICES-linux.txt` (also inside each package: Settings → About). FFmpeg, which both include, is under the LGPL: its source and the scripts that built it are the two `.tar.gz` files here, explained in `SOURCES-windows.txt` and `SOURCES-linux.txt`. The AppImage also carries system libraries from Ubuntu 24.04, whose source packages its notices name.
+The licences of everything each package carries are in `THIRD-PARTY-NOTICES-windows.txt` and `THIRD-PARTY-NOTICES-linux.txt` (also inside each package: Settings → About). FFmpeg, which both include, is under the LGPL: its source and the scripts that built it are the two `.tar.gz` files here, explained in `SOURCES-windows.txt` and `SOURCES-linux.txt`. The AppImage also carries system libraries from Ubuntu 24.04, whose source packages its notices name: their sources, at exactly those versions, are `Couch-Co-App_{version}_amd64-system-sources.tar`.
 "
     )
 }

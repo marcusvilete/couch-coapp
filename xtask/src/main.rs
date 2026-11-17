@@ -27,6 +27,7 @@ mod ffmpeg_bindings;
 mod notices;
 mod relay;
 mod release;
+mod system_sources;
 
 use std::{
     path::{Path, PathBuf},

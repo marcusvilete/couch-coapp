@@ -19,7 +19,8 @@
 //! It bundles twice: the notices list the system libraries the bundler
 //! copies, known only once it has, and must be inside the AppImage. Then
 //! `target/appimage/` holds the AppImage, the notices, FFmpeg's source
-//! archives and `SOURCES.txt`, to hand out together.
+//! archives, the system libraries' sources (`system_sources`, fetched from
+//! Launchpad: M26c) and `SOURCES.txt`, to hand out together.
 
 use std::{
     collections::BTreeMap,
@@ -30,7 +31,7 @@ use std::{
 
 use anyhow::{Context, bail};
 
-use crate::{deps, notices, relay};
+use crate::{deps, notices, relay, system_sources};
 
 #[derive(Debug, Default, PartialEq)]
 struct Options {
@@ -462,6 +463,15 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
         notices::FILE_NAME
     };
     fs::write(out.join(notices_beside), &notices)?;
+    // The system libraries' sources, beside it (the LGPL's, from the same
+    // place as the binary), at the versions the notices name.
+    let sources_tar = name.replace(".AppImage", "-system-sources.tar");
+    let packages = notices::source_packages(root, &appdir)?;
+    let fetched = system_sources::fetch(root, &packages, &out.join(&sources_tar))?;
+    println!(
+        "The system libraries' sources: {} package(s), {fetched} file(s), in {sources_tar}",
+        packages.len()
+    );
     let mut archives = Vec::new();
     for source in deps::SOURCES {
         let from = deps::third_party(root).join("sources").join(source.file);
@@ -497,8 +507,8 @@ and the scripts that built the included copy, are these two archives:
 {archives}
 The AppImage also carries system libraries from Ubuntu 24.04 (WebKitGTK,
 GTK, GLib and what they need), under the LGPL and other licences: the
-notices name each one's source package and version, and where Ubuntu
-publishes it.
+notices name each one's source package and version, and their sources, at
+exactly those versions, are in {sources_tar}, beside it.
 ",
             notices = notices::FILE_NAME,
             archives = archives.join("\n"),
