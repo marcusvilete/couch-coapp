@@ -24,6 +24,7 @@ pub mod secrets;
 mod store;
 
 use std::{
+    collections::BTreeMap,
     fmt,
     sync::{
         Arc, Mutex, PoisonError,
@@ -44,7 +45,9 @@ use couch_room::{
     session::SessionError,
 };
 pub use network::{InternetView, NetworkTimings, NetworkTrouble, RelayStateView};
-pub use reasons::{InviteRelay, InviteRelayView, JoinProblem, MemberReason, UnreachableView};
+pub use reasons::{
+    CodePassing, InviteRelay, InviteRelayView, JoinProblem, MemberReason, UnreachableView,
+};
 pub use relays::RelayRules;
 use relays::SavedRelays;
 use serde::{Deserialize, Serialize};
@@ -135,7 +138,8 @@ pub enum Command {
     /// Owner only: a new invite link, good for a week (or until revoked, or
     /// five wrong passwords). With relays configured it names our relay,
     /// never our IP address, so right after startup it may wait a few
-    /// seconds for the relay.
+    /// seconds for the relay. M26b: the link carries our relay's code when
+    /// we may pass it on; the reply holds the same invite without it too.
     GetInvite {
         room: String,
     },
@@ -224,6 +228,18 @@ pub enum Command {
     /// Lets iroh's public relays stand in while none of ours works (off by
     /// default). Answers with [`Response::Network`].
     SetPublicFallback {
+        on: bool,
+    },
+    /// "Pass this relay on to my rooms" (M26b): its code goes to members of
+    /// our rooms who need it. Not for a relay from a personal code or
+    /// without one. Answers with [`Response::Network`].
+    SetPassOn {
+        url: String,
+        on: bool,
+    },
+    /// "Use relays my rooms pass on" (M26b, on by default): off, no code is
+    /// asked for or kept. Answers with [`Response::Network`].
+    SetUsePassedOn {
         on: bool,
     },
     /// Who reaches us through a relay: the rooms and members whose record
@@ -897,6 +913,9 @@ pub struct NetworkView {
     /// question off: creating a room or an invite asks for a relay of their
     /// own first (the wizard; [`Command::DeferRelay`]).
     pub ask_for_relay: bool,
+    /// "Use relays my rooms pass on" (M26b, on by default): codes are asked
+    /// for when a member is on a relay we lack, and kept.
+    pub use_passed_on: bool,
 }
 
 /// Who reaches us through a relay ([`Command::RelayUse`]), for the warning
@@ -964,6 +983,19 @@ pub enum RelayCheckOutcome {
     Unreachable { details: Option<String> },
 }
 
+/// The relay an invite names, when it wants a code (M26b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct InviteCodeView {
+    pub host: String,
+    /// We may pass it on here (not personal, its switch on, not received
+    /// for another room): the link carries it, and whoever has the link can
+    /// use the relay, password or not, until its code changes. Otherwise
+    /// newcomers need a code of their own.
+    pub passable: bool,
+}
+
 /// One relay this profile holds. Its token never leaves the engine: only
 /// whether it has one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -980,7 +1012,36 @@ pub struct RelayView {
     pub has_code: bool,
     /// From a personal code: never passed on.
     pub personal: bool,
+    /// "Pass this relay on to my rooms" (M26b): its code goes to members of
+    /// our rooms who need it (a received relay's, only in the rooms it came
+    /// for). Off for a personal code or a relay without one.
+    pub pass_on: bool,
+    /// Passed on to us by rooms (M26b), rather than added by the user.
+    pub received: Option<ReceivedView>,
+    /// Our code was refused, and this member of a room gave us the one it
+    /// holds now (M26b), by name.
+    pub renewed_by: Option<String>,
+    /// Kept without a check letting us in: it didn't answer then.
+    pub unchecked: bool,
     pub state: RelayStateView,
+}
+
+/// Where a relay passed on to us came from (M26b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ReceivedView {
+    pub rooms: Vec<ReceivedRoomView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ReceivedRoomView {
+    /// The room's id; its name is the room view's.
+    pub room: String,
+    /// Who passed it on, by name then.
+    pub from: String,
 }
 
 /// A window or screen from [`Command::ListSources`].
@@ -1658,6 +1719,12 @@ pub enum Response {
     Room(RoomView),
     Invite {
         link: String,
+        /// The relay the link names, when it wants a code (M26b): whether
+        /// the link can carry it.
+        code: Option<InviteCodeView>,
+        /// The same invite without the relay's code, when `link` carries it
+        /// (the invite dialog's switch).
+        without_code: Option<String>,
     },
     InvitePreview(InvitePreview),
     /// [`Command::CheckInviteRelay`]: `None` for an invite naming no relay.
@@ -1781,6 +1848,10 @@ pub struct RemoteAccessView {
     /// Unlocked: what that PC can host, as it said (M16c). The console hides
     /// the keyboard seat and desktop control where they're missing.
     pub capabilities: Option<HostCapabilities>,
+    /// One of our PCs that isn't offering remote play now: not connected
+    /// in this room, or remote play off there (M26b: the panel says why
+    /// when the member's reason tells, and that it must be fixed there).
+    pub offline: bool,
 }
 
 impl fmt::Debug for Command {
@@ -1843,6 +1914,14 @@ impl fmt::Debug for Command {
             Self::CheckNetwork => f.write_str("CheckNetwork"),
             Self::SetPublicFallback { on } => {
                 f.debug_struct("SetPublicFallback").field("on", on).finish()
+            }
+            Self::SetPassOn { url, on } => f
+                .debug_struct("SetPassOn")
+                .field("url", url)
+                .field("on", on)
+                .finish(),
+            Self::SetUsePassedOn { on } => {
+                f.debug_struct("SetUsePassedOn").field("on", on).finish()
             }
             Self::ReadRelayCode { .. } => f.write_str("ReadRelayCode { .. }"),
             Self::AddRelayCode { unchecked, .. } => f
@@ -2623,9 +2702,19 @@ pub(crate) struct RelayState {
     /// A backup was restored: its relays are on disk, taken at the next
     /// start; no change meanwhile.
     frozen: bool,
+    /// Relays lent to the endpoint for a join (M26b: an invite's code),
+    /// never saved.
+    /// Each with the joins that lent it, so one join ending doesn't take
+    /// it from another naming the same relay.
+    lent: BTreeMap<String, (couch_net::endpoint::Relay, usize)>,
 }
 
 impl RelayState {
+    /// Whether `url` is one of our saved relays.
+    pub(crate) fn holds(&self, url: &str) -> bool {
+        self.saved.relays.iter().any(|r| r.url == url)
+    }
+
     /// Moves the endpoint to the saved relays, less those set aside for
     /// refusing our code (`benched`): iroh picks its home relay by speed
     /// alone and keeps one that refuses us, which would leave us reachable
@@ -2646,6 +2735,13 @@ impl RelayState {
                 ours: ours
                     .into_iter()
                     .filter(|r| !benched.contains(r.url.as_str()))
+                    .chain(
+                        self.lent
+                            .values()
+                            .map(|(r, _)| r)
+                            .filter(|r| !self.holds(r.url.as_str()))
+                            .cloned(),
+                    )
                     .collect(),
                 public: public || (falling_back && rules.public_relays),
             },
@@ -2670,14 +2766,30 @@ impl RelayState {
                     built_in: relay.built_in,
                     has_code: relay.token.is_some(),
                     personal: relay.personal,
+                    pass_on: relay.token.is_some() && !relay.personal && !relay.kept_to_me,
+                    received: relay.received.as_ref().map(|r| ReceivedView {
+                        rooms: r
+                            .rooms
+                            .iter()
+                            .map(|f| ReceivedRoomView {
+                                room: f.room.clone(),
+                                from: f.from_name.clone(),
+                            })
+                            .collect(),
+                    }),
+                    renewed_by: relay.renewed_by.clone(),
+                    unchecked: relay.unchecked,
                     state: RelayStateView::Checking,
                 },
                 token: relay
                     .token
                     .clone()
                     .and_then(couch_net::endpoint::RelayToken::new),
+                passable: relay.passable(),
             })
             .collect();
+        network.use_passed_on = !self.saved.refuse_passed_on;
+        network.dont_ask = self.saved.dont_ask.iter().cloned().collect();
         network.public_in_use = matches!(self.in_use, RelayChoice::Relays { public: true, .. });
         network.keep_public = self.saved.keep_public;
         network.public_fallback = self.saved.public_fallback;
@@ -2892,6 +3004,8 @@ pub struct Engine {
     /// Wakes the watch after the relays changed.
     poke: mpsc::Sender<()>,
     endpoint: couch_net::Endpoint,
+    /// The relays' one way to change, shared with the rooms' actor (M26b).
+    hub: RelayHub,
     /// Held while the shortcut keys are read, changed and written, so two
     /// changes at once can't lose one.
     shortcuts_edit: Mutex<()>,
@@ -2935,6 +3049,7 @@ impl Engine {
                     saved,
                     dial: dial.clone(),
                     frozen: false,
+                    lent: Default::default(),
                 }
             }
             Relays::Fixed(choice) => RelayState {
@@ -2943,6 +3058,7 @@ impl Engine {
                 in_use: choice.clone(),
                 dial: dial.clone(),
                 frozen: false,
+                lent: Default::default(),
             },
         };
         let backup_files = options.backup_files.clone();
@@ -2959,11 +3075,13 @@ impl Engine {
             relays.rules.is_some(),
         )));
         relays.list_into(&mut network::lock(&network));
+        let in_use = relays.in_use.clone();
+        let relays = Arc::new(tokio::sync::Mutex::new(relays));
         let (poke, poked) = mpsc::channel(4);
         let started = rooms::start(
             &profile,
             options,
-            relays.in_use.clone(),
+            in_use,
             events.clone(),
             panic.clone(),
             rooms::Links {
@@ -2971,10 +3089,10 @@ impl Engine {
                 dial,
                 network: network.clone(),
                 poke: poke.clone(),
+                relays: relays.clone(),
             },
         )
         .await?;
-        let relays = Arc::new(tokio::sync::Mutex::new(relays));
         network::watch(
             network.clone(),
             relays.clone(),
@@ -3000,6 +3118,7 @@ impl Engine {
             network,
             poke,
             endpoint: started.endpoint,
+            hub: started.hub,
             shortcuts_edit: Mutex::new(()),
             installing_driver: AtomicBool::new(false),
             tray: AtomicBool::new(tray),
@@ -3022,6 +3141,31 @@ impl Engine {
         &self,
         change: impl FnOnce(&mut RelayState) -> Result<(), EngineError>,
     ) -> Result<Response, EngineError> {
+        self.hub.change(change).await?;
+        Ok(self.network_view())
+    }
+}
+
+/// The relays' one way to change (M26a, M26b): the engine's commands and the
+/// rooms' actor (codes passed on, relays lent for a join) alike. One change
+/// at a time, saved, then applied to the running endpoint.
+#[derive(Clone)]
+pub(crate) struct RelayHub {
+    pub relays: Arc<tokio::sync::Mutex<RelayState>>,
+    pub data_dir: std::path::PathBuf,
+    pub secrets: Arc<dyn secrets::SecretStore>,
+    pub endpoint: couch_net::Endpoint,
+    pub network: network::Shared,
+    pub poke: mpsc::Sender<()>,
+}
+
+impl RelayHub {
+    /// Changes the saved relays, saves them, and applies them. Refused where
+    /// the relays were fixed at start, or after a restore.
+    pub(crate) async fn change(
+        &self,
+        change: impl FnOnce(&mut RelayState) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
         let mut state = self.relays.lock().await;
         if state.rules.is_none() {
             return Err(EngineError::Refused(
@@ -3036,7 +3180,7 @@ impl Engine {
         let before = state.saved.clone();
         change(&mut state)?;
         if state.saved != before {
-            let store = store::Store::new(self.profile.data_dir(), self.secrets.clone());
+            let store = store::Store::new(&self.data_dir, self.secrets.clone());
             if let Err(e) = store.save_relays(&state.saved) {
                 state.saved = before;
                 return Err(e.into());
@@ -3062,9 +3206,65 @@ impl Engine {
         }
         drop(state);
         let _ = self.poke.try_send(());
-        Ok(self.network_view())
+        Ok(())
     }
 
+    /// Lends the endpoint a relay for a join (M26b: the code an invite
+    /// carries), never saved; [`Self::unlend`] takes it back. Nothing for a
+    /// relay held already.
+    /// What was lent: the relay with the code the endpoint uses (another
+    /// join's, if one lent it first); `None` where the relays are fixed,
+    /// after a restore, or for one held, and the caller takes nothing back.
+    pub(crate) async fn lend(
+        &self,
+        relay: couch_net::endpoint::Relay,
+    ) -> Option<couch_net::endpoint::Relay> {
+        let mut state = self.relays.lock().await;
+        if state.rules.is_none() || state.frozen || state.holds(relay.url.as_str()) {
+            return None;
+        }
+        let url = relay.url.to_string();
+        match state.lent.get_mut(&url) {
+            // Another join lent it: the first code stays, and is the one
+            // this join uses.
+            Some((first, joins)) => {
+                *joins += 1;
+                Some(first.clone())
+            }
+            None => {
+                network::lock(&self.network).lent.insert(url.clone());
+                state.lent.insert(url, (relay.clone(), 1));
+                self.reapply(&mut state).await;
+                Some(relay)
+            }
+        }
+    }
+
+    /// Takes back what one join lent: the relay goes with the last of them.
+    pub(crate) async fn unlend(&self, url: &str) {
+        let mut state = self.relays.lock().await;
+        let Some((_, joins)) = state.lent.get_mut(url) else {
+            return;
+        };
+        *joins -= 1;
+        if *joins == 0 {
+            state.lent.remove(url);
+            network::lock(&self.network).lent.remove(url);
+            self.reapply(&mut state).await;
+        }
+    }
+
+    async fn reapply(&self, state: &mut RelayState) {
+        let benched = {
+            let network = network::lock(&self.network);
+            (network.benched.clone(), network.falling_back())
+        };
+        state.apply(&self.endpoint, &benched.0, benched.1).await;
+        let _ = self.poke.try_send(());
+    }
+}
+
+impl Engine {
     /// Adds a relay the user gave (typed, or from a code): checked first
     /// unless `unchecked`, outside the lock (it takes up to
     /// [`NetworkTimings::check_timeout`]), and saved only if it let us in.
@@ -3085,6 +3285,17 @@ impl Engine {
             }
         };
         let url = relays::check_url(url, test_build)?;
+        // iroh sends a token as an HTTP header: anything else could never
+        // reach the relay, and would look like a relay not answering.
+        if token.as_ref().is_some_and(|t| {
+            !t.reveal().chars().all(|c| c.is_ascii_graphic())
+                || t.reveal().len() > couch_proto::room::MAX_RELAY_SECRET_BYTES
+        }) {
+            return Err(EngineError::InvalidRelay(
+                "its code holds characters a relay can't take (only letters, digits and punctuation, no spaces), or is longer than 512"
+                    .into(),
+            ));
+        }
         if !unchecked {
             let relay = couch_net::endpoint::Relay::new(url.clone(), token.clone());
             let outcome =
@@ -3460,6 +3671,7 @@ impl Engine {
                     .clone();
                 let relay = reasons::check_invite_relay(
                     invite.addr.relay.as_deref(),
+                    invite.relay_code.is_some(),
                     &self.network,
                     &rules,
                     self.timings.check_timeout,
@@ -3500,6 +3712,12 @@ impl Engine {
                     if relay.personal {
                         return Err(EngineError::Refused(
                             "this relay's code is personal: it was given to you alone, so it isn't shared",
+                        ));
+                    }
+                    // M26b: a code a room passed on stays in that room.
+                    if relay.received.is_some() {
+                        return Err(EngineError::Refused(
+                            "your rooms passed this relay on to you: its code stays with them, so it isn't shared",
                         ));
                     }
                     relays::code::RelayCode {
@@ -3543,6 +3761,31 @@ impl Engine {
                 }
                 self.change_relays(|state| {
                     state.saved.public_fallback = on;
+                    Ok(())
+                })
+                .await
+            }
+            Command::SetPassOn { url, on } => {
+                self.change_relays(|state| {
+                    let relay = state
+                        .saved
+                        .relays
+                        .iter_mut()
+                        .find(|r| reasons::normalized(&r.url) == reasons::normalized(&url))
+                        .ok_or(EngineError::Refused("that relay isn't in your list"))?;
+                    if on && (relay.personal || relay.token.is_none()) {
+                        return Err(EngineError::Refused(
+                            "a relay from a personal code, or without one, isn't passed on",
+                        ));
+                    }
+                    relay.kept_to_me = !on;
+                    Ok(())
+                })
+                .await
+            }
+            Command::SetUsePassedOn { on } => {
+                self.change_relays(|state| {
+                    state.saved.refuse_passed_on = !on;
                     Ok(())
                 })
                 .await
@@ -4257,6 +4500,7 @@ mod tests {
                 ips: vec![],
             },
             founder: None,
+            relay_code: None,
         };
         let plain = rooms::invite_link(&invite, None);
         assert!(plain.starts_with(LINK_PREFIX));
@@ -4356,7 +4600,9 @@ mod tests {
             format!(
                 "{:?}",
                 Response::Invite {
-                    link: secret.into()
+                    link: secret.into(),
+                    code: None,
+                    without_code: Some(secret.into())
                 }
             ),
             format!(

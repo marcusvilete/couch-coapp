@@ -43,6 +43,12 @@ pub struct NetworkTimings {
     /// How long a relay is given to let us in, checking its code (before
     /// it is added, and now and then).
     pub check_timeout: Duration,
+    /// A relay of ours is checked again, when a member on it can't be
+    /// reached, at most this often (M26b: its code may have changed).
+    pub suspect_every: Duration,
+    /// A room is asked again for a relay's code it didn't give, at most
+    /// this often (M26b).
+    pub ask_every: Duration,
 }
 
 impl Default for NetworkTimings {
@@ -53,6 +59,8 @@ impl Default for NetworkTimings {
             check_every: Duration::from_secs(10 * 60),
             recheck_after: Duration::from_secs(2 * 60),
             check_timeout: Duration::from_secs(10),
+            suspect_every: Duration::from_secs(30),
+            ask_every: Duration::from_secs(60),
         }
     }
 }
@@ -170,6 +178,30 @@ pub(crate) struct Listed {
     pub view: RelayView,
     /// For checking its code; never shown.
     pub token: Option<RelayToken>,
+    /// To which rooms its code may be passed on (M26b).
+    pub passable: Passable,
+}
+
+/// To which rooms a relay's code may be passed on (M26b).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum Passable {
+    /// Personal, kept to the user, or without a code.
+    #[default]
+    Never,
+    /// The user's own (or the build's): every room.
+    Everywhere,
+    /// Received: only the rooms it came for, by id.
+    Rooms(Vec<String>),
+}
+
+impl Passable {
+    pub fn allows(&self, room: &str) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Everywhere => true,
+            Self::Rooms(rooms) => rooms.iter().any(|r| r == room),
+        }
+    }
 }
 
 /// Everything the network view is made from.
@@ -202,6 +234,15 @@ pub(crate) struct Network {
     /// probed without a code now and then, to say why.
     wanted: BTreeSet<String>,
     probes: BTreeMap<String, Probed>,
+    /// Codes from rooms are taken (M26b: "Use relays my rooms pass on").
+    pub use_passed_on: bool,
+    /// Relays the user removed: never asked for again.
+    pub dont_ask: BTreeSet<String>,
+    /// How long each suspected relay waits before it is checked again (M26b).
+    suspicion: BTreeMap<String, Duration>,
+    /// Relays lent to the endpoint for a join (M26b): never named in our
+    /// record while only lent.
+    pub lent: BTreeSet<String>,
     /// Grows whenever a relay's state, the trouble or a probe changes: the
     /// rooms' actor looks at it on its tick and works out its members'
     /// reasons again.
@@ -229,6 +270,10 @@ impl Network {
             fresh: BTreeMap::new(),
             wanted: BTreeSet::new(),
             probes: BTreeMap::new(),
+            use_passed_on: true,
+            dont_ask: BTreeSet::new(),
+            lent: BTreeSet::new(),
+            suspicion: BTreeMap::new(),
             generation: 0,
         }
     }
@@ -240,6 +285,20 @@ impl Network {
             .iter()
             .any(|l| l.view.url == url)
             .then(|| relay_state(url, &facts))
+    }
+
+    /// The code of `url` if it may go to a member of `room` (M26b).
+    pub fn passable_token(&self, url: &str, room: &str) -> Option<RelayToken> {
+        self.listed
+            .iter()
+            .find(|l| l.view.url == url)
+            .filter(|l| l.passable.allows(room))
+            .and_then(|l| l.token.clone())
+    }
+
+    /// Whether a code for `url` may be asked for and kept (M26b).
+    pub fn may_ask(&self, url: &str) -> bool {
+        self.use_passed_on && !self.dont_ask.contains(url)
     }
 
     /// Our code for relay `url`, if we hold it with one.
@@ -333,6 +392,35 @@ impl Network {
             self.checked(url, result, now);
         }
         same
+    }
+
+    /// A member on relay `url`, one we hold, couldn't be reached (M26b): its
+    /// code may have changed (iroh says so only of the home relay), so a
+    /// check that let us in is due again: first after `every`
+    /// ([`NetworkTimings::suspect_every`]), then twice as long each time, up
+    /// to `most` (the regular checks' interval), while members on it stay
+    /// away (a friend's PC off is the usual cause). Whether one is due now.
+    pub fn suspect(&mut self, url: &str, now: Instant, every: Duration, most: Duration) -> bool {
+        let wait = *self.suspicion.get(url).unwrap_or(&every);
+        match self.checks.get_mut(url) {
+            Some(check)
+                if check.result == RelayCheck::Accepted
+                    && !check.stale
+                    && now.duration_since(check.at) >= wait =>
+            {
+                check.stale = true;
+                self.suspicion
+                    .insert(url.to_string(), (wait * 2).min(most.max(every)));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Relays no unreachable member is on any more: suspected afresh next
+    /// time.
+    pub fn calm(&mut self, suspects: &BTreeSet<String>) {
+        self.suspicion.retain(|url, _| suspects.contains(url));
     }
 
     /// "Check again": every code is due a check now. One that refused stays
@@ -466,6 +554,7 @@ impl Network {
             test_build: self.test_build,
             changeable: self.changeable,
             ask_for_relay: self.asks_for_relay(crate::remote::unix_now()),
+            use_passed_on: self.use_passed_on,
         }
     }
 
@@ -474,7 +563,8 @@ impl Network {
     pub fn asks_for_relay(&self, now_unix: u64) -> bool {
         self.changeable
             && self.public_offered
-            && self.listed.is_empty()
+            && // Relays rooms passed on aren't the user's own (M26b).
+            self.listed.iter().all(|l| l.view.received.is_some())
             && self.ask.due(now_unix, env!("CARGO_PKG_VERSION"))
     }
 
@@ -901,9 +991,18 @@ pub(crate) mod tests {
                 built_in: false,
                 has_code: token.is_some(),
                 personal: false,
+                pass_on: token.is_some(),
+                received: None,
+                renewed_by: None,
+                unchecked: false,
                 state: RelayStateView::Checking,
             },
             token: token.and_then(RelayToken::new),
+            passable: if token.is_some() {
+                Passable::Everywhere
+            } else {
+                Passable::Never
+            },
         }
     }
 

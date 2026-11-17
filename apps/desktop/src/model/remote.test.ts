@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { SeatView } from "../bindings/SeatView";
 import type { SessionView } from "../bindings/SessionView";
-import { desktopBlocked, desktopCommand, lockedText, remoteKeyboardSeat, viaRemote, waitText } from "./remote";
+import type { MemberView } from "../bindings/MemberView";
+import {
+  desktopBlocked,
+  desktopCommand,
+  lockedText,
+  pcUnreachableText,
+  remoteKeyboardSeat,
+  viaRemote,
+  waitText,
+} from "./remote";
 
 const target = { room: "r1", member: "pc" };
 
@@ -129,5 +138,34 @@ describe("a keyboard seat in a session started from afar (M16c-2)", () => {
     // A Linux PC that can't make input devices yet.
     expect(remoteKeyboardSeat({ sessions: true, keyboardSeat: false, desktopControl: false })).toBe(false);
     expect(remoteKeyboardSeat(null)).toBe(true);
+  });
+});
+
+describe("one of our PCs out of reach (M26b)", () => {
+  const pc = (over: Partial<MemberView>): MemberView => ({
+    id: "pc",
+    name: "Ana's PC",
+    isOwner: false,
+    link: "offline",
+    otherVersion: null,
+    remote: null,
+    unreachable: null,
+    ...over,
+  });
+
+  it("says why, and when it must be fixed at the PC", () => {
+    expect(pcUnreachableText(pc({}))).toContain("may be off or asleep");
+    expect(pcUnreachableText(pc({ link: "relay" }))).toContain("isn't offering remote play now");
+    const down = pcUnreachableText(
+      pc({
+        unreachable: {
+          reason: { type: "relayUnreachable", url: "u", host: "relay.example.com", ours: false },
+          details: null,
+        },
+      }),
+    );
+    expect(down).toContain("That has to be fixed at Ana's PC");
+    const ours = pcUnreachableText(pc({ unreachable: { reason: { type: "ourConnection" }, details: null } }));
+    expect(ours).not.toContain("fixed at");
   });
 });

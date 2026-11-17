@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
+import type { CodePassing } from "../bindings/CodePassing";
 import type { MemberView } from "../bindings/MemberView";
 import type { RoomView } from "../bindings/RoomView";
 import type { UnreachableView } from "../bindings/UnreachableView";
-import { inviteRelayText, joinProblemText, memberReason, roomReason, staleInvitesText } from "./reasons";
+import {
+  inviteCodeText,
+  inviteRelayText,
+  joinProblemText,
+  memberReason,
+  roomReason,
+  staleInvitesText,
+} from "./reasons";
 
-const needsCode = (host: string): UnreachableView => ({
-  reason: { type: "needsCode", url: `https://${host}/`, host },
+const needsCode = (host: string, passing: CodePassing = "nobody"): UnreachableView => ({
+  reason: { type: "needsCode", url: `https://${host}/`, host, passing },
   details: "timed out",
 });
 
@@ -44,6 +52,18 @@ describe("why a member can't be reached", () => {
     ).toContain("Settings → Network");
   });
 
+  it("says the room is asked for a code first, and when nobody here can pass it on (M26b)", () => {
+    const asking = memberReason("Bia", needsCode("relay.example.com", "asking").reason);
+    expect(asking.text).toContain("getting it from the room");
+    expect(asking.fix).toBeNull();
+    expect(memberReason("Bia", needsCode("relay.example.com", "nobody").reason).text).toContain(
+      "nobody here can pass on: ask Bia for it",
+    );
+    const off = memberReason("Bia", needsCode("relay.example.com", "off").reason);
+    expect(off.text).toContain("your rooms aren't asked for it");
+    expect(off.fix).toEqual({ host: "relay.example.com" });
+  });
+
   it("is said once for the room when everyone shares it", () => {
     const bia = member("Bia", { unreachable: needsCode("relay.example.com") });
     const caio = member("Caio", { unreachable: needsCode("relay.example.com") });
@@ -74,6 +94,17 @@ describe("joining", () => {
     const said = inviteRelayText(view({ type: "needsCode" }), false);
     expect(said?.fix).toEqual({ host: "relay.example.com" });
     expect(said?.text).toContain("You can still try");
+    // The link carries its code (M26b): nothing to say.
+    expect(inviteRelayText(view({ type: "carried" }), false)).toBeNull();
+  });
+
+  it("says what a link does with the relay's code (M26b)", () => {
+    const code = { host: "relay.example.com", passable: true };
+    expect(inviteCodeText(code)).toContain("whoever has the link can use relay.example.com");
+    expect(inviteCodeText({ ...code, passable: false })).toContain("need a code of their own");
+    expect(joinProblemText({ type: "linkCodeRefused", host: "relay.example.com" }).text).toContain(
+      "Ask for a new link",
+    );
   });
 
   it("names the step that failed", () => {

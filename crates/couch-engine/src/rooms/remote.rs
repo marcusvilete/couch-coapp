@@ -1362,9 +1362,23 @@ impl Actor {
     /// What a device shows of `member` in `room`: one of our PCs, or one
     /// asking to be.
     pub(super) fn remote_access(&self, room: RoomId, member: MemberId) -> Option<RemoteAccessView> {
-        let link = self.remote.links.get(&(room, member))?;
+        let accepted = self.remote.hosts.iter().any(|h| h.id == member.to_hex());
+        let Some(link) = self.remote.links.get(&(room, member)) else {
+            // One of our PCs, not offering now (M26b): the panel says why it
+            // can't be reached, when the member's reason tells.
+            return accepted.then(|| RemoteAccessView {
+                accepted: true,
+                unlocked: false,
+                code: remote::device_code(member),
+                wait_secs: None,
+                locked: false,
+                capabilities: None,
+                offline: true,
+            });
+        };
         Some(RemoteAccessView {
-            accepted: self.remote.hosts.iter().any(|h| h.id == member.to_hex()),
+            offline: false,
+            accepted,
             unlocked: link.unlocked,
             code: remote::device_code(member),
             wait_secs: link.wait_secs,

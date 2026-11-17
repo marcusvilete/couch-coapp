@@ -415,6 +415,24 @@ export const SHOTS = [
     await settings("Network")(page);
     await page.getByRole("button", { name: "Details" }).first().click();
   }],
+  // M26b: relay codes passed on.
+  ["settings-network-passed-on", "network-passed-on", settings("Network")],
+  ["network-passed-on-menu", "network-passed-on", async (page) => {
+    await settings("Network")(page);
+    await page.getByRole("button", { name: "relay.bia-games.net: options" }).click();
+    await page.getByRole("menuitem", { name: /Pass it on|Stop passing/ }).waitFor();
+  }],
+  ["dialog-invite-without-code", "owner-alone", async (page) => {
+    await click("Invite")(page);
+    await page.getByRole("switch", { name: /Include .*code/ }).click();
+    await page.getByRole("switch", { name: /Include .*code/, checked: false }).waitFor();
+  }],
+  ["dialog-invite-personal", "invite-personal-relay", click("Invite")],
+  ["join-code-in-link", "join-code-in-link", async (page) => {
+    await click("Join with an invite")(page);
+    await page.getByLabel("Invite link").fill("https://marcusvilete.github.io/couch-coapp/j/#v1.abc");
+    await page.waitForTimeout(400);
+  }],
   ["settings-drivers", "lobby", settings("Drivers")],
   ["settings-backup", "lobby", settings("Backup")],
   ["settings-backup-empty", "first-run", settings("Backup")],
@@ -615,6 +633,27 @@ export const STABLE = [
         await page.getByLabel("Password", { exact: true }).first().fill("offline");
         await page.getByRole("button", { name: "Join", exact: true }).click();
         await page.getByText("isn't on it").waitFor();
+      }],
+    ],
+  ],
+  // M26b: the code switch under the invite link; leaving the code out makes
+  // a new link in the same room.
+  [
+    "invite code",
+    "owner-alone",
+    [".dialog", ".invite-link", ".invite-code"],
+    [
+      ["open", async (page) => {
+        await click("Invite")(page);
+        await page.getByRole("switch", { name: /Include .*code/ }).waitFor();
+      }],
+      ["leave out", async (page) => {
+        await page.getByRole("switch", { name: /Include .*code/ }).click();
+        await page.getByRole("switch", { name: /Include .*code/, checked: false }).waitFor();
+      }],
+      ["put back", async (page) => {
+        await page.getByRole("switch", { name: /Include .*code/ }).click();
+        await page.getByRole("switch", { name: /Include .*code/, checked: true }).waitFor();
       }],
     ],
   ],

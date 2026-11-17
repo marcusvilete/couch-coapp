@@ -159,6 +159,13 @@
 }
 
 /* ---- Invite ---- */
+/* The code switch under the link (M26b): its room is kept while the link
+   is made, and for a relay wanting no code, so nothing moves. */
+.invite-code {
+  /* A switch with a two-line sentence. */
+  min-height: 60px;
+}
+
 .invite-link {
   min-height: 108px;
 }

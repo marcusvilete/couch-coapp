@@ -3,4 +3,4 @@
 /**
  * What we know of an invite's relay.
  */
-export type InviteRelay = { "type": "ours" } | { "type": "public" } | { "type": "notAllowed" } | { "type": "unchecked" } | { "type": "open" } | { "type": "needsCode" } | { "type": "unreachable", details: string | null, };
+export type InviteRelay = { "type": "ours" } | { "type": "public" } | { "type": "notAllowed" } | { "type": "unchecked" } | { "type": "open" } | { "type": "needsCode" } | { "type": "carried" } | { "type": "unreachable", details: string | null, };

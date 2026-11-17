@@ -37,6 +37,7 @@ const homePc = (state: Partial<RemoteAccessView>): MemberView =>
       waitSecs: null,
       locked: false,
       capabilities: state.unlocked ? { sessions: true, keyboardSeat: true, desktopControl: true } : null,
+      offline: false,
       ...state,
     },
   });
@@ -119,7 +120,19 @@ function othersSession(host: string, title: string, over: Partial<SessionView> =
 const BUILT_IN = "https://couchrelay.duckdns.org/";
 
 function relay(host: string, state: RelayStateView, over: Partial<RelayView> = {}): RelayView {
-  return { url: `https://${host}/`, host, builtIn: false, hasCode: true, personal: false, state, ...over };
+  return {
+    url: `https://${host}/`,
+    host,
+    builtIn: false,
+    hasCode: true,
+    personal: false,
+    passOn: !over.personal && over.hasCode !== false,
+    received: null,
+    renewedBy: null,
+    unchecked: false,
+    state,
+    ...over,
+  };
 }
 
 /** A friends' build: its own relay, home, nothing wrong. */
@@ -138,6 +151,7 @@ function network(over: Partial<NetworkView> = {}): NetworkView {
     testBuild: false,
     changeable: true,
     askForRelay: false,
+    usePassedOn: true,
     ...over,
   };
 }
@@ -422,6 +436,32 @@ export const SCENARIOS: Record<string, Scenario> = {
   "remote-locked": {
     title: "Remote play: our PC, locked",
     world: () => base([sofa({ members: [you(false), homePc({}), bia, caio] })]),
+  },
+  "remote-unreachable": {
+    title: "Remote play (M26b): our PC can't be reached, its relay not answering: to be fixed at the PC",
+    world: () =>
+      base([
+        sofa({
+          members: [
+            you(false),
+            {
+              ...homePc({ offline: true }),
+              link: "offline",
+              unreachable: {
+                reason: {
+                  type: "relayUnreachable",
+                  url: "https://relay.anas-home.net/",
+                  host: "relay.anas-home.net",
+                  ours: false,
+                },
+                details: "no answer from relay.anas-home.net",
+              },
+            },
+            bia,
+            caio,
+          ],
+        }),
+      ]),
   },
   "remote-unlocked": {
     title: "Remote play: our PC unlocked, no session there",
@@ -969,6 +1009,45 @@ export const SCENARIOS: Record<string, Scenario> = {
         }),
       }),
   },
+  "network-passed-on": {
+    title:
+      "Network (M26b): relays our rooms passed on (from whom, for which room), a code renewed by a member, one kept to us",
+    world: () =>
+      base([sofa(), friday()], {
+        network: network({
+          relays: [
+            relay("couchrelay.duckdns.org", { type: "home" }, { builtIn: true }),
+            relay("relay.bia-games.net", { type: "connected" }, {
+              received: {
+                rooms: [
+                  { room: "f41d0000000000000000000000000002", from: "Rafa" },
+                  { room: "50fa0000000000000000000000000001", from: "Caio" },
+                ],
+              },
+            }),
+            relay("relay.friday-crew.org", { type: "idle" }, { renewedBy: "Dee" }),
+            relay("relay.just-mine.example", { type: "idle" }, { passOn: false }),
+          ],
+        }),
+      }),
+  },
+  "invite-personal-relay": {
+    title: "Invite (M26b): our relay's code is personal, so the link can't carry it",
+    world: () =>
+      base([room("a10e", "Movie night")], {
+        network: network({
+          relays: [relay("relay.bia-games.net", { type: "home" }, { personal: true })],
+          homeRelay: "https://relay.bia-games.net/",
+        }),
+      }),
+  },
+  "join-code-in-link": {
+    title: "Joining (M26b): the link carries the code of the owner's relay: nothing to ask for",
+    world: () =>
+      base([], {
+        inviteRelay: { url: "https://relay.rafa.games/", host: "relay.rafa.games", relay: { type: "carried" } },
+      }),
+  },
   "network-refused": {
     title: "Network: the app's relay refuses our code (rotated): the strip, and Paste a new code",
     world: () =>
@@ -1072,7 +1151,7 @@ export const SCENARIOS: Record<string, Scenario> = {
   },
   // M26a-2: why someone can't be reached, and what to do.
   "member-reasons": {
-    title: "Members we can't reach, and why: a relay wanting a code (Paste a code in their menu), one of ours not answering",
+    title: "Members we can't reach, and why: a relay wanting a code (Paste a code in their menu), one of ours not answering; M26b: one whose code the room is being asked for",
     world: () =>
       base([
         sofa({
@@ -1081,7 +1160,12 @@ export const SCENARIOS: Record<string, Scenario> = {
             bia,
             member("ca10", "Caio", "offline", {
               unreachable: {
-                reason: { type: "needsCode", url: "https://relay.caio-plays.net/", host: "relay.caio-plays.net" },
+                reason: {
+                  type: "needsCode",
+                  url: "https://relay.caio-plays.net/",
+                  host: "relay.caio-plays.net",
+                  passing: "nobody",
+                },
                 details: "timed out dialing the member",
               },
             }),
@@ -1092,6 +1176,12 @@ export const SCENARIOS: Record<string, Scenario> = {
               },
             }),
             edu,
+            member("g11", "Gil", "offline", {
+              unreachable: {
+                reason: { type: "needsCode", url: "https://relay.gil.example/", host: "relay.gil.example", passing: "asking" },
+                details: null,
+              },
+            }),
           ],
         }),
       ]),
@@ -1102,7 +1192,7 @@ export const SCENARIOS: Record<string, Scenario> = {
       const away = (id: string, name: string) =>
         member(id, name, "offline", {
           unreachable: {
-            reason: { type: "needsCode", url: "https://relay.rafa.games/", host: "relay.rafa.games" },
+            reason: { type: "needsCode", url: "https://relay.rafa.games/", host: "relay.rafa.games", passing: "nobody" },
             details: null,
           },
         });

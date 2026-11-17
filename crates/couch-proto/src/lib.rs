@@ -78,7 +78,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// `RemoteDrawing.pictures`.
 /// 19: a number per picture upload (P17): `PictureUpload.upload`, echoed in
 /// `PictureAnswer.upload`.
-pub const PROTOCOL_MINOR: u16 = 19;
+/// 20: relay codes passed on (M26b): `RelayAsk`, `RelayAnswer`, and invites
+/// of version 3 carrying the code of the owner's relay.
+pub const PROTOCOL_MINOR: u16 = 20;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -105,6 +107,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (17, "0.30"),
     (18, "0.32"),
     (19, "0.33"),
+    (20, "0.37"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

@@ -23,8 +23,32 @@ pub struct TestRelay {
 impl TestRelay {
     /// Starts one. `token`: the only token it admits, or `None` for anyone.
     pub async fn start(token: Option<&str>) -> Self {
+        Self::start_on(0, token).await
+    }
+
+    /// Stops it and starts it again on the same address with `token`: a
+    /// relay's code rotated, everyone connected to it dropped (M26b).
+    pub async fn restart(self, token: Option<&str>) -> Self {
+        let port: u16 = self
+            .url
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.trim_end_matches('/').parse().ok())
+            .expect("a port");
+        // Dropping it leaves its tasks running: shut it down.
+        let _ = self._server.shutdown().await;
+        // The port is free again a moment after the server stops.
+        for _ in 0..50 {
+            if std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Self::start_on(port, token).await
+    }
+
+    async fn start_on(port: u16, token: Option<&str>) -> Self {
         let refused = Arc::new(AtomicUsize::new(0));
-        let mut relay = RelayConfig::new((Ipv4Addr::LOCALHOST, 0));
+        let mut relay = RelayConfig::new((Ipv4Addr::LOCALHOST, port));
         relay.key_cache_capacity = Some(1024);
         relay.access = Arc::new(TokenAccess {
             token: token.map(str::to_string),

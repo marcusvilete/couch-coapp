@@ -3,13 +3,13 @@
 // sharing one, removing one with a warning naming who is reached through
 // it, the public relays' switches, and help: the diagnostics to copy and the
 // log folder. Kept current by the engine's network events (`lobby.network`).
-import { Copy, FolderOpen, Globe, MoreHorizontal, RefreshCw, Server, Share2, Trash2 } from "lucide-react";
+import { Copy, FolderOpen, Globe, MoreHorizontal, RefreshCw, Send, Server, Share2, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { NetworkView } from "../bindings/NetworkView";
 import type { RelayUseView } from "../bindings/RelayUseView";
 import type { RelayView } from "../bindings/RelayView";
 import { errorText, request } from "../engine";
-import { networkLine, RELAY_LINE, relayState, removeWarning, type Tone } from "../model/network";
+import { networkLine, RELAY_LINE, relayOrigin, relayState, removeWarning, type Tone } from "../model/network";
 import { PERSONAL_WHY } from "../model/reasons";
 import { Button, IconButton } from "../ui/Button";
 import { Switch } from "../ui/Controls";
@@ -30,6 +30,8 @@ export function NetworkSection(props: {
   pasteFor: PasteFor | null;
   /** This PC can be a home PC: remote play's warning applies. */
   homePc: boolean;
+  /** Our rooms' names by id: relays rooms passed on name them (M26b). */
+  roomNames: Record<string, string>;
 }) {
   const view = props.network;
   const [status, setStatus] = useState<{ text: string; tone: "ok" | "error" } | null>(null);
@@ -95,7 +97,21 @@ export function NetworkSection(props: {
       label: "Share its code",
       icon: <Share2 />,
       onSelect: () => void share(relay),
-      disabled: relay.personal ? "Personal: given to you alone" : working,
+      disabled: relay.personal
+        ? "Personal: given to you alone"
+        : relay.received
+          ? "Your rooms passed it on: its code stays with them"
+          : working,
+    },
+    {
+      label: relay.passOn ? "Stop passing it on to my rooms" : "Pass it on to my rooms",
+      icon: <Send />,
+      onSelect: () => void change({ type: "setPassOn", url: relay.url, on: !relay.passOn }),
+      disabled: relay.personal
+        ? "Personal: never passed on"
+        : !relay.hasCode
+          ? "Open to everyone: nothing to pass on"
+          : working,
     },
     { label: "Paste a new code", icon: <Copy />, onSelect: () => askForCode(relay.host) },
     "separator",
@@ -160,6 +176,7 @@ export function NetworkSection(props: {
                   relay={r}
                   menu={menu(r)}
                   home={view.homeRelay === r.url}
+                  origin={relayOrigin(r, props.roomNames)}
                   onPaste={() => askForCode(r.host)}
                 />
               ))}
@@ -183,6 +200,13 @@ export function NetworkSection(props: {
                 />
               </>
             )}
+            <Switch
+              checked={view.usePassedOn}
+              disabled={working}
+              onChange={(on) => void change({ type: "setUsePassedOn", on })}
+              label="Use relays my rooms pass on"
+              detail="When someone in your rooms is on a relay you don't have, the others pass you its code. Off: you ask them yourself."
+            />
           </>
         )}
       </div>
@@ -244,7 +268,14 @@ function Dot(props: { tone: Tone }) {
   return <span className={`net-dot net-dot-${props.tone}`} aria-hidden="true" />;
 }
 
-function RelayRow(props: { relay: RelayView; menu: MenuEntry[]; home: boolean; onPaste: () => void }) {
+function RelayRow(props: {
+  relay: RelayView;
+  menu: MenuEntry[];
+  home: boolean;
+  onPaste: () => void;
+  /** Who passed it on, or renewed its code (M26b). */
+  origin: string | null;
+}) {
   const r = props.relay;
   const state = relayState(r.state);
   return (
@@ -266,6 +297,8 @@ function RelayRow(props: { relay: RelayView; menu: MenuEntry[]; home: boolean; o
                 <Why label="Details">{PERSONAL_WHY}</Why>
               </>
             )}
+            {r.received && <Badge tone="info">from your rooms</Badge>}
+            {r.hasCode && !r.personal && !r.passOn && <Badge>kept to you</Badge>}
           </span>
           <span className={`relay-state relay-state-${state.tone}`}>
             <Dot tone={state.tone} />
@@ -276,6 +309,7 @@ function RelayRow(props: { relay: RelayView; menu: MenuEntry[]; home: boolean; o
               </Why>
             )}
           </span>
+          {props.origin && <span className="relay-origin">{props.origin}</span>}
         </span>
         {r.state.type === "refused" && (
           <Button size="sm" variant="primary" onClick={props.onPaste}>
@@ -379,7 +413,9 @@ function RemoveRelayDialog(props: { relay: RelayView; onClose: () => void; onNet
           <p className="form-hint">Nobody in your rooms reaches you through it now.</p>
         )}
         <p className="form-hint">
-          To use it again later, you'll need its code. {props.relay.personal ? "" : "Share its code first to keep it."}
+          {props.relay.received
+            ? "Your rooms won't pass it on to you again unless you add it yourself."
+            : `To use it again later, you'll need its code. ${props.relay.personal ? "" : "Share its code first to keep it."}`}
         </p>
         <p className="field-error selectable" role={error ? "alert" : undefined}>
           {error ?? " "}

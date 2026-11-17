@@ -94,6 +94,8 @@ export function SettingsPage(props: {
   onRestoredDev: () => void;
   network: NetworkView | null;
   onNetwork: (network: NetworkView) => void;
+  /** Our rooms' names by id: relays rooms passed on name them (M26b). */
+  roomNames: Record<string, string>;
   /** The shell's strip asks for a relay's new code. */
   pasteFor: PasteFor | null;
 }) {
@@ -154,6 +156,7 @@ export function SettingsPage(props: {
                 network={props.network}
                 onNetwork={props.onNetwork}
                 pasteFor={props.pasteFor}
+                roomNames={props.roomNames}
                 homePc={props.info?.homePc ?? false}
               />
             )}

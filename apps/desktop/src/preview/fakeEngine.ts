@@ -11,6 +11,7 @@ import type { Event as EngineEvent } from "../bindings/Event";
 import type { HostController } from "../bindings/HostController";
 import type { InputSetup } from "../bindings/InputSetup";
 import type { InvitePreview } from "../bindings/InvitePreview";
+import type { InviteCodeView } from "../bindings/InviteCodeView";
 import type { InviteRelay } from "../bindings/InviteRelay";
 import type { InviteRelayView } from "../bindings/InviteRelayView";
 import type { MemberView } from "../bindings/MemberView";
@@ -212,8 +213,18 @@ function self(): MemberView {
   };
 }
 
-function linkFor(room: FakeRoom): string {
-  return `https://marcusvilete.github.io/couch-coapp/j/#v1.${room.id}.${encodeURIComponent(room.name)}.Zm9vYmFyYmF6cXV4`;
+function linkFor(room: FakeRoom, withCode = false): string {
+  const code = withCode && inviteCode()?.passable ? ".Y29kZWNvZGVjb2Rl" : "";
+  return `https://marcusvilete.github.io/couch-coapp/j/#v1.${room.id}.${encodeURIComponent(room.name)}.Zm9vYmFyYmF6cXV4${code}`;
+}
+
+/** What an invite does with our home relay's code (M26b): carried when we
+ * may pass it on, as the engine does. */
+function inviteCode(): InviteCodeView | null {
+  const n = w().network;
+  const home = n.relays.find((r) => r.url === n.homeRelay);
+  if (!home?.hasCode) return null;
+  return { host: home.host, passable: home.passOn };
 }
 
 /** What the fake knows of a relay an invite names (M26a-2): ours once
@@ -228,6 +239,8 @@ function relayKnown(host: string): InviteRelay {
  * checked yet. */
 function previewRelay(relay: InviteRelayView | null): InviteRelayView | null {
   if (relay == null) return null;
+  // The link carries its code (M26b): nothing to check.
+  if (relay.relay.type === "carried") return relay;
   return { ...relay, relay: relayKnown(relay.host).type === "ours" ? { type: "ours" } : { type: "unchecked" } };
 }
 
@@ -486,6 +499,8 @@ type NetworkCommand = Extract<
       | "removeRelay"
       | "setPublicRelays"
       | "setPublicFallback"
+      | "setPassOn"
+      | "setUsePassedOn"
       | "relayUse"
       | "deferRelay"
       | "getDiagnostics"
@@ -530,8 +545,28 @@ function addChecked(url: string, host: string, token: string | null, personal: b
       relayTokens.set(url, token);
       const state: RelayView["state"] = host.includes("down") ? { type: "unreachable", details: null } : { type: "idle" };
       const held = n.relays.find((r) => r.url === url);
-      if (held) Object.assign(held, { hasCode: token != null, personal, state });
-      else n.relays.push({ url, host, builtIn: false, hasCode: token != null, personal, state });
+      if (held)
+        Object.assign(held, {
+          hasCode: token != null,
+          personal,
+          passOn: token != null && !personal,
+          received: null,
+          renewedBy: null,
+          state,
+        });
+      else
+        n.relays.push({
+          url,
+          host,
+          builtIn: false,
+          hasCode: token != null,
+          personal,
+          passOn: token != null && !personal,
+          received: null,
+          renewedBy: null,
+          unchecked: false,
+          state,
+        });
       resolve(networkReply());
     }),
   );
@@ -610,6 +645,17 @@ function networkCommand(cmd: NetworkCommand): Response | Promise<Response> {
       return networkReply();
     case "deferRelay":
       n.askForRelay = false;
+      return networkReply();
+    case "setPassOn": {
+      const relay = held(cmd.url);
+      if (cmd.on && (relay.personal || !relay.hasCode)) {
+        throw "a relay from a personal code, or without one, isn't passed on";
+      }
+      relay.passOn = cmd.on;
+      return networkReply();
+    }
+    case "setUsePassedOn":
+      n.usePassedOn = cmd.on;
       return networkReply();
     case "relayUse": {
       // Whoever is online reaches us through our home relay, or one
@@ -911,7 +957,12 @@ function handle(cmd: Command): Response | Promise<Response> {
       const room = owned(cmd.room);
       notCatchingUp(room);
       if (room.needsPassword) throw "this room came back from a backup without its password: set a new one first";
-      return { type: "invite", link: linkFor(room) };
+      return {
+        type: "invite",
+        link: linkFor(room, true),
+        code: inviteCode(),
+        without_code: inviteCode()?.passable ? linkFor(room) : null,
+      };
     }
     case "changePassword": {
       const room = owned(cmd.room);
@@ -1024,6 +1075,8 @@ function handle(cmd: Command): Response | Promise<Response> {
     case "removeRelay":
     case "setPublicRelays":
     case "setPublicFallback":
+    case "setPassOn":
+    case "setUsePassedOn":
     case "relayUse":
     case "deferRelay":
     case "getDiagnostics":

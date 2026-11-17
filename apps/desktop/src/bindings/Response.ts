@@ -4,6 +4,7 @@ import type { DrawingSettingsView } from "./DrawingSettingsView";
 import type { DriverView } from "./DriverView";
 import type { EngineInfo } from "./EngineInfo";
 import type { GameWindowView } from "./GameWindowView";
+import type { InviteCodeView } from "./InviteCodeView";
 import type { InvitePreview } from "./InvitePreview";
 import type { InviteRelayView } from "./InviteRelayView";
 import type { JoinProblem } from "./JoinProblem";
@@ -23,7 +24,17 @@ import type { TrayView } from "./TrayView";
 /**
  * The reply to a [`Command`]. Its `Debug` leaves out invite links.
  */
-export type Response = { "type": "info" } & EngineInfo | { "type": "pong", nonce: number, } | { "type": "profile" } & ProfileView | { "type": "rooms", rooms: Array<RoomView>, } | { "type": "room" } & RoomView | { "type": "invite", link: string, } | { "type": "invitePreview" } & InvitePreview | { "type": "inviteRelay", relay: InviteRelayView | null, } | { "type": "joinProblem", problem: JoinProblem, } | { "type": "openedInvite", link: string | null, } | { "type": "sources" } & SourceList | { "type": "soundSources", programs: Array<string>, } | { "type": "shortcuts", shortcuts: Array<ShortcutView>, 
+export type Response = { "type": "info" } & EngineInfo | { "type": "pong", nonce: number, } | { "type": "profile" } & ProfileView | { "type": "rooms", rooms: Array<RoomView>, } | { "type": "room" } & RoomView | { "type": "invite", link: string, 
+/**
+ * The relay the link names, when it wants a code (M26b): whether
+ * the link can carry it.
+ */
+code: InviteCodeView | null, 
+/**
+ * The same invite without the relay's code, when `link` carries it
+ * (the invite dialog's switch).
+ */
+without_code: string | null, } | { "type": "invitePreview" } & InvitePreview | { "type": "inviteRelay", relay: InviteRelayView | null, } | { "type": "joinProblem", problem: JoinProblem, } | { "type": "openedInvite", link: string | null, } | { "type": "sources" } & SourceList | { "type": "soundSources", programs: Array<string>, } | { "type": "shortcuts", shortcuts: Array<ShortcutView>, 
 /**
  * The drawing editor's own keys (M27a): fixed, listed only.
  */

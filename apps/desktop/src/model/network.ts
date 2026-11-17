@@ -6,6 +6,7 @@ import type { NetworkTrouble } from "../bindings/NetworkTrouble";
 import type { NetworkView } from "../bindings/NetworkView";
 import type { RelayStateView } from "../bindings/RelayStateView";
 import type { RelayUseView } from "../bindings/RelayUseView";
+import type { RelayView } from "../bindings/RelayView";
 
 /** The one line that says what a relay is, the first time it appears. */
 export const RELAY_LINE = "A relay passes your connection along when your PCs can't connect directly.";
@@ -91,6 +92,18 @@ export function troubleStrip(trouble: NetworkTrouble): { text: string; fix: Trou
 export function names(list: string[]): string {
   if (list.length <= 1) return list[0] ?? "";
   return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+/** Where a relay came from, when not added by the user (M26b): passed on by
+ * rooms ("From Bia, for Friday games"), or its code renewed by a member.
+ * `roomNames` by room id; a room we no longer show is "another room". */
+export function relayOrigin(relay: RelayView, roomNames: Record<string, string>): string | null {
+  if (relay.received) {
+    const parts = relay.received.rooms.map((f) => `${f.from}, for ${roomNames[f.room] ?? "another room"}`);
+    return `From ${names(parts)}`;
+  }
+  if (relay.renewedBy) return `New code from ${relay.renewedBy}`;
+  return null;
 }
 
 /** The warning before removing a relay: who is reached through it, and

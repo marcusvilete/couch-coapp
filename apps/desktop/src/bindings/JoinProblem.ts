@@ -5,4 +5,4 @@
  * told apart by connecting to the invite's relay afterwards. A refusal by
  * the owner (the password, the link's expiry, a ban) is said as before.
  */
-export type JoinProblem = { "type": "ourConnection" } | { "type": "relayUnreachable", url: string, host: string, details: string | null, } | { "type": "relayRefused", url: string, host: string, reason: string, } | { "type": "needsCode", url: string, host: string, } | { "type": "ownerNotOnRelay", host: string, };
+export type JoinProblem = { "type": "ourConnection" } | { "type": "relayUnreachable", url: string, host: string, details: string | null, } | { "type": "relayRefused", url: string, host: string, reason: string, } | { "type": "needsCode", url: string, host: string, } | { "type": "ownerNotOnRelay", host: string, } | { "type": "linkCodeRefused", host: string, };
