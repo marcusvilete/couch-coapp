@@ -1,4 +1,4 @@
-# Reads the private release configuration (M7): relay_url, relay_token, invite_page, test.
+# Reads the private release configuration (M7): relay_url, relay_token, invite_page, releases, test.
 # Dot-sourced by build-installer.ps1 and relay.ps1; not run on its own. The file lives outside
 # the repository (`cargo xtask release-config` creates it); COUCH_RELEASE_CONFIG points at another one.
 
@@ -9,7 +9,7 @@ function Get-ReleaseConfigPath {
 
 # A flat TOML file of `key = "text"` and `key = true|false` lines; anything else is refused.
 function Read-ReleaseConfig([string] $Path) {
-    $config = @{ relay_url = ''; relay_token = ''; invite_page = ''; test = $false }
+    $config = @{ relay_url = ''; relay_token = ''; invite_page = ''; releases = ''; test = $false }
     foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
         $line = $line.Trim()
         if ($line -eq '' -or $line.StartsWith('#')) { continue }

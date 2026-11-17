@@ -197,7 +197,26 @@ struct SourcePackage {
     texts: BTreeSet<String>,
 }
 
-fn libraries(root: &Path, appdir: &Path) -> anyhow::Result<String> {
+/// What the AppImage's system files are: the system it was built on, how many
+/// files, and the source packages they came from.
+struct Traced {
+    system: BTreeMap<String, String>,
+    files: usize,
+    sources: BTreeMap<String, SourcePackage>,
+}
+
+/// Each of Ubuntu's source packages the AppImage carries something of, with
+/// its version: what `cargo xtask appimage` fetches from Launchpad to go
+/// beside it (the LGPL's source, from the same place as the binary).
+pub fn source_packages(root: &Path, appdir: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    Ok(trace(root, appdir)?
+        .sources
+        .into_iter()
+        .map(|(source, package)| (source, package.version))
+        .collect())
+}
+
+fn trace(root: &Path, appdir: &Path) -> anyhow::Result<Traced> {
     // The notices, SOURCES.txt and the docs say Ubuntu 24.04, and promise
     // the glibc it has.
     let system = os_release()?;
@@ -262,6 +281,19 @@ fn libraries(root: &Path, appdir: &Path) -> anyhow::Result<String> {
         entry.binaries.insert(name.to_string(), version);
         entry.texts.insert(text);
     }
+    Ok(Traced {
+        system,
+        files: files.len(),
+        sources,
+    })
+}
+
+fn libraries(root: &Path, appdir: &Path) -> anyhow::Result<String> {
+    let Traced {
+        system,
+        files,
+        sources,
+    } = trace(root, appdir)?;
 
     let mut out = String::new();
     section(
@@ -277,7 +309,8 @@ fn libraries(root: &Path, appdir: &Path) -> anyhow::Result<String> {
     out.push_str(
         "\nEach comes from one of Ubuntu's packages: its section names the source\n\
          package and where Ubuntu publishes that exact version's source, and gives\n\
-         the package's copyright file, which holds its licences.\n",
+         the package's copyright file, which holds its licences. Those sources, at\n\
+         exactly these versions, come with the AppImage, in a tar beside it.\n",
     );
     for (source, package) in &sources {
         let binaries: Vec<String> = package
@@ -310,7 +343,7 @@ fn libraries(root: &Path, appdir: &Path) -> anyhow::Result<String> {
     }
     println!(
         "The AppImage carries {} system file(s) from {} Ubuntu source package(s)",
-        files.len(),
+        files,
         sources.len()
     );
     Ok(out)

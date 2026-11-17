@@ -74,6 +74,10 @@ relay_token = "{token}"
 # -NoInvitePage overrides it for one build.
 invite_page = ""
 
+# Whose GitHub releases the app checks for new versions, as <owner>/<name>
+# (such as marcusvilete/couch-coapp). Empty: it never checks.
+releases = ""
+
 # true only in a copy for testing on your LAN: allows an http:// relay_url
 # and invite_page, and names the installer "-test".
 test = false

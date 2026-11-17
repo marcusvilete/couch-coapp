@@ -1,11 +1,11 @@
 ---
 name: release-installer
-description: Build and hand out a Couch Co-App Windows installer with `scripts\build-installer.ps1`, and the Linux AppImage with `scripts/build-appimage.sh` in WSL: when a version bump is needed (the wire revision, the three version files), building from a merged, clean, pushed main, release versus test builds, checking which relay and invite page it carries without printing the relay's token, serving the files, and what to tell the people who install it and record afterwards. Use when asked for an installer or an AppImage, a new version to hand out, a test build for another PC, or before a run with other people.
+description: Build and hand out a Couch Co-App Windows installer with `scripts\build-installer.ps1`, and the Linux AppImage with `scripts/build-appimage.sh` in WSL, or make a public release through the release workflow on a tag: when a version bump is needed (the wire revision, the three version files), building from a merged, clean, pushed main, release versus test versus public builds, checking which relay and invite page it carries without printing the relay's token, serving the files, the draft release, and what to tell the people who install it and record afterwards. Use when asked for an installer or an AppImage, a new version to hand out, a public release, a test build for another PC, or before a run with other people.
 ---
 
 # A release installer
 
-There are no public binaries (ADR 0009): installers are built from source and handed to people the builder knows, unsigned. A release installer carries the builder's relay URL and token and the invite page's address, baked in at build time from the private `release.toml` (`%USERPROFILE%\.couch-coapp\release.toml`, never in the repository; `cargo xtask release-config` creates it, `deploy/release.example.toml` shows its shape). `docs/self-hosting.md` is the human guide to the same steps.
+Two routes (ADR 0014). **Public releases** come from the release workflow on a tag (the section at the end): no secret, iroh's public relays by default. **Friends' installers** are built here from source and handed to people the builder knows, unsigned. A release installer carries the builder's relay URL and token and the invite page's address, baked in at build time from the private `release.toml` (`%USERPROFILE%\.couch-coapp\release.toml`, never in the repository; `cargo xtask release-config` creates it, `deploy/release.example.toml` shows its shape). `docs/self-hosting.md` is the human guide to the same steps.
 
 ## 1. Is a new version needed?
 
@@ -36,6 +36,8 @@ From the repository's root, in PowerShell:
   - `-TestRelay`: a `-test` installer on iroh's public relays, from any tree (a dirty one warns that its notices ask people to request the source). For trying a branch on another PC, not for regular use.
   - `-InvitePage <https://…/j/>` sets the invite page for this build (test builds included); `-NoInvitePage` gives `couchco://` links.
   - `-Config <file>`: another release configuration (a LAN test one, say).
+  - `-Public`: a public build, no relay, no token and no `release.toml` (what the workflow makes; by hand only to try one here). It needs a clean tree and checks the workspace repository's releases for new versions.
+  - `-Releases <owner>/<name>`: whose GitHub releases the update notice checks, for this build; otherwise `release.toml`'s `releases` (empty: it never checks). A test build never checks, and the script refuses it one.
 
 ## 4. Check what it carries
 
@@ -70,13 +72,24 @@ A Linux PC or a Steam Deck watches and plays, and is a remote-play device; since
   timeout 3500 bash scripts/build-appimage.sh > ~/runs/build-appimage.log 2>&1; echo "exit $?"
   ```
   Never print or open that file. It builds, bundles once, writes the notices from what the bundle carries (the AppImage's runtime and AppRun, and every system file traced to its Ubuntu package with `dpkg -S`), and bundles again with them inside.
-- **Check its output** as for the installer (leave out lines with "token"): `Our relay: …`, `Invites link to …`, `The AppImage carries N system file(s) from M Ubuntu source package(s)`, and `Built Couch-Co-App_<version>_<commit>.AppImage (… MB) in …/target/appimage`.
+- **Check its output** as for the installer (leave out lines with "token"): `Our relay: …`, `Invites link to …`, `The AppImage carries N system file(s) from M Ubuntu source package(s)`, `The system libraries' sources: M package(s), … file(s), in …-system-sources.tar` (fetched from Launchpad: the first build downloads a few hundred MB, kept in `third_party/_downloads`), and `Built Couch-Co-App_<version>_<commit>.AppImage (… MB) in …/target/appimage`.
 - **It fails rather than leave anything out:** a file in the AppImage no package installed, or a runtime that names other parts than the texts pinned in `xtask/licences/appimage/` (then fetch and pin the new ones).
 - **Try it once in WSLg** before handing it out: `COUCH_PROFILE=appimagecheck target/appimage/Couch-Co-App_*.AppImage`; Settings → About shows the version, the commit and the notices.
-- **Hand out all of `target/appimage/`** (the AppImage, the notices, FFmpeg's archives, `SOURCES.txt`): copy it to Windows (`rm -rf /mnt/c/dev/couch-coapp/target/appimage && cp -r ~/couch-release/target/appimage /mnt/c/dev/couch-coapp/target/`) and serve it like the installer.
+- **Hand out all of `target/appimage/`** (the AppImage, the notices, FFmpeg's archives, the system libraries' sources tar, `SOURCES.txt`): copy it to Windows (`rm -rf /mnt/c/dev/couch-coapp/target/appimage && cp -r ~/couch-release/target/appimage /mnt/c/dev/couch-coapp/target/`) and serve it like the installer.
 - **What to tell them:** make it executable (Properties, or `chmod +x`), then open it; without FUSE, `--appimage-extract-and-run`; on a Steam Deck, Desktop Mode, and for Game Mode add it as a non-Steam game; it needs glibc 2.39 or newer; it adds itself to the app menu at start (the panic key needs that entry); invite links work once it has started once; the log is `~/.local/share/CouchCoApp/profiles/default/desktop.log`.
 
 ## 6. Afterwards
 
 - Note which version people now have, and what the next run should try: the milestones' "still to come" lines in their results pages.
 - After the run, record what was seen in those results pages, in a section of its own, through the usual branch.
+
+## A public release (M26c, the release workflow)
+
+`.github/workflows/release.yml` builds the installer on a Windows runner and the AppImage on Ubuntu 24.04, as public builds (`build-installer.ps1 -Public`, `build-appimage.sh --public`), and uses no secret.
+
+- **Before tagging:** the same checks as section 1 and 2: a merged main, a version not released before, `git status --short` empty. Until the update notice is in (M26c-2), don't tag a public release: its users would never hear of the next one.
+- **Try it first by hand:** Actions → Release → Run workflow, on the branch. It builds both packages and the notes and keeps them as the run's artifacts, with no release; download them, install the Windows one, and run the AppImage in WSLg (section above). GitHub offers Run workflow only once the workflow is on the default branch.
+- **Tag the version** (the author's step, or with their go-ahead): `git tag v<version>` on that commit, then `git push origin v<version>`. The `check` job runs `cargo xtask release-notes --tag`, which refuses a tag that isn't `v` and the version in `Cargo.toml`, `tauri.conf.json` and `package.json` (no `-rc` suffixes), before anything long runs. It also refuses a tag whose commit isn't on `main`, and a workspace `repository` (Cargo.toml) that isn't the repository running it (a fork's notes and notices would link upstream's source).
+- **The draft:** the `draft` job collects both packages (`Couch-Co-App_<version>_x64-setup.exe`, `Couch-Co-App_<version>_amd64.AppImage`), `SHA256SUMS`, `THIRD-PARTY-NOTICES-windows.txt` and `-linux.txt`, `SOURCES-windows.txt` and `-linux.txt`, FFmpeg's two archives (once: it fails if the two packages' differ), and `Couch-Co-App_<version>_amd64-system-sources.tar` (the AppImage's system libraries' sources, from Launchpad), with the notes. Their first line, `<!-- couch-wire-revision: N -->`, is what the update notice reads: never remove it when editing the notes.
+- **The author reads and publishes the draft;** nothing in the workflow publishes. Don't add SmartScreen text to the notes without asking (the author's call, 2026-11-17).
+- **A failed run:** read the failing job's log (`gh run view --log-failed`, or the Actions tab). Fix on a branch; re-running the `draft` job alone needs no new tag, but it refuses while a release or draft for that tag exists (delete a half-made draft on GitHub first). For a fix in the code, delete the tag (`git push --delete origin v<version>`, then `git tag -d v<version>`) and any draft it made, and tag again once the fix is merged (its own version if it changed the app, which bumps it). A tag never moves to another commit once a release from it is public.

@@ -4,7 +4,7 @@
 # It asks to install for "just me" (%LOCALAPPDATA%\Programs) or everyone (Program Files; on an
 # administrator account Windows asks for administrator rights when it opens), registers couchco:// links,
 # and after installing offers ViGEmBus and HidHide (their own setups, which ask for
-# administrator rights). Unsigned (installers go to friends only, ADR 0009): Windows SmartScreen
+# administrator rights). Unsigned (ADR 0014): Windows SmartScreen
 # warns, and "More info" then "Run anyway" installs it. Logs go to desktop.log in
 # %LOCALAPPDATA%\CouchCoApp\profiles\<profile>.
 #
@@ -18,6 +18,14 @@
 #   .\scripts\build-installer.ps1                       # release: our relay and its token, https only
 #   .\scripts\build-installer.ps1 -Config <file>        # another file, e.g. a LAN test one (test = true)
 #   .\scripts\build-installer.ps1 -TestRelay            # a test installer: iroh's public relays, no file needed
+#   .\scripts\build-installer.ps1 -Public               # a public build (M26c): no relay, no token, no file
+#
+# A public build (ADR 0014) is what the release workflow (.github\workflows\release.yml) makes on
+# a tag: iroh's public relays until the user registers one, a clean tree like a release, and a
+# setup file named by its version alone. It checks this repository's releases for new versions
+# (the workspace's `repository` in Cargo.toml); a release build does only with `releases` in
+# release.toml. Test builds never do. For one build:
+#   -Releases <owner>/<name>                              # whose GitHub releases it checks
 #
 # Where Copy invite links to (P4): the invite page (deploy\invite-page), or couchco:// links.
 # A release build takes release.toml's invite_page; a test build has none. Either way:
@@ -27,6 +35,8 @@
 param(
     [string] $Config,
     [switch] $TestRelay,
+    [switch] $Public,
+    [string] $Releases,
     [string] $InvitePage,
     [switch] $NoInvitePage
 )
@@ -39,7 +49,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 
 # The values baked into the build (couch_engine::build_config). Checked here, since the app
 # treats a value it can't read as none.
-$build = @{ COUCH_BUILD_RELAY_URL = $null; COUCH_BUILD_RELAY_TOKEN = $null; COUCH_BUILD_INVITE_PAGE = $null; COUCH_BUILD_TEST = $null; COUCH_BUILD_COMMIT = $null }
+$build = @{ COUCH_BUILD_RELAY_URL = $null; COUCH_BUILD_RELAY_TOKEN = $null; COUCH_BUILD_INVITE_PAGE = $null; COUCH_BUILD_TEST = $null; COUCH_BUILD_COMMIT = $null; COUCH_BUILD_PUBLIC = $null; COUCH_BUILD_RELEASES = $null }
 $test = [bool] $TestRelay
 $release = $null
 $dirtyTree = [bool] (git -C $repo status --porcelain)
@@ -59,9 +69,13 @@ function Assert-WebAddress([string] $Name, [string] $Value) {
         throw "$Name must begin with https:// in lower case, not '$Value'."
     }
 }
+if (@(@([bool] $Config, [bool] $TestRelay, [bool] $Public) | Where-Object { $_ }).Count -gt 1) { throw 'Pass one of -Config, -TestRelay or -Public.' }
 if ($TestRelay) {
-    if ($Config) { throw 'Pass -Config or -TestRelay, not both.' }
+    if ($Releases) { throw 'A test installer never checks for new versions: leave out -Releases.' }
     Write-Host "A test installer: iroh's public relays, and plain http relays on the LAN allowed."
+} elseif ($Public) {
+    $build.COUCH_BUILD_PUBLIC = '1'
+    Write-Host "A public build: no relay and no token, iroh's public relays until a relay is registered."
 } else {
     $path = if ($Config) { $Config } else { Get-ReleaseConfigPath }
     if (-not (Test-Path -LiteralPath $path)) {
@@ -81,6 +95,32 @@ if ($TestRelay) {
 }
 if ($test) { $build.COUCH_BUILD_TEST = '1' }
 
+# Whose GitHub releases the update notice checks (M26c): this build's choice, else a public
+# build's own repository, else release.toml's. Never a test build's, which the app ignores.
+$repository = (Select-String -Path (Join-Path $repo 'Cargo.toml') -Pattern '^repository = "([^"]+)"').Matches | Select-Object -First 1
+$releasesRepo = if ($PSBoundParameters.ContainsKey('Releases')) {
+    $Releases   # '' for none
+} elseif ($Public) {
+    $url = if ($repository) { $repository.Groups[1].Value } else { '' }
+    if ($url -cnotmatch '^https://github\.com/(.+)$') {
+        throw "A public build checks the releases of the workspace's repository, which must be on GitHub: Cargo.toml has '$url'. Pass -Releases <owner>/<name>, or -Releases '' for none."
+    }
+    $Matches[1]
+} elseif ($release) {
+    $release.releases
+} else { '' }
+if ($releasesRepo) {
+    if ($test) { throw 'A test build never checks for new versions: leave out releases (release.toml) or -Releases.' }
+    # As couch_engine::build_config checks it: the app treats one it can't read as none.
+    if ($releasesRepo -cnotmatch '\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/(?!\.\.?\z)[A-Za-z0-9._-]{1,100}\z') {
+        throw "Releases must be a GitHub repository as <owner>/<name>, not '$releasesRepo'."
+    }
+    $build.COUCH_BUILD_RELEASES = $releasesRepo
+    Write-Host "It checks for new versions at github.com/$releasesRepo/releases"
+} else {
+    Write-Host 'It never checks for new versions.'
+}
+
 # Where invites link to: this build's choice, else release.toml's (release builds only).
 $page = if ($NoInvitePage) { '' } elseif ($InvitePage) { $InvitePage } elseif ($release) { $release.invite_page } else { '' }
 if ($page) {
@@ -96,11 +136,12 @@ if ($page) {
 # The notices link the app's source at this commit: it must be that exact commit, and reachable.
 if ($dirtyTree) {
     if (-not $test) {
-        throw 'Uncommitted changes: a release installer must match a commit exactly, since its notices link to that commit''s source. Commit first, or build a test installer (-TestRelay).'
+        throw 'Uncommitted changes: a release or public installer must match a commit exactly, since its notices link to that commit''s source. Commit first, or build a test installer (-TestRelay).'
     }
     Write-Warning 'Uncommitted changes: this test installer''s notices ask friends to request its source from you.'
 }
-if (-not (git -C $repo branch -r --contains HEAD 2>$null)) {
+# A tag's build in the release workflow checks out the tag alone: no remote branch to see.
+if ($env:GITHUB_REF_TYPE -ne 'tag' -and -not (git -C $repo branch -r --contains HEAD 2>$null)) {
     Write-Warning 'This commit is on no remote branch yet: push it, or friends can''t reach the source the notices link to.'
 }
 
@@ -146,6 +187,11 @@ try {
 $built = Get-ChildItem (Join-Path $repo 'target\release\bundle\nsis') -Filter "*_$($cargo)_x64-setup.exe" |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $built) { throw 'No installer was produced.' }
+# The build may not change what the notices link to (Cargo.lock, say), as the AppImage's checks.
+$changed = git -C $repo status --porcelain
+if (-not $dirtyTree -and $changed) {
+    throw "The build changed files in the repository, so the installer no longer matches its commit:`n$($changed -join "`n")"
+}
 
 $commit = git -C $repo rev-parse --short HEAD
 $dirty = if ($dirtyTree) { '-dirty' } else { '' }
@@ -153,13 +199,13 @@ $out = Join-Path $repo 'target\installer'
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force $out | Out-Null
 $kind = if ($test) { '-test' } else { '' }
-$name = "Couch-Co-App_$($cargo)_$commit$dirty$kind-setup.exe"
+# A public build is named by its version alone, as its release names it.
+$name = if ($Public) { "Couch-Co-App_$($cargo)_x64-setup.exe" } else { "Couch-Co-App_$($cargo)_$commit$dirty$kind-setup.exe" }
 Copy-Item $built.FullName (Join-Path $out $name)
 
 # FFmpeg's source and build scripts go with every installer (the LGPL), explained in SOURCES.txt.
 $sources = Join-Path $repo 'third_party\sources'
 Get-ChildItem $sources -Filter *.tar.gz | Copy-Item -Destination $out
-$repository = (Select-String -Path (Join-Path $repo 'Cargo.toml') -Pattern '^repository = "([^"]+)"').Matches | Select-Object -First 1
 $appSource = if ($repository -and -not $dirtyTree) {
     "$($repository.Groups[1].Value)/tree/$(git -C $repo rev-parse HEAD)"
 } else {

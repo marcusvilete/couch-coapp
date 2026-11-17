@@ -3394,13 +3394,7 @@ impl Engine {
         let text = diagnostics::text(&diagnostics::Facts {
             app_version: env!("CARGO_PKG_VERSION"),
             commit: build_config::commit(),
-            build: if cfg!(debug_assertions) {
-                "development build"
-            } else if build_config::test_build() {
-                "test build"
-            } else {
-                "release build"
-            },
+            build: build_config::kind(),
             system: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             wire: couch_proto::PROTOCOL_MINOR,
             network: &network,

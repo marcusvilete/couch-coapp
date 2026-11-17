@@ -28,7 +28,7 @@ use crate::deps;
 
 mod system_libraries;
 
-pub use system_libraries::{Bundle, runtime_version};
+pub use system_libraries::{Bundle, runtime_version, source_packages};
 
 pub const FILE_NAME: &str = "THIRD-PARTY-NOTICES.txt";
 
