@@ -4,6 +4,7 @@
 // what is shown, and sends commands.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NetworkTrouble } from "../bindings/NetworkTrouble";
+import type { WebPage } from "../bindings/WebPage";
 import { errorText, request } from "../engine";
 import type { TroubleFix } from "../model/network";
 import { hosted } from "../model/overlay";
@@ -133,6 +134,11 @@ export default function App() {
     if (fix === "pasteCode" && trouble.type === "relayRefused") {
       setPasteFor((was) => ({ host: trouble.host, seq: (was?.seq ?? 0) + 1 }));
     }
+  };
+
+  // The build's pages in the browser (M26c-2): named, never addressed.
+  const openPage = (page: WebPage) => {
+    request({ type: "openPage", page }, "done").catch((e) => lobby.notify(errorText(e), "warn"));
   };
 
   const ctx: Context = {
@@ -351,6 +357,7 @@ export default function App() {
                       actions={actions}
                       hostEntries={myHere ? (m) => viewerEntries(room, myHere, m.id, members.run) : undefined}
                       onClose={drawerMode ? () => setDrawer(false) : undefined}
+                      onGetUpdate={lobby.info?.releasePages ? () => openPage("releases") : undefined}
                     />
                   )}
                 </div>
@@ -363,7 +370,18 @@ export default function App() {
                 onEditName={() => setDialog({ kind: "name" })}
               />
             ) : null}
-            <TroubleStrip network={lobby.network} working={checking} onFix={fixTrouble} />
+            <TroubleStrip
+              network={lobby.network}
+              working={checking}
+              onFix={fixTrouble}
+              updates={lobby.updates}
+              onGetUpdate={() => openPage("newVersion")}
+              onDismissUpdate={(version) =>
+                request({ type: "dismissUpdate", version }, "updates")
+                  .then(lobby.setUpdates)
+                  .catch((e) => lobby.notify(errorText(e), "warn"))
+              }
+            />
           </div>
         </div>
       </div>

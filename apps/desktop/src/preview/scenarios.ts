@@ -181,6 +181,8 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       platform: "windows",
       capabilities: { sessions: true, keyboardSeat: true, desktopControl: true },
       homePc: true,
+      // A public build (M26c-2): the update notice, Report a problem.
+      releasePages: true,
     },
     profile: { displayName: "Ana", memberId: ME },
     rooms,
@@ -229,6 +231,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
     drawingDefault: false,
     picturesDefault: false,
     hdr: true,
+    updates: { checks: true, on: true, latest: null, dismissed: null },
     remotePlay: {
       on: false,
       pinSet: false,
@@ -1240,6 +1243,36 @@ export const SCENARIOS: Record<string, Scenario> = {
   "network-public-first-run": {
     title: "Network: only the public relays, no rooms yet: Create a room asks for a relay first",
     world: () => base([], { network: publicOnly() }),
+  },
+  "update-notice": {
+    title: "A newer version is out: the strip (M26c-2)",
+    world: () =>
+      base([sofa(), friday()], {
+        updates: { checks: true, on: true, latest: { version: "0.40.0", wireChanged: false }, dismissed: null },
+      }),
+  },
+  "update-wire": {
+    title: "A newer version on another wire revision: everyone needs it",
+    world: () =>
+      base([sofa(), friday()], {
+        updates: { checks: true, on: true, latest: { version: "0.40.0", wireChanged: true }, dismissed: null },
+      }),
+  },
+  "update-and-trouble": {
+    title: "A newer version while offline: the trouble comes first",
+    world: () =>
+      base([sofa(), friday()], {
+        updates: { checks: true, on: true, latest: { version: "0.40.0", wireChanged: false }, dismissed: null },
+        network: network({ internet: "offline", udp: null, homeRelay: null, trouble: { type: "noInternet" } }),
+      }),
+  },
+  "update-none": {
+    title: "A build that names no releases: no switch, no report, no link",
+    world: () =>
+      base([sofa({ members: [you(true), bia, member("g1", "Gui", "direct", { otherVersion: { appVersion: "0.18.0", newer: true } })] })], {
+        info: { ...base([]).info, releasePages: false },
+        updates: { checks: false, on: true, latest: null, dismissed: null },
+      }),
   },
   "release-build": {
     title: "A release build (restarts itself)",

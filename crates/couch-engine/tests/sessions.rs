@@ -1429,6 +1429,7 @@ fn options(port: u16, fake: Arc<Fake>) -> EngineOptions {
             check_timeout: Duration::from_secs(2),
             ..couch_engine::NetworkTimings::default()
         },
+        releases: None,
     }
 }
 

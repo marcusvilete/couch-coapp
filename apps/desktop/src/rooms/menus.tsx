@@ -1,6 +1,6 @@
 // The menus of a room and of a member: the same entries on the "⋯" button
 // and on right-click. An entry the engine would refuse is disabled with why.
-import { ArrowDown, ArrowUp, Ban, Crown, DoorOpen, KeyRound, Link2Off, LogOut, UserPlus } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpCircle, Ban, Crown, DoorOpen, KeyRound, Link2Off, LogOut, UserPlus } from "lucide-react";
 import type { MemberView } from "../bindings/MemberView";
 import type { RoomView } from "../bindings/RoomView";
 import { unreachableOf } from "../model/reasons";
@@ -46,8 +46,19 @@ export function roomMenu(room: RoomView, a: RoomActions, place: { index: number;
 
 /** A member's menu; `hosting` adds the session's entries for them (seats)
  * while we host. Empty for ourselves outside a session. */
-export function memberMenu(room: RoomView, m: MemberView, a: RoomActions, hosting: MenuEntry[] = []): MenuEntry[] {
+/** `getUpdate`: opens the latest release, where the build names its
+ * releases (M26c-2), for a member on a newer version than ours. */
+export function memberMenu(
+  room: RoomView,
+  m: MemberView,
+  a: RoomActions,
+  hosting: MenuEntry[] = [],
+  getUpdate?: () => void,
+): MenuEntry[] {
   const entries: MenuEntry[] = [...hosting];
+  if (m.otherVersion?.newer && getUpdate) {
+    entries.push({ label: "Get the new version", icon: <ArrowUpCircle />, onSelect: getUpdate });
+  }
   // A code would let us reach them (M26a-2).
   const why = unreachableOf(m);
   if (why?.fix) {

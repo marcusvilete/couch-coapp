@@ -460,6 +460,10 @@ impl Backend for LinuxBackend {
         couch_platform_linux::folder::open(dir, "desktop.log").map_err(MediaError::Backend)
     }
 
+    fn open_page(&self, url: &str) -> Result<(), MediaError> {
+        couch_platform_linux::web::open(url).map_err(MediaError::Backend)
+    }
+
     /// The desktop's dialog comes when the host starts the stream, once:
     /// never over the game when a guest arrives, nor again each time
     /// someone comes back.

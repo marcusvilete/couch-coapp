@@ -1025,6 +1025,11 @@ impl Actor {
         }
     }
 
+    /// We host a session (streaming or not) or watch one.
+    pub(super) fn busy(&self) -> bool {
+        self.sessions.hosting.is_some() || self.sessions.watching.is_some()
+    }
+
     fn hosting_mut(&mut self) -> Option<&mut Hosting> {
         self.sessions.hosting.as_mut()
     }

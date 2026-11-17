@@ -21,6 +21,7 @@ pub mod netem;
 pub mod pictures;
 pub mod streams;
 pub mod video;
+pub mod web;
 
 pub use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey,

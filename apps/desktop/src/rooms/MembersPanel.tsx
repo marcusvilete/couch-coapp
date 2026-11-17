@@ -25,6 +25,9 @@ export function MembersPanel(props: {
   hostEntries?: (member: MemberView) => MenuEntry[];
   /** Shown as a drawer over the room (narrow windows): it can be closed. */
   onClose?: () => void;
+  /** Opens the latest release, where the build names its releases
+   * (M26c-2): offered for a member on a newer version than ours. */
+  onGetUpdate?: () => void;
 }) {
   const { room } = props;
   // The order while a menu is open: presence changing meanwhile moves no row
@@ -47,7 +50,7 @@ export function MembersPanel(props: {
   const holdRows = (open: boolean) => setFrozen(open ? live.current : null);
 
   const row = (m: MemberView) => {
-    const items = memberMenu(room, m, props.actions, props.hostEntries?.(m) ?? []);
+    const items = memberMenu(room, m, props.actions, props.hostEntries?.(m) ?? [], props.onGetUpdate);
     const hosting = room.sessions.find((s) => s.host === m.id);
     const plays = room.sessions.some((s) => playersOf(s).includes(m.id));
     const watches = room.sessions.some((s) => s.viewers.includes(m.id));

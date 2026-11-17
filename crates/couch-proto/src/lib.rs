@@ -84,6 +84,13 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// `RelayHint`.
 pub const PROTOCOL_MINOR: u16 = 21;
 
+/// What a public release's notes say first, as `<!-- couch-wire-revision: N -->`
+/// with [`PROTOCOL_MINOR`] for N (M26c, `cargo xtask release-notes`): the
+/// update notice reads it to say whether everyone in your rooms needs the
+/// new version. Out of sight on the release page, since its visible text
+/// may be edited. Never on the wire: no revision of its own.
+pub const RELEASE_WIRE_MARKER: &str = "couch-wire-revision";
+
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
 /// minor version bump** (`cargo xtask bump minor`): builds of different

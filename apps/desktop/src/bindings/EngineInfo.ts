@@ -29,4 +29,9 @@ capabilities: HostCapabilities,
  * Settings offers the home PC's side of remote play only then (a Linux
  * host until M16c-1's fifth part doesn't).
  */
-homePc: boolean, };
+homePc: boolean, 
+/**
+ * This build names its releases (M26c-2): the update notice's switch,
+ * the version mismatch's link and Report a problem are offered.
+ */
+releasePages: boolean, };

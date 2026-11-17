@@ -379,6 +379,15 @@ pub trait Backend: Send + Sync + 'static {
         ))
     }
 
+    /// Opens one of the build's pages in the browser (M26c-2): an https
+    /// address the engine made from the build's repository, never one the
+    /// webview named.
+    fn open_page(&self, _url: &str) -> Result<(), MediaError> {
+        Err(MediaError::Unsupported(
+            "opening web pages on this system".into(),
+        ))
+    }
+
     /// Opens a profile's folder (its logs) in the system's file manager
     /// (M26a, Settings → Network). The webview never names the path.
     fn open_folder(&self, _dir: &std::path::Path) -> Result<(), MediaError> {

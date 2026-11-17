@@ -32,3 +32,4 @@ pub mod screencast;
 pub mod session_lock;
 pub mod sound;
 pub mod stdio;
+pub mod web;

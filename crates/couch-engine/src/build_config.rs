@@ -2,7 +2,7 @@
 //! that `scripts/build-installer.ps1` reads (outside the repo; see
 //! `deploy/release.example.toml`). Development builds get none of them and
 //! use iroh's public relays. Cargo rebuilds when one changes, since rustc
-//! records the variables `option    option_env!("COUCH_BUILD_RELAY_URL").filter(|_| !public_build() && relay().is_none())env!` reads.
+//! records the variables `option_env!` reads.
 
 use couch_net::{RelayUrl, endpoint::RelayToken};
 
@@ -76,6 +76,57 @@ pub fn releases() -> Option<&'static str> {
     option_env!("COUCH_BUILD_RELEASES")
         .map(str::trim)
         .filter(|repo| !test_build() && is_repository(repo))
+}
+
+/// Where the update notice looks for new versions, and the repository
+/// whose pages the app opens (M26c-2, ADR 0014).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseSource {
+    /// GitHub's latest-release API for the repository, or the stand-in.
+    pub api: String,
+    /// `https://github.com/<owner>/<name>`: every page the app opens for the
+    /// notice, the version mismatch and a problem's report starts with it.
+    pub repository: String,
+    /// [`RELEASES_URL_VAR`] stands in: plain http allowed, looked at soon
+    /// after start, once every start.
+    pub stand_in: bool,
+}
+
+/// Read at run time by development and test builds alone (never public or
+/// friends' builds): the address the update notice reads in place of
+/// GitHub's, such as a copy of its reply served on this PC
+/// (`crates/couch-engine/tests/fixtures/github-latest-release.json`). The
+/// pages the app opens are then the workspace repository's.
+pub const RELEASES_URL_VAR: &str = "COUCH_RELEASES_URL";
+
+/// Where this build looks for new versions: its own [`releases`], or in a
+/// development or test build [`RELEASES_URL_VAR`]; `None` for a build that
+/// never looks (a friends' build without `releases`, any other build
+/// without the variable).
+pub fn release_source() -> Option<ReleaseSource> {
+    if let Some(repo) = releases() {
+        return Some(ReleaseSource {
+            api: format!("https://api.github.com/repos/{repo}/releases/latest"),
+            repository: format!("https://github.com/{repo}"),
+            stand_in: false,
+        });
+    }
+    if !test_build() {
+        return None;
+    }
+    let api = std::env::var(RELEASES_URL_VAR).ok()?.trim().to_string();
+    if !(api.starts_with("http://") || api.starts_with("https://")) {
+        tracing::warn!("{RELEASES_URL_VAR} isn't an http or https address: ignored");
+        return None;
+    }
+    let repo = env!("CARGO_PKG_REPOSITORY")
+        .strip_prefix("https://github.com/")
+        .filter(|repo| is_repository(repo))?;
+    Some(ReleaseSource {
+        api,
+        repository: format!("https://github.com/{repo}"),
+        stand_in: true,
+    })
 }
 
 /// What the build kind is called in Copy diagnostics.

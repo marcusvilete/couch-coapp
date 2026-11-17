@@ -115,6 +115,10 @@ impl Backend for WindowsBackend {
             .map_err(|e| MediaError::Backend(format!("Explorer: {e}")))
     }
 
+    fn open_page(&self, url: &str) -> Result<(), MediaError> {
+        couch_platform_win::web::open(url).map_err(MediaError::Backend)
+    }
+
     fn sources(&self) -> Result<Sources, MediaError> {
         let mut elevated = std::collections::HashMap::new();
         let windows = capture::list_windows()?
