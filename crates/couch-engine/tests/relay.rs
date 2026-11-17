@@ -351,6 +351,84 @@ mod registered {
     }
 }
 
+/// Relays for dialing only (the M26b follow-up; our vendored iroh's second
+/// change, third_party/iroh/PATCHED.md): a relay a room passed on, or one
+/// lent for a join, is our home only while no other relay answers. Home is
+/// named in every room's record, where the others can't get its code.
+mod dial_only {
+    use couch_net::{
+        RelayUrl,
+        endpoint::{self, EndpointOptions, Relay, RelayChoice, RelayToken},
+    };
+    use couch_testkit::relay::TestRelay;
+    use iroh::Watcher;
+
+    use super::WAIT;
+
+    fn relay(at: &TestRelay, token: &str) -> Relay {
+        Relay::new(at.url.parse().unwrap(), RelayToken::new(token))
+    }
+
+    async fn bind(choice: RelayChoice) -> couch_net::Endpoint {
+        let mut options = EndpointOptions::new(couch_net::SecretKey::generate(), choice);
+        options.relay_only = true;
+        endpoint::bind(options).await.expect("bind")
+    }
+
+    fn home(endpoint: &couch_net::Endpoint) -> Option<RelayUrl> {
+        endpoint.addr().relay_urls().next().cloned()
+    }
+
+    /// Waits until `endpoint`'s home is `want`, then that it stays so for a
+    /// while (a report that hears every relay comes meanwhile).
+    async fn home_is(endpoint: &couch_net::Endpoint, want: &Relay) {
+        let mut addr = endpoint.watch_addr();
+        tokio::time::timeout(WAIT, async {
+            loop {
+                if addr.get().relay_urls().any(|u| *u == want.url) {
+                    return;
+                }
+                addr.updated().await.expect("the endpoint is running");
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("home is {:?}, not {}", home(endpoint), want.url));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(home(endpoint).as_ref(), Some(&want.url), "home moved away");
+    }
+
+    #[tokio::test]
+    async fn home_leaves_a_relay_that_becomes_dial_only_and_moves_back() {
+        let one = TestRelay::start(Some("one")).await;
+        let two = TestRelay::start(Some("two")).await;
+        let (one, two) = (relay(&one, "one"), relay(&two, "two"));
+        let first = RelayChoice::ours(vec![one.clone().dial_only(), two.clone()]);
+        let us = bind(first.clone()).await;
+        home_is(&us, &two).await;
+
+        // Both answer as fast: unpatched, iroh keeps the home it has.
+        let second = RelayChoice::ours(vec![one.clone(), two.clone().dial_only()]);
+        endpoint::change_relays(&us, &first, &second).await;
+        home_is(&us, &one).await;
+        us.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_dial_only_relay_is_home_when_no_other_answers() {
+        let passed_on = TestRelay::start(Some("passed")).await;
+        let passed_on = relay(&passed_on, "passed").dial_only();
+        // Nothing listens there any more: our own relay is down.
+        let gone = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let down = Relay::new(format!("http://127.0.0.1:{gone}").parse().unwrap(), None);
+        let us = bind(RelayChoice::ours(vec![down, passed_on.clone()])).await;
+        home_is(&us, &passed_on).await;
+        us.close().await;
+    }
+}
+
 /// A relay code is checked before it is saved (M26a): the relay lets us in
 /// with its token, refuses another (in its own words), or isn't there.
 #[tokio::test]

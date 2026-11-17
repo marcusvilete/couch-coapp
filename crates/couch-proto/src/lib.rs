@@ -80,7 +80,9 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// `PictureAnswer.upload`.
 /// 20: relay codes passed on (M26b): `RelayAsk`, `RelayAnswer`, and invites
 /// of version 3 carrying the code of the owner's relay.
-pub const PROTOCOL_MINOR: u16 = 20;
+/// 21: a rotated relay code moving during the overlap (the M26b follow-up):
+/// `RelayHint`.
+pub const PROTOCOL_MINOR: u16 = 21;
 
 /// Each wire revision with the app's major.minor version that first carried
 /// it, oldest first. **Raising [`PROTOCOL_MINOR`] means a new row here and a
@@ -108,6 +110,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (18, "0.32"),
     (19, "0.33"),
     (20, "0.37"),
+    (21, "0.38"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

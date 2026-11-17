@@ -2740,7 +2740,9 @@ impl RelayState {
                             .values()
                             .map(|(r, _)| r)
                             .filter(|r| !self.holds(r.url.as_str()))
-                            .cloned(),
+                            // For the join alone: never our home relay
+                            // while another answers.
+                            .map(|r| r.clone().dial_only()),
                     )
                     .collect(),
                 public: public || (falling_back && rules.public_relays),
@@ -2785,6 +2787,15 @@ impl RelayState {
                     .token
                     .clone()
                     .and_then(couch_net::endpoint::RelayToken::new),
+                standby: relay.standby.as_ref().and_then(|s| {
+                    Some(network::StandbyCode {
+                        token: couch_net::endpoint::RelayToken::new(s.token.clone())?,
+                        room: s.room.clone(),
+                        got: s.got,
+                        checked: s.checked,
+                        pasted: relay.pasted,
+                    })
+                }),
                 passable: relay.passable(),
             })
             .collect();
@@ -3321,21 +3332,33 @@ impl Engine {
             }
         }
         let checked = token.clone();
+        // A new code for a relay held, not personal: our rooms get a hint
+        // (the M26b follow-up), for a rotation's overlap.
+        let mut new_code = false;
         self.change_relays(|state| {
-            let personal = personal.unwrap_or_else(|| {
+            let held = state.saved.relays.iter().find(|r| r.url == url.as_str());
+            let personal = personal.unwrap_or_else(|| held.is_some_and(|r| r.personal));
+            let before = held.and_then(|r| r.token.clone());
+            let added =
                 state
                     .saved
-                    .relays
-                    .iter()
-                    .any(|r| r.url == url.as_str() && r.personal)
-            });
-            let added = state
-                .saved
-                .add(url.clone(), token, personal, remote::unix_now())?;
+                    .add(url.clone(), token.clone(), personal, remote::unix_now())?;
+            new_code = added == relays::Added::Replaced
+                && !personal
+                && token.is_some()
+                && before.as_deref() != token.as_ref().map(|t| t.reveal());
             tracing::info!(%url, ?added, unchecked, "relay registered");
             Ok(())
         })
         .await?;
+        if new_code {
+            let _ = self
+                .actor
+                .send(rooms::Input::RelayCodeChanged {
+                    url: url.to_string(),
+                })
+                .await;
+        }
         if !unchecked {
             // It let us in just now: no need to check it again soon. Only
             // if it still holds that code: another add may have replaced it
@@ -3786,6 +3809,12 @@ impl Engine {
             Command::SetUsePassedOn { on } => {
                 self.change_relays(|state| {
                     state.saved.refuse_passed_on = !on;
+                    if !on {
+                        // Nothing from rooms waits to replace our codes.
+                        for relay in &mut state.saved.relays {
+                            relay.standby = None;
+                        }
+                    }
                     Ok(())
                 })
                 .await
@@ -4028,6 +4057,32 @@ impl Engine {
             return Vec::new();
         }
         response.await.unwrap_or_default()
+    }
+
+    /// For tests: whether relay `url` holds a standby code, and whether it
+    /// is `code` (the M26b follow-up; never shown in the app).
+    #[doc(hidden)]
+    pub async fn relay_standby(&self, url: &str, code: &str) -> (bool, bool) {
+        let url = url.parse::<couch_net::RelayUrl>().map(|u| u.to_string());
+        let state = self.relays.lock().await;
+        let standby = url.ok().and_then(|u| state.saved.standby(&u).cloned());
+        (standby.is_some(), standby.is_some_and(|s| s.token == code))
+    }
+
+    /// For tests: the relays the endpoint holds without our having saved
+    /// them, the ones lent for joins (M26b), and whether each is for dialing
+    /// only.
+    #[doc(hidden)]
+    pub async fn unsaved_relays(&self) -> Vec<(String, bool)> {
+        let state = self.relays.lock().await;
+        match &state.in_use {
+            RelayChoice::Relays { ours, .. } => ours
+                .iter()
+                .filter(|r| !state.holds(r.url.as_str()))
+                .map(|r| (r.url.to_string(), r.dial_only))
+                .collect(),
+            RelayChoice::Disabled => Vec::new(),
+        }
     }
 
     /// For tests: drops the connection with `member` in `room` as a dead

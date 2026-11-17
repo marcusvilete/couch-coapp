@@ -24,9 +24,13 @@ The author's choices (2026-11-13):
 **Settled while building M26b** (2026-11-13; [results](../m26b-results.md)):
 - **The author's choices:** a personal code refused is never asked for again (taken back on purpose); a relay of the user's own whose code is refused takes a room member's checked code in place and stays the user's ("new code from Bia"); the remote-play device says why it can't reach its home PC in the same PR; the version mismatch's link, the antivirus submission and the invite page's download stay in M26c, as "In parts" says.
 - **A rotation of a relay that isn't our home is noticed** by checking its code again when a member on it can't be reached (at most every 30 s): iroh reports refusals of the home relay alone.
-- **Codes are asked for only once ours is refused,** so during a rotation's overlap (both tokens accepted) nothing moves; after it, an app reaches its rooms to ask only by another path (a direct one, or another relay). A home PC whose only relay is the rotated one can't ask: the deploy guide says to paste the new code there, or give it a second relay, before the old token goes.
+- **Codes are asked for only once ours is refused,** so during a rotation's overlap (both tokens accepted) nothing moves; after it, an app reaches its rooms to ask only by another path (a direct one, or another relay). A home PC whose only relay is the rotated one can't ask: the deploy guide says to paste the new code there, or give it a second relay, before the old token goes. (Since the follow-ups, below: a hint moves the new code during the overlap.)
 - **A received relay stays with its rooms everywhere:** never shared by Share, and dropped once its last room is forgotten (not while a room being left still says its goodbyes).
 - **One way to change relays** (`RelayHub`), for the user's commands, codes passed on and a join's lent code alike.
+
+**Settled after M26b** (2026-11-16, the follow-ups the author chose before M26c; [protocol](../protocol.md#a-rotations-overlap)):
+- **A relay passed on to us, or lent for a join, is never our home relay while another answers** (the author's choice: with none of ours nor the public ones answering, one may be home rather than none). A second change to the vendored iroh: relays of the map for dialing only, still probed and dialed with their tokens, a candidate for home only when no other relay of the map has a recent latency (`third_party/iroh/PATCHED.md`).
+- **A rotation moves during its overlap** (the author's choice of a hint over leaving it to the deploy guide; a wire revision): a member whose code changed sends `RelayHint` (no code) to its rooms; a holder asks that member alone and keeps the answer, checked, **on standby beside its own, never in its place** (Claude's proposal, the author's choice: nobody can tell an old code from a new one while both work, so a working code is never replaced, and a member answering with an old or personal code changes nothing); once ours is refused, the standby is checked again and taken, nobody reachable needed. Answers give the standby, and a new standby hints its holder's rooms, so the code spreads past the paster's rooms.
 
 ## Context
 
@@ -104,7 +108,7 @@ The author's choice: nobody should copy a code to play with their own room. So m
 
 **What it opens, and why it's acceptable:**
 - **anyone admitted to a room can use the relays its members are on,** as anyone they handed the code to could before. A relay's owner who wants to choose who uses it gives personal codes;
-- **a member can make us hold a relay of its choosing** (its own home), which may then become our home relay (iroh can't keep a relay out of that choice): its operator sees our address and when we're online, and can drop what's relayed through it, never read it (end-to-end encrypted). Bounded by the cap, the 30 days, Settings showing every received relay and where it came from, and removing it.
+- **a member can make us hold a relay of its choosing** (its own home), which can be our home relay only while nothing else answers (since the M26b follow-ups): its operator sees our address and when we're online, and can drop what's relayed through it, never read it (end-to-end encrypted). Bounded by the cap, the 30 days, Settings showing every received relay and where it came from, and removing it.
 
 ### Showing what's wrong, and how to fix it
 
@@ -171,4 +175,4 @@ The room's relay in the owner's signed policy stays out (a wire revision for lit
 
 ## Limits, for later
 
-- **iroh can't keep a relay from becoming our home relay**, nor keep us listening on more than one. Either would close the last gaps (a received relay as our home; a newcomer whose link names a relay we moved from). Worth asking upstream.
+- **iroh can't keep us listening on more than one relay** (a newcomer whose link names a relay we moved from). Keeping a relay from becoming home is our vendored iroh's second change since the M26b follow-ups (above), worth offering upstream with the first.

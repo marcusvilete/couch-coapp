@@ -142,8 +142,45 @@ It also pointed again at the limit below: a newcomer on public relays alone who 
 
 ## Still to come
 
-- **Two tests the review asked for:** the claimed-home rule through engines (a member can't make its record claim a relay it isn't on without a fake engine), and a join's lent relay seen taken back after a refusal (the endpoint's list isn't visible to the tests).
+- **One test the review asked for:** the claimed-home rule through engines (a member can't make its record claim a relay it isn't on without a fake engine). The other, a join's lent relay seen taken back after a refusal, came with the follow-ups (below).
 - **Hand checks with two PCs:** a code passed on through a friend, a join with the code in the link, a rotation reaching a member whose code was refused, and the remote panel with the home PC's relay down. The scenarios above cover each through real relays on loopback.
-- **A received relay can become our home relay** (iroh can't keep one out of that choice), so our record may name it. Members of our other rooms then dial us there, and the code passing covers them only within the rooms it came for. ADR 0014 lists it as a limit of iroh's. The second review calls this likely the common case (a newcomer on public relays joining through a link): worth a follow-up, such as a vendored iroh change for map entries used for dialing only, never as home.
 - **Records don't follow a member to a relay nobody else holds** (M26a-1's finding). Code passing narrows it: a member whose relay changes to one the room can pass on is reached again once someone asks.
 - **M26c:** public releases, the update notice, the version mismatch's link, the invite page's download and relay note.
+
+## The follow-ups (0.38.0)
+
+The author chose to close two gaps before M26c (2026-11-16), with three choices made at the start: a passed-on relay may be home only when no other relay answers; a code fetched during a rotation's overlap waits on standby, never replacing the one in use; hints are sent by whoever pastes a new code and spread by whoever takes a standby.
+
+- **A relay passed on to us, or lent for a join, is never our home relay while another answers.** The vendored iroh's second change (`third_party/iroh/PATCHED.md`): relays of the map for dialing only, probed and dialed as before, a candidate for home only when no other relay of the map has a latency over the reports' last 5 minutes; a home relay that becomes dial-only gives way at once. Received and lent relays are dial-only (`SavedRelays::choice`, `RelayState::apply`). No wire change.
+- **A rotated code moves during its overlap** (wire revision 21, `RelayHint`; [protocol](protocol.md#a-rotations-overlap)). A member who pastes a new code hints its rooms; a holder, for a relay the room uses, asks the hinter alone and keeps the checked code on standby beside its own; once its own is refused it takes the standby, checked again, with nobody to ask. Answers give the standby, and a new standby hints its holder's rooms. While building it, Claude found that answers had to give the standby, or a member spreading the hint would hand out its old code; and that a hint had to be for a relay the room uses, or hints at made-up relays would show which relays we hold.
+
+**Checked:**
+- `cargo test -p couch-engine --test relay`, mod `dial_only`: home leaves a relay that becomes dial-only and comes back to the other when they swap (fails with the rule turned off: iroh keeps the home it has); a dial-only relay is home when the only other relay doesn't answer. The vendored iroh's `net_report::tests::dial_only_relays_are_home_only_when_no_other_answers`, and its other net_report tests, pass from a copy with an empty `[workspace]`.
+- `cargo test -p couch-engine --test rooms`: `a_rotated_code_waits_on_standby_and_takes_over_when_the_old_goes` (four engines on real relays: the hint, the standby at Bia and, through her, at Eve in a room Dee isn't in, nothing renewed during the overlap, then the old code dropped while Dee is gone and both switching to their standby); `a_join_with_the_code_in_the_link_keeps_it_only_once_admitted` now also sees the lent relay taken back after a wrong password.
+- Units: relays `a_standby_code_never_replaces_the_one_in_use`, `a_received_relay_is_for_its_rooms_alone` (received relays dial-only, the user's own not); proto `RelayHint` round trip and checks.
+
+**The review.** A fresh review agent read the diff and found twelve problems, all checked against the code and fixed:
+1. **Relays gone from the map still counted as answering** (removed, or set aside for refusing us), so with our own relay set aside and only a received one left we could keep no working home for up to 5 minutes. Only relays in the map or heard in the report count now.
+2. **Reports don't hear every relay** (QAD probes the first five and stops at two answers), so a received relay could be home while ours answered. Ours are probed first, and a full report waits for one of them.
+3. **The fallback was dead after a full report**, which clears the last report: the client remembers the home it gave apart.
+4. **A standby was handed out unchecked for good,** in answers and invites. Answers give it for a day after it let us in; invites always carry the code in use.
+5. **Any member could replace our standby** with a code of its own (a personal one) and have us spread it, or two codes flip back and forth: the first stays for a day.
+6. **"Use relays my rooms pass on" off didn't stop a standby being taken:** it is checked when taking one, and turning it off clears them.
+7. **A hint went once,** so a member connecting later in the overlap never heard it: rooms are hinted again every 10 minutes for a day.
+8. **A standby whose check never answered blocked the room's asks:** after one try without an answer, the room is asked too.
+9. **One member hinting every minute held the slot** an honest hint needed: per hinter now.
+10. **Hints told rooms that don't use a relay that we hold it:** only rooms that use it are hinted.
+11. **A departing dial-only relay was briefly a regular one** while the map changed: both sets are dial-only meanwhile.
+12. **A standby outlived the room it came from:** it goes with that room.
+Also: the ask after a hint names the relay as we hold it (an odd spelling was dropped), and a code held already isn't checked again. Its notes on the tests stand: Eve's switch in the rotation scenario can't be told from a renewal by Bia (Bia's half proves it), and `home_is`'s wait proves no report came meanwhile; iroh's unit test covers what the engine tests can't steer (a full report's reset, a relay that left the map).
+
+After the fixes: the vendored iroh's net_report tests, `cargo clippy`, and the engine's rooms, relay and sessions scenarios three times each.
+
+**The second review** (the first had high-severity findings) confirmed all twelve fixes and found the rest of part B wanting in two ways, both fixed:
+1. **A member could have us spread its code in place of the one the user just pasted:** answering the paster's hint first with a code of its own that works (a personal one), it became the paster's standby, which answers preferred, and spread from there; taken back later, every answer for a day was a refused code. Now answers give the code in use for a day after the user pastes one, and a standby is checked against its relay again every hour, answers giving it only while it let us in within two hours, and dropping it once refused.
+2. **Re-hints outlived their cause:** a standby gone (its room left, the switch turned off) kept its rooms hinted for a day, and the answers then gave the old code. A re-hint carries a digest of its code now, and stops once that is no longer the code we hand out.
+And the smaller ones: a received relay's standby is given only in the room it came from, and hinted only there; a member is hinted only where the room uses the relay apart from it (as an answer to it would need); a hinter's slot goes by member, so reconnecting doesn't reset it; the docs say a hint follows a *kept* standby. Left as they are: the fall back to a received relay as home lags up to 5 minutes when our only other relay dies without leaving the map (iroh remembers its latency that long; documented in PATCHED.md), and the iroh unit test runs only from a copy of the folder, not in CI. Then: `cargo clippy`, the engine's unit tests (a new one for the answer rules, `answers_give_a_standby_only_where_and_while_it_may_go`), and the rooms, relay and sessions scenarios three times each.
+
+**What this can't prevent:** a member who answers a hint first with a code that works but isn't the rotation's becomes our standby for a day ([protocol](protocol.md#a-rotations-overlap)).
+
+**Still to come:** a rotation by hand on the deployed relay, with two PCs (the deploy guide's steps, with the overlap).
