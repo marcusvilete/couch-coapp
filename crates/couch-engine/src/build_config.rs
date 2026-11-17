@@ -56,3 +56,83 @@ pub fn commit() -> Option<&'static str> {
 pub fn test_build() -> bool {
     cfg!(debug_assertions) || option_env!("COUCH_BUILD_TEST").is_some_and(|v| v == "1")
 }
+
+/// A public build (M26c, ADR 0014: `build-installer.ps1 -Public`,
+/// `build-appimage.sh --public`, made by the release workflow on a tag):
+/// no relay and no token, on iroh's public relays until the user registers
+/// one; never a test build.
+pub fn public_build() -> bool {
+    option_env!("COUCH_BUILD_PUBLIC").is_some_and(|v| v == "1") && !test_build()
+}
+
+/// The GitHub repository whose releases the update notice checks, as
+/// `owner/name`: a public build's, or a friends' build's with `releases` in
+/// `release.toml`. Never in a development or test build.
+pub fn releases() -> Option<&'static str> {
+    option_env!("COUCH_BUILD_RELEASES")
+        .map(str::trim)
+        .filter(|repo| !test_build() && is_repository(repo))
+}
+
+/// What the build kind is called in Copy diagnostics.
+pub fn kind() -> &'static str {
+    if cfg!(debug_assertions) {
+        "development build"
+    } else if test_build() {
+        "test build"
+    } else if public_build() {
+        "public build"
+    } else {
+        "release build"
+    }
+}
+
+/// `owner/name` as GitHub allows them: an owner of letters, digits and
+/// inner hyphens, a name of letters, digits, `.`, `-` and `_` (not `.` or
+/// `..`). The build scripts check the same.
+fn is_repository(text: &str) -> bool {
+    let Some((owner, name)) = text.split_once('/') else {
+        return false;
+    };
+    let owner_ok = !owner.is_empty()
+        && owner.len() <= 39
+        && !owner.starts_with('-')
+        && !owner.ends_with('-')
+        && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let name_ok = !name.is_empty()
+        && name.len() <= 100
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    owner_ok && name_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_repository;
+
+    #[test]
+    fn a_releases_repository_is_owner_and_name() {
+        for good in ["marcusvilete/couch-coapp", "a/b", "my-org/app.v2_x"] {
+            assert!(is_repository(good), "{good}");
+        }
+        for bad in [
+            "",
+            "couch-coapp",
+            "a/b/c",
+            "/b",
+            "a/",
+            "-a/b",
+            "a-/b",
+            "a/..",
+            "a/.",
+            "a b/c",
+            "https://github.com/a/b",
+            "a/b?x",
+        ] {
+            assert!(!is_repository(bad), "{bad}");
+        }
+    }
+}

@@ -1,0 +1,196 @@
+# Builds a public release (M26c, ADR 0014): the Windows installer and the Linux
+# AppImage, public builds (no relay, no token: `build-installer.ps1 -Public`,
+# `build-appimage.sh --public`), through the same steps as by hand.
+#
+# - A tag v<version> (the version in Cargo.toml, tauri.conf.json and
+#   package.json, `cargo xtask bump`) makes a DRAFT release with both packages,
+#   SHA256SUMS, each package's notices and SOURCES.txt, and FFmpeg's source and
+#   build scripts. Read it, then publish it on GitHub: nothing here publishes.
+# - Run by hand (Actions -> Release -> Run workflow, on any branch), it builds
+#   the same files and keeps them as this run's artifacts, with the notes it
+#   would write: no tag, no release.
+#
+# It uses no secret. Only the job making the draft may write to the repository.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+    # TEMPORARY, for trying the workflow before it is on main: removed before the PR.
+    branches: [m26c-1-public-builds]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Nothing here builds twice: incremental files would only fill the cache.
+  CARGO_INCREMENTAL: 0
+  # The repository's own invite page (invite-page.yml publishes it).
+  INVITE_PAGE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/j/
+
+jobs:
+  # Before anything long: the tag names the version every file carries, and
+  # the notes are written (cargo xtask release-notes).
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust (the version in rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-check
+      - name: The tag and the notes
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            cargo xtask release-notes --tag "$GITHUB_REF_NAME" --out release-notes.md
+          else
+            cargo xtask release-notes --out release-notes.md
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  windows:
+    needs: check
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust (the version in rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+      # What fetch-deps downloads (pinned by URL and SHA-256, xtask/src/deps.rs).
+      - uses: actions/cache@v6
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/sdl3
+            third_party/drivers
+            third_party/sources
+            third_party/_downloads
+          key: windows-third-party-${{ hashFiles('xtask/src/deps.rs') }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: cargo-about (for the notices)
+        run: cargo install --locked cargo-about@0.9.2 --features cli
+      - name: Front end's packages
+        working-directory: apps/desktop
+        run: npm ci
+      - name: The installer
+        shell: powershell
+        run: .\scripts\build-installer.ps1 -Public -InvitePage $env:INVITE_PAGE
+      - name: Gather
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory release | Out-Null
+          Copy-Item target\installer\* release\
+          Move-Item release\SOURCES.txt release\SOURCES-windows.txt
+          Copy-Item target\THIRD-PARTY-NOTICES.txt release\THIRD-PARTY-NOTICES-windows.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: release/
+          if-no-files-found: error
+
+  linux:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      # linuxdeploy is an AppImage itself, and the runner has no FUSE.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - uses: actions/checkout@v7
+      - name: System packages
+        timeout-minutes: 10
+        run: sudo bash scripts/linux-deps.sh
+      - name: Rust (the version in rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux
+      - uses: actions/cache@v6
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/sources
+            third_party/_downloads
+          key: linux-third-party-${{ hashFiles('xtask/src/deps.rs') }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: cargo-about (for the notices)
+        run: cargo install --locked cargo-about@0.9.2 --features cli
+      - name: Front end's packages
+        working-directory: apps/desktop
+        run: npm ci
+      - name: The AppImage
+        run: bash scripts/build-appimage.sh --public --invite-page "$INVITE_PAGE"
+      - name: Gather
+        run: |
+          mkdir release
+          cp target/appimage/* release/
+          mv release/SOURCES.txt release/SOURCES-linux.txt
+          mv release/THIRD-PARTY-NOTICES.txt release/THIRD-PARTY-NOTICES-linux.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: release/
+          if-no-files-found: error
+
+  # A tag only: the draft, with every file and their sums.
+  draft:
+    if: github.ref_type == 'tag'
+    needs: [check, windows, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: One folder, FFmpeg's sources once
+        run: |
+          mkdir release
+          cp artifacts/windows/* release/
+          for file in artifacts/linux/*; do
+            name=$(basename "$file")
+            # Both packages carry the same pinned source archives.
+            if [ -e "release/$name" ]; then
+              cmp "$file" "release/$name" || { echo "$name differs between the two packages"; exit 1; }
+            else
+              cp "$file" release/
+            fi
+          done
+          (cd release && sha256sum -- * > ../SHA256SUMS) && mv SHA256SUMS release/
+          ls -l release
+      - name: The draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "Couch Co-App $version" \
+            --notes-file artifacts/release-notes/release-notes.md

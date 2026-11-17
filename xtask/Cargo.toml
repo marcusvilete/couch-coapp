@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Repository automation: fetch-deps, stage-dlls, doctor."
+description = "Repository automation: fetch-deps, stage-dlls, doctor, the release notes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,8 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# The wire revision, for the release notes (M26c).
+couch-proto.workspace = true
 bindgen = "0.73"
 getrandom.workspace = true
 serde.workspace = true

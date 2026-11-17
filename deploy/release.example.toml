@@ -25,6 +25,12 @@ relay_token = "0000000000000000000000000000000000000000000000000000000000000000"
 # -NoInvitePage overrides it for one build.
 invite_page = "https://example.github.io/couch-coapp/j/"
 
+# Whose GitHub releases the app checks for new versions (M26c), as <owner>/<name>: it then
+# says "Couch Co-App X is out" with a link, at most once a day, unless the user turns it off.
+# Empty (or left out): it never checks. A public build always checks the repository it was
+# built from; a test build never does. -Releases <owner>/<name> (--releases) sets it for one build.
+releases = ""
+
 # true only for a copy used to test on your LAN: it allows http:// in relay_url and
 # invite_page (such as http://192.168.1.10:3340 for scripts\relay.ps1 -Lan), lets the app
 # take plain http relays at private addresses in Settings, and names the installer (and the

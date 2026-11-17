@@ -7,8 +7,14 @@
 //! - `--config <file>`: another release configuration (`test = true` for
 //!   a LAN one);
 //! - `--test-relay`: a test AppImage on iroh's public relays, from any tree;
+//! - `--public`: a public build (M26c, ADR 0014; what the release workflow
+//!   makes on a tag): no relay and no token, a clean tree, named by its
+//!   version alone, checking the workspace repository's releases;
 //! - `--invite-page <https://…/j/>` or `--no-invite-page`: where Copy
-//!   invite links to, for this build.
+//!   invite links to, for this build;
+//! - `--releases <owner>/<name>`: whose GitHub releases the update notice
+//!   checks, for this build (a release build's comes from `release.toml`'s
+//!   `releases`; a test build's is always none).
 //!
 //! It bundles twice: the notices list the system libraries the bundler
 //! copies, known only once it has, and must be inside the AppImage. Then
@@ -30,8 +36,10 @@ use crate::{deps, notices, relay};
 struct Options {
     config: Option<PathBuf>,
     test_relay: bool,
+    public: bool,
     invite_page: Option<String>,
     no_invite_page: bool,
+    releases: Option<String>,
 }
 
 impl Options {
@@ -52,13 +60,29 @@ impl Options {
                     );
                 }
                 "--no-invite-page" => options.no_invite_page = true,
+                "--public" => options.public = true,
+                "--releases" => {
+                    options.releases = Some(
+                        args.next()
+                            .context("--releases takes <owner>/<name>")?
+                            .clone(),
+                    );
+                }
                 other => bail!(
-                    "unknown option {other}; the options: --config <file>, --test-relay, --invite-page <address>, --no-invite-page"
+                    "unknown option {other}; the options: --config <file>, --test-relay, --public, --invite-page <address>, --no-invite-page, --releases <owner>/<name>"
                 ),
             }
         }
-        if options.config.is_some() && options.test_relay {
-            bail!("pass --config or --test-relay, not both");
+        if [options.config.is_some(), options.test_relay, options.public]
+            .into_iter()
+            .filter(|&given| given)
+            .count()
+            > 1
+        {
+            bail!("pass one of --config, --test-relay or --public");
+        }
+        if options.test_relay && options.releases.is_some() {
+            bail!("a test AppImage never checks for new versions: leave out --releases");
         }
         if options.invite_page.is_some() && options.no_invite_page {
             bail!("pass --invite-page or --no-invite-page, not both");
@@ -73,6 +97,7 @@ struct ReleaseConfig {
     relay_url: String,
     relay_token: String,
     invite_page: String,
+    releases: String,
     test: bool,
 }
 
@@ -83,6 +108,7 @@ impl std::fmt::Debug for ReleaseConfig {
             .field("relay_url", &self.relay_url)
             .field("relay_token", &"..")
             .field("invite_page", &self.invite_page)
+            .field("releases", &self.releases)
             .field("test", &self.test)
             .finish()
     }
@@ -123,8 +149,9 @@ fn read_release_config(text: &str) -> anyhow::Result<ReleaseConfig> {
             ("relay_url", Some(v), _) => config.relay_url = v.to_string(),
             ("relay_token", Some(v), _) => config.relay_token = v.to_string(),
             ("invite_page", Some(v), _) => config.invite_page = v.to_string(),
+            ("releases", Some(v), _) => config.releases = v.to_string(),
             ("test", _, Some(v)) => config.test = v,
-            ("relay_url" | "relay_token" | "invite_page", ..) => {
+            ("relay_url" | "relay_token" | "invite_page" | "releases", ..) => {
                 bail!("'{key}' takes text in quotes")
             }
             ("test", ..) => bail!("'test' takes true or false, without quotes"),
@@ -160,6 +187,29 @@ fn check_address(name: &str, value: &str, test: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A GitHub repository as `owner/name`, as `couch_engine::build_config`
+/// reads it (the app treats one it can't read as none) and
+/// `build-installer.ps1` checks it.
+fn check_repository(value: &str) -> anyhow::Result<()> {
+    let readable = value.split_once('/').is_some_and(|(owner, name)| {
+        let owner_ok = (1..=39).contains(&owner.len())
+            && !owner.starts_with('-')
+            && !owner.ends_with('-')
+            && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        let name_ok = (1..=100).contains(&name.len())
+            && name != "."
+            && name != ".."
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        owner_ok && name_ok
+    });
+    if !readable {
+        bail!("releases must be a GitHub repository as <owner>/<name>, not '{value}'");
+    }
+    Ok(())
+}
+
 pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if cfg!(windows) {
         bail!(
@@ -181,6 +231,8 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
         "COUCH_BUILD_INVITE_PAGE",
         "COUCH_BUILD_TEST",
         "COUCH_BUILD_COMMIT",
+        "COUCH_BUILD_PUBLIC",
+        "COUCH_BUILD_RELEASES",
     ]
     .into_iter()
     .map(|name| (name, None))
@@ -198,6 +250,11 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
         println!(
             "A test AppImage: iroh's public relays, and plain http relays on the LAN allowed."
         );
+    } else if options.public {
+        println!(
+            "A public build: no relay and no token, iroh's public relays until a relay is registered."
+        );
+        build.insert("COUCH_BUILD_PUBLIC", Some("1".into()));
     } else {
         let path = match &options.config {
             Some(path) => path.clone(),
@@ -256,6 +313,29 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
         build.insert("COUCH_BUILD_TEST", Some("1".into()));
     }
 
+    // Whose GitHub releases the update notice checks (M26c): this build's
+    // choice, else a public build's own repository, else release.toml's.
+    let releases = match (&options.releases, &release) {
+        (Some(repo), _) => repo.clone(),
+        (None, _) if options.public => workspace_repository(root)?
+            .and_then(|url| url.strip_prefix("https://github.com/").map(str::to_string))
+            .unwrap_or_default(),
+        (None, Some(config)) => config.releases.clone(),
+        (None, None) => String::new(),
+    };
+    if releases.is_empty() {
+        println!("It never checks for new versions.");
+    } else {
+        if test {
+            bail!(
+                "a test build never checks for new versions: leave out releases (release.toml) or --releases"
+            );
+        }
+        check_repository(&releases)?;
+        println!("It checks for new versions at github.com/{releases}/releases");
+        build.insert("COUCH_BUILD_RELEASES", Some(releases));
+    }
+
     // Where invites link to: this build's choice, else release.toml's.
     let page = if options.no_invite_page {
         String::new()
@@ -283,7 +363,7 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if dirty {
         if !test {
             bail!(
-                "uncommitted changes: a release AppImage must match a commit exactly, since its notices link to that commit's source. Commit first, or build a test AppImage (--test-relay)"
+                "uncommitted changes: a release or public AppImage must match a commit exactly, since its notices link to that commit's source. Commit first, or build a test AppImage (--test-relay)"
             );
         }
         println!(
@@ -354,7 +434,12 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
     let commit = git(root, &["rev-parse", "--short", "HEAD"])?;
     let kind = if test { "-test" } else { "" };
-    let name = format!("Couch-Co-App_{version}_{commit}{suffix}{kind}.AppImage");
+    // A public build is named by its version alone, as its release names it.
+    let name = if options.public {
+        format!("Couch-Co-App_{version}_amd64.AppImage")
+    } else {
+        format!("Couch-Co-App_{version}_{commit}{suffix}{kind}.AppImage")
+    };
     let out = target.join("appimage");
     if out.exists() {
         fs::remove_dir_all(&out)?;
@@ -419,7 +504,7 @@ publishes it.
 
 /// The workspace's version, which `tauri.conf.json` and `package.json`
 /// must share (`cargo xtask bump` keeps them so).
-fn one_version(root: &Path) -> anyhow::Result<String> {
+pub(crate) fn one_version(root: &Path) -> anyhow::Result<String> {
     let cargo = fs::read_to_string(root.join("Cargo.toml"))?
         .lines()
         .find_map(|l| l.strip_prefix("version = \""))
@@ -551,7 +636,7 @@ fn carried_notices(appimage: &Path, scratch: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(notices)
 }
 
-fn workspace_repository(root: &Path) -> anyhow::Result<Option<String>> {
+pub(crate) fn workspace_repository(root: &Path) -> anyhow::Result<Option<String>> {
     let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
     Ok(manifest.lines().find_map(|l| {
         l.strip_prefix("repository = \"")
@@ -560,7 +645,7 @@ fn workspace_repository(root: &Path) -> anyhow::Result<Option<String>> {
     }))
 }
 
-fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("git")
         .current_dir(root)
         .args(args)
@@ -615,6 +700,38 @@ mod tests {
         );
         assert!(Options::parse(&args(&["--config"])).is_err());
         assert!(Options::parse(&args(&["--relay"])).is_err());
+        // A public build is neither a test build nor one from release.toml.
+        assert_eq!(
+            Options::parse(&args(&["--public", "--releases", "a/b"])).unwrap(),
+            Options {
+                public: true,
+                releases: Some("a/b".into()),
+                ..Options::default()
+            }
+        );
+        assert!(Options::parse(&args(&["--public", "--test-relay"])).is_err());
+        assert!(Options::parse(&args(&["--public", "--config", "a.toml"])).is_err());
+        assert!(Options::parse(&args(&["--test-relay", "--releases", "a/b"])).is_err());
+        assert!(Options::parse(&args(&["--releases"])).is_err());
+    }
+
+    #[test]
+    fn releases_are_owner_and_name() {
+        for good in ["marcusvilete/couch-coapp", "a/b", "my-org/app.v2_x"] {
+            assert!(check_repository(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "couch-coapp",
+            "a/b/c",
+            "/b",
+            "a/",
+            "-a/b",
+            "a/..",
+            "https://github.com/a/b",
+        ] {
+            assert!(check_repository(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -625,6 +742,7 @@ mod tests {
              relay_token = \"abc\"\n\
              \n\
              invite_page = \"\"\n\
+             releases = \"a/b\"\n\
              test = true\n",
         )
         .unwrap();
@@ -634,6 +752,7 @@ mod tests {
                 relay_url: "https://relay.example.com".into(),
                 relay_token: "abc".into(),
                 invite_page: String::new(),
+                releases: "a/b".into(),
                 test: true,
             }
         );

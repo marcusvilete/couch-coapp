@@ -5,8 +5,11 @@
 #   bash scripts/build-appimage.sh                  # release: our relay and its token, from release.toml
 #   bash scripts/build-appimage.sh --config <file>  # another file, e.g. a LAN test one (test = true)
 #   bash scripts/build-appimage.sh --test-relay     # a test AppImage: iroh's public relays, no file needed
+#   bash scripts/build-appimage.sh --public         # a public build (M26c): no relay, no token, no file
 #   --invite-page https://<user>.github.io/<repository>/j/   # where Copy invite links to, this build
 #   --no-invite-page                                          # couchco:// links, this build
+#   --releases <owner>/<name>                                 # whose GitHub releases it checks, this build
+#                         (a public build: this repository's; a release: release.toml's releases)
 # release.toml is ~/.couch-coapp/release.toml, or COUCH_RELEASE_CONFIG; from WSL, the
 # Windows one: COUCH_RELEASE_CONFIG=/mnt/c/Users/<you>/.couch-coapp/release.toml.
 # `cargo xtask appimage` does the work. Then target/appimage/ holds the AppImage, its
