@@ -231,7 +231,7 @@ export default function App() {
     dialog != null &&
     (("room" in dialog && !dialogRoom) ||
       (dialog.kind === "streamPicker" && (dialog.remote ? remoteSession == null : host == null)) ||
-      (dialog.kind === "unlockRemote" && remotePc?.remote == null) ||
+      (dialog.kind === "unlockRemote" && (remotePc?.remote == null || remotePc.remote.offline)) ||
       (dialog.kind === "startSession" &&
         dialog.remote != null &&
         !dialogRoom?.members.some((m) => m.id === dialog.remote && m.remote?.unlocked)) ||
@@ -302,6 +302,7 @@ export default function App() {
                 onClose={() => setView("room")}
                 busy={busy}
                 hasRooms={rooms.length > 0}
+                roomNames={Object.fromEntries(rooms.map((r) => [r.id, r.name]))}
                 profile={lobby.profile}
                 info={lobby.info}
                 onProfile={lobby.setProfile}

@@ -16,16 +16,17 @@ use thiserror::Error;
 
 use crate::{
     ids::{InviteToken, MemberId, RoomNonce},
-    room::{PeerAddr, valid_name},
+    room::{PeerAddr, RelaySecret, valid_name},
 };
 
 pub const LINK_PREFIX: &str = "couchco://join#";
 pub const MAGIC: [u8; 2] = *b"CC";
 /// The newest layout read. Version 1 is the invite of a room its founder
 /// owns, version 2 (M13) of a room handed over since: the same fields, then
-/// the founder. Both are written, so a room never handed over keeps making
-/// the invites earlier builds read.
-pub const VERSION: u8 = 2;
+/// the founder. Version 3 (M26b) carries the code of the owner's relay: the
+/// same fields, then the founder if it isn't the owner, then the code. The
+/// oldest layout that holds an invite is written.
+pub const VERSION: u8 = 3;
 /// Longest text [`Invite::parse`] looks at.
 pub const MAX_CHARS: usize = 4096;
 
@@ -45,6 +46,10 @@ pub struct Invite {
     /// Who founded the room, if not its owner now (M13): the room id binds
     /// the founder, and the chain of handovers from it names the owner.
     pub founder: Option<MemberId>,
+    /// The token of the relay [`Self::addr`] names (M26b), when the owner
+    /// may pass it on and didn't leave it out: the newcomer joins through it,
+    /// and keeps it once admitted. Whoever has the link can use the relay.
+    pub relay_code: Option<RelaySecret>,
 }
 
 /// Version 1's layout, and the start of version 2's: the invite page reads
@@ -64,6 +69,14 @@ struct Layout {
 struct HandedOver {
     invite: Layout,
     founder: MemberId,
+}
+
+/// Version 3: version 1's fields, the founder if not the owner, the code.
+#[derive(Serialize, Deserialize)]
+struct WithCode {
+    invite: Layout,
+    founder: Option<MemberId>,
+    relay_code: RelaySecret,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -102,12 +115,22 @@ impl Invite {
             expires: invite.expires,
             addr: invite.addr,
             founder,
+            relay_code: None,
         }
     }
 
     /// The payload alone: what follows `#` in the link.
     pub fn payload(&self) -> String {
-        let body = match self.founder.filter(|f| *f != self.owner) {
+        let founder = self.founder.filter(|f| *f != self.owner);
+        if let Some(relay_code) = &self.relay_code {
+            let body = postcard::to_stdvec(&WithCode {
+                invite: self.layout(),
+                founder,
+                relay_code: relay_code.clone(),
+            });
+            return encode(3, &body.expect("postcard into a Vec"));
+        }
+        let body = match founder {
             None => (1, postcard::to_stdvec(&self.layout())),
             Some(founder) => (
                 2,
@@ -151,6 +174,17 @@ impl Invite {
         }
         let invite = match version {
             1 => Self::from_layout(whole(body)?, None),
+            3 => {
+                let with: WithCode = whole(body)?;
+                // Only one way to write each invite, as for version 2.
+                if with.founder == Some(with.invite.owner) || !with.relay_code.is_valid() {
+                    return Err(InviteError::Damaged);
+                }
+                Self {
+                    relay_code: Some(with.relay_code),
+                    ..Self::from_layout(with.invite, with.founder)
+                }
+            }
             _ => {
                 let handed: HandedOver = whole(body)?;
                 // Only one way to write each invite: a founder who owns the
@@ -168,7 +202,10 @@ impl Invite {
     }
 
     fn is_valid(&self) -> bool {
-        valid_name(&self.name) && self.addr.is_valid()
+        valid_name(&self.name)
+            && self.addr.is_valid()
+            // A code is for the relay the invite names.
+            && (self.relay_code.is_none() || self.addr.relay.is_some())
     }
 }
 
@@ -205,7 +242,55 @@ mod tests {
                 ips: vec![],
             },
             founder: None,
+            relay_code: None,
         }
+    }
+
+    /// M26b: an invite carrying its relay's code is version 3, which starts
+    /// as version 1 does (the invite page reads the name at the same
+    /// offset), founder or not; the code never shows in Debug.
+    #[test]
+    fn an_invite_with_its_relays_code_is_version_3() {
+        let bytes = |p: &str| BASE32_NOPAD.decode(p.to_uppercase().as_bytes()).unwrap();
+        let v1 = bytes(&invite().payload());
+        for founder in [None, Some(MemberId([9; 32]))] {
+            let with = Invite {
+                founder,
+                relay_code: Some(RelaySecret("s3cret-token".into())),
+                ..invite()
+            };
+            let payload = with.payload();
+            assert_eq!(Invite::parse(&payload), Ok(with.clone()));
+            let v3 = bytes(&payload);
+            assert_eq!(v3[2], 3);
+            assert_eq!(v1[3..], v3[3..v1.len()]);
+            assert!(!format!("{with:?}").contains("s3cret"));
+        }
+        // A code with no relay to go with it, or an empty one, is damage;
+        // so is the founder written when it owns the room.
+        let relayless = Invite {
+            relay_code: Some(RelaySecret("s3cret".into())),
+            addr: PeerAddr::default(),
+            ..invite()
+        };
+        assert_eq!(
+            Invite::parse(&relayless.payload()),
+            Err(InviteError::Damaged)
+        );
+        let empty = Invite {
+            relay_code: Some(RelaySecret(String::new())),
+            ..invite()
+        };
+        assert_eq!(Invite::parse(&empty.payload()), Err(InviteError::Damaged));
+        let non_canonical = WithCode {
+            invite: invite().layout(),
+            founder: Some(invite().owner),
+            relay_code: RelaySecret("s3cret".into()),
+        };
+        assert_eq!(
+            Invite::parse(&encode(3, &postcard::to_stdvec(&non_canonical).unwrap())),
+            Err(InviteError::Damaged)
+        );
     }
 
     /// M13: a room handed over names its founder too, in version 2.

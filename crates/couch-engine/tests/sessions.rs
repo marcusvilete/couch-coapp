@@ -1645,7 +1645,7 @@ async fn three() -> (Member, Member, Member, String) {
     else {
         panic!("a room");
     };
-    let Response::Invite { link } = a
+    let Response::Invite { link, .. } = a
         .handle(Command::GetInvite {
             room: room.id.clone(),
         })
@@ -1832,7 +1832,7 @@ async fn watching_and_playing_through_our_relay_alone() {
         panic!("a room");
     };
     let room = room.id;
-    let Response::Invite { link } = a
+    let Response::Invite { link, .. } = a
         .handle(Command::GetInvite { room: room.clone() })
         .await
         .unwrap()
@@ -4897,7 +4897,7 @@ async fn a_newcomer_sees_a_session_already_live() {
         else {
             panic!("a room");
         };
-        let Response::Invite { link } = a
+        let Response::Invite { link, .. } = a
             .handle(Command::GetInvite {
                 room: room.id.clone(),
             })
@@ -5405,7 +5405,7 @@ async fn trusted(room: &str, a: &Member, b: &Member) {
     a.ok(Command::SetRemotePin { pin: PIN.into() }).await;
     a.ok(Command::AddRemoteDevice { member: b.id() }).await;
     a.ok(Command::SetRemotePlay { on: true }).await;
-    wait_remote(b, room, a, "A's offer", |r| r.is_some()).await;
+    wait_remote(b, room, a, "A's offer", |r| r.is_some_and(|r| !r.offline)).await;
     b.ok(Command::AcceptRemoteHost { member: a.id() }).await;
 }
 
@@ -5469,7 +5469,7 @@ async fn a_trusted_device_runs_the_home_pcs_sessions_from_afar() {
     wait_remote(&b, &room, &a, "unlocked", |r| r.is_some_and(|r| r.unlocked)).await;
 
     // C, a friend: no offer, nothing to send.
-    wait_remote(&c, &room, &a, "no offer", |r| r.is_none()).await;
+    wait_remote(&c, &room, &a, "no offer", |r| r.is_none_or(|r| r.offline)).await;
     assert!(refused_remotely(
         &c.handle(remote(&room, &a, RemoteAction::EndSession)).await,
         "isn't offering"
@@ -5644,15 +5644,18 @@ async fn a_device_is_locked_out_by_the_home_pc() {
 
     // Removed at A: the offer goes.
     a.ok(Command::RemoveRemoteDevice { member: b.id() }).await;
-    wait_remote(&b, &room, &a, "no offer", |r| r.is_none()).await;
+    wait_remote(&b, &room, &a, "no offer", |r| r.is_none_or(|r| r.offline)).await;
     a.ok(Command::AddRemoteDevice { member: b.id() }).await;
-    wait_remote(&b, &room, &a, "offered again", |r| r.is_some()).await;
+    wait_remote(&b, &room, &a, "offered again", |r| {
+        r.is_some_and(|r| !r.offline)
+    })
+    .await;
 
     // Remote play off at A: the offer goes too.
     a.ok(Command::SetRemotePlay { on: false }).await;
-    wait_remote(&b, &room, &a, "off", |r| r.is_none()).await;
+    wait_remote(&b, &room, &a, "off", |r| r.is_none_or(|r| r.offline)).await;
     a.ok(Command::SetRemotePlay { on: true }).await;
-    wait_remote(&b, &room, &a, "on again", |r| r.is_some()).await;
+    wait_remote(&b, &room, &a, "on again", |r| r.is_some_and(|r| !r.offline)).await;
 
     // Wrong PINs: five free, then a wait, which a right PIN can't skip.
     for _ in 0..4 {
@@ -5935,9 +5938,15 @@ async fn desktop_control_ends_with_the_operator() {
         .await;
     // B hears the offer go before it comes back: the wait below must see the
     // new offer, not the old one still on its way out.
-    wait_remote(&b, &room, &a, "the offer withdrawn", |r| r.is_none()).await;
+    wait_remote(&b, &room, &a, "the offer withdrawn", |r| {
+        r.is_none_or(|r| r.offline)
+    })
+    .await;
     a.ok(Command::AddRemoteDevice { member: b.id() }).await;
-    wait_remote(&b, &room, &a, "offered again", |r| r.is_some()).await;
+    wait_remote(&b, &room, &a, "offered again", |r| {
+        r.is_some_and(|r| !r.offline)
+    })
+    .await;
     b.ok(unlock(&room, &a, PIN)).await;
 
     // Remote play off, and on again.
@@ -5945,9 +5954,13 @@ async fn desktop_control_ends_with_the_operator() {
     a.ok(Command::SetRemotePlay { on: false }).await;
     a.wait_session(&room, &a, "ended by remote play off", ended)
         .await;
-    wait_remote(&b, &room, &a, "the offer withdrawn", |r| r.is_none()).await;
+    // Still B's PC, out of reach now (M26b): the panel says why.
+    wait_remote(&b, &room, &a, "the offer withdrawn", |r| {
+        r.is_some_and(|r| r.offline && r.accepted && !r.unlocked)
+    })
+    .await;
     a.ok(Command::SetRemotePlay { on: true }).await;
-    wait_remote(&b, &room, &a, "on again", |r| r.is_some()).await;
+    wait_remote(&b, &room, &a, "on again", |r| r.is_some_and(|r| !r.offline)).await;
     b.ok(unlock(&room, &a, PIN)).await;
 
     // B closes its stream window: it no longer watches.
@@ -6074,7 +6087,10 @@ async fn a_locked_home_pc_is_reported() {
     })
     .await;
     // A friend hears nothing of it.
-    wait_remote(&c, &room, &a, "no offer for C", |r| r.is_none()).await;
+    wait_remote(&c, &room, &a, "no offer for C", |r| {
+        r.is_none_or(|r| r.offline)
+    })
+    .await;
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -6178,7 +6194,10 @@ async fn a_viewer_only_platform_refuses_to_host_and_still_watches() {
     // Nothing reached the room: no session of B's, no offer from B.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(a.session(&room, &b).await.is_none());
-    wait_remote(&a, &room, &b, "no offer from B", |r| r.is_none()).await;
+    wait_remote(&a, &room, &b, "no offer from B", |r| {
+        r.is_none_or(|r| r.offline)
+    })
+    .await;
     // Turning remote play off is never refused.
     b.ok(Command::SetRemotePlay { on: false }).await;
 

@@ -71,7 +71,7 @@ A relay code is the relay's address and a token on one line, such as `couch-rela
   - or in the app: Settings → Network → the relay's **⋯** → **Share its code**. It copies the code, kept out of Windows' clipboard history and its sync to other devices (and out of KDE's clipboard history on Linux). It works for any relay you hold, the built-in one included, except a personal one.
 - **Sending one:** the code lets whoever holds it use the relay. Send it privately (a direct message), never in a public channel, and only to people you'd let use your server's bandwidth.
 - **Using one:** paste it in Settings → Network → Add a relay. The app shows which relay it names and whether it holds a token, before anything is saved. Creating a room or an invite on a profile with no relay of its own also asks for one.
-- **Friends of your friends:** anyone who reaches you through your relay needs its code too, or a build carrying it. A friend on another relay reaches you as long as one of you holds the other's.
+- **Friends of your friends:** anyone who reaches you through your relay needs its code too. Since 0.37 they get it by themselves: members of a room pass on the codes its members' relays need, and an invite link carries its owner's (a switch in the invite dialog leaves it out). So **whoever joins a room on your relay can use it**, as anyone you handed the code to could before. To choose who uses it, give personal codes (below): those are never passed on. A friend on another relay reaches you as long as one of you holds the other's.
 
 ## Personal codes: one per friend
 
@@ -103,8 +103,8 @@ Don't run `install.sh` while the list is in the config: it puts back the empty l
 
      The config file is readable by every user on the server (the service's dynamic user needs it). That's acceptable for this token, which ships in every installer anyway.
   2. Hand out the new token: builds with it built in (`release.toml`; a new build replaces the built-in token, but never a code the user pasted for the same relay), and the new code (`./relay-code.sh https://<name>/ <new>`) to whoever pasted the old one. They paste it in Settings → Network: pasting a code for a relay already in the list gives it the new code.
-  3. **Keep both for a while,** until everyone has the new one. A PC run from afar (remote play) is the one to wait for: nobody is at it to paste a code, and with the old token gone it can't be reached until someone is.
-  4. Go back to the new token alone in `token.env`, and restart. Anyone still on the old code sees "no longer accepts your code" in Settings → Network and the strip at the bottom of the app's window, with Paste a new code.
+  3. **Keep both for a while,** until the people you can reach have the new one. Since 0.37 the apps pass it on themselves once the old one stops working (step 4): an app whose code is refused asks the members of its rooms, and anyone holding the new code who is on the relay passes it on. That needs a way to reach the room other than this relay: a direct path, or another relay. **A PC run from afar (remote play) whose only relay is this one is the one to see to:** nobody is at it to paste a code, and once the old token is gone it can't reach anyone to ask. Paste the new code there, or give it a second relay, before step 4.
+  4. Go back to the new token alone in `token.env`, and restart. Apps still on the old code ask their rooms for the new one; until one gets it, it sees "no longer accepts your code" in Settings → Network and the strip at the bottom of the app's window, with Paste a new code.
 
   Don't run `install.sh` during a rotation: it puts back the empty list from this folder, and with `token.env` commented out the relay would then refuse to start.
 

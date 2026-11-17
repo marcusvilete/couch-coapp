@@ -420,6 +420,8 @@ async fn the_network_view_tells_each_relay_s_state() {
             first_check: Duration::from_millis(200),
             check_every: Duration::from_secs(1),
             recheck_after: Duration::from_millis(500),
+            suspect_every: Duration::from_secs(1),
+            ask_every: Duration::from_secs(1),
         },
         ..EngineOptions::development()
     };

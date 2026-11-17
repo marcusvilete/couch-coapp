@@ -15,7 +15,7 @@ use std::time::Duration;
 use couch_net::{
     RelayUrl,
     addr::DialRules,
-    endpoint::{Relay, RelayCheck, check_relay, is_public_relay},
+    endpoint::{Relay, RelayCheck, RelayToken, check_relay, is_public_relay},
 };
 use serde::Serialize;
 use ts_rs::TS;
@@ -41,11 +41,32 @@ pub enum MemberReason {
     /// They are on a relay of ours that no longer accepts our code.
     RelayRefused { url: String, host: String },
     /// They are on a relay that needs a code we don't have: ask them (or
-    /// anyone on it) for it, or give them ours.
-    NeedsCode { url: String, host: String },
+    /// anyone on it) for it, or give them ours. M26b: the room is asked for
+    /// it first.
+    NeedsCode {
+        url: String,
+        host: String,
+        passing: CodePassing,
+    },
     /// Their relay is one this build won't dial (only https to a named
     /// server): they need another relay, or a direct path.
     RelayNotAllowed { host: String },
+}
+
+/// Where getting a relay's code from the room stands (M26b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum CodePassing {
+    /// The members we are connected to are being asked: "Getting its code
+    /// from the room…".
+    Asking,
+    /// Nobody we reach may pass it on (personal, switched off, or nobody
+    /// connected holds it): ask them for it.
+    Nobody,
+    /// Not asked: "Use relays my rooms pass on" is off, or the user removed
+    /// that relay.
+    Off,
 }
 
 /// A member's reason, with iroh's own words for Details.
@@ -109,6 +130,9 @@ pub enum InviteRelay {
     Open,
     /// It wants a code we don't have: ask the owner for it.
     NeedsCode,
+    /// One we don't hold, whose code the link carries (M26b): the join goes
+    /// through it, and it is kept once admitted.
+    Carried,
     /// It didn't answer; iroh's error, for Details.
     Unreachable { details: Option<String> },
 }
@@ -140,6 +164,9 @@ pub enum JoinProblem {
     /// The relay answered, but the owner isn't on it: offline, or the link
     /// is old (their app moved to another relay since).
     OwnerNotOnRelay { host: String },
+    /// The code the link carries for the owner's relay was refused (M26b):
+    /// changed since the link was made. Ask for a new link.
+    LinkCodeRefused { host: String },
 }
 
 impl std::fmt::Display for JoinProblem {
@@ -164,13 +191,17 @@ impl std::fmt::Display for JoinProblem {
                 f,
                 "{host} answered, but the room's owner isn't on it: they may be offline, or the link may be old (ask for a new one)"
             ),
+            Self::LinkCodeRefused { host } => write!(
+                f,
+                "{host}, the relay the room's owner uses, refused the code in this link: it changed since, so ask for a new link"
+            ),
         }
     }
 }
 
 /// What we know of relay `url` without connecting: held, public, not
 /// dialed, or what probing it found lately.
-fn classify(url: &RelayUrl, network: &Network, rules: &DialRules) -> InviteRelay {
+fn classify(url: &RelayUrl, carried: bool, network: &Network, rules: &DialRules) -> InviteRelay {
     let key = url.to_string();
     if !rules.allows(url) {
         return InviteRelay::NotAllowed;
@@ -180,6 +211,9 @@ fn classify(url: &RelayUrl, network: &Network, rules: &DialRules) -> InviteRelay
     }
     if is_public_relay(url) {
         return InviteRelay::Public;
+    }
+    if carried && network.changeable && network.may_ask(&key) {
+        return InviteRelay::Carried;
     }
     match network.probe(&key) {
         Some(Probe::Open) => InviteRelay::Open,
@@ -194,13 +228,14 @@ fn classify(url: &RelayUrl, network: &Network, rules: &DialRules) -> InviteRelay
 /// An invite's relay, as the preview shows it at once.
 pub(crate) fn invite_relay(
     relay: Option<&str>,
+    carried: bool,
     network: &Network,
     rules: &DialRules,
 ) -> Option<InviteRelayView> {
     let url = normalized(relay?)?;
     Some(InviteRelayView {
         host: host(&url),
-        relay: classify(&url, network, rules),
+        relay: classify(&url, carried, network, rules),
         url: url.to_string(),
     })
 }
@@ -209,11 +244,12 @@ pub(crate) fn invite_relay(
 /// known of it: whether it wants one.
 pub(crate) async fn check_invite_relay(
     relay: Option<&str>,
+    carried: bool,
     network: &network::Shared,
     rules: &DialRules,
     timeout: Duration,
 ) -> Option<InviteRelayView> {
-    let mut view = invite_relay(relay, &network::lock(network), rules)?;
+    let mut view = invite_relay(relay, carried, &network::lock(network), rules)?;
     if view.relay == InviteRelay::Unchecked {
         let url: RelayUrl = view.url.parse().ok()?;
         view.relay = match check_relay(&Relay::new(url, None), timeout).await {
@@ -234,6 +270,7 @@ pub(crate) async fn check_invite_relay(
 /// a relay to look at, or for one the dial rules don't allow.
 pub(crate) async fn join_problem(
     relay: Option<&str>,
+    carried: Option<RelayToken>,
     error: &str,
     network: &network::Shared,
     rules: &DialRules,
@@ -254,6 +291,9 @@ pub(crate) async fn join_problem(
             network.token(&key),
         )
     };
+    // The link's code, lent for the join (M26b), where we hold none.
+    let lent = token.is_none() && carried.is_some();
+    let token = token.or(carried);
     if matches!(
         trouble,
         Some(NetworkTrouble::NoInternet | NetworkTrouble::SignIn | NetworkTrouble::NoRelay)
@@ -268,6 +308,7 @@ pub(crate) async fn join_problem(
             host,
             reason,
         },
+        Ok(RelayCheck::Refused(_)) if lent => JoinProblem::LinkCodeRefused { host },
         Ok(RelayCheck::Refused(_)) => JoinProblem::NeedsCode { url: key, host },
         Ok(RelayCheck::Unreachable(details)) => JoinProblem::RelayUnreachable {
             url: key,
@@ -340,7 +381,14 @@ pub(crate) fn member_reason(
         };
     }
     match network.probe(&key)? {
-        Probe::NeedsCode => with(MemberReason::NeedsCode { url: key, host }, None),
+        Probe::NeedsCode => with(
+            MemberReason::NeedsCode {
+                url: key,
+                host,
+                passing: CodePassing::Asking,
+            },
+            None,
+        ),
         Probe::Unreachable(details) => with(
             MemberReason::RelayUnreachable {
                 url: key,
@@ -424,7 +472,8 @@ mod tests {
             UnreachableView {
                 reason: MemberReason::NeedsCode {
                     url: THEIRS.into(),
-                    host: "theirs.example".into()
+                    host: "theirs.example".into(),
+                    passing: CodePassing::Asking,
                 },
                 details: Some("timed out".into()),
             }
@@ -466,6 +515,7 @@ mod tests {
         ] {
             let problem = join_problem(
                 Some(relay),
+                None,
                 "no answer",
                 &network,
                 &rules(),

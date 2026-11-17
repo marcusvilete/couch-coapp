@@ -909,6 +909,7 @@ impl Room {
             expires,
             addr,
             founder: Some(self.founder),
+            relay_code: None,
         };
         Ok((invite, vec![Effect::Save]))
     }

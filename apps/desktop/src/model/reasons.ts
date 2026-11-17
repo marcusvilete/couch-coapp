@@ -2,6 +2,7 @@
 // ADR 0014 "Showing what's wrong"): a member, a room, an invite's relay, a
 // join that failed, links gone stale. Hints, never verdicts: a direct path
 // may still connect. Pure functions.
+import type { InviteCodeView } from "../bindings/InviteCodeView";
 import type { InviteRelayView } from "../bindings/InviteRelayView";
 import type { JoinProblem } from "../bindings/JoinProblem";
 import type { MemberReason } from "../bindings/MemberReason";
@@ -46,11 +47,26 @@ export function memberReason(name: string, reason: MemberReason): Said {
         fix: { host: reason.host },
       };
     case "needsCode":
-      return {
-        short: "needs a code",
-        text: `${name} is on ${reason.host}, which needs a code you don't have: ask ${name} for it. Either of you holding the other's relay is enough.`,
-        fix: { host: reason.host },
-      };
+      switch (reason.passing) {
+        case "asking":
+          return {
+            short: "getting its code",
+            text: `${name} is on ${reason.host}, which needs a code you don't have: getting it from the room…`,
+            fix: null,
+          };
+        case "nobody":
+          return {
+            short: "needs a code",
+            text: `${name} is on ${reason.host}, which needs a code nobody here can pass on: ask ${name} for it. Either of you holding the other's relay is enough.`,
+            fix: { host: reason.host },
+          };
+        case "off":
+          return {
+            short: "needs a code",
+            text: `${name} is on ${reason.host}, which needs a code you don't have: ask ${name} for it (your rooms aren't asked for it: see Settings → Network). Either of you holding the other's relay is enough.`,
+            fix: { host: reason.host },
+          };
+      }
     case "relayNotAllowed":
       return {
         short: "relay not used",
@@ -105,6 +121,7 @@ export function inviteRelayText(view: InviteRelayView, checking: boolean): Said 
     case "ours":
     case "public":
     case "open":
+    case "carried":
       return null;
     case "unchecked":
       return checking ? { short: "checking", text: `Checking ${view.host}, the owner's relay…`, fix: null } : null;
@@ -162,6 +179,12 @@ export function joinProblemText(p: JoinProblem): Said {
         text: `${p.host} answered, but the owner isn't on it: they may be offline, or the link may be old (ask for a new one).`,
         fix: null,
       };
+    case "linkCodeRefused":
+      return {
+        short: "link's code refused",
+        text: `${p.host}, the owner's relay, refused the code in this link: it changed since. Ask for a new link.`,
+        fix: null,
+      };
   }
 }
 
@@ -173,6 +196,16 @@ export function staleInvitesText(s: StaleInvites, here = false): string {
   const them = s.count === 1 ? "it" : "them";
   const then = here ? `Send this one to anyone who has ${them}.` : "Send a new link.";
   return `${links} to ${where}, but you're on ${s.now} now: people with ${them} can't join. ${then}`;
+}
+
+/** What an invite link does with the owner's relay's code (M26b). */
+export function inviteCodeText(code: InviteCodeView): string {
+  if (!code.passable) {
+    return `This link can't carry ${code.host}'s code (yours is personal, kept to you, or came from another room): people need a code of their own.`;
+  }
+  // One sentence whether on or off: the switch says which, and its row
+  // keeps its height.
+  return `Joining needs no code from you then; but whoever has the link can use ${code.host}, password or not, until its code changes.`;
 }
 
 /** The line at the foot of Create a room and Invite while only the public

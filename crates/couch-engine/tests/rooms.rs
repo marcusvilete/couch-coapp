@@ -9,8 +9,9 @@ use std::{
 };
 
 use couch_engine::{
-    BackupFiles, Command, Engine, EngineError, EngineOptions, Event, InvitePreview, InviteStatus,
-    MemberLink, Profile, RelayRules, Relays, Response, RoomGone, RoomView, secrets::Unprotected,
+    BackupFiles, CodePassing, Command, Engine, EngineError, EngineOptions, Event, InvitePreview,
+    InviteRelay, InviteStatus, JoinProblem, MemberLink, MemberReason, Profile, RelayRules, Relays,
+    Response, RoomGone, RoomView, secrets::Unprotected,
 };
 use couch_net::endpoint::{Relay, RelayChoice, RelayToken};
 use couch_proto::{ids::MemberId, invite::Invite};
@@ -150,7 +151,7 @@ impl Member {
             .handle(Command::GetInvite { room: room.into() })
             .await?
         {
-            Response::Invite { link } => Ok(link),
+            Response::Invite { link, .. } => Ok(link),
             other => panic!("expected an invite, got {other:?}"),
         }
     }
@@ -1473,7 +1474,7 @@ async fn a_member_on_a_relay_wanting_a_code_we_lack_is_said_so() {
 }
 
 /// A join says which step failed (M26a-2). Ana's invite names her relay,
-/// which wants a code Bia lacks: the preview names it, checking it says so
+/// which wants a code Bia lacks and the link leaves out: the preview names it, checking it says so
 /// before the password, and joining anyway fails at that step. With its
 /// code Bia joins. Ana away, a link to her new room finds the relay
 /// answering without her on it.
@@ -1503,7 +1504,8 @@ async fn a_join_says_which_step_failed() {
     a.handle(add(&anas.url, Some("anas-token"))).await.unwrap();
     b.handle(add(&open.url, None)).await.unwrap();
     let room = a.create("Sofá").await.id;
-    let invite = a.invite(&room).await;
+    // Without its code (M26b: links carry it by default).
+    let invite = a.invite_with(&room, true).await.0;
 
     let Ok(Response::InvitePreview(preview)) = b
         .handle(Command::PreviewInvite {
@@ -1631,6 +1633,348 @@ async fn links_naming_a_relay_the_owner_left_are_marked() {
     stop_all(&mut [&mut a]).await;
 }
 
+// ---- Relay codes passed on (M26b) ----
+
+/// A member whose relays come from its profile, relay-only.
+fn on_relays(port: u16) -> EngineOptions {
+    EngineOptions {
+        relays: Relays::Profile(RelayRules {
+            built_in: None,
+            test_build: true,
+            public_relays: false,
+        }),
+        relay_only: true,
+        network: couch_engine::NetworkTimings {
+            first_check: Duration::from_millis(500),
+            check_every: Duration::from_secs(5),
+            recheck_after: Duration::from_secs(1),
+            suspect_every: Duration::from_secs(1),
+            ask_every: Duration::from_secs(2),
+            check_timeout: Duration::from_secs(3),
+            ..couch_engine::NetworkTimings::default()
+        },
+        ..options(port)
+    }
+}
+
+async fn on_relays_member(name: &'static str) -> Member {
+    Member::with_options(name, on_relays(free_port())).await
+}
+
+impl Member {
+    async fn add_relay(&self, url: &str, token: Option<&str>, personal: bool) {
+        match self
+            .handle(Command::AddRelay {
+                url: url.into(),
+                token: token.map(Into::into),
+                personal,
+                unchecked: false,
+            })
+            .await
+        {
+            Ok(Response::Network(_)) => {}
+            other => panic!("{}: the relay added, got {other:?}", self.name),
+        }
+    }
+
+    async fn network(&self) -> couch_engine::NetworkView {
+        match self.handle(Command::GetNetwork).await {
+            Ok(Response::Network(n)) => n,
+            other => panic!("{}: the network, got {other:?}", self.name),
+        }
+    }
+
+    /// The relay `url` as our list shows it, if held.
+    async fn relay(&self, url: &str) -> Option<couch_engine::RelayView> {
+        let url = url.parse::<couch_net::RelayUrl>().unwrap().to_string();
+        self.network()
+            .await
+            .relays
+            .into_iter()
+            .find(|r| r.url == url)
+    }
+
+    async fn wait_network(&self, what: &str, check: impl Fn(&couch_engine::NetworkView) -> bool) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let view = self.network().await;
+            if check(&view) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{}: timed out waiting for {what}; last view: {view:#?}",
+                self.name
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn invite_with(
+        &self,
+        room: &str,
+        without_code: bool,
+    ) -> (String, Option<couch_engine::InviteCodeView>) {
+        match self.handle(Command::GetInvite { room: room.into() }).await {
+            // One invite, with its relay's code or without (the dialog's
+            // switch).
+            Ok(Response::Invite {
+                link,
+                code,
+                without_code: plain,
+            }) => (
+                match plain {
+                    Some(plain) if without_code => plain,
+                    _ => link,
+                },
+                code,
+            ),
+            other => panic!("{}: an invite, got {other:?}", self.name),
+        }
+    }
+}
+
+/// Who passed a relay on to us, if it was.
+fn passed_on_by(relay: &couch_engine::RelayView) -> Vec<String> {
+    relay
+        .received
+        .as_ref()
+        .map(|r| r.rooms.iter().map(|f| f.from.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// A member who can't reach another gets the code through a third and
+/// connects (M26b). Ana owns the room on a relay open to all, so everyone
+/// joins through her; Bia is on Rb, Cai on Rc from a personal code, and Dee
+/// holds both. Bia and Cai can't reach each other until one asks the room:
+/// Dee answers (she is connected to the other through that relay), never
+/// Cai with her personal code, nor Ana, who holds neither.
+#[tokio::test]
+async fn a_member_gets_a_code_through_a_third_and_connects() {
+    let open = TestRelay::start(None).await;
+    let rb = TestRelay::start(Some("bees")).await;
+    let rc = TestRelay::start(Some("cees")).await;
+    let mut a = on_relays_member("Ana").await;
+    let mut b = on_relays_member("Bia").await;
+    let mut c = on_relays_member("Cai").await;
+    let mut d = on_relays_member("Dee").await;
+    a.add_relay(&open.url, None, false).await;
+    b.add_relay(&rb.url, Some("bees"), false).await;
+    c.add_relay(&rc.url, Some("cees"), true).await;
+    d.add_relay(&rb.url, Some("bees"), false).await;
+    d.add_relay(&rc.url, Some("cees"), false).await;
+    let room = a.create("Sofá").await.id;
+    let (invite, code) = a.invite_with(&room, false).await;
+    assert_eq!(code, None, "an open relay has no code to carry");
+    for m in [&d, &b, &c] {
+        m.join(&invite, PASSWORD).await.unwrap();
+    }
+    full_mesh(&room, &[&a, &b, &c, &d]).await;
+
+    // Whichever asked first, the code came from Dee alone.
+    let bias_rc = b.relay(&rc.url).await;
+    let cais_rb = c.relay(&rb.url).await;
+    assert!(
+        bias_rc.is_some() || cais_rb.is_some(),
+        "one of them holds the other's relay"
+    );
+    for got in [bias_rc, cais_rb].into_iter().flatten() {
+        assert_eq!(passed_on_by(&got), ["Dee"], "{got:?}");
+        assert!(!got.personal && !got.unchecked, "{got:?}");
+    }
+    // Ana took nothing: she needed nothing.
+    assert_eq!(a.network().await.relays.len(), 1);
+    stop_all(&mut [&mut a, &mut b, &mut c, &mut d]).await;
+}
+
+/// A code received for a room never leaves it, and a personal code never
+/// leaves its holder (M26b). Bia gets Cai's relay for "Sofá" from Dee; in
+/// "Mesa", where Dee isn't, Eve (on a relay of her own she keeps to
+/// herself) can't reach Cai: Bia may not pass on what she received for
+/// another room, and Cai's code is personal. Eve hears that nobody here can
+/// pass it on, and never holds it.
+#[tokio::test]
+async fn a_received_code_stays_in_its_room_and_a_personal_one_with_its_holder() {
+    let open = TestRelay::start(None).await;
+    let rb = TestRelay::start(Some("bees")).await;
+    let rc = TestRelay::start(Some("cees")).await;
+    let re = TestRelay::start(Some("eves")).await;
+    let mut a = on_relays_member("Ana").await;
+    let mut b = on_relays_member("Bia").await;
+    let mut c = on_relays_member("Cai").await;
+    let mut d = on_relays_member("Dee").await;
+    let mut e = on_relays_member("Eve").await;
+    a.add_relay(&open.url, None, false).await;
+    b.add_relay(&rb.url, Some("bees"), false).await;
+    c.add_relay(&rc.url, Some("cees"), true).await;
+    d.add_relay(&rb.url, Some("bees"), false).await;
+    d.add_relay(&rc.url, Some("cees"), false).await;
+    e.add_relay(&re.url, Some("eves"), true).await;
+    let sofa = a.create("Sofá").await.id;
+    let invite = a.invite(&sofa).await;
+    for m in [&d, &c, &b] {
+        m.join(&invite, PASSWORD).await.unwrap();
+    }
+    full_mesh(&sofa, &[&a, &b, &c, &d]).await;
+    // Bia asks for Cai's relay herself: Dee answers.
+    b.wait_network("Cai's relay from Dee", |n| {
+        n.relays.iter().any(|r| passed_on_by(r) == ["Dee"])
+    })
+    .await;
+
+    let mesa = a.create("Mesa").await.id;
+    let invite = a.invite(&mesa).await;
+    for m in [&b, &c, &e] {
+        m.join(&invite, PASSWORD).await.unwrap();
+    }
+    let cid = c.id();
+    e.wait_for(&mesa, "nobody can pass Cai's relay on", |v| {
+        v.and_then(|v| v.members.iter().find(|m| m.id == cid))
+            .and_then(|m| m.unreachable.as_ref())
+            .is_some_and(|u| {
+                matches!(
+                    u.reason,
+                    MemberReason::NeedsCode {
+                        passing: CodePassing::Nobody,
+                        ..
+                    }
+                )
+            })
+    })
+    .await;
+    assert_eq!(e.relay(&rc.url).await, None, "Eve never holds Cai's relay");
+    // Cai never got Eve's personal one either.
+    assert_eq!(c.relay(&re.url).await, None);
+    stop_all(&mut [&mut a, &mut b, &mut c, &mut d, &mut e]).await;
+}
+
+/// A join with the code in the link (M26b): Ana's link carries her relay's
+/// code, so Bia, who lacks it, joins through it, and keeps it for the room
+/// only once admitted: a wrong password leaves her nothing. A link made
+/// without the code fails at that step, as before.
+#[tokio::test]
+async fn a_join_with_the_code_in_the_link_keeps_it_only_once_admitted() {
+    let anas = TestRelay::start(Some("anas-token")).await;
+    let open = TestRelay::start(None).await;
+    let mut a = on_relays_member("Ana").await;
+    let mut b = on_relays_member("Bia").await;
+    a.add_relay(&anas.url, Some("anas-token"), false).await;
+    b.add_relay(&open.url, None, false).await;
+    let room = a.create("Sofá").await.id;
+
+    let (without, code) = a.invite_with(&room, true).await;
+    assert_eq!(
+        code.map(|c| c.passable),
+        Some(true),
+        "the link can carry it"
+    );
+    let joined = b
+        .handle(Command::JoinRoom {
+            invite: without,
+            password: PASSWORD.into(),
+        })
+        .await;
+    assert!(
+        matches!(
+            &joined,
+            Ok(Response::JoinProblem {
+                problem: JoinProblem::NeedsCode { .. }
+            })
+        ),
+        "{joined:?}"
+    );
+
+    let (invite, code) = a.invite_with(&room, false).await;
+    assert_eq!(code.map(|c| c.passable), Some(true));
+    let Ok(Response::InvitePreview(preview)) = b
+        .handle(Command::PreviewInvite {
+            invite: invite.clone(),
+        })
+        .await
+    else {
+        panic!("a preview");
+    };
+    assert_eq!(preview.relay.map(|r| r.relay), Some(InviteRelay::Carried));
+
+    // Cai, with a wrong password, reaches Ana through the link's code, and
+    // keeps nothing.
+    let mut c = on_relays_member("Cai").await;
+    c.add_relay(&open.url, None, false).await;
+    let wrong = c.join(&invite, "not the password").await;
+    assert!(
+        matches!(wrong, Err(EngineError::WrongPassword)),
+        "{wrong:?}"
+    );
+    assert_eq!(
+        c.relay(&anas.url).await,
+        None,
+        "nothing kept for a wrong password"
+    );
+    c.stop().await;
+
+    b.join(&invite, PASSWORD).await.unwrap();
+    full_mesh(&room, &[&a, &b]).await;
+    b.wait_network("Ana's relay kept for the room", |n| {
+        n.relays.iter().any(|r| {
+            passed_on_by(r) == ["Ana"] && r.received.as_ref().unwrap().rooms[0].room == room
+        })
+    })
+    .await;
+
+    // Another of Ana's rooms, its link naming the relay Bia holds for the
+    // first: the second room joins it (the review's finding), so leaving
+    // the first doesn't take it away.
+    let mesa = a.create("Mesa").await.id;
+    let (invite, _) = a.invite_with(&mesa, false).await;
+    b.join(&invite, PASSWORD).await.unwrap();
+    b.wait_network("Ana's relay kept for both rooms", |n| {
+        n.relays
+            .iter()
+            .any(|r| r.received.as_ref().is_some_and(|x| x.rooms.len() == 2))
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b]).await;
+}
+
+/// A rotation reaches a member whose code was refused (M26b): Bia and Dee
+/// are on Rc; its code changes, Dee is given the new one by hand, and
+/// Bia's, refused, is renewed from Dee through the room, staying Bia's own.
+#[tokio::test]
+async fn a_new_code_reaches_a_member_whose_code_was_refused() {
+    let open = TestRelay::start(None).await;
+    let rc = TestRelay::start(Some("old")).await;
+    let mut a = on_relays_member("Ana").await;
+    let mut b = on_relays_member("Bia").await;
+    let mut d = on_relays_member("Dee").await;
+    a.add_relay(&open.url, None, false).await;
+    b.add_relay(&open.url, None, false).await;
+    b.add_relay(&rc.url, Some("old"), false).await;
+    d.add_relay(&rc.url, Some("old"), false).await;
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+    for m in [&b, &d] {
+        m.join(&invite, PASSWORD).await.unwrap();
+    }
+    full_mesh(&room, &[&a, &b, &d]).await;
+
+    let rc = rc.restart(Some("new")).await;
+    d.add_relay(&rc.url, Some("new"), false).await;
+    b.wait_network("Bia's code renewed by Dee", |n| {
+        n.relays
+            .iter()
+            .any(|r| r.renewed_by.as_deref() == Some("Dee") && r.received.is_none())
+    })
+    .await;
+    b.wait_network("Rc letting Bia in again", |n| {
+        n.relays.iter().any(|r| {
+            r.renewed_by.is_some()
+                && !matches!(r.state, couch_engine::RelayStateView::Refused { .. })
+        })
+    })
+    .await;
+    stop_all(&mut [&mut a, &mut b, &mut d]).await;
+}
+
 /// With relays configured, an invite never carries IP addresses, even right
 /// after startup before the relay is known. (The relay here doesn't exist,
 /// so the invite either names it or isn't made at all.)
@@ -1657,7 +2001,7 @@ async fn invites_carry_no_ip_addresses_when_relays_are_configured() {
         panic!("expected a room");
     };
     match engine.handle(Command::GetInvite { room: room.id }).await {
-        Ok(Response::Invite { link }) => {
+        Ok(Response::Invite { link, .. }) => {
             let invite = Invite::parse(&link).unwrap();
             assert!(invite.addr.ips.is_empty(), "{invite:?}");
         }

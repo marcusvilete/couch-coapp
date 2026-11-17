@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NetworkView } from "../bindings/NetworkView";
-import { names, networkLine, relayState, removeWarning, troubleStrip } from "./network";
+import { names, networkLine, relayOrigin, relayState, removeWarning, troubleStrip } from "./network";
 
 const online: NetworkView = {
   relays: [],
@@ -16,6 +16,7 @@ const online: NetworkView = {
   testBuild: false,
   changeable: true,
   askForRelay: false,
+  usePassedOn: true,
 };
 
 describe("our own connection in plain words", () => {
@@ -58,5 +59,37 @@ describe("our own connection in plain words", () => {
     });
     expect(lines[0]).toBe("Without it, you'll reach Bia and Caio in “Friday games” only over a direct path, if one works.");
     expect(lines[1]).toMatch(/Remote play is on/);
+  });
+});
+
+describe("relays passed on (M26b)", () => {
+  const relay = {
+    url: "https://r.example/",
+    host: "r.example",
+    builtIn: false,
+    hasCode: true,
+    personal: false,
+    passOn: true,
+    received: null,
+    renewedBy: null,
+    unchecked: false,
+    state: { type: "idle" as const },
+  };
+
+  it("names who passed a relay on, and for which rooms", () => {
+    expect(relayOrigin(relay, {})).toBeNull();
+    const received = {
+      ...relay,
+      received: {
+        rooms: [
+          { room: "a", from: "Bia" },
+          { room: "gone", from: "Caio" },
+        ],
+      },
+    };
+    expect(relayOrigin(received, { a: "Friday games" })).toBe(
+      "From Bia, for Friday games and Caio, for another room",
+    );
+    expect(relayOrigin({ ...relay, renewedBy: "Dee" }, {})).toBe("New code from Dee");
   });
 });

@@ -96,6 +96,18 @@ fn read(status: &[RelayStatus], report: Option<&NetReport>) -> EndpointHealth {
     }
 }
 
+/// Every relay a connection has a path through now, selected or not
+/// (M26b: proof that a member really is on a relay).
+pub fn relay_paths(conn: &Connection) -> Vec<RelayUrl> {
+    conn.paths()
+        .iter()
+        .filter_map(|p| match p.remote_addr() {
+            iroh::TransportAddr::Relay(url) => Some(url.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The relay a connection's selected path goes through, if it is relayed.
 pub fn selected_relay(conn: &Connection) -> Option<RelayUrl> {
     let paths = conn.paths();

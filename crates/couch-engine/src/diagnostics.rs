@@ -70,6 +70,9 @@ pub(crate) fn text(facts: &Facts) -> String {
         }
     );
     let _ = writeln!(out, "Relays:");
+    if !n.use_passed_on {
+        let _ = writeln!(out, "  relays rooms pass on: not taken");
+    }
     if !n.changeable {
         let _ = writeln!(out, "  fixed at start");
     }
@@ -85,6 +88,16 @@ pub(crate) fn text(facts: &Facts) -> String {
         });
         if relay.personal {
             marks.push("personal");
+        }
+        // M26b, without saying who passed it on.
+        if relay.received.is_some() {
+            marks.push("passed on by a room");
+        }
+        if relay.renewed_by.is_some() {
+            marks.push("code renewed by a room");
+        }
+        if relay.has_code && !relay.personal && !relay.pass_on {
+            marks.push("kept to me");
         }
         let _ = writeln!(
             out,
@@ -325,6 +338,15 @@ mod tests {
                 built_in: true,
                 has_code: true,
                 personal: false,
+                pass_on: true,
+                received: Some(crate::ReceivedView {
+                    rooms: vec![crate::ReceivedRoomView {
+                        room: "secret-room-id".into(),
+                        from: "Bia".into(),
+                    }],
+                }),
+                renewed_by: None,
+                unchecked: false,
                 state: RelayStateView::Unreachable {
                     details: Some("timed out reaching 203.0.113.7:443".into()),
                 },
@@ -341,6 +363,7 @@ mod tests {
             test_build: false,
             changeable: true,
             ask_for_relay: false,
+            use_passed_on: true,
         };
         let rooms = vec![RoomView {
             id: "secret-room-id".into(),
@@ -355,6 +378,7 @@ mod tests {
                         reason: MemberReason::NeedsCode {
                             url: "https://theirs.example/".into(),
                             host: "theirs.example".into(),
+                            passing: crate::reasons::CodePassing::Nobody,
                         },
                         details: Some("timed out dialing 198.51.100.4:7777".into()),
                     }),
@@ -394,7 +418,7 @@ mod tests {
         }
         for said in [
             "0.35.0 (release build, commit 0123456789ab)",
-            "relay.example.com (built in, with a code): unreachable: timed out reaching <address>",
+            "relay.example.com (built in, with a code, passed on by a room): unreachable: timed out reaching <address>",
             "direct connections: blocked (UDP)",
             "Trouble: no relay answers",
             "public relays: not in use; may stand in",

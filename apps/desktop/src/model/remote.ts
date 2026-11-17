@@ -8,6 +8,7 @@ import type { MemberView } from "../bindings/MemberView";
 import type { RemoteAction } from "../bindings/RemoteAction";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
+import { memberReason } from "./reasons";
 
 /** A home PC we run from here, as met in a room. */
 export type RemoteTarget = { room: string; member: string };
@@ -121,4 +122,30 @@ export function lockedText(): string {
 /** "45 s", "3 min": how long until a PIN may be tried. */
 export function waitText(secs: number): string {
   return secs < 90 ? `${secs} s` : `${Math.ceil(secs / 60)} min`;
+}
+
+/** Why one of our PCs can't be reached from this device (M26b, ADR 0014's
+ * remote-play line): the member's reason when the app can tell, and whether
+ * it must be fixed at the PC, where nobody may be. */
+export function pcUnreachableText(pc: MemberView): string {
+  const u = pc.unreachable;
+  if (!u) {
+    return pc.link === "offline"
+      ? `${pc.name} isn't online: it may be off or asleep, or the app closed there.`
+      : `${pc.name} isn't offering remote play now: it may be turned off in its Settings → Remote play.`;
+  }
+  const said = memberReason(pc.name, u.reason).text;
+  switch (u.reason.type) {
+    // Ours to fix, here.
+    case "ourConnection":
+    case "relayRefused":
+      return said;
+    case "needsCode":
+      return u.reason.passing === "asking"
+        ? said
+        : `${said} Share its relay from ${pc.name}'s Settings → Network when you're at it.`;
+    case "relayUnreachable":
+    case "relayNotAllowed":
+      return `${said} That has to be fixed at ${pc.name}.`;
+  }
 }

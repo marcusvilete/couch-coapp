@@ -126,6 +126,12 @@
   color: var(--danger);
 }
 
+/* Who passed a relay on, or renewed its code (M26b). */
+.relay-origin {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
 /* Adding a relay: the code, or the address. */
 .relay-add {
   display: grid;

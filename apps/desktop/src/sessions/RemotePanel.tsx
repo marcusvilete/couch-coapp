@@ -10,7 +10,7 @@ import type { MemberView } from "../bindings/MemberView";
 import type { RoomView } from "../bindings/RoomView";
 import type { SessionView } from "../bindings/SessionView";
 import { errorText, request } from "../engine";
-import { lockedText, waitText } from "../model/remote";
+import { lockedText, pcUnreachableText, waitText } from "../model/remote";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { Dialog } from "../ui/Dialog";
@@ -53,6 +53,29 @@ export function RemotePanel(props: {
       >
         Only if it's your own PC: its Settings → Remote play shows the code <strong className="tabular">{remote.code}</strong>
         . Check it matches there before you accept.
+      </Callout>
+    );
+  }
+
+  // Ours, but not reachable now (M26b): why, when the app can tell, and
+  // whether it must be fixed at the PC.
+  if (remote.offline) {
+    return (
+      <Callout
+        tone="warn"
+        icon={<MonitorX />}
+        title={`${pc.name}, your PC, can't be reached`}
+        actions={
+          <Button
+            size="sm"
+            disabled={busy != null}
+            onClick={() => void run("forget", { type: "forgetRemoteHost", member: pc.id })}
+          >
+            Forget
+          </Button>
+        }
+      >
+        {pcUnreachableText(pc)}
       </Callout>
     );
   }

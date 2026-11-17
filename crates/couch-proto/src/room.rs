@@ -201,6 +201,86 @@ pub struct Presence {
     pub connected: Vec<MemberId>,
 }
 
+/// A relay's token, as a code carries it (M26b): sent only to the member who
+/// asked for it, or in an invite. Never printed.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelaySecret(pub String);
+
+/// Longest relay token passed on, in bytes.
+pub const MAX_RELAY_SECRET_BYTES: usize = 512;
+
+impl RelaySecret {
+    /// Visible ASCII alone, no spaces: what an HTTP header can carry (iroh
+    /// sends it as `Authorization: Bearer`). Anything else could never be
+    /// sent, nor told from a relay that doesn't answer.
+    pub fn is_valid(&self) -> bool {
+        !self.0.is_empty()
+            && self.0.len() <= MAX_RELAY_SECRET_BYTES
+            && self.0.chars().all(|c| c.is_ascii_graphic())
+    }
+}
+
+impl std::fmt::Debug for RelaySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("..")
+    }
+}
+
+/// A member asks another of the same room for the code of a relay it needs
+/// and lacks (M26b): one a member of that room is on, by its signed record,
+/// or one of ours refusing the code we hold (a rotation). Never relayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayAsk {
+    /// As the member's record names it.
+    pub url: String,
+}
+
+/// The answer to a [`RelayAsk`], on the connection it came on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayAnswer {
+    pub url: String,
+    pub answer: RelayAnswerKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelayAnswerKind {
+    /// Its token. A relay open to everyone is never asked for: it needs none.
+    Code(RelaySecret),
+    /// Nothing to give.
+    None(NoRelayCode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoRelayCode {
+    /// Nothing to give: we don't hold it, may not pass it on here (personal,
+    /// the user's switch off, received for another room), or nobody in this
+    /// room is on it as far as we can tell. One answer for all, so asking
+    /// can't tell which relays we hold.
+    Unavailable,
+    /// Too many asks: try again later.
+    Busy,
+}
+
+impl RelayAsk {
+    pub fn is_valid(&self) -> bool {
+        !self.url.is_empty()
+            && self.url.len() <= MAX_RELAY_URL_BYTES
+            && !self.url.chars().any(char::is_control)
+    }
+}
+
+impl RelayAnswer {
+    pub fn is_valid(&self) -> bool {
+        !self.url.is_empty()
+            && self.url.len() <= MAX_RELAY_URL_BYTES
+            && !self.url.chars().any(char::is_control)
+            && match &self.answer {
+                RelayAnswerKind::Code(secret) => secret.is_valid(),
+                RelayAnswerKind::None(_) => true,
+            }
+    }
+}
+
 /// Sent before closing a connection on purpose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Goodbye {
@@ -247,6 +327,30 @@ mod tests {
     use std::net::{Ipv6Addr, SocketAddrV6};
 
     use super::*;
+
+    /// M26b: a relay's token passed on never prints, and asks and answers
+    /// are checked before anything is done with them.
+    #[test]
+    fn relay_codes_never_print_and_are_checked() {
+        let answer = RelayAnswer {
+            url: "https://relay.example.com/".into(),
+            answer: RelayAnswerKind::Code(RelaySecret("s3cret-token".into())),
+        };
+        assert!(answer.is_valid());
+        assert!(!format!("{answer:?}").contains("s3cret"));
+        let long = |n| RelaySecret("x".repeat(n));
+        assert!(long(MAX_RELAY_SECRET_BYTES).is_valid());
+        assert!(!long(MAX_RELAY_SECRET_BYTES + 1).is_valid());
+        assert!(!RelaySecret(String::new()).is_valid());
+        assert!(!RelaySecret("line\nbreak".into()).is_valid());
+        assert!(
+            !RelayAsk {
+                url: "r".repeat(MAX_RELAY_URL_BYTES + 1)
+            }
+            .is_valid()
+        );
+        assert!(!RelayAsk { url: String::new() }.is_valid());
+    }
 
     fn largest_record(i: u8) -> Signed<MemberRecord> {
         Signed {

@@ -15,6 +15,7 @@
 //! the one we watch, and the others' we hear of. So does remote play
 //! ([`remote`], M25): one of our own devices running our sessions from afar.
 
+mod passing;
 mod remote;
 mod sessions;
 
@@ -96,6 +97,13 @@ pub(crate) enum Input {
     /// the new connection and closes the old one, as when a dial crosses
     /// one already up (M16a).
     DialAgain(String, String),
+    /// A relay's code a member passed on, checked against the relay (M26b).
+    RelayCodeChecked {
+        room: RoomId,
+        url: String,
+        hash: [u8; 32],
+        checked: passing::Checked,
+    },
     Shutdown(oneshot::Sender<()>),
     /// A backup, opened, to restore into this profile (M13): here, so no
     /// room is created or joined under the old identity meanwhile.
@@ -299,6 +307,8 @@ pub(crate) struct JoinOutcome {
     invite: Invite,
     admitted: Admitted,
     snapshot: RoomSnapshot,
+    /// The relay the invite's code lent the endpoint for the join (M26b).
+    lent: Option<couch_net::endpoint::Relay>,
 }
 
 enum Outgoing {
@@ -354,6 +364,7 @@ pub(crate) struct Started {
     pub member_id: MemberId,
     pub inbox: mpsc::Sender<Input>,
     pub endpoint: Endpoint,
+    pub hub: crate::RelayHub,
 }
 
 struct Actor {
@@ -399,6 +410,13 @@ struct Actor {
     poke: mpsc::Sender<()>,
     /// How long a relay is given to answer, telling a join's failing step.
     relay_check: Duration,
+    /// How often a relay of ours is checked again when a member on it
+    /// can't be reached (M26b).
+    suspect_every: Duration,
+    /// The regular checks' interval: suspecting backs off up to it.
+    check_every: Duration,
+    /// How often a room is asked again for a relay's code (M26b).
+    ask_every: Duration,
     /// How long a join waits to reach the owner.
     join_connect: Duration,
     /// For rooms we own, the relay each open invite names (M26a-2).
@@ -428,6 +446,10 @@ struct Actor {
     restored: bool,
     /// Remote play (M25): as a home PC, its devices; as a device, its PCs.
     remote: remote::Remote,
+    /// The relays' one way to change (M26b: codes passed on are kept).
+    hub: crate::RelayHub,
+    /// Relay codes asked for and answered (M26b).
+    passing: passing::Passing,
 }
 
 fn lock(limits: &Mutex<AdmissionLimits>) -> MutexGuard<'_, AdmissionLimits> {
@@ -488,6 +510,8 @@ pub(crate) struct Links {
     pub network: crate::network::Shared,
     /// Wakes the network's watch.
     pub poke: mpsc::Sender<()>,
+    /// The saved relays (M26b: codes passed on are kept there).
+    pub relays: Arc<tokio::sync::Mutex<crate::RelayState>>,
 }
 
 /// Loads the identity, binds the endpoint, restores remembered rooms and
@@ -505,6 +529,7 @@ pub(crate) async fn start(
         dial,
         network,
         poke,
+        relays: relay_state,
     } = links;
     let store = Store::new(profile.data_dir(), options.secret_store.clone());
     let secret_key = store.identity()?;
@@ -532,6 +557,14 @@ pub(crate) async fn start(
         .await
         .map_err(|e| EngineError::Net(e.to_string()))?;
 
+    let hub = crate::RelayHub {
+        relays: relay_state,
+        data_dir: profile.data_dir().to_path_buf(),
+        secrets: options.secret_store.clone(),
+        endpoint: endpoint.clone(),
+        network: network.clone(),
+        poke: poke.clone(),
+    };
     let (inbox, inbox_rx) = mpsc::channel(INBOX);
     let now = Instant::now();
     let can_host = options.backend.capabilities().sessions && options.backend.home_pc();
@@ -570,6 +603,9 @@ pub(crate) async fn start(
         network,
         poke,
         relay_check: options.network.check_timeout,
+        suspect_every: options.network.suspect_every,
+        check_every: options.network.check_every,
+        ask_every: options.network.ask_every,
         join_connect: options.join_connect,
         invite_relays: crate::store::invite_relays(profile.data_dir()),
         stale_seen: BTreeMap::new(),
@@ -582,6 +618,8 @@ pub(crate) async fn start(
         views: AtomicU64::new(0),
         restored: false,
         remote: remote::Remote::load(profile.data_dir(), options.start_at_sign_in, can_host),
+        hub: hub.clone(),
+        passing: passing::Passing::default(),
     };
     actor.restore_rooms(now);
     // Awake from the start while remote play is on (M25c).
@@ -592,6 +630,7 @@ pub(crate) async fn start(
         member_id: me,
         inbox,
         endpoint,
+        hub,
     })
 }
 
@@ -809,11 +848,21 @@ impl Actor {
                     self.remote_received(room, conn, message, now);
                     return;
                 }
+                if message.is_relay() {
+                    self.relay_received(room, conn, message, now);
+                    return;
+                }
                 if let Some(entry) = self.rooms.get_mut(&room) {
                     let fx = entry.room.received(conn, message, now);
                     self.apply(room, fx, now);
                 }
             }
+            Input::RelayCodeChecked {
+                room,
+                url,
+                hash,
+                checked,
+            } => self.relay_code_checked(room, url, hash, checked),
             Input::Closed { conn } => {
                 let Some(closed) = self.conns.remove(&conn) else {
                     return;
@@ -1007,6 +1056,8 @@ impl Actor {
             | Command::SetPublicRelays { .. }
             | Command::CheckNetwork
             | Command::SetPublicFallback { .. }
+            | Command::SetPassOn { .. }
+            | Command::SetUsePassedOn { .. }
             | Command::ReadRelayCode { .. }
             | Command::CheckInviteRelay { .. }
             | Command::AddRelayCode { .. }
@@ -1209,7 +1260,16 @@ impl Actor {
 
     /// Re-reads our addresses, and announces them if they changed.
     fn refresh_addr(&mut self, now: Instant) {
-        let addr = addr::peer_addr(&self.endpoint.addr());
+        let mut addr = addr::peer_addr(&self.endpoint.addr());
+        // A relay lent for a join (M26b) never goes in our record: a link
+        // anyone made could else become the relay every room dials us at.
+        // Once kept (admitted), it is ours like any other.
+        if let Some(home) = addr.relay.as_deref().and_then(crate::reasons::normalized) {
+            let network = crate::network::lock(&self.network);
+            if network.lent.contains(home.as_str()) && network.held(home.as_str()).is_none() {
+                addr.relay = self.addr.relay.clone();
+            }
+        }
         if addr != self.addr {
             tracing::debug!(?addr, "our addresses changed");
             let moved = addr.relay != self.addr.relay;
@@ -1285,8 +1345,25 @@ impl Actor {
         if let Some(relay) = invite.addr.relay.clone() {
             self.remember_invite_relay(room, invite_tag(&invite.token), relay);
         }
+        // M26b: the link carries our relay's code when we may pass it on;
+        // the dialog's switch picks the same invite without it.
+        let page = crate::build_config::invite_page();
+        let plain = invite_link(&invite, page);
+        let (code, link, without_code) = match self.invite_code(room, &invite) {
+            Some((code, Some(secret))) => {
+                let with = Invite {
+                    relay_code: Some(secret),
+                    ..invite.clone()
+                };
+                (Some(code), invite_link(&with, page), Some(plain))
+            }
+            Some((code, None)) => (Some(code), plain, None),
+            None => (None, plain, None),
+        };
         Ok(Response::Invite {
-            link: invite_link(&invite, crate::build_config::invite_page()),
+            link,
+            code,
+            without_code,
         })
     }
 
@@ -1340,6 +1417,7 @@ impl Actor {
         };
         let relay = crate::reasons::invite_relay(
             invite.addr.relay.as_deref(),
+            invite.relay_code.is_some(),
             &crate::network::lock(&self.network),
             &self.dial_rules(),
         );
@@ -1378,6 +1456,7 @@ impl Actor {
             let _ = reply.send(Err(EngineError::Refused("already joining this room")));
             return;
         }
+        let lent = self.lend_for_join(&invite);
         let job = JoinJob {
             endpoint: self.endpoint.clone(),
             password: PasswordKey::derive(id, password),
@@ -1388,6 +1467,8 @@ impl Actor {
             network: self.network.clone(),
             check_timeout: self.relay_check,
             connect_timeout: self.join_connect,
+            lent,
+            hub: self.hub.clone(),
         };
         let inbox = self.inbox.clone();
         tokio::spawn(async move {
@@ -1427,9 +1508,11 @@ impl Actor {
             invite,
             admitted,
             snapshot,
+            lent,
         } = outcome;
         if let Some(view) = self.view(id, now) {
             admission::close(&admitted.conn, close_code::DUPLICATE);
+            self.link_code_done(id, &invite, false, lent);
             let _ = reply.send(Ok(Response::Room(view)));
             return;
         }
@@ -1449,6 +1532,7 @@ impl Actor {
             Ok(room) => room,
             Err(e) => {
                 admission::close(&admitted.conn, close_code::LEFT_ROOM);
+                self.link_code_done(id, &invite, false, lent);
                 let _ = reply.send(Err(match e {
                     RoomError::Banned => EngineError::Refused("you are banned from this room"),
                     other => other.into(),
@@ -1458,6 +1542,7 @@ impl Actor {
         };
         tracing::info!(room = ?id, "joined a room");
         self.rooms.insert(id, Entry::new(room, None));
+        self.link_code_done(id, &invite, true, lent);
         self.save(id);
         self.admitted(admitted, now);
         self.announce(id, now);
@@ -1894,6 +1979,9 @@ impl Actor {
         self.rooms.remove(&room);
         // Which relay its links named goes with it (M26a-2).
         self.prune_invite_relays();
+        // So do the relays received for it alone (M26b): only now, once a
+        // room left has said its goodbyes, perhaps through one of them.
+        self.drop_received_for(room);
         if let Err(e) = self.store.forget_room(room) {
             tracing::error!("could not forget room {room:?}: {e}");
         }
@@ -1997,6 +2085,7 @@ impl Actor {
         self.dial_errors
             .retain(|m, _| !connected.contains(m) && rostered.contains(m));
         let mut wanted = BTreeSet::new();
+        let mut suspects = BTreeSet::new();
         let mut fresh: BTreeMap<RoomId, BTreeMap<MemberId, crate::UnreachableView>> =
             BTreeMap::new();
         {
@@ -2013,6 +2102,12 @@ impl Actor {
                     if let Some(url) = crate::reasons::wants_probe(relay.as_deref(), &rules) {
                         wanted.insert(url);
                     }
+                    // One of ours: its code may have changed (M26b).
+                    if let Some(url) = relay.as_deref().and_then(crate::reasons::normalized)
+                        && network.held(url.as_str()).is_some()
+                    {
+                        suspects.insert(url.to_string());
+                    }
                     if let Some(reason) = crate::reasons::member_reason(
                         relay.as_deref(),
                         Some(error),
@@ -2024,8 +2119,26 @@ impl Actor {
                 }
             }
         }
-        if crate::network::lock(&self.network).want_probes(wanted) {
-            let _ = self.poke.try_send(());
+        {
+            let mut network = crate::network::lock(&self.network);
+            let mut poke = network.want_probes(wanted);
+            for url in &suspects {
+                poke |= network.suspect(url, Instant::now(), self.suspect_every, self.check_every);
+            }
+            network.calm(&suspects);
+            if poke {
+                let _ = self.poke.try_send(());
+            }
+        }
+        // Where asking the room for a code stands (M26b).
+        for (room, members) in &mut fresh {
+            for view in members.values_mut() {
+                if let crate::reasons::MemberReason::NeedsCode { url, passing, .. } =
+                    &mut view.reason
+                {
+                    *passing = self.code_passing(*room, url);
+                }
+            }
         }
         let changed: Vec<RoomId> = self
             .rooms
@@ -2277,6 +2390,8 @@ impl Actor {
         self.board_tick(now);
         // Why members can't be reached (M26a-2).
         self.refresh_reasons(now);
+        // Codes our rooms need, asked for (M26b).
+        self.passing_tick(now);
         if now >= self.next_addr_check {
             self.next_addr_check = now + ADDR_CHECK_EVERY;
             self.refresh_addr(now);
@@ -2376,10 +2491,39 @@ struct JoinJob {
     network: crate::network::Shared,
     check_timeout: Duration,
     connect_timeout: Duration,
+    /// The relay the invite names, with the code it carries, lent to the
+    /// endpoint for the join (M26b): taken back unless admitted, when the
+    /// actor keeps it for the room.
+    lent: Option<couch_net::endpoint::Relay>,
+    hub: crate::RelayHub,
 }
 
 impl JoinJob {
-    async fn run(self) -> Result<Box<JoinOutcome>, EngineError> {
+    async fn run(mut self) -> Result<Box<JoinOutcome>, EngineError> {
+        // Only what was really lent counts, for the diagnosis and for taking
+        // it back (none where the relays are fixed, say).
+        self.lent = match self.lent.take() {
+            Some(relay) => self.hub.lend(relay).await,
+            None => None,
+        };
+        let lent = self.lent.clone();
+        let hub = self.hub.clone();
+        let result = self.attempt().await;
+        match (result, lent) {
+            (Err(e), Some(relay)) => {
+                hub.unlend(relay.url.as_str()).await;
+                Err(e)
+            }
+            (Ok(mut outcome), lent) => {
+                // Taken back by the actor once the join is settled.
+                outcome.lent = lent;
+                Ok(outcome)
+            }
+            (result, None) => result,
+        }
+    }
+
+    async fn attempt(self) -> Result<Box<JoinOutcome>, EngineError> {
         let owner = self.invite.owner;
         let relay = self
             .invite
@@ -2438,6 +2582,7 @@ impl JoinJob {
         };
         match attempt.await {
             Ok((conn, tx, rx, snapshot)) => Ok(Box::new(JoinOutcome {
+                lent: None,
                 admitted: Admitted {
                     room: self.room,
                     peer: owner,
@@ -2461,6 +2606,7 @@ impl JoinJob {
     async fn unreached(&self, error: &AdmissionError) -> EngineError {
         match crate::reasons::join_problem(
             self.invite.addr.relay.as_deref(),
+            self.lent.as_ref().and_then(|r| r.token.clone()),
             &error.to_string(),
             &self.network,
             &self.dial,

@@ -69,4 +69,9 @@ changeable: boolean,
  * question off: creating a room or an invite asks for a relay of their
  * own first (the wizard; [`Command::DeferRelay`]).
  */
-askForRelay: boolean, };
+askForRelay: boolean, 
+/**
+ * "Use relays my rooms pass on" (M26b, on by default): codes are asked
+ * for when a member is on a relay we lack, and kept.
+ */
+usePassedOn: boolean, };

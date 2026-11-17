@@ -26,4 +26,10 @@ locked: boolean,
  * Unlocked: what that PC can host, as it said (M16c). The console hides
  * the keyboard seat and desktop control where they're missing.
  */
-capabilities: HostCapabilities | null, };
+capabilities: HostCapabilities | null, 
+/**
+ * One of our PCs that isn't offering remote play now: not connected
+ * in this room, or remote play off there (M26b: the panel says why
+ * when the member's reason tells, and that it must be fixed there).
+ */
+offline: boolean, };

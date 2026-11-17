@@ -21,6 +21,13 @@ The author's choices (2026-11-13):
 - **Others' relay addresses are narrowed, not closed** (the review's finding): release builds dial them only as https on port 443 to a dotted name without a LAN suffix; a public name resolving to a private address isn't caught, as iroh resolves it. Checking resolved addresses would need a resolver of our own in iroh: left for later.
 - **Records don't follow a member to a relay nobody else holds:** with no connection left to send its new record on, the others keep dialing its old relay. M26a-1 warns before removing a relay others reach us through; M26a-2's reasons and M26b's codes must account for it.
 
+**Settled while building M26b** (2026-11-13; [results](../m26b-results.md)):
+- **The author's choices:** a personal code refused is never asked for again (taken back on purpose); a relay of the user's own whose code is refused takes a room member's checked code in place and stays the user's ("new code from Bia"); the remote-play device says why it can't reach its home PC in the same PR; the version mismatch's link, the antivirus submission and the invite page's download stay in M26c, as "In parts" says.
+- **A rotation of a relay that isn't our home is noticed** by checking its code again when a member on it can't be reached (at most every 30 s): iroh reports refusals of the home relay alone.
+- **Codes are asked for only once ours is refused,** so during a rotation's overlap (both tokens accepted) nothing moves; after it, an app reaches its rooms to ask only by another path (a direct one, or another relay). A home PC whose only relay is the rotated one can't ask: the deploy guide says to paste the new code there, or give it a second relay, before the old token goes.
+- **A received relay stays with its rooms everywhere:** never shared by Share, and dropped once its last room is forgotten (not while a room being left still says its goodbyes).
+- **One way to change relays** (`RelayHub`), for the user's commands, codes passed on and a join's lent code alike.
+
 ## Context
 
 **Only the builder can make a release today.** A release build carries its builder's relay and token (`release.toml`, ADR 0007), so every update is an installer built by hand on the maintainer's PC and handed out the same way. The token in it was never secret anyway: anyone with the installer can read it.

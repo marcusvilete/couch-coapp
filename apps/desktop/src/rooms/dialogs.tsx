@@ -2,18 +2,27 @@
 // components' state, and go when the dialog closes.
 import { Check as CheckIcon, Clock, Copy, DoorOpen, Link2, Plus, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { InviteCodeView } from "../bindings/InviteCodeView";
 import type { InvitePreview } from "../bindings/InvitePreview";
 import type { InviteRelayView } from "../bindings/InviteRelayView";
 import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
 import type { RoomView } from "../bindings/RoomView";
 import { engineCommand, errorText, request } from "../engine";
-import { inviteRelayText, joinProblemText, PUBLIC_RELAYS_HINT, staleInvitesText, type Said } from "../model/reasons";
+import {
+  inviteCodeText,
+  inviteRelayText,
+  joinProblemText,
+  PUBLIC_RELAYS_HINT,
+  staleInvitesText,
+  type Said,
+} from "../model/reasons";
 import { PasteCodeDialog } from "../settings/PasteCodeDialog";
 import { takesOfferItself } from "../state/openedLink";
 import { Avatar } from "../ui/Avatar";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
+import { Switch } from "../ui/Controls";
 import { Dialog } from "../ui/Dialog";
 import { Badge, Skeleton } from "../ui/Feedback";
 import { Field, PasswordInput, TextArea, TextInput } from "../ui/Field";
@@ -410,14 +419,21 @@ export function InviteDialog(props: {
   /** Only iroh's public relays are in use: a line says so (M26a-2). */
   publicRelays: boolean;
 }) {
-  const [link, setLink] = useState<string | null>(null);
+  // One invite, with our relay's code and without it (M26b): the switch
+  // picks which link to send, never making another invite.
+  const [invite, setInvite] = useState<{ link: string; plain: string | null; code: InviteCodeView | null } | null>(
+    null,
+  );
+  const [withCode, setWithCode] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const code = invite?.code ?? null;
+  const link = invite == null ? null : !withCode && invite.plain != null ? invite.plain : invite.link;
 
   useEffect(() => {
     let live = true;
     request({ type: "getInvite", room: props.room.id }, "invite")
-      .then((r) => live && setLink(r.link))
+      .then((r) => live && setInvite({ link: r.link, plain: r.without_code, code: r.code }))
       .catch((e) => live && setError(errorText(e)));
     return () => {
       live = false;
@@ -471,6 +487,19 @@ export function InviteDialog(props: {
           Anyone with both can join for a week, until five wrong passwords, or until you revoke invites. Treat the link
           like half of the password.
         </p>
+        <div className="invite-code">
+          {code?.passable ? (
+            <Switch
+              checked={withCode}
+              disabled={link == null}
+              onChange={setWithCode}
+              label={`Include ${code.host}'s code`}
+              detail={inviteCodeText(code)}
+            />
+          ) : code ? (
+            <p className="form-hint">{inviteCodeText(code)}</p>
+          ) : null}
+        </div>
         {props.room.staleInvites && (
           <p className="form-hint warn">{staleInvitesText(props.room.staleInvites, true)}</p>
         )}
