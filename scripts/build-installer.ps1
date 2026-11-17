@@ -188,8 +188,9 @@ $built = Get-ChildItem (Join-Path $repo 'target\release\bundle\nsis') -Filter "*
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $built) { throw 'No installer was produced.' }
 # The build may not change what the notices link to (Cargo.lock, say), as the AppImage's checks.
-if (-not $dirtyTree -and (git -C $repo status --porcelain)) {
-    throw 'The build changed files in the repository (git status): the installer no longer matches its commit.'
+$changed = git -C $repo status --porcelain
+if (-not $dirtyTree -and $changed) {
+    throw "The build changed files in the repository, so the installer no longer matches its commit:`n$($changed -join "`n")"
 }
 
 $commit = git -C $repo rev-parse --short HEAD
