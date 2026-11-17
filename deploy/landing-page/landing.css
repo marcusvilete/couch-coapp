@@ -1,0 +1,681 @@
+/* The landing page, in the app's look (apps/desktop/src/styles/tokens.css, as the
+   invite page): near-neutral greys, main buttons in the text's colour, blue for focus,
+   the brand's violet for accents only; dark or light as the visitor's system is. */
+:root {
+  color-scheme: light dark;
+  --bg: light-dark(#f2f1ec, #1f1e1d);
+  --band: light-dark(#e9e7e0, #262624);
+  --card: light-dark(#ffffff, #2c2c2a);
+  --frame: light-dark(#dcd9d0, #181817);
+  --border: light-dark(#e0ddd4, #3a3936);
+  --border-strong: light-dark(#d4d1c6, #4b4a46);
+  --text: light-dark(#141413, #faf9f5);
+  --text-muted: light-dark(#5e5d59, #c2c0b6);
+  --primary: light-dark(#141413, #faf9f5);
+  --primary-hover: light-dark(#30302e, #e3e1d9);
+  --primary-fg: light-dark(#faf9f5, #141413);
+  --hover: light-dark(rgb(20 20 19 / 0.045), rgb(250 249 245 / 0.05));
+  --focus: light-dark(#2c84db, #4a9ff0);
+  --brand: light-dark(#6a3fe0, #9670ff);
+  --brand-soft: light-dark(rgb(106 63 224 / 0.1), rgb(150 112 255 / 0.16));
+  --glow: light-dark(rgb(106 63 224 / 0.16), rgb(150 112 255 / 0.2));
+  --radius: 10px;
+  --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Cantarell", "Noto Sans", sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Cantarell", "Noto Sans", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Kept hidden whatever a rule's display says (the download's note, until it has one). */
+[hidden] {
+  display: none !important;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 4.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 var(--font);
+  -webkit-text-size-adjust: 100%;
+}
+
+a {
+  color: inherit;
+  text-underline-offset: 0.18em;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+
+  &:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+a:focus-visible,
+summary:focus-visible,
+.picker-tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.skip {
+  position: absolute;
+  left: 16px;
+  top: -3rem;
+  z-index: 10;
+  background: var(--card);
+  padding: 0.5rem 0.9rem;
+  border-radius: var(--radius);
+
+  &:focus {
+    top: 0.75rem;
+  }
+}
+
+.wrap {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+@media (min-width: 640px) {
+  .wrap {
+    padding: 0 28px;
+  }
+}
+
+.narrow {
+  max-width: 46rem;
+}
+
+/* The bar on top, staying while the page scrolls. */
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+
+.top-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  height: 3.5rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex: none;
+  text-decoration: none;
+  font: 650 1rem var(--font-display);
+}
+
+.top nav {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+
+  & a {
+    flex: none;
+    padding: 0.35rem 0.6rem;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text-muted);
+    font-size: 0.93rem;
+
+    &:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
+  }
+}
+
+/* On a phone, the brand's name gives way to the links. */
+@media (max-width: 560px) {
+  .brand span {
+    display: none;
+  }
+}
+
+section {
+  padding: 4.5rem 0;
+}
+
+.band {
+  background: var(--band);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: clamp(2.1rem, 5.5vw, 3.6rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 1rem;
+}
+
+h2 {
+  font-size: clamp(1.6rem, 3.5vw, 2.2rem);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 1.5rem;
+}
+
+h3 {
+  font-size: 1.08rem;
+  font-weight: 650;
+  margin: 0 0 0.4rem;
+}
+
+p {
+  margin: 0 0 1rem;
+}
+
+ul {
+  margin: 0 0 1rem;
+  padding-left: 1.25rem;
+}
+
+li {
+  margin-bottom: 0.4rem;
+}
+
+.quiet {
+  color: var(--text-muted);
+}
+
+.small {
+  font-size: 0.9rem;
+}
+
+/* ---- The top ---- */
+
+.hero {
+  padding: 4.5rem 0 4rem;
+  text-align: center;
+  background: radial-gradient(60rem 28rem at 50% 78%, var(--glow), transparent 70%);
+}
+
+.lead {
+  font-size: clamp(1.08rem, 2.2vw, 1.3rem);
+  color: var(--text-muted);
+  max-width: 34rem;
+  margin: 0 auto 2rem;
+  text-wrap: balance;
+}
+
+.get p {
+  margin-bottom: 0.5rem;
+}
+
+.get .note {
+  display: inline-block;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.facts {
+  margin-top: 1.25rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.button {
+  display: inline-block;
+  font: 600 1rem var(--font);
+  background: var(--primary);
+  color: var(--primary-fg);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  padding: 0.75rem 1.5rem;
+  text-decoration: none;
+  transition: background 120ms;
+
+  &:hover {
+    background: var(--primary-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 3px;
+  }
+}
+
+/* ---- Pictures ---- */
+
+.shot {
+  margin: 0;
+
+  & img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 12px;
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.08), 0 24px 60px rgb(0 0 0 / 0.18);
+  }
+}
+
+.hero-shot {
+  margin-top: 3rem;
+}
+
+.relay-shot {
+  margin-top: 2rem;
+}
+
+/* ---- Pickers: How it works, Features ----
+   Without scripts, and on a narrow screen: each item's text, then its picture. On a wide
+   screen with scripts: the titles in a column, the chosen item's picture beside them, in
+   a frame of one size whichever it is, so choosing moves nothing. */
+
+.picker-item {
+  margin-bottom: 2.5rem;
+}
+
+.picker-text {
+  & h3 {
+    margin: 0 0 0.25rem;
+  }
+
+  & p {
+    margin: 0 0 1rem;
+    color: var(--text-muted);
+  }
+}
+
+/* The title's button looks like a heading until the picker is on. */
+.picker-tab {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font: inherit;
+}
+
+.num {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font: 700 0.92rem var(--font-display);
+}
+
+.picker-shot {
+  margin: 0;
+
+  & img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 12px;
+    border: 1px solid var(--border-strong);
+  }
+}
+
+@media (min-width: 900px) {
+  .picker.on {
+    display: grid;
+    grid-template-columns: minmax(14rem, 18rem) 1fr;
+    column-gap: 2.5rem;
+    align-items: start;
+
+    & .picker-item {
+      display: contents;
+    }
+
+    & .picker-text {
+      grid-column: 1;
+      position: relative;
+      border-radius: 12px;
+      padding: 0.85rem 1rem 0.9rem;
+      margin-bottom: 0.35rem;
+      cursor: pointer;
+      transition: background 120ms;
+
+      &:hover {
+        background: var(--hover);
+      }
+
+      & p {
+        margin: 0;
+        font-size: 0.95rem;
+      }
+    }
+
+    & .picker-tab {
+      cursor: pointer;
+
+      /* The whole item answers a click, not only its title. */
+      &::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+      }
+    }
+
+    & .chosen .picker-text {
+      background: var(--card);
+      box-shadow: inset 3px 0 0 var(--brand), 0 1px 3px rgb(0 0 0 / 0.08);
+    }
+
+    & .picker-shot {
+      grid-column: 2;
+      grid-row: 1 / span var(--items);
+      display: none;
+      aspect-ratio: 4 / 3;
+      background: var(--frame);
+      border-radius: 16px;
+      padding: 0.75rem;
+      align-self: start;
+      /* In view while a long list is chosen from. */
+      position: sticky;
+      top: 4.75rem;
+
+      & picture {
+        display: contents;
+      }
+
+      & img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        border: 0;
+        border-radius: 8px;
+      }
+    }
+
+    & .chosen .picker-shot {
+      display: block;
+    }
+  }
+}
+
+.explain {
+  max-width: 46rem;
+  margin: 1rem auto 0;
+
+  & li {
+    margin-bottom: 0.6rem;
+  }
+}
+
+/* ---- Trust ---- */
+
+.ticks {
+  list-style: none;
+  padding: 0;
+
+  & li {
+    position: relative;
+    padding-left: 1.9rem;
+    margin-bottom: 0.75rem;
+
+    /* A tick, drawn: two borders of a turned box. */
+    &::before {
+      content: "";
+      position: absolute;
+      left: 0.35rem;
+      top: 0.38em;
+      width: 0.45rem;
+      height: 0.8rem;
+      border: solid var(--brand);
+      border-width: 0 2.5px 2.5px 0;
+      transform: rotate(45deg);
+    }
+  }
+}
+
+.two {
+  display: grid;
+  gap: 1.5rem 2.5rem;
+  margin-top: 1.5rem;
+}
+
+@media (min-width: 700px) {
+  .two {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.two ul {
+  color: var(--text-muted);
+}
+
+/* ---- Questions ---- */
+
+details {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.6rem;
+
+  & summary {
+    cursor: pointer;
+    padding: 0.9rem 1.1rem;
+    font-weight: 600;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    &::after {
+      content: "+";
+      color: var(--text-muted);
+      font-weight: 400;
+      font-size: 1.2rem;
+      line-height: 1;
+    }
+  }
+
+  &[open] summary::after {
+    content: "−";
+  }
+
+  & p {
+    padding: 0 1.1rem 0.4rem;
+    color: var(--text-muted);
+  }
+}
+
+/* ---- The end ---- */
+
+.end {
+  text-align: center;
+  background: radial-gradient(40rem 16rem at 50% 100%, var(--glow), transparent 70%);
+}
+
+footer {
+  border-top: 1px solid var(--border);
+  padding: 2rem 0 2.5rem;
+}
+
+.foot nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  margin-bottom: 1rem;
+  font-size: 0.93rem;
+}
+
+/* Windows' High Contrast themes pick their own colours; keep the edges and marks. */
+@media (forced-colors: active) {
+  .shot img,
+  .picker-shot img,
+  details,
+  .button,
+  .get .note {
+    border-color: CanvasText;
+  }
+
+  .picker.on .chosen .picker-text {
+    outline: 2px solid Highlight;
+  }
+
+  .num {
+    forced-color-adjust: none;
+    background: CanvasText;
+    color: Canvas;
+  }
+
+  .ticks li::before {
+    border-color: CanvasText;
+  }
+}
+
+/* ---- A before/after picture (HDR) ----
+   The converted picture below, the unconverted one over it cut at --split; a range input
+   over both moves the line (mouse, touch, keys). Without scripts, the line stays at 50%. */
+
+.compare {
+  --split: 50%;
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  user-select: none;
+  touch-action: pan-y;
+
+  & img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 0;
+    border-radius: 0;
+  }
+
+  & .compare-before {
+    position: absolute;
+    inset: 0;
+    height: 100%;
+    clip-path: inset(0 calc(100% - var(--split)) 0 0);
+  }
+
+  /* The input covers the picture: dragging anywhere moves the line. */
+  & input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: ew-resize;
+  }
+}
+
+.compare-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--split);
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  box-shadow: 0 0 6px rgb(0 0 0 / 0.5);
+  pointer-events: none;
+
+  /* The grip in the middle. */
+  &::after {
+    content: "‹ ›";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 2.4rem;
+    height: 2.4rem;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: #fff;
+    color: #141413;
+    font: 700 0.95rem/1 var(--font);
+    letter-spacing: 0.1em;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
+  }
+}
+
+.compare input:focus-visible + .compare-handle::after {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.compare-label {
+  position: absolute;
+  top: 0.6rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.6);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.compare-left {
+  left: 0.6rem;
+}
+
+.compare-right {
+  right: 0.6rem;
+}
+
+/* In the picker's frame: the pair centred, at the frame's height at most. */
+@media (min-width: 900px) {
+  .picker.on .picker-shot .compare {
+    position: relative;
+    top: 50%;
+    transform: translateY(-50%);
+    max-height: 100%;
+
+    & img {
+      width: 100%;
+      height: auto;
+      object-fit: fill;
+    }
+
+    & .compare-before {
+      height: 100%;
+    }
+  }
+}
+
+@media (forced-colors: active) {
+  .compare {
+    border-color: CanvasText;
+  }
+}
