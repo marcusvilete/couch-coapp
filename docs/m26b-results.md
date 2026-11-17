@@ -142,7 +142,7 @@ It also pointed again at the limit below: a newcomer on public relays alone who 
 
 ## Still to come
 
-- **One test the review asked for:** the claimed-home rule through engines (a member can't make its record claim a relay it isn't on without a fake engine). The other, a join's lent relay seen taken back after a refusal, came with the follow-ups (below).
+- ~~**One test the review asked for:** the claimed-home rule through engines.~~ Done after M26c (0.39.1): `a_relay_a_record_merely_names_gets_no_code` in `tests/rooms.rs`, with no test hook. An offline member's record still names its relay, a claim nobody is on, the same to the others as a record lying about its home. A member holding that relay's code, passable in the room (received for it, so never her home), is asked by a newcomer and gives nothing. With the rule taken out of `answer_for`, the test fails. The other, a join's lent relay seen taken back after a refusal, came with the follow-ups (below).
 - **Hand checks with two PCs:** a code passed on through a friend, a join with the code in the link, a rotation reaching a member whose code was refused, and the remote panel with the home PC's relay down. The scenarios above cover each through real relays on loopback.
 - **Records don't follow a member to a relay nobody else holds** (M26a-1's finding). Code passing narrows it: a member whose relay changes to one the room can pass on is reached again once someone asks.
 - **M26c:** public releases, the update notice, the version mismatch's link, the invite page's download and relay note.

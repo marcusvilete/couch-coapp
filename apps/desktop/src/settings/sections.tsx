@@ -589,7 +589,8 @@ export function AboutSection() {
           licence is the LICENSE file next to the app.
         </p>
         <p className="settings-note">
-          Its source code: {source ? <span className="mono selectable">{source}</span> : "ask whoever gave you the app."}{" "}
+          Its source code:{" "}
+          {source ? <><span className="mono selectable">{source}</span>.</> : "ask whoever gave you the app."}{" "}
           FFmpeg's source came with the installer, in the files beside it.
         </p>
       </div>
