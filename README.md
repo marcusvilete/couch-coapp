@@ -28,7 +28,7 @@ I believe no one wants to contribute to a "vibecoded" repository, but feel free 
 
 ---
 
-**Status:** in development. Windows hosts and watches. Linux watches and plays, and hosts sessions on KDE or GNOME: controller seats, the keyboard-and-mouse seat for guests (on GNOME with our extension), and a device of yours controlling its desktop from afar; friends there get an AppImage you build ([self-hosting](docs/self-hosting.md#4-an-appimage-for-friends-on-linux)).
+**Status:** in development. Windows hosts and watches. Linux watches and plays, and hosts sessions on KDE or GNOME: controller seats, the keyboard-and-mouse seat for guests (on GNOME with our extension), and a device of yours controlling its desktop from afar. Each [release](https://github.com/marcusvilete/couch-coapp/releases/latest) has a Windows installer and a Linux AppImage.
 
 <table align="center">
   <tr>
@@ -59,13 +59,13 @@ I believe no one wants to contribute to a "vibecoded" repository, but feel free 
 
 ## Using it, building it, reading it
 
-- **[Use it with your friends](docs/self-hosting.md):** there are no official downloads. Build your own installer and run your own small relay server, step by step.
+- **[Use it with your friends](docs/self-hosting.md):** install the [latest release](https://github.com/marcusvilete/couch-coapp/releases/latest), make a room and send its link. It works on iroh's free public relays; a small relay of your own can be added any time, step by step.
 - **[Develop it](docs/development.md):** set up a PC to build, run and test the app.
 - **[How it works](docs/architecture.md):** the design and the milestones, with the [wire protocol](docs/protocol.md) and the [decisions behind it](docs/adr/).
 
 ## How it connects
 
-Each pair of players' PCs talks directly over iroh (QUIC) whenever it can. A relay, a small server you run yourself, starts each connection and carries it when no direct path exists. Even then it only forwards encrypted traffic it can't read: rooms, passwords, video, sound and input stay between the players' PCs.
+Each pair of players' PCs talks directly over iroh (QUIC) whenever it can. A relay starts each connection and carries it when no direct path exists: iroh's free public relays, or a small server you run yourself, whose code the app passes on to your rooms' members. Even then it only forwards encrypted traffic it can't read: rooms, passwords, video, sound and input stay between the players' PCs.
 
 ## Licence
 

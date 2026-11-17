@@ -448,6 +448,20 @@ pub async fn probe(relays: RelayChoice, timeout: Duration) -> Result<NetProbe, N
 mod tests {
     use super::*;
 
+    /// The invite page (`deploy/invite-page/j/invite.js`, M26c-3) tells
+    /// iroh's public relays by their names' ending, to leave out its "ask
+    /// for its code" note. An iroh update that moves them fails here first.
+    #[test]
+    fn the_invite_page_knows_the_public_relays() {
+        let urls = public_relay_urls();
+        assert!(!urls.is_empty());
+        for url in urls {
+            let host = url.host_str().unwrap().trim_end_matches('.');
+            assert_eq!(url.scheme(), "https", "{url}");
+            assert!(host.ends_with(".relay.n0.iroh.link"), "{url}");
+        }
+    }
+
     #[tokio::test]
     async fn binds_without_relays() {
         let endpoint = bind(EndpointOptions::new(

@@ -75,3 +75,32 @@ Left, as the review judged it: a session starting during a look already under wa
 - The first public tag (0.39.0 or later), and with the second, the notice seen for real.
 - M26c-3: the invite page's download and relay note; `self-hosting.md` rewritten, the README below your note.
 - Install the workflow's own installer once (Settings → About, Copy diagnostics: "public build", the public relays) and run its AppImage in WSLg.
+
+## M26c-3: the invite page's download and relay note, the guides
+
+No app change, so no version of its own: the first public tag can be 0.39.0.
+
+**What it does**
+- **The invite page offers the download** to someone without the app: a button for the visitor's system (Windows, or Linux with the AppImage) to the repository's latest release, naming the file to pick there, and a link for the other system. A Mac is told the app isn't on macOS yet, a phone to open the link on a PC; a Chromebook and anything unknown get Windows first. The links open the release page rather than a file (your choice: file names carry the version, and the page has the notes and the sums). The repository is written into the page by `invite-page.yml` as it publishes it (`github.repository` in a `couch-releases` meta tag), so a fork's page links to the fork's releases; served from the repository as it is, the page asks for the installer as before.
+- **The relay note:** an invite naming a relay that isn't one of iroh's public ones, and carrying no code (version 1 or 2: only version 3 carries one), says "Whoever invited you uses a relay of their own, relay.example.com, and this link doesn't carry its code: if the app asks for one, ask them for it." The page reads the invite up to the relay's address and never reads the code; a newer version than 3 gets no note. The page still makes no request but its own files, and sends nothing.
+- **The guides:** `self-hosting.md` is now "install a release, make a room, add a relay of your own and your rooms get it", with the Linux package's details, checking a download, new versions, what goes wrong and what to do; SmartScreen's two clicks stay there alone (your choice). Building installers (a build carrying your relay, the AppImage, a public build) moved to `development.md`. The relay guide takes a token of its own (`openssl rand -hex 32`, as `install.sh` now says) and puts the code first. The README, below your note: the status line, "Use it with your friends" and "How it connects" name the releases and the public relays.
+
+**Checked**
+- `node deploy/invite-page/check.js`: the page against five invites the app made, pinned in `couch_proto::invite` (`the_invites_for_the_relay_note_are_pinned` adds version 3 with its code, one on iroh's public relay, one on a LAN), a version 4, damaged ones, seven browsers' user agents, the repository's shape, and the placeholder the workflow fills.
+- `couch_net::endpoint`'s `the_invite_page_knows_the_public_relays`: every one of iroh's public relays matches the page's pattern, so an iroh update that moves them fails there.
+- The page in Edge as published (the workflow's substitution run by hand), as Windows, Linux, macOS and an iPhone, dark and light, at 480 and 390 px: no error, no request but its own files.
+- Windows: fmt, clippy and the whole workspace's tests (1,036, and the doctests: rustdoc once couldn't find `couch_engine` for `couch_desktop_lib`'s, a stale build file; they pass run again); `scripts/check-docs.sh`. Linux: the two new tests are the same on both, left to CI.
+
+**The review**
+A fresh agent over the diff: the page held (the parser matches the Rust layout for versions 1 to 3, every value from the invite goes in as text, nothing can leave the page, the workflow's substitution is safe), and nothing high. Fixed, each checked first:
+- **The relay's scripts weren't executable in git** (`100644`), and the rewrite had dropped the old `chmod +x`: both are executable now, and the guides call them with `bash`.
+- **Someone with only a release had no way to the relay kit:** the guides now clone the repository at the app's version on the server, which keeps the relay on that version's iroh.
+- **A builder whose relay already runs** would have built with `release-config`'s fresh token, which the relay refuses: `development.md` says to put the relay's own in.
+- **The AppImage's steps no longer installed cargo-about** (the Linux setup never did): put back.
+- **A crafted five-byte length could wrap round 32 bits** into a small one, showing a name for a link the app refuses: lengths are read from three bytes at most (`check.js` has the case, which fails without it).
+- Words: the relay guide's token is now kept off by its code, not by builds; Copy diagnostics names relays by their server; "others reach you through it" is the home relay's alone; the AppImage's update; the invite page's caveat for builders, Plasma 5.27 untried, a relay open to everyone added by its address, all put back; `install.sh`'s "untested" line gone (it runs).
+
+Left, as judged: a Mac or a phone still sees the download buttons under its note (to send the link on, or pick it later); an ARM PC gets the x86-64 package first (there is no other); ADR 0009's line on `self-hosting.md` listing the toolchain stays as history.
+
+**Still to come**
+- Once merged, the page goes out by itself (`invite-page.yml`): until the first release is published, its download opens an empty releases page. Tag and publish soon after.

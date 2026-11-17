@@ -8,6 +8,10 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex">
+<!-- The GitHub repository whose releases the download links open, as owner/name:
+     written by .github/workflows/invite-page.yml when it publishes the page. Left
+     empty, the page asks the visitor to get the app from whoever invited them. -->
+<meta name="couch-releases" content="">
 <title>Couch Co-App invite</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="invite.css">
@@ -25,6 +29,7 @@
 
     <section id="invite" hidden>
       <p>Open it in Couch Co-App. The app asks for the room's password before joining; whoever invited you has it.</p>
+      <p id="relay-note" class="note" hidden>Whoever invited you uses a relay of their own, <strong id="relay-name"></strong>, and this link doesn't carry its code: if the app asks for one, ask them for it.</p>
       <p><a id="open" class="button" href="#">Open in Couch Co-App</a></p>
       <p class="quiet">Nothing happens? Copy the invite and paste it into the app's Join box.</p>
       <p class="copy"><button id="copy" type="button">Copy the invite</button> <span id="copied" role="status"></span></p>
@@ -37,7 +42,13 @@
 
   <section class="quiet away">
     <h2>Don't have the app?</h2>
-    <p>Couch Co-App is for Windows and Linux. Ask whoever invited you for the installer (on Linux, an AppImage), then open this link again.</p>
+    <p id="get-it">Couch Co-App is for Windows and Linux. Ask whoever invited you for the installer (on Linux, an AppImage), then open this link again.</p>
+    <div id="downloads" hidden>
+      <p><a id="download-first" class="download" href="#"></a></p>
+      <p id="download-pick"></p>
+      <p id="download-other-line" hidden><a id="download-other" href="#"></a></p>
+      <p>Then open this link again.</p>
+    </div>
   </section>
 </main>
 </body>

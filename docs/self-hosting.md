@@ -1,173 +1,95 @@
-# Use it with your friends: your installer and your own relay
+# Play with your friends: the app, and a relay of your own
 
-There are no official downloads ([ADR 0009](adr/0009-source-only-releases.md)). To play with your friends, you build the installer yourself, and run a small relay server that helps your friends' PCs find each other. This is the shortest path. It takes an afternoon the first time, mostly waiting for builds, and needs a Windows PC and a small Linux server.
+Install the app from the [releases](https://github.com/marcusvilete/couch-coapp/releases/latest), make a room and send your friends its link. That works as it is, on iroh's free public relays. For regular play, run a small relay of your own: add it in your app, and your rooms get it.
 
-## What you'll end up with
+## 1. Install the app
 
-- **An installer** (`Couch-Co-App_<version>_<commit>-setup.exe`) that your friends run. It's unsigned, so Windows SmartScreen warns once: "More info", then "Run anyway".
-- **A relay** on a server you control, which only your installers can use. The app connects your friends' PCs directly when it can, and through your relay when it can't.
-- **If you like, an AppImage** (`Couch-Co-App_<version>_<commit>.AppImage`) for friends on Linux or a Steam Deck, who watch and play sessions, and on a Linux desktop host them too, with controller seats ([step 4](#4-an-appimage-for-friends-on-linux)).
+Each [release](https://github.com/marcusvilete/couch-coapp/releases/latest) has a package for each system. Everyone you play with needs the app; the invite page your links open offers the right one.
 
-## 1. Prepare your Windows PC (once)
+**Windows 10 and 11:** `Couch-Co-App_<version>_x64-setup.exe`.
+- **It's unsigned,** so Windows SmartScreen warns once: "More info", then "Run anyway".
+- **It asks whether to install for you or for everyone,** then offers the two drivers it uses, one question each, with the buttons in Windows' own language:
+  - **ViGEmBus:** say yes if you'll host games, so guests' controllers reach the game;
+  - **HidHide:** optional. It lets the host's own controllers play through seats, one seat each.
 
-1. **Install:**
-   - Git;
-   - Visual Studio Build Tools, with the **Desktop development with C++** workload;
-   - Rust (`winget install --id Rustlang.Rustup -e`);
-   - Node.js;
-   - CMake (`winget install Kitware.CMake`).
-2. **Two cargo tools,** in a new terminal:
-   ```powershell
-   cargo install cargo-deny --locked
-   cargo install --locked cargo-about --features cli
-   ```
-3. **Get the code,** to a short path:
-   ```powershell
-   git clone <this repository's address> C:\dev\couch-coapp
-   cd C:\dev\couch-coapp
-   ```
-4. **Fetch the dependencies.** In PowerShell, from that folder (run the first line in every new terminal):
-   ```powershell
-   . .\scripts\dev.ps1
-   cargo xtask fetch-deps
-   cargo xtask stage-dlls
-   cd apps\desktop; npm install; cd ..\..
-   ```
-5. **Create your private settings and token:**
-   ```powershell
-   cargo xtask release-config
-   ```
-   It writes `%USERPROFILE%\.couch-coapp\release.toml` and prints a token. Keep the token in a password manager: the server needs it in step 2. The file is outside the code folder on purpose, so it never ends up in git.
+  Each opens its own setup, and Windows asks for administrator rights. A driver already installed isn't offered again, and Settings → Drivers installs either later.
 
-## Do you need your own relay?
+  | ViGEmBus | HidHide |
+  |---|---|
+  | ![The installer asking whether to install ViGEmBus](images/installer-vigembus.png) | ![The installer asking whether to install HidHide](images/installer-hidhide.png) |
+- **The first session you host** can take a while to get its controllers ready: Windows sets up each virtual controller the first time it's plugged in. The app says so, with a timer and a Stop waiting button; the controllers come up by themselves, and later sessions start at once.
 
-**iroh, the networking library the app uses, runs free public relays.** The app can use them, and needs no server of yours.
-
-We still recommend your own, for regular play:
-- **iroh offers its public relays for testing and hobby use,** with limits it doesn't publish and no promise they stay up;
-- **with your own,** only your installers can use it, and it keeps working as long as you keep it running.
-
-**To use iroh's public relays instead:** skip step 2, and build with `.\scripts\build-installer.ps1 -TestRelay` in step 3 (no `relay_url` needed). Those installers use iroh's public relays while no relay is added, and their names end in `-test`.
-
-**Relays in the app** (Settings → Network, since 0.35.0):
-- **A profile holds several relays at once,** each with its own code, and they all apply at once, no restart. Whoever runs a relay gives its **relay code** (one line); you paste it under Add a relay, and the app connects with it before saving. A relay open to everyone is added by its address.
-- **Share its code** (in a relay's ⋯ menu) copies the code for a friend, kept out of the clipboard's history. Your own relay's code can also be made on the server ([deploy/relay/README.md](../deploy/relay/README.md#relay-codes)).
-- **The public relays** are used while a profile has no relay of its own, and can be kept on beside yours, or let stand in when none of yours answers.
-- **A friend reaches you through your relay only with its code,** or a build carrying it: your relay accepts only clients with its token. When two PCs can't connect directly, either holding the other's relay is enough.
-
-## 2. Set up your relay (once)
-
-You need a small Linux server (Ubuntu 24.04) with a name pointing at it. A free one works: [deploy/relay/README.md](../deploy/relay/README.md) walks through Oracle Cloud's free tier and a free DuckDNS name, step by step.
-
-1. **Create the server and its name.** In the provider's firewall, open TCP 80, TCP 443 and UDP 7842.
-2. **Copy the relay kit to it and install it.** From your PC, in the code folder:
-   ```powershell
-   scp -i <your SSH key> -r deploy/relay <user>@<your relay's name>:
-   ```
-   Then, on the server:
-   ```bash
-   cd relay && chmod +x install.sh
-   sudo ./install.sh <your relay's name> <an email for Let's Encrypt>
-   ```
-   Paste your token when it asks. The first build can take a while on a small server.
-3. **Check it:** open `https://<your relay's name>/` in a browser. You should see iroh-relay's page, with no certificate warning:
-
-   ![iroh-relay's page in a browser, served over https](images/relay-page.png)
-
-## 3. Build the installer (each time you hand one out)
-
-1. **Point the build at your relay:** in `%USERPROFILE%\.couch-coapp\release.toml`, set
-   ```toml
-   relay_url = "https://<your relay's name>"
-   ```
-2. **Build**, in a terminal where you ran `. .\scripts\dev.ps1`:
-   ```powershell
-   .\scripts\build-installer.ps1
-   ```
-   It takes several minutes the first time. It needs the code exactly as committed: if you changed anything, commit it first (see [If you change the code](#if-you-change-the-code)).
-3. **Hand out everything in `target\installer\`:**
-   - the setup file;
-   - FFmpeg's two source archives;
-   - `SOURCES.txt`.
-
-   The licences require that whoever gets the app can also get its source and FFmpeg's. To serve the folder on your network: `npx --yes http-server target\installer -p 8000`.
-
-**What your friends will see when installing:** after the app installs, it offers the two drivers, one question each, with the buttons in Windows' own language:
-- **ViGEmBus:** say yes if they'll host games, so guests' controllers reach the game;
-- **HidHide:** optional. It lets the host's own controllers play through seats, one seat each.
-
-Each one opens its own setup, and Windows asks for administrator rights. A driver already installed isn't offered again.
-
-The first session someone hosts on a PC can take a while to get its controllers ready: Windows sets up each virtual controller the first time it's plugged in. The app says so, with a timer and a Stop waiting button; the controllers come up by themselves, and later sessions start at once.
-
-| ViGEmBus | HidHide |
-|---|---|
-| ![The installer asking whether to install ViGEmBus](images/installer-vigembus.png) | ![The installer asking whether to install HidHide](images/installer-hidhide.png) |
-
-## 4. An AppImage for friends on Linux
-
-Optional. A Linux PC or a Steam Deck **watches and plays** sessions, and runs a PC of yours from afar (remote play). A Linux PC on KDE or GNOME, in a Wayland session (the default on both), also **hosts**: guests' controllers need Settings → Drivers → Virtual controllers set up once, and the desktop asks which window or screen to share. Guests can have keyboard and mouse too, on KDE as it is (Plasma 6; Plasma 5.27, Kubuntu 24.04's, hasn't been tried), and on GNOME 46 or later once Settings → Drivers has installed our small extension (then log out and back in once): it tells the app which window is in front. When a stream starts, the app asks you which window is the game (it offers the likely one); a guest's keys reach that window only while it's in front, and their pointer stays inside it. It can also be the PC you run from afar (Settings → Remote play): share a screen at it once and let the desktop remember the choice, since nobody is there to answer the dialog later. Run from afar, your device can also control its desktop (a session with the keyboard seat), once Virtual controllers is set up there: the same setting gives it a virtual keyboard and mouse. The AppImage uses the system's own PipeWire library (`libpipewire-0.3`, which current desktops all have), even only to watch. One file, the AppImage, carries WebKitGTK and GTK with it, and runs on a system whose glibc is 2.39 or newer (`ldd --version` says): Ubuntu 24.04 and Fedora 40 are. A Steam Deck is: in Desktop Mode it watches and plays (tried 2026-11-09), but can't host, since Desktop Mode runs X11, where the desktop won't share its screen.
-
-**Build it on Ubuntu 24.04.** WSL on your Windows PC works: `wsl --install -d Ubuntu-24.04`, then everything below inside it.
-1. **Prepare it, once:**
-   - **a clone of the code, on Linux's own disk** (in WSL never under `/mnt/c`): `git clone <this repository's address> ~/couch-release`, then `cd ~/couch-release`;
-   - the system packages: `sudo bash scripts/linux-deps.sh`;
-   - Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`), Node.js 24 (from NodeSource: Ubuntu's own is too old), and `cargo install --locked cargo-about --features cli`;
-   - the front end's packages: `cd apps/desktop && npm ci && cd ../..` (`npm ci` leaves the tree clean, which a release build needs).
-2. **Your release settings:** the same `release.toml` as on Windows. On Ubuntu put it at `~/.couch-coapp/release.toml`; in WSL, point at Windows' own instead of copying it:
-   ```bash
-   export COUCH_RELEASE_CONFIG=/mnt/c/Users/<you>/.couch-coapp/release.toml
-   ```
-3. **Build**, from the clone, at the same commit as your Windows installer (`git pull`):
-   ```bash
-   bash scripts/build-appimage.sh
-   ```
-   It takes the same options as `build-installer.ps1`, spelled the Linux way: `--test-relay`, `--config <file>`, `--invite-page <address>`, `--no-invite-page`. The first build takes a while.
-4. **Hand out everything in `target/appimage/`:** the AppImage, `THIRD-PARTY-NOTICES.txt`, FFmpeg's two source archives and `SOURCES.txt`. The notices also name the source of every system library the AppImage carries, as the licences ask.
-
-**What your friends do with it:**
-- **Make it executable,** then open it: in the file manager, Properties → "Executable as program" (or `chmod +x Couch-Co-App_*.AppImage`).
-- **It needs FUSE,** which desktops normally have. Without it, start it with `--appimage-extract-and-run`.
-- **On a Steam Deck:** in Desktop Mode, download it, make it executable, and open it. For Game Mode, add it to Steam as a non-Steam game.
+**Linux:** `Couch-Co-App_<version>_amd64.AppImage`, for a system whose glibc is 2.39 or newer (`ldd --version` says): Ubuntu 24.04 and Fedora 40 are.
+- **Make it executable,** then open it: in the file manager, Properties → "Executable as program" (or `chmod +x Couch-Co-App_*.AppImage`). It needs FUSE, which desktops normally have; without it, start it with `--appimage-extract-and-run`.
+- **What it does:** it watches and plays sessions, and runs a PC of yours from afar (remote play). On KDE or GNOME, in a Wayland session (the default on both), it also **hosts**:
+  - guests' controllers need Settings → Drivers → Virtual controllers set up once, and the desktop asks which window or screen to share;
+  - guests can have keyboard and mouse too, on KDE as it is (Plasma 6; Plasma 5.27, Kubuntu 24.04's, hasn't been tried), and on GNOME 46 or later once Settings → Drivers has installed our small extension (then log out and back in once). When a stream starts, the app asks you which window is the game (it offers the likely one); a guest's keys reach that window only while it's in front, and their pointer stays inside it;
+  - it can be the PC you run from afar (Settings → Remote play): share a screen at it once and let the desktop remember the choice, since nobody is there to answer the dialog later. Your device can then control its desktop too, once Virtual controllers is set up there.
+- **It uses the system's own PipeWire library** (`libpipewire-0.3`, which current desktops all have), even only to watch.
+- **On a Steam Deck:** in Desktop Mode, download it, make it executable and open it; for Game Mode, add it to Steam as a non-Steam game. It watches and plays there, but can't host: Desktop Mode runs X11, where the desktop won't share its screen.
 - **Invite links** open it once it has started once. Moved to another folder, it needs one start there.
 - **It adds itself to the app menu** when it starts (`~/.local/share/applications/com.couchcoapp.CouchCoApp.desktop`, and its icon in `~/.local/share/icons`): the desktop's shortcuts for the panic key need it. A newer AppImage takes the entry over once the old file is gone; deleting both files removes it.
 - **Its data and log** are in `~/.local/share/CouchCoApp/profiles/default/` (`desktop.log`).
 
+**macOS** isn't there yet.
+
+**Checking a download** against the release's `SHA256SUMS`: on Windows, `Get-FileHash .\Couch-Co-App_<version>_x64-setup.exe` in PowerShell; on Linux, `sha256sum --check --ignore-missing SHA256SUMS` in the download's folder.
+
+**New versions:** the app says when one is out, in the strip at the bottom of its window, at most once a day (it asks GitHub, which sees your PC's address; Settings → About turns it off). Nothing installs by itself: download the new package and install it over the old one (on Linux, the new AppImage takes the old one's place: delete the old file). When a version changes how members talk to each other, everyone in a room needs it to play together: the notice says so, and the member list says who must update.
+
+## 2. Make a room and invite your friends
+
+1. **Create a room** with a password.
+2. **Invite:** the room's Invite makes a link. Send it, and the password separately.
+3. **Your friends open the link.** Chat apps don't make the app's own links clickable, so the link opens a small page that shows the room's name, opens the app, and offers the download to someone without it. The app asks for the password before joining.
+
+Out of the box, the app uses **iroh's public relays**: free, shared by everyone, run for testing and hobby use, with limits nobody publishes and no promise they stay up. Creating a room or an invite with no relay of your own asks whether to add one: "Remind me later" asks again in a week, "Stay on the public relays" never.
+
+## 3. A relay of your own
+
+Each pair of players' PCs talks directly whenever it can. A relay starts each connection and carries it when no direct path works (some home routers and most phone networks). It only forwards encrypted traffic it can't read: rooms, passwords, video, sound and input stay between the players' PCs.
+
+**Your own relay** keeps working as long as you keep it running, is used only by those who hold its code, and needs a small Linux server: a free one works.
+
+1. **Set it up,** once: [deploy/relay/README.md](../deploy/relay/README.md) walks through it, with Oracle Cloud's free tier and a free DuckDNS name as the worked example. In short:
+   - a small Linux server (Ubuntu 24.04 or Debian 12) with a name pointing at it, and TCP 80, TCP 443 and UDP 7842 open in the provider's firewall;
+   - a token, its password: `openssl rand -hex 32`. Keep it in a password manager;
+   - the relay kit on the server, the repository's `deploy/relay` folder at your app's version (Settings → About): `git clone --depth 1 --branch v<version> https://github.com/marcusvilete/couch-coapp`, then `cd couch-coapp/deploy/relay`;
+   - installed with `sudo bash install.sh <name> <email>`, pasting the token when it asks.
+
+   Then `https://<your relay's name>/` shows iroh-relay's page in a browser, with no certificate warning:
+
+   ![iroh-relay's page in a browser, served over https](images/relay-page.png)
+2. **Make its code,** on the server, in the kit's folder: `bash relay-code.sh https://<your relay's name>/ <token>`. A relay code is the relay's address and token on one line (`couch-relay-1.…`).
+3. **Add it in your app:** Settings → Network → Add a relay, and paste the code. The app connects with it before saving, and says so if the relay refuses it.
+
+**Your rooms get it.** A friend reaches you through your relay only with its code, and they get it by themselves:
+- **an invite link carries its code** (a switch in the invite dialog leaves it out). The newcomer joins through it, and keeps it once let in;
+- **members of a room pass on the codes** its members' relays need, so friends of friends reach you too. When two PCs can't connect directly, either holding the other's relay is enough;
+- **Share its code** (in the relay's ⋯ menu in Settings → Network) copies it for someone by hand, kept out of the clipboard's history. Send it privately.
+
+So **whoever joins a room on your relay can use it.** To choose who does, give each friend a **personal code** of their own, which is never passed on and can be taken back from that one person. To change the code for everyone, **rotate** the token, keeping the old one beside the new for a day while the apps pass the new one on. The relay guide has both, and how to watch its load.
+
+A profile holds several relays at once, each with its own code, and they all apply at once, with no restart: you can be on yours and on a friend's. A relay open to everyone, with no token, is added by its address instead of a code. The public relays are used while a profile has none of its own, and can be kept on beside yours, or let stand in when none of yours answers (Settings → Network, off by default).
+
 ## How to know it worked
 
-- **Settings → Network** lists your relay, marked "this app's", with "Connected: others reach you through it".
+- **Settings → Network** lists your relay as connected, with "others reach you through it" when it's the one your PC is reached at (with the public relays kept on, that may be one of theirs).
 - **Settings → About** shows the version and the commit it was built from.
 
 | Settings → Network | Settings → About |
 |---|---|
-| ![Settings, Network tab: the Couch Co-App relay chosen and connected](images/settings-network.png) | ![Settings, About tab: the version, the commit and the licences](images/settings-about.png) |
+| ![Settings, Network tab: the relay chosen and connected](images/settings-network.png) | ![Settings, About tab: the version, the commit and the licences](images/settings-about.png) |
 - **Your friends can join your room** from an invite link and the password, from their own networks.
-
-Everyone in a room needs an installer from the same build of yours. A different build shows "Needs update" in the member list. Other people's builds can't use your relay, because they don't have your token, unless you give them its code.
-
-## What you can skip
-
-- **The drivers on your build PC.** The installer offers them to whoever installs it.
-- **The invite page,** an optional page that makes invite links clickable in chat apps. To use it, either:
-  - **use an existing one:** set `invite_page` in `release.toml` to its address, such as the page published from the repository you cloned (`https://<user>.github.io/<repository>/j/`). Whoever runs the page could see the invites opened with it (the password still guards the room);
-  - **host your own:** your fork's GitHub Pages runs the same workflow ([deploy/invite-page/README.md](../deploy/invite-page/README.md)).
-
-  `build-installer.ps1 -InvitePage <address>` sets it for one build, and `-NoInvitePage` builds with plain `couchco://` links.
-- **Tests and the developer tools in [development.md](development.md).**
-- **A version bump,** unless you hand out a new installer to people who have an older one. Then run `cargo xtask bump patch` (or `minor`, after changes that older builds can't talk to): it sets the same new version in every file that names it.
-
-## If you change the code
-
-The installer's notices tell your friends where its source is: the `repository` address in `Cargo.toml`, at the exact commit it was built from. If you change the code:
-1. fork the repository on GitHub;
-2. set `repository` in `Cargo.toml` to your fork's address;
-3. commit and push;
-4. then build.
-
-Otherwise your friends would be pointed at code that isn't what they're running. The build script refuses uncommitted changes, and warns when the commit isn't pushed yet.
 
 ## When something goes wrong
 
-- **"Not connected to a relay yet" in Settings → Network:** check `https://<your relay's name>/` in a browser. If it doesn't load, see the relay guide's "Running it" section; a stopped VM is the usual cause.
-- **The build stops with an error:** run `cargo xtask doctor` (on Linux, after `. scripts/dev.sh`). It checks every tool and dependency.
-- **More detail:** [deploy/relay/README.md](../deploy/relay/README.md) for the server, [development.md](development.md) for the build.
+- **A member can't be reached:** the member list says why when the app can tell: their relay isn't answering, or needs a code nobody in the room can pass on ("ask Bia for it", with Paste a code). Otherwise they may simply be away.
+- **A join fails:** the join screen says which step did (the relay, the owner not on it, the password, an old link). A link whose owner uses a relay of their own without its code says so before the password: ask them for its code.
+- **Your relay is "Not answering"** in Settings → Network: open `https://<your relay's name>/` in a browser. If it doesn't load, see the relay guide's "Running it"; a stopped VM is the usual cause.
+- **"Needs update"** in the member list: you and that member are on versions that can't talk to each other; it says which of you must update.
+- **Anything else:** Settings → About → Report a problem opens an issue on GitHub. Settings → Network → Copy diagnostics copies what helps for you to paste into it: versions, relays by their server's name and state, and each room's members' links, numbered; never a name, an IP address, a code, a password or an invite.
+
+## A build carrying your relay
+
+Before public releases, friends got installers built by whoever ran the relay, with the relay inside. That still works: such a build lists its relay as "this app's", it can't be removed, and nobody pastes a code. It needs a Windows PC that builds the app, and a new installer from you for each version. [development.md](development.md#building-installers) has the steps.

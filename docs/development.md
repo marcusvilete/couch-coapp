@@ -1,6 +1,6 @@
 # Developing Couch Co-App
 
-How to set up a Windows PC to build, run and test the app, and Linux to build, test and watch with it. If you only want an installer and a relay for your friends, [self-hosting.md](self-hosting.md) is the shorter path. [CLAUDE.md](../CLAUDE.md) has the full command list and the rules that aren't obvious from the code; [architecture.md](architecture.md) explains how the pieces fit.
+How to set up a Windows PC to build, run and test the app, and Linux to build, test and watch with it. If you only want to play, install a [release](https://github.com/marcusvilete/couch-coapp/releases/latest); [self-hosting.md](self-hosting.md) covers that and running a relay of your own. [CLAUDE.md](../CLAUDE.md) has the full command list and the rules that aren't obvious from the code; [architecture.md](architecture.md) explains how the pieces fit.
 
 ## Setup (Windows 11)
 
@@ -52,7 +52,7 @@ Linux builds, passes the tests, and watches and plays a Windows host's sessions 
    ```
 6. **Build and test** with the same commands as on Windows (below). Only `probe`, `host`, `view`, `pad-test` and `front-probe` exist in `couch-cli` there.
 
-A workflow (`.github/workflows/linux.yml`) runs clippy, the tests and the front end's checks on Linux for every pull request. The AppImage for other Linux PCs: [self-hosting.md](self-hosting.md#4-an-appimage-for-friends-on-linux).
+A workflow (`.github/workflows/linux.yml`) runs clippy, the tests and the front end's checks on Linux for every pull request. The AppImage for other Linux PCs: [Building installers](#building-installers) below.
 
 **A Linux host on a real desktop** (the portals' dialogs, the host's keys, notifications, a real sound device; WSL has none of them): a VirtualBox VM with GNOME and KDE, made with `scripts/vm/create.ps1`, and the AppImage copied in. A development build (`npm run tauri dev`) on Linux installs no menu entry, so the desktop's portals don't know the app and refuse its global shortcuts: the host's keys work only from an AppImage.
 
@@ -85,20 +85,42 @@ cargo build --release -p couch-cli -p couch-viewer
 .\target\release\couch-cli.exe latency-probe --secs 30 --relay none   # end-to-end latency on this PC
 ```
 
-**A test installer** (iroh's public relays; for trying it on another PC, from any tree):
-```powershell
-.\scripts\build-installer.ps1 -TestRelay      # target\installer\...-test-setup.exe
-npx --yes http-server target\installer -p 8000
-```
-Release installers, with your own relay, are in [self-hosting.md](self-hosting.md).
-
-**A public build** (no relay and no token: iroh's public relays until someone registers a relay; from a clean, committed tree): `.\scripts\build-installer.ps1 -Public`, or `bash scripts/build-appimage.sh --public` on Linux. The repository's release workflow (`.github/workflows/release.yml`) makes both on a tag `v<version>`, into a draft GitHub Release; run by hand from the Actions tab, it builds them from any branch and keeps them as the run's artifacts, with no release.
-
 **The update notice:** builds that name their releases (public builds) look at GitHub's latest release once a day. To try it in a development build, serve the copy of GitHub's reply in the repository, `npx --yes http-server crates/couch-engine/tests/fixtures -p 8000`, and set `$env:COUCH_RELEASES_URL = 'http://localhost:8000/github-latest-release.json'` before `npm run tauri dev`: ten seconds after start, the strip at the bottom says 0.99.0 is out. Release and public builds ignore the variable.
 
 **A relay on this PC:** run `cargo xtask relay-tool` once, then `.\scripts\relay.ps1`. It serves `http://localhost:3340` with the token from your `release.toml` (`-Lan` opens it to your network, `-Open` drops the token). Point a development build at it by setting `COUCH_BUILD_RELAY_URL` and `COUCH_BUILD_RELAY_TOKEN` before `npm run tauri dev`.
 
 **The invite page** (optional): a static page that makes invite links clickable in chat apps. A workflow publishes it on the repository's GitHub Pages, and `build-installer.ps1 -InvitePage <address>` points one build at a page. [deploy/invite-page/README.md](../deploy/invite-page/README.md) covers trying and hosting it.
+
+## Building installers
+
+The repository's releases come from its release workflow (`.github/workflows/release.yml`): on a tag `v<version>` it builds the Windows installer and the AppImage as **public builds** (no relay and no token: iroh's public relays until the user adds one) and makes a draft GitHub Release of them. Run by hand from the Actions tab, it builds them from any branch and keeps them as the run's artifacts, with no release. The same on this PC, from a clean, committed tree: `.\scripts\build-installer.ps1 -Public`, or `bash scripts/build-appimage.sh --public` on Linux.
+
+**A test installer** (iroh's public relays; for trying it on another PC, from any tree):
+```powershell
+.\scripts\build-installer.ps1 -TestRelay      # target\installer\...-test-setup.exe
+npx --yes http-server target\installer -p 8000
+```
+
+**A build carrying your relay,** for friends who'd rather not paste a code: it lists the relay as "this app's", which can't be removed. You need the setup above, a relay of your own ([deploy/relay/README.md](../deploy/relay/README.md)), and a new installer from you for each version.
+1. **Your private settings,** once: `cargo xtask release-config` writes `%USERPROFILE%\.couch-coapp\release.toml` with a fresh token for the relay: give it to `install.sh` on a new server, and keep it in a password manager. **If your relay already runs,** replace `relay_token` with its token, or the build carries one the relay refuses. The file is outside the repository on purpose, so it never ends up in git; the build refuses one inside it.
+2. **Point it at your relay:** in `release.toml`, set `relay_url = "https://<your relay's name>"`. It can also name an invite page (`invite_page`, such as the repository's own, `https://<user>.github.io/<repository>/j/`: [deploy/invite-page/README.md](../deploy/invite-page/README.md); whoever runs a page could see the invites opened with it, though the room's password still guards the room), and whose releases the app checks for new versions (`releases = "<owner>/<name>"`; none by default, so its users hear of nothing). `-InvitePage <address>` and `-Releases <owner>/<name>` set them for one build, `-NoInvitePage` builds with plain `couchco://` links.
+3. **Build:** `.\scripts\build-installer.ps1`. It needs the code exactly as committed; it takes several minutes the first time.
+4. **Hand out everything in `target\installer\`:** the setup file, FFmpeg's two source archives and `SOURCES.txt`. The licences require that whoever gets the app can also get its source and FFmpeg's. To serve the folder on your network: `npx --yes http-server target\installer -p 8000`.
+
+**A version bump** comes with each installer handed out to people who have an older one: `cargo xtask bump patch` (or `minor`, after changes older builds can't talk to) sets the same new version in every file that names it.
+
+**If you change the code,** the installer's notices must point your friends at what they run: the `repository` address in `Cargo.toml`, at the exact commit it was built from. Fork the repository, set `repository` to your fork's address, commit and push, then build. The build script refuses uncommitted changes, and warns when the commit isn't pushed yet.
+
+**The AppImage, for Linux,** is built on Ubuntu 24.04. WSL on your Windows PC works: `wsl --install -d Ubuntu-24.04`, then everything below inside it.
+1. **Prepare it, once:**
+   - **a clone of the code, on Linux's own disk** (in WSL never under `/mnt/c`, and not the copy you develop in): `git clone <this repository's address> ~/couch-release`, then `cd ~/couch-release`;
+   - the system packages, Rust and Node.js 24, as in the Linux setup above, and cargo-about: `cargo install --locked cargo-about --features cli`;
+   - the front end's packages: `cd apps/desktop && npm ci && cd ../..` (`npm ci` leaves the tree clean, which a release build needs).
+2. **Your release settings:** the same `release.toml`, at `~/.couch-coapp/release.toml`; in WSL, point at Windows' own instead of copying it: `export COUCH_RELEASE_CONFIG=/mnt/c/Users/<you>/.couch-coapp/release.toml`.
+3. **Build**, from the clone, at the same commit as your Windows installer (`git pull`): `bash scripts/build-appimage.sh`. It takes the same options as `build-installer.ps1`, spelled the Linux way: `--test-relay`, `--public`, `--config <file>`, `--invite-page <address>`, `--no-invite-page`, `--releases <owner>/<name>`.
+4. **Hand out everything in `target/appimage/`:** the AppImage, `THIRD-PARTY-NOTICES.txt`, FFmpeg's two source archives, `SOURCES.txt`, and the system libraries' sources (`…-system-sources.tar`): the notices name the source of every system library the AppImage carries, as the licences ask.
+
+What your friends do with either package is in [self-hosting.md](self-hosting.md#1-install-the-app). When a build stops with an error, `cargo xtask doctor` (on Linux, after `. scripts/dev.sh`) checks every tool and dependency.
 
 ## Tests and checks
 

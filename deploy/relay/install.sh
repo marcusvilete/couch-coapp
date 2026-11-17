@@ -3,8 +3,8 @@
 #   sudo ./install.sh relay.example.com you@example.com
 # It builds iroh-relay (the version below, which must match the app's iroh pin in
 # Cargo.toml), installs the config and the systemd unit from this folder, asks for the
-# token (release.toml's relay_token), and starts it. Run it again to update.
-# Untested until we have a server: follow README.md and check each step's output.
+# token (a long random string, or release.toml's relay_token), and starts it. Run it
+# again to update.
 set -euo pipefail
 
 RELAY_VERSION="1.3.0"
@@ -64,7 +64,7 @@ sed -e "s/RELAY_HOSTNAME/$HOSTNAME_/" -e "s/CONTACT_EMAIL/$CONTACT/" \
 chmod 644 /etc/iroh-relay/iroh-relay.toml
 
 if [[ ! -s /etc/iroh-relay/token.env ]]; then
-    read -r -s -p "The relay token (release.toml's relay_token): " TOKEN
+    read -r -s -p "The relay token (openssl rand -hex 32 makes one; or release.toml's relay_token): " TOKEN
     echo
     if [[ -z "$TOKEN" ]]; then
         echo "no token given" >&2

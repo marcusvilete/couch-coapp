@@ -40,6 +40,13 @@ jobs:
         run: |
           mkdir -p site
           cp -r deploy/invite-page/j site/j
+      # The download links open this repository's latest release (M26c-3).
+      - name: Name the repository for the downloads
+        run: |
+          placeholder='<meta name="couch-releases" content="">'
+          named="<meta name=\"couch-releases\" content=\"${GITHUB_REPOSITORY}\">"
+          sed -i "s|${placeholder}|${named}|" site/j/index.html
+          grep -Fq "$named" site/j/index.html
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
