@@ -196,6 +196,10 @@ pub(crate) struct Options {
 
     /// Explicitly configured external addresses to advertise.
     pub(crate) configured_addrs: BTreeSet<SocketAddr>,
+
+    /// Couch Co-App: the relays of the map used for dialing only, never
+    /// home while another relay answers.
+    pub(crate) dial_only_relays: BTreeSet<RelayUrl>,
 }
 
 /// Inner state for an iroh [`crate::Endpoint`].
@@ -215,6 +219,9 @@ pub(crate) struct EndpointInner {
     runtime: Arc<Runtime>,
     /// Static configuration for the endpoint.
     pub(crate) static_config: StaticConfig,
+    /// Couch Co-App: the relays used for dialing only, shared with the
+    /// net_report client.
+    dial_only: net_report::DialOnlyRelays,
 }
 
 impl Drop for EndpointInner {
@@ -887,7 +894,9 @@ impl EndpointInner {
             net_report_config,
             static_config,
             configured_addrs,
+            dial_only_relays,
         } = opts;
+        let dial_only = net_report::DialOnlyRelays::new(dial_only_relays);
 
         let address_lookup =
             address_lookup::AddressLookupServices::with_metrics(metrics.address_lookup.clone());
@@ -1060,7 +1069,8 @@ impl EndpointInner {
             relay_map.clone(),
             net_report_config,
             metrics.net_report.clone(),
-        );
+        )
+        .with_dial_only(dial_only.clone());
 
         let (direct_addr_done_tx, direct_addr_done_rx) = mpsc::channel(8);
         let direct_addr_update_state = DirectAddrUpdateState::new(
@@ -1110,6 +1120,7 @@ impl EndpointInner {
             endpoint,
             runtime,
             static_config,
+            dial_only,
         })
     }
 
@@ -1249,6 +1260,17 @@ impl EndpointInner {
             .await
             .ok();
         res
+    }
+
+    /// Couch Co-App: replaces the relays used for dialing only; a change
+    /// runs a full net report, which chooses the home relay again.
+    pub(crate) async fn set_dial_only_relays(&self, relays: BTreeSet<RelayUrl>) {
+        if self.dial_only.set(relays) {
+            self.actor_sender
+                .send(ActorMessage::RelayMapChange)
+                .await
+                .ok();
+        }
     }
 
     /// Adds an external address to advertise to peers.
@@ -2184,6 +2206,7 @@ mod tests {
             net_report_config: Default::default(),
             static_config,
             configured_addrs: Default::default(),
+            dial_only_relays: Default::default(),
         }
     }
 
@@ -2600,6 +2623,7 @@ mod tests {
             net_report_config: Default::default(),
             static_config,
             configured_addrs: Default::default(),
+            dial_only_relays: Default::default(),
         };
         let sock = EndpointInner::bind(opts).await?;
         Ok(sock)

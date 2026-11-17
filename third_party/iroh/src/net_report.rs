@@ -132,6 +132,34 @@ impl Default for NetReportConfig {
 const FULL_REPORT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const ENOUGH_ENDPOINTS: usize = 3;
 
+/// Couch Co-App: the relays of the map used for dialing only. They are
+/// probed like any other, but one becomes the preferred (home) relay only
+/// when no other relay of the map has a recent latency. Shared between the
+/// endpoint, which sets it, and the net_report client, which reads it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DialOnlyRelays(Arc<std::sync::RwLock<BTreeSet<RelayUrl>>>);
+
+impl DialOnlyRelays {
+    pub(crate) fn new(urls: BTreeSet<RelayUrl>) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(urls)))
+    }
+
+    /// The relays used for dialing only, now.
+    pub(crate) fn get(&self) -> BTreeSet<RelayUrl> {
+        self.0.read().expect("poisoned").clone()
+    }
+
+    /// Replaces the set; whether it changed.
+    pub(crate) fn set(&self, urls: BTreeSet<RelayUrl>) -> bool {
+        let mut held = self.0.write().expect("poisoned");
+        if *held == urls {
+            return false;
+        }
+        *held = urls;
+        true
+    }
+}
+
 /// Client to run net_reports.
 #[derive(Debug)]
 pub(crate) struct Client {
@@ -140,6 +168,11 @@ pub(crate) struct Client {
     metrics: Arc<Metrics>,
     probes: BTreeSet<Probe>,
     relay_map: RelayMap,
+    /// Couch Co-App: see [`DialOnlyRelays`].
+    dial_only: DialOnlyRelays,
+    /// Couch Co-App: the last preferred relay a report gave, which the
+    /// socket keeps as home while later reports give none.
+    home: Option<RelayUrl>,
     #[cfg(not(wasm_browser))]
     qad_conns: QadConns,
     #[cfg(not(wasm_browser))]
@@ -282,12 +315,20 @@ impl Client {
             reports: Reports::default(),
             probes,
             relay_map,
+            dial_only: DialOnlyRelays::default(),
+            home: None,
             #[cfg(not(wasm_browser))]
             qad_conns: QadConns::default(),
             #[cfg(not(wasm_browser))]
             tls_config: opts.tls_config,
             captive_portal_check: opts.user_config.captive_portal_check,
         }
+    }
+
+    /// Couch Co-App: reads which relays are for dialing only from `dial_only`.
+    pub(crate) fn with_dial_only(mut self, dial_only: DialOnlyRelays) -> Self {
+        self.dial_only = dial_only;
+        self
     }
 
     /// Generates a [`Report`].
@@ -501,7 +542,11 @@ impl Client {
         let mut v6_buf = JoinSet::new();
         let cancel_v6 = shutdown_token.child_token();
 
-        let relays = self.relay_map.relays::<Vec<_>>();
+        let mut relays = self.relay_map.relays::<Vec<_>>();
+        // Couch Co-App: relays for dialing only last, so the ones that can be
+        // home are among those probed.
+        let dial_only = self.dial_only.get();
+        relays.sort_by_key(|relay| dial_only.contains(&relay.url));
         for relay in relays.into_iter().take(MAX_RELAYS) {
             if if_state.have_v4 && needs_v4_probe {
                 trace!(?relay.url, "v4 QAD probe starting");
@@ -670,6 +715,24 @@ impl Client {
         #[cfg_attr(wasm_browser, allow(unused_mut))]
         let mut num_ipv6 = 0;
         let mut num_https = 0;
+        // Couch Co-App: a full report isn't enough while the map holds a
+        // relay that isn't for dialing only and none of those answered yet:
+        // they decide the home relay (still bounded by the probes' timeout).
+        if do_full {
+            let dial_only = self.dial_only.get();
+            let regular_held = self
+                .relay_map
+                .urls::<Vec<_>>()
+                .iter()
+                .any(|url| !dial_only.contains(url));
+            let regular_heard = report
+                .relay_latency
+                .iter()
+                .any(|(_, url, _)| !dial_only.contains(url));
+            if regular_held && !regular_heard {
+                return false;
+            }
+        }
         for (typ, _, _) in report.relay_latency.iter() {
             match typ {
                 #[cfg(not(wasm_browser))]
@@ -788,12 +851,33 @@ impl Client {
             self.reports.prev.remove(&t);
         }
 
+        // Couch Co-App: a relay for dialing only is a candidate only when no
+        // other relay of the map has a latency over the past MAX_AGE (none
+        // answers). Only relays still in the map, or heard in this report
+        // (probed from it), count: one removed, or set aside for refusing
+        // us, answers nothing for us whatever it said minutes ago.
+        let dial_only = self.dial_only.get();
+        let relay_map = &self.relay_map;
+        let heard: BTreeSet<RelayUrl> = r
+            .relay_latency
+            .iter()
+            .map(|(_, url, _)| url.clone())
+            .collect();
+        let live = |url: &RelayUrl| relay_map.contains(url) || heard.contains(url);
+        let any_regular = best_recent
+            .iter()
+            .any(|(_, url, _)| !dial_only.contains(url) && live(url));
+        let candidate = |url: &RelayUrl| live(url) && dial_only.contains(url) != any_regular;
+
         // Then, pick which currently-alive relay server from the
         // current report has the best latency over the past MAX_AGE.
         let mut best_any = Duration::default();
         let mut old_relay_cur_latency = Duration::default();
         {
             for (_, url, duration) in r.relay_latency.iter() {
+                if !candidate(url) {
+                    continue;
+                }
                 if Some(url) == prev_relay.as_ref() {
                     old_relay_cur_latency = duration;
                 }
@@ -813,8 +897,25 @@ impl Client {
                 && !old_relay_cur_latency.is_zero()
                 && best_any > old_relay_cur_latency / 3 * 2
             {
-                r.preferred_relay = prev_relay;
+                r.preferred_relay = prev_relay.clone();
             }
+
+            // Couch Co-App: no candidate in this report (an incremental one
+            // hears only its QAD relay), and our home is no longer one (it
+            // became dial-only, left the map, or a relay that isn't
+            // dial-only answers again): the best candidate over the past
+            // MAX_AGE, rather than the socket keeping that home. `home`
+            // outlives the full reports, which clear `prev_relay`.
+            if r.preferred_relay.is_none() && !self.home.as_ref().is_some_and(&candidate) {
+                r.preferred_relay = best_recent
+                    .iter()
+                    .filter(|(_, url, _)| candidate(url))
+                    .min_by_key(|(_, _, latency)| *latency)
+                    .map(|(_, url, _)| url.clone());
+            }
+        }
+        if r.preferred_relay.is_some() {
+            self.home.clone_from(&r.preferred_relay);
         }
 
         self.reports.prev.insert(now, r.clone());
@@ -1250,6 +1351,109 @@ mod tests {
             assert_eq!(got, want, "preferred_relay");
         }
 
+        Ok(())
+    }
+
+    /// Couch Co-App: a relay for dialing only is home only while no other
+    /// relay answers.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn dial_only_relays_are_home_only_when_no_other_answers() -> Result {
+        fn url(i: u16) -> RelayUrl {
+            format!("http://{i}.com").parse().unwrap()
+        }
+        fn report(latencies: &[(u16, u64)]) -> Report {
+            let mut report = Report::default();
+            for &(id, ms) in latencies {
+                report.relay_latency.update_relay(
+                    url(id),
+                    Duration::from_millis(ms),
+                    Probe::QadIpv4,
+                );
+            }
+            report
+        }
+        let tls_config = CaTlsConfig::insecure_skip_verify()
+            .client_config(default_provider())
+            .expect("infallible");
+        let client = || {
+            let relay_map: RelayMap = [1, 2]
+                .into_iter()
+                .map(|i| RelayConfig::new(url(i), None))
+                .collect();
+            let dial_only = DialOnlyRelays::new([url(1)].into());
+            let client = Client::new(
+                DnsResolver::new(),
+                relay_map,
+                Options::new(tls_config.clone()),
+                Default::default(),
+            )
+            .with_dial_only(dial_only.clone());
+            (client, dial_only)
+        };
+
+        // Much faster, but dial-only: the other one is home.
+        let (mut c, _) = client();
+        let mut r = report(&[(1, 10), (2, 300)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(2)));
+
+        // Nothing else answers: the dial-only one is home, until another
+        // answers, however much slower.
+        let (mut c, _) = client();
+        let mut r = report(&[(1, 10)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(1)));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut r = report(&[(1, 10), (2, 300)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(2)));
+
+        // Home before it became dial-only, and the next report hears only
+        // it: the other one, which answered recently, is home.
+        let (mut c, dial_only) = client();
+        dial_only.set(BTreeSet::new());
+        let mut r = report(&[(1, 10), (2, 300)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(1)));
+        dial_only.set([url(1)].into());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut r = report(&[(1, 10)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(2)));
+
+        // The same across a full report, which clears the last report
+        // (the review's finding: the home is remembered apart).
+        let (mut c, dial_only) = client();
+        dial_only.set(BTreeSet::new());
+        let mut r = report(&[(1, 10), (2, 300)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        dial_only.set([url(1)].into());
+        c.reports.last = None;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut r = report(&[(1, 10)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(2)));
+
+        // The other relay left the map (removed, or set aside for refusing
+        // us): it answers nothing for us, whatever it said a minute ago, so
+        // the dial-only one is home rather than none (the review's finding).
+        let (mut c, _) = client();
+        let mut r = report(&[(1, 10), (2, 300)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(2)));
+        c.relay_map.remove(&url(2));
+        c.reports.last = None;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut r = report(&[(1, 10)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(1)));
+
+        // Unpatched behaviour stays for regular relays: the fastest.
+        let (mut c, dial_only) = client();
+        dial_only.set(BTreeSet::new());
+        let mut r = report(&[(1, 10), (2, 300)]);
+        c.add_report_history_and_set_preferred_relay(&mut r);
+        assert_eq!(r.preferred_relay, Some(url(1)));
         Ok(())
     }
 }

@@ -150,6 +150,8 @@ pub struct Builder {
     net_report_config: NetReportConfig,
     crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
     configured_addrs: BTreeSet<SocketAddr>,
+    /// Couch Co-App: see [`Builder::dial_only_relays`].
+    dial_only_relays: BTreeSet<RelayUrl>,
 }
 
 impl From<RelayMode> for Option<TransportConfig> {
@@ -218,6 +220,7 @@ impl Builder {
             net_report_config: Default::default(),
             crypto_provider: None,
             configured_addrs: Default::default(),
+            dial_only_relays: Default::default(),
         }
     }
 
@@ -286,6 +289,7 @@ impl Builder {
             net_report_config: self.net_report_config,
             static_config,
             configured_addrs: self.configured_addrs,
+            dial_only_relays: self.dial_only_relays,
         };
 
         let inner = socket::EndpointInner::bind(sock_opts)
@@ -530,6 +534,14 @@ impl Builder {
     /// [`PublicKey`]: iroh_base::PublicKey
     pub fn secret_key(mut self, secret_key: SecretKey) -> Self {
         self.secret_key = Some(secret_key);
+        self
+    }
+
+    /// Couch Co-App: relays of the relay map used for dialing only. They are
+    /// probed and dialed with their tokens like any other, but one becomes
+    /// the home relay only when no other relay of the map answers.
+    pub fn dial_only_relays(mut self, relays: impl IntoIterator<Item = RelayUrl>) -> Self {
+        self.dial_only_relays = relays.into_iter().collect();
         self
     }
 
@@ -1016,6 +1028,17 @@ impl Endpoint {
             return None;
         }
         self.inner.remove_relay(relay).await
+    }
+
+    /// Couch Co-App: replaces the relays used for dialing only (see
+    /// [`Builder::dial_only_relays`]); a change chooses the home relay again.
+    pub async fn set_dial_only_relays(&self, relays: impl IntoIterator<Item = RelayUrl>) {
+        if self.is_closed() {
+            return;
+        }
+        self.inner
+            .set_dial_only_relays(relays.into_iter().collect())
+            .await;
     }
 
     /// Adds an external address on which this endpoint is directly reachable.

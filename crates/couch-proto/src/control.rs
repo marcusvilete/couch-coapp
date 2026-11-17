@@ -20,7 +20,7 @@ use crate::{
     },
     room::{
         Goodbye, HandoverAnswer, HandoverOffer, HandoverWithdraw, MemberRecord, OwnedPolicy,
-        Presence, RelayAnswer, RelayAsk, RoomSnapshot, Signed,
+        Presence, RelayAnswer, RelayAsk, RelayHint, RoomSnapshot, Signed,
     },
     session::{
         ControlCancel, ControlDeclined, ControlRequest, GameFocus, SessionAnnounce, SessionEnded,
@@ -63,6 +63,9 @@ pub mod type_ids {
     /// members of a room, never relayed.
     pub const RELAY_ASK: u16 = MUST_UNDERSTAND | 0x0508;
     pub const RELAY_ANSWER: u16 = MUST_UNDERSTAND | 0x0509;
+    /// A member's code for a relay changed (the M26b follow-up): a hint to
+    /// ask, carrying no code.
+    pub const RELAY_HINT: u16 = MUST_UNDERSTAND | 0x050A;
     /// The session directory is optional: a peer that doesn't know sessions
     /// just doesn't show them. The rest only follow an announcement.
     pub const SESSION_ANNOUNCE: u16 = 0x0601;
@@ -212,6 +215,7 @@ pub enum ControlMessage {
     HandoverWithdraw(HandoverWithdraw),
     RelayAsk(RelayAsk),
     RelayAnswer(RelayAnswer),
+    RelayHint(RelayHint),
     SessionAnnounce(SessionAnnounce),
     SessionStatus(SessionStatus),
     SessionEnded(SessionEnded),
@@ -240,9 +244,12 @@ pub enum ControlMessage {
 }
 
 impl ControlMessage {
-    /// Whether this asks for or answers with a relay's code (M26b).
+    /// Whether this asks for, answers with or hints at a relay's code (M26b).
     pub fn is_relay(&self) -> bool {
-        matches!(self, Self::RelayAsk(_) | Self::RelayAnswer(_))
+        matches!(
+            self,
+            Self::RelayAsk(_) | Self::RelayAnswer(_) | Self::RelayHint(_)
+        )
     }
 
     /// Whether this is remote play's (M25), between a home PC and a device
@@ -338,6 +345,7 @@ impl ControlMessage {
             Self::HandoverWithdraw(_) => type_ids::HANDOVER_WITHDRAW,
             Self::RelayAsk(_) => type_ids::RELAY_ASK,
             Self::RelayAnswer(_) => type_ids::RELAY_ANSWER,
+            Self::RelayHint(_) => type_ids::RELAY_HINT,
             Self::SessionAnnounce(_) => type_ids::SESSION_ANNOUNCE,
             Self::SessionStatus(_) => type_ids::SESSION_STATUS,
             Self::SessionEnded(_) => type_ids::SESSION_ENDED,
@@ -389,6 +397,7 @@ impl ControlMessage {
             Self::HandoverWithdraw(m) => postcard::to_stdvec(m)?,
             Self::RelayAsk(m) => postcard::to_stdvec(m)?,
             Self::RelayAnswer(m) => postcard::to_stdvec(m)?,
+            Self::RelayHint(m) => postcard::to_stdvec(m)?,
             Self::SessionAnnounce(m) => postcard::to_stdvec(m)?,
             Self::SessionStatus(m) => postcard::to_stdvec(m)?,
             Self::SessionEnded(m) => postcard::to_stdvec(m)?,
@@ -442,6 +451,7 @@ impl ControlMessage {
             type_ids::HANDOVER_WITHDRAW => Self::HandoverWithdraw(payload(frame)?),
             type_ids::RELAY_ASK => Self::RelayAsk(payload(frame)?),
             type_ids::RELAY_ANSWER => Self::RelayAnswer(payload(frame)?),
+            type_ids::RELAY_HINT => Self::RelayHint(payload(frame)?),
             type_ids::SESSION_ANNOUNCE => Self::SessionAnnounce(payload(frame)?),
             type_ids::SESSION_STATUS => Self::SessionStatus(payload(frame)?),
             type_ids::SESSION_ENDED => Self::SessionEnded(payload(frame)?),
@@ -649,6 +659,9 @@ mod tests {
                 accept: true,
             }),
             ControlMessage::HandoverWithdraw(HandoverWithdraw { offer: 2 }),
+            ControlMessage::RelayHint(RelayHint {
+                url: "https://relay.example.com/".into(),
+            }),
             ControlMessage::RelayAsk(RelayAsk {
                 url: "https://relay.example.com/".into(),
             }),

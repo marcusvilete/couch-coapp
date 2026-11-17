@@ -22,11 +22,28 @@ use crate::NetError;
 pub struct Relay {
     pub url: RelayUrl,
     pub token: Option<RelayToken>,
+    /// For dialing only: never our home relay while another relay of the
+    /// map answers (a relay a room passed on, or one lent for a join: our
+    /// home relay is named in every room's record, where the others can't
+    /// get its code). Our vendored iroh's change (third_party/iroh/PATCHED.md).
+    pub dial_only: bool,
 }
 
 impl Relay {
     pub fn new(url: RelayUrl, token: Option<RelayToken>) -> Self {
-        Self { url, token }
+        Self {
+            url,
+            token,
+            dial_only: false,
+        }
+    }
+
+    /// This relay, for dialing only.
+    pub fn dial_only(self) -> Self {
+        Self {
+            dial_only: true,
+            ..self
+        }
     }
 
     /// Its entry in iroh's relay map. Plain http is a relay on this PC or
@@ -96,6 +113,18 @@ impl RelayChoice {
         configs
     }
 
+    /// The relays held for dialing only.
+    fn dial_only(&self) -> Vec<RelayUrl> {
+        match self {
+            Self::Relays { ours, .. } => ours
+                .iter()
+                .filter(|r| r.dial_only)
+                .map(|r| r.url.clone())
+                .collect(),
+            Self::Disabled => Vec::new(),
+        }
+    }
+
     fn mode(&self) -> RelayMode {
         match self {
             Self::Relays { .. } => {
@@ -137,6 +166,11 @@ pub async fn change_relays(endpoint: &Endpoint, from: &RelayChoice, to: &RelayCh
     if matches!(from, RelayChoice::Disabled) || matches!(to, RelayChoice::Disabled) {
         return;
     }
+    // Both sets' relays while the map changes, so neither one being added
+    // nor one going is taken for a home relay in between; then the new set.
+    let mut either = from.dial_only();
+    either.extend(to.dial_only());
+    endpoint.set_dial_only_relays(either).await;
     let (before, after) = (from.configs(), to.configs());
     for config in &before {
         if !after.iter().any(|c| c.url == config.url) {
@@ -150,6 +184,7 @@ pub async fn change_relays(endpoint: &Endpoint, from: &RelayChoice, to: &RelayCh
                 .await;
         }
     }
+    endpoint.set_dial_only_relays(to.dial_only()).await;
 }
 
 /// The token our relay asks of clients (`access.shared_token` in its
@@ -288,6 +323,7 @@ pub async fn bind(options: EndpointOptions) -> Result<Endpoint, NetError> {
     // there (M26a), which records and invites make unnecessary.
     let mut builder = Endpoint::builder(presets::Minimal)
         .relay_mode(options.relays.mode())
+        .dial_only_relays(options.relays.dial_only())
         .secret_key(options.secret_key)
         .alpns(vec![couch_proto::ALPN.to_vec()])
         .transport_config(transport_config(options.congestion));

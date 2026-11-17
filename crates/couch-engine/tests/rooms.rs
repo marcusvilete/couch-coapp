@@ -1910,6 +1910,20 @@ async fn a_join_with_the_code_in_the_link_keeps_it_only_once_admitted() {
         None,
         "nothing kept for a wrong password"
     );
+    // And what the join lent the endpoint is taken back (the review's test
+    // gap).
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let unsaved = c.engine().unsaved_relays().await;
+        if unsaved.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the lent relay still held: {unsaved:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     c.stop().await;
 
     b.join(&invite, PASSWORD).await.unwrap();
@@ -1973,6 +1987,77 @@ async fn a_new_code_reaches_a_member_whose_code_was_refused() {
     })
     .await;
     stop_all(&mut [&mut a, &mut b, &mut d]).await;
+}
+
+/// A rotation with an overlap (the M26b follow-up): Rc takes the old and the
+/// new code for a while. Dee pastes the new one, and her room hears a hint:
+/// Bia asks Dee alone and keeps the new code on standby, still using hers,
+/// which works. Eve, in another of Bia's rooms but not Dee's, gets it from
+/// Bia in turn (the standby, never Bia's old code). Then Rc drops the old
+/// code while Dee is gone: Bia and Eve, refused, take their standby with
+/// nobody to ask.
+#[tokio::test]
+async fn a_rotated_code_waits_on_standby_and_takes_over_when_the_old_goes() {
+    let open = TestRelay::start(None).await;
+    let rc = TestRelay::start(Some("old")).await;
+    let mut a = on_relays_member("Ana").await;
+    let mut b = on_relays_member("Bia").await;
+    let mut d = on_relays_member("Dee").await;
+    let mut e = on_relays_member("Eve").await;
+    a.add_relay(&open.url, None, false).await;
+    b.add_relay(&rc.url, Some("old"), false).await;
+    d.add_relay(&rc.url, Some("old"), false).await;
+    e.add_relay(&open.url, None, false).await;
+    e.add_relay(&rc.url, Some("old"), false).await;
+    let sofa = a.create("Sofá").await.id;
+    let invite = a.invite(&sofa).await;
+    for m in [&b, &d] {
+        m.join(&invite, PASSWORD).await.unwrap();
+    }
+    full_mesh(&sofa, &[&a, &b, &d]).await;
+    // Bia's own room, on Rc alone: Eve, not Dee.
+    let mesa = b.create("Mesa").await.id;
+    let invite = b.invite(&mesa).await;
+    e.join(&invite, PASSWORD).await.unwrap();
+    full_mesh(&mesa, &[&b, &e]).await;
+
+    let rc = rc.restart_with(&["old", "new"]).await;
+    d.add_relay(&rc.url, Some("new"), false).await;
+    let url = rc.url.clone();
+    async fn standby(m: &Member, url: &str) -> (bool, bool) {
+        m.engine().relay_standby(url, "new").await
+    }
+    let deadline = Instant::now() + WAIT;
+    while standby(&b, &url).await != (true, true) || standby(&e, &url).await != (true, true) {
+        assert!(
+            Instant::now() < deadline,
+            "the new code on standby at Bia and Eve"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Still on their own codes, which work: nothing renewed.
+    for m in [&b, &e] {
+        let relay = m.relay(&rc.url).await.unwrap();
+        assert_eq!(relay.renewed_by, None, "{}: {relay:?}", m.name);
+    }
+
+    // The old code goes while Dee is away: nobody holds what Bia lacks,
+    // yet she and Eve are let in again.
+    d.stop().await;
+    let rc = rc.restart(Some("new")).await;
+    for (m, from) in [(&b, "Dee"), (&e, "Bia")] {
+        m.wait_network("the standby taken in", |n| {
+            n.relays.iter().any(|r| {
+                r.renewed_by.as_deref() == Some(from)
+                    && !matches!(r.state, couch_engine::RelayStateView::Refused { .. })
+            })
+        })
+        .await;
+        assert_eq!(standby(m, &url).await, (false, false), "{}", m.name);
+    }
+    full_mesh(&mesa, &[&b, &e]).await;
+    drop(rc);
+    stop_all(&mut [&mut a, &mut b, &mut e]).await;
 }
 
 /// With relays configured, an invite never carries IP addresses, even right

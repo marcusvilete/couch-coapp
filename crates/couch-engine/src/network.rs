@@ -178,8 +178,23 @@ pub(crate) struct Listed {
     pub view: RelayView,
     /// For checking its code; never shown.
     pub token: Option<RelayToken>,
+    /// Its standby code (the M26b follow-up); never shown.
+    pub standby: Option<StandbyCode>,
     /// To which rooms its code may be passed on (M26b).
     pub passable: Passable,
+}
+
+/// A relay's standby code, as [`crate::relays::Standby`] holds it.
+#[derive(Debug, Clone)]
+pub(crate) struct StandbyCode {
+    pub token: RelayToken,
+    /// The room it came from, by id.
+    pub room: String,
+    pub got: u64,
+    pub checked: u64,
+    /// When the user last pasted the relay's code in use: for a day, answers
+    /// give that one.
+    pub pasted: u64,
 }
 
 /// To which rooms a relay's code may be passed on (M26b).
@@ -287,13 +302,54 @@ impl Network {
             .then(|| relay_state(url, &facts))
     }
 
-    /// The code of `url` if it may go to a member of `room` (M26b).
+    /// The code of `url` if it may go to a member of `room` (M26b): the
+    /// code in use, as invites carry it.
     pub fn passable_token(&self, url: &str, room: &str) -> Option<RelayToken> {
         self.listed
             .iter()
             .find(|l| l.view.url == url)
             .filter(|l| l.passable.allows(room))
             .and_then(|l| l.token.clone())
+    }
+
+    /// The code to answer a member of `room` asking for `url` with: its
+    /// standby code while that is fresh (the M26b follow-up: it came after a
+    /// rotation's hint and outlasts the code in use, so a member spreading
+    /// a hint passes on the new code, never the old), else the code in use.
+    pub fn answer_token(&self, url: &str, room: &str, now_unix: u64) -> Option<RelayToken> {
+        let listed = self
+            .listed
+            .iter()
+            .find(|l| l.view.url == url)
+            .filter(|l| l.passable.allows(room))?;
+        listed
+            .standby
+            .as_ref()
+            .filter(|s| crate::relays::standby_answerable(s.got, s.checked, now_unix))
+            // Pasted lately by the user: that is the new code (the second
+            // review's finding: a member answering our hint must not have us
+            // spread its own in its place).
+            .filter(|s| now_unix.saturating_sub(s.pasted) >= crate::relays::STANDBY_FRESH_SECS)
+            // A received relay's standby only in the room it came from.
+            .filter(|s| listed.view.received.is_none() || s.room == room)
+            .map(|s| s.token.clone())
+            .or_else(|| listed.token.clone())
+    }
+
+    /// Whether a member of `room` may give us a standby code for `url` (the
+    /// M26b follow-up): we hold it with a code that isn't personal, and a
+    /// received one came for that room. As `relays::standby_allowed`.
+    pub fn may_stand_by(&self, url: &str, room: &str) -> bool {
+        self.may_ask(url)
+            && self.listed.iter().any(|l| {
+                l.view.url == url
+                    && l.token.is_some()
+                    && !l.view.personal
+                    && l.view
+                        .received
+                        .as_ref()
+                        .is_none_or(|r| r.rooms.iter().any(|f| f.room == room))
+            })
     }
 
     /// Whether a code for `url` may be asked for and kept (M26b).
@@ -998,6 +1054,7 @@ pub(crate) mod tests {
                 state: RelayStateView::Checking,
             },
             token: token.and_then(RelayToken::new),
+            standby: None,
             passable: if token.is_some() {
                 Passable::Everywhere
             } else {
@@ -1043,6 +1100,72 @@ pub(crate) mod tests {
             Instant::now(),
             &NetworkTimings::default(),
         )
+    }
+
+    /// The M26b follow-up: answers give a standby only while it is fresh and
+    /// lately checked, never in a room it didn't come from (a received
+    /// relay), nor for a day after the user pasted a code; invites carry the
+    /// code in use.
+    #[test]
+    fn answers_give_a_standby_only_where_and_while_it_may_go() {
+        use crate::relays::{STANDBY_FRESH_SECS, STANDBY_RECHECK_SECS};
+        const T: u64 = 1_800_000_000;
+        let answer = |network: &Network, room: &str, at: u64| {
+            network
+                .answer_token(A, room, at)
+                .map(|t| t.reveal().to_string())
+        };
+        let mut network = network(&[(A, Some("old"))]);
+        network.listed[0].standby = Some(StandbyCode {
+            token: RelayToken::new("new").unwrap(),
+            room: "room1".into(),
+            got: T,
+            checked: T,
+            pasted: 0,
+        });
+        assert_eq!(answer(&network, "room1", T + 60).as_deref(), Some("new"));
+        assert_eq!(
+            answer(&network, "room2", T + 60).as_deref(),
+            Some("new"),
+            "ours: every room"
+        );
+        assert_eq!(
+            network
+                .passable_token(A, "room1")
+                .map(|t| t.reveal().to_string())
+                .as_deref(),
+            Some("old"),
+            "invites carry the code in use"
+        );
+        // Not checked again lately, or a day old: the code in use.
+        assert_eq!(
+            answer(&network, "room1", T + 2 * STANDBY_RECHECK_SECS).as_deref(),
+            Some("old")
+        );
+        network.listed[0].standby.as_mut().unwrap().checked = T + STANDBY_FRESH_SECS;
+        assert_eq!(
+            answer(&network, "room1", T + STANDBY_FRESH_SECS).as_deref(),
+            Some("old")
+        );
+        network.listed[0].standby.as_mut().unwrap().checked = T;
+        // Pasted lately: that one.
+        network.listed[0].standby.as_mut().unwrap().pasted = T - 60;
+        assert_eq!(answer(&network, "room1", T + 60).as_deref(), Some("old"));
+        network.listed[0].standby.as_mut().unwrap().pasted = 0;
+        // Received for two rooms, its standby from one: only there.
+        network.listed[0].view.received = Some(crate::ReceivedView {
+            rooms: ["room1", "room2"]
+                .into_iter()
+                .map(|r| crate::ReceivedRoomView {
+                    room: r.into(),
+                    from: "Bia".into(),
+                })
+                .collect(),
+        });
+        network.listed[0].passable = Passable::Rooms(vec!["room1".into(), "room2".into()]);
+        assert_eq!(answer(&network, "room1", T + 60).as_deref(), Some("new"));
+        assert_eq!(answer(&network, "room2", T + 60).as_deref(), Some("old"));
+        assert_eq!(answer(&network, "room3", T + 60), None);
     }
 
     #[test]

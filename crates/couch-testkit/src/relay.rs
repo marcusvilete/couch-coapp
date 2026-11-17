@@ -23,12 +23,25 @@ pub struct TestRelay {
 impl TestRelay {
     /// Starts one. `token`: the only token it admits, or `None` for anyone.
     pub async fn start(token: Option<&str>) -> Self {
-        Self::start_on(0, token).await
+        Self::start_on(0, token.map(|t| vec![t.to_string()])).await
     }
 
     /// Stops it and starts it again on the same address with `token`: a
     /// relay's code rotated, everyone connected to it dropped (M26b).
     pub async fn restart(self, token: Option<&str>) -> Self {
+        self.restart_tokens(token.map(|t| vec![t.to_string()]))
+            .await
+    }
+
+    /// Stops it and starts it again taking each of `tokens`: a rotation's
+    /// overlap, both the old and the new code letting clients in (the M26b
+    /// follow-up).
+    pub async fn restart_with(self, tokens: &[&str]) -> Self {
+        self.restart_tokens(Some(tokens.iter().map(|t| t.to_string()).collect()))
+            .await
+    }
+
+    async fn restart_tokens(self, tokens: Option<Vec<String>>) -> Self {
         let port: u16 = self
             .url
             .rsplit_once(':')
@@ -43,15 +56,15 @@ impl TestRelay {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        Self::start_on(port, token).await
+        Self::start_on(port, tokens).await
     }
 
-    async fn start_on(port: u16, token: Option<&str>) -> Self {
+    async fn start_on(port: u16, tokens: Option<Vec<String>>) -> Self {
         let refused = Arc::new(AtomicUsize::new(0));
         let mut relay = RelayConfig::new((Ipv4Addr::LOCALHOST, port));
         relay.key_cache_capacity = Some(1024);
         relay.access = Arc::new(TokenAccess {
-            token: token.map(str::to_string),
+            tokens,
             refused: refused.clone(),
         });
         let mut config = ServerConfig::default();
@@ -73,14 +86,15 @@ impl TestRelay {
 
 #[derive(Debug)]
 struct TokenAccess {
-    token: Option<String>,
+    /// The tokens it takes, or `None` for anyone.
+    tokens: Option<Vec<String>>,
     refused: Arc<AtomicUsize>,
 }
 
 impl AccessControl for TokenAccess {
     async fn on_connect(&self, request: &ClientRequest) -> Access {
-        match &self.token {
-            Some(token) if request.auth_token().as_ref() != Some(token) => {
+        match &self.tokens {
+            Some(tokens) if !request.auth_token().is_some_and(|t| tokens.contains(&t)) => {
                 self.refused.fetch_add(1, Ordering::SeqCst);
                 Access::Deny {
                     reason: Some("this relay is for Couch Co-App".into()),

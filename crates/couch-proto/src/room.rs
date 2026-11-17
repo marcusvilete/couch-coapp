@@ -261,6 +261,25 @@ pub enum NoRelayCode {
     Busy,
 }
 
+/// The code a member holds for a relay changed while the relay still takes
+/// the old one (a rotation's overlap; the M26b follow-up): a member holding
+/// that relay may ask for the new code ([`RelayAsk`]) and keep it on standby,
+/// for when the old one is refused. It carries no code, and is never
+/// relayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayHint {
+    /// As the relay is named in records.
+    pub url: String,
+}
+
+impl RelayHint {
+    pub fn is_valid(&self) -> bool {
+        !self.url.is_empty()
+            && self.url.len() <= MAX_RELAY_URL_BYTES
+            && !self.url.chars().any(char::is_control)
+    }
+}
+
 impl RelayAsk {
     pub fn is_valid(&self) -> bool {
         !self.url.is_empty()
@@ -350,6 +369,19 @@ mod tests {
             .is_valid()
         );
         assert!(!RelayAsk { url: String::new() }.is_valid());
+        assert!(!RelayHint { url: String::new() }.is_valid());
+        assert!(
+            !RelayHint {
+                url: "https://r.example/\n".into()
+            }
+            .is_valid()
+        );
+        assert!(
+            RelayHint {
+                url: "https://r.example/".into()
+            }
+            .is_valid()
+        );
     }
 
     fn largest_record(i: u8) -> Signed<MemberRecord> {

@@ -103,6 +103,19 @@ pub(crate) enum Input {
         url: String,
         hash: [u8; 32],
         checked: passing::Checked,
+        /// After a member's hint: kept on standby, if at all.
+        hinted: bool,
+    },
+    /// A relay's standby code was tried, ours being refused (the M26b
+    /// follow-up): `taken` if it let us in and is the code in use now.
+    StandbyTried {
+        url: String,
+        taken: bool,
+    },
+    /// The user pasted a new code for a relay they pass on (the M26b
+    /// follow-up): its rooms get a hint.
+    RelayCodeChanged {
+        url: String,
     },
     Shutdown(oneshot::Sender<()>),
     /// A backup, opened, to restore into this profile (M13): here, so no
@@ -862,7 +875,10 @@ impl Actor {
                 url,
                 hash,
                 checked,
-            } => self.relay_code_checked(room, url, hash, checked),
+                hinted,
+            } => self.relay_code_checked(room, url, hash, checked, hinted, now),
+            Input::StandbyTried { url, taken } => self.standby_tried(url, taken, now),
+            Input::RelayCodeChanged { url } => self.code_changed(&url, None, now),
             Input::Closed { conn } => {
                 let Some(closed) = self.conns.remove(&conn) else {
                     return;

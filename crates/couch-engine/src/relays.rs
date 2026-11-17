@@ -79,6 +79,68 @@ pub(crate) struct SavedRelay {
     /// again later.
     #[serde(default)]
     pub unchecked: bool,
+    /// Another code that let us in, from a room after a member's hint (a
+    /// rotation's overlap, the M26b follow-up): never in use while ours
+    /// works, taken (checked again) once ours is refused. Never shown.
+    #[serde(default)]
+    pub standby: Option<Standby>,
+    /// When the user last gave it a new code by hand in place of one held (a
+    /// rotation's paste), in seconds since 1970 (UTC; 0 if never since 0.38): for a day, answers give that code, never
+    /// a standby (the second review's finding: a member answering our hint
+    /// must not have us spread its own code in place of the one pasted).
+    #[serde(default)]
+    pub pasted: u64,
+}
+
+/// A code on standby, and who gave it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Standby {
+    pub token: String,
+    /// The room it came from, by id, and its giver: their member id and
+    /// their name then.
+    pub room: String,
+    pub from: String,
+    pub from_name: String,
+    /// When we got it, in seconds since 1970 (UTC).
+    #[serde(default)]
+    pub got: u64,
+    /// When it last let us in (checked again every
+    /// [`STANDBY_RECHECK_SECS`] while held).
+    #[serde(default)]
+    pub checked: u64,
+}
+
+/// How long a standby code counts as fresh once we got it: kept against
+/// another member's, and given in answers in place of the code in use (a
+/// rotation's overlap lasts a day or so).
+pub const STANDBY_FRESH_SECS: u64 = 24 * 60 * 60;
+/// A standby held is checked against its relay again this often; answers
+/// give it only while it let us in within twice that (the second review's
+/// finding: a standby taken back meanwhile must not be handed out).
+pub const STANDBY_RECHECK_SECS: u64 = 60 * 60;
+
+impl Standby {
+    pub fn fresh(&self, now_unix: u64) -> bool {
+        now_unix.saturating_sub(self.got) < STANDBY_FRESH_SECS
+    }
+}
+
+/// Whether a standby got and last checked then may be given in answers now
+/// (in its own room, for a received relay: [`crate::network::Network::answer_token`]).
+pub fn standby_answerable(got: u64, checked: u64, now_unix: u64) -> bool {
+    now_unix.saturating_sub(got) < STANDBY_FRESH_SECS
+        && now_unix.saturating_sub(checked) < 2 * STANDBY_RECHECK_SECS
+}
+
+impl std::fmt::Debug for Standby {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Standby")
+            .field("token", &"..")
+            .field("room", &self.room)
+            .field("from_name", &self.from_name)
+            .field("checked", &self.checked)
+            .finish()
+    }
 }
 
 /// Where a received relay came from (M26b).
@@ -130,6 +192,19 @@ impl SavedRelay {
     }
 }
 
+/// Whether `relay` may hold a standby code from `room`: a code of ours, not
+/// personal (taken back on purpose, and never rotated with the shared one),
+/// and for a received relay, one of the rooms it came for. As a code from a
+/// room renews one refused (`passing_tick`'s renewals).
+fn standby_allowed(relay: &SavedRelay, room: &str) -> bool {
+    relay.token.is_some()
+        && !relay.personal
+        && relay
+            .received
+            .as_ref()
+            .is_none_or(|r| r.rooms.iter().any(|f| f.room == room))
+}
+
 impl std::fmt::Debug for SavedRelay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SavedRelay")
@@ -141,6 +216,7 @@ impl std::fmt::Debug for SavedRelay {
             .field("kept_to_me", &self.kept_to_me)
             .field("received", &self.received)
             .field("unchecked", &self.unchecked)
+            .field("standby", &self.standby)
             .finish()
     }
 }
@@ -312,10 +388,14 @@ impl SavedRelays {
                         })
                         .ok()
                 }?;
-                Some(Relay::new(
-                    url,
-                    saved.token.clone().and_then(RelayToken::new),
-                ))
+                let relay = Relay::new(url, saved.token.clone().and_then(RelayToken::new));
+                // A relay a room passed on is never our home while another
+                // answers: the home relay is named in every room's record,
+                // and only that room can get its code.
+                Some(match saved.received {
+                    Some(_) => relay.dial_only(),
+                    None => relay,
+                })
             })
             .collect();
         // Relays rooms passed on don't count: they're for those rooms alone,
@@ -345,6 +425,8 @@ impl SavedRelays {
             relay.received = None;
             relay.renewed_by = None;
             relay.unchecked = false;
+            relay.standby = None;
+            relay.pasted = now_unix;
             return Ok(Added::Replaced);
         }
         if self.relays.len() >= MAX_RELAYS {
@@ -427,6 +509,7 @@ impl SavedRelays {
                     "a relay of your own takes a code only once it lets us in",
                 )),
                 None => {
+                    relay.standby.take_if(|s| s.token == token);
                     relay.token = Some(token);
                     relay.token_from_build = false;
                     relay.renewed_by = Some(from_name.to_string());
@@ -456,6 +539,7 @@ impl SavedRelays {
                     if checked {
                         relay.unchecked = false;
                     }
+                    relay.standby.take_if(|s| s.token == token);
                     relay.token = Some(token);
                     Ok(Receipt::Joined)
                 }
@@ -485,6 +569,126 @@ impl SavedRelays {
         Ok(Receipt::New)
     }
 
+    /// Keeps a code a member of `room` gave after a hint, which let us in,
+    /// on standby (the M26b follow-up): never in place of the code in use,
+    /// which still works, since nobody can tell an old code from a new one
+    /// while the relay takes both. Only for a relay we hold with a code of
+    /// our own that isn't personal, and a received one only from its rooms
+    /// (codes never move from one room to another by themselves). Whether
+    /// it is a new standby (the code in use, or the standby held, isn't).
+    pub fn stand_by(
+        &mut self,
+        url: &RelayUrl,
+        token: &RelayToken,
+        room: &str,
+        from: &str,
+        from_name: &str,
+        now_unix: u64,
+    ) -> Result<bool, EngineError> {
+        if !self.may_ask(url.as_str()) {
+            return Err(EngineError::Refused(
+                "relays from rooms aren't taken here, or not this one",
+            ));
+        }
+        let Some(relay) = self.relays.iter_mut().find(|r| r.url == url.as_str()) else {
+            return Err(EngineError::Refused(
+                "a standby code is for a relay we hold",
+            ));
+        };
+        if !standby_allowed(relay, room) {
+            return Err(EngineError::Refused(
+                "this relay takes no code from this room",
+            ));
+        }
+        let token = token.reveal();
+        // The first standby stays while it is fresh (the review's finding):
+        // a member answering later with another code that works, its own
+        // personal one say, can't take its place and have us spread it, and
+        // two codes in circulation never flip back and forth.
+        if relay.token.as_deref() == Some(token)
+            || relay
+                .standby
+                .as_ref()
+                .is_some_and(|s| s.token == token || s.fresh(now_unix))
+        {
+            return Ok(false);
+        }
+        relay.standby = Some(Standby {
+            token: token.to_string(),
+            room: room.to_string(),
+            from: from.to_string(),
+            from_name: from_name.to_string(),
+            got: now_unix,
+            checked: now_unix,
+        });
+        Ok(true)
+    }
+
+    /// The standby `token` of `url` let us in again just now.
+    pub fn refresh_standby(&mut self, url: &str, token: &str, now_unix: u64) -> bool {
+        let Some(standby) = self
+            .relays
+            .iter_mut()
+            .find(|r| r.url == url)
+            .and_then(|r| r.standby.as_mut())
+            .filter(|s| s.token == token)
+        else {
+            return false;
+        };
+        standby.checked = now_unix;
+        true
+    }
+
+    /// The standby code of `url`, if it has one.
+    pub fn standby(&self, url: &str) -> Option<&Standby> {
+        self.relays
+            .iter()
+            .find(|r| r.url == url)
+            .and_then(|r| r.standby.as_ref())
+    }
+
+    /// Ours was refused and the standby `token` let us in, checked again
+    /// just now: it is the code in use, credited to its giver as a renewal
+    /// from a room is. Nothing if the standby changed meanwhile.
+    pub fn take_standby(&mut self, url: &str, token: &str) -> bool {
+        // "Use relays my rooms pass on" turned off meanwhile.
+        if !self.may_ask(url) {
+            return false;
+        }
+        let Some(relay) = self.relays.iter_mut().find(|r| r.url == url) else {
+            return false;
+        };
+        let Some(standby) = relay.standby.take_if(|s| s.token == token) else {
+            return false;
+        };
+        if !standby_allowed(relay, &standby.room) {
+            return false;
+        }
+        relay.token = Some(standby.token);
+        relay.token_from_build = false;
+        relay.unchecked = false;
+        match &mut relay.received {
+            None => relay.renewed_by = Some(standby.from_name),
+            Some(received) => {
+                if let Some(known) = received.rooms.iter_mut().find(|f| f.room == standby.room) {
+                    known.from = standby.from;
+                    known.from_name = standby.from_name;
+                }
+            }
+        }
+        true
+    }
+
+    /// The standby `token` of `url` was refused, or the relay no longer
+    /// takes one from its room: it goes.
+    pub fn drop_standby(&mut self, url: &str, token: &str) -> bool {
+        self.relays
+            .iter_mut()
+            .find(|r| r.url == url)
+            .and_then(|r| r.standby.take_if(|s| s.token == token))
+            .is_some()
+    }
+
     /// We left `room`, or forgot it: the relays received for it alone go.
     /// Whether anything changed.
     pub fn drop_room(&mut self, room: &str) -> bool {
@@ -495,6 +699,9 @@ impl SavedRelays {
                 let had = received.rooms.len();
                 received.rooms.retain(|f| f.room != room);
                 changed |= received.rooms.len() != had;
+                // A received relay's standby from that room goes with it:
+                // it may go only to the rooms it came for.
+                changed |= relay.standby.take_if(|s| s.room == room).is_some();
             }
         }
         self.relays
@@ -843,6 +1050,30 @@ mod tests {
         // stay on beside them.
         let rules = rules(None, true);
         assert!(held(&saved.choice(&rules)).1);
+        // And never our home while another answers; the user's own may be.
+        saved
+            .add(url("https://own.example"), Some(token("o")), false, NOW)
+            .unwrap();
+        let RelayChoice::Relays { ours, .. } = saved.choice(&rules) else {
+            panic!("relays");
+        };
+        let dial_only: Vec<(&str, bool)> =
+            ours.iter().map(|r| (r.url.as_str(), r.dial_only)).collect();
+        assert_eq!(
+            dial_only,
+            [
+                ("https://r.example/", true),
+                ("https://own.example/", false)
+            ]
+        );
+        saved.remove(&url("https://own.example")).unwrap();
+        // Given by the user, it's theirs, and may be home.
+        let mut taken = saved.clone();
+        taken.add(r.clone(), Some(token("z")), false, NOW).unwrap();
+        let RelayChoice::Relays { ours, .. } = taken.choice(&rules) else {
+            panic!("relays");
+        };
+        assert!(!ours[0].dial_only);
 
         // Kept to the user, it goes nowhere.
         saved.relays[0].kept_to_me = true;
@@ -854,6 +1085,167 @@ mod tests {
         assert!(saved.drop_room("room2"));
         assert!(saved.relays.is_empty(), "gone with its last room");
         assert!(!saved.drop_room("room2"));
+    }
+
+    /// The M26b follow-up: a code fetched after a hint waits on standby,
+    /// never replacing the one in use, and is taken only on its own word.
+    #[test]
+    fn a_standby_code_never_replaces_the_one_in_use() {
+        let mut saved = SavedRelays::default();
+        let own = url("https://own.example");
+        saved
+            .add(own.clone(), Some(token("old")), false, NOW)
+            .unwrap();
+        let held = |s: &SavedRelays| s.relays[0].token.clone().unwrap();
+
+        // The code in use isn't a standby; a new one is, once.
+        assert!(
+            !saved
+                .stand_by(&own, &token("old"), "room1", "bia", "Bia", NOW)
+                .unwrap()
+        );
+        assert!(
+            saved
+                .stand_by(&own, &token("new"), "room1", "bia", "Bia", NOW)
+                .unwrap()
+        );
+        assert!(
+            !saved
+                .stand_by(&own, &token("new"), "room2", "cai", "Cai", NOW)
+                .unwrap()
+        );
+        // The first stays while fresh: another code that works, a member's
+        // own personal one say, can't take its place (the review's finding).
+        assert!(
+            !saved
+                .stand_by(&own, &token("eves"), "room1", "eve", "Eve", NOW + 60)
+                .unwrap()
+        );
+        assert_eq!(saved.relays[0].standby.as_ref().unwrap().token, "new");
+        let stale = NOW + STANDBY_FRESH_SECS;
+        assert!(
+            saved
+                .stand_by(&own, &token("later"), "room1", "eve", "Eve", stale)
+                .unwrap(),
+            "a stale one gives way"
+        );
+        saved.relays[0].standby = Some(Standby {
+            token: "new".into(),
+            room: "room1".into(),
+            from: "bia".into(),
+            from_name: "Bia".into(),
+            got: NOW,
+            checked: NOW,
+        });
+        assert_eq!(held(&saved), "old");
+        // Answers give it only while it let us in lately; checking it again
+        // keeps it so (the second review's finding).
+        let late = NOW + 3 * STANDBY_RECHECK_SECS;
+        let answerable = |saved: &SavedRelays, at: u64| {
+            let s = saved.relays[0].standby.as_ref().unwrap();
+            standby_answerable(s.got, s.checked, at)
+        };
+        assert!(!answerable(&saved, late));
+        assert!(!saved.refresh_standby(own.as_str(), "other", late));
+        assert!(saved.refresh_standby(own.as_str(), "new", late));
+        assert!(answerable(&saved, late));
+        assert!(!answerable(&saved, NOW + STANDBY_FRESH_SECS), "a day on");
+        assert!(
+            !format!("{:?}", saved.relays[0]).contains("new"),
+            "never printed"
+        );
+
+        // Taken only with the code checked: another one changes nothing.
+        assert!(!saved.take_standby(own.as_str(), "other"));
+        assert_eq!(held(&saved), "old");
+        assert!(saved.take_standby(own.as_str(), "new"));
+        assert_eq!(held(&saved), "new");
+        assert_eq!(saved.relays[0].renewed_by.as_deref(), Some("Bia"));
+        assert!(saved.relays[0].standby.is_none());
+
+        // Refused: dropped. A code pasted by hand drops it too.
+        saved
+            .stand_by(&own, &token("next"), "room1", "bia", "Bia", NOW)
+            .unwrap();
+        assert!(saved.drop_standby(own.as_str(), "next"));
+        assert!(saved.relays[0].standby.is_none());
+        saved
+            .stand_by(&own, &token("next"), "room1", "bia", "Bia", NOW)
+            .unwrap();
+        saved
+            .add(own.clone(), Some(token("pasted")), false, NOW)
+            .unwrap();
+        assert!(saved.relays[0].standby.is_none());
+
+        // Never for a personal code, nor for a relay we lack.
+        saved
+            .add(own.clone(), Some(token("mine")), true, NOW)
+            .unwrap();
+        assert!(
+            saved
+                .stand_by(&own, &token("x"), "room1", "bia", "Bia", NOW)
+                .is_err()
+        );
+        let lacked = url("https://lacked.example");
+        assert!(
+            saved
+                .stand_by(&lacked, &token("x"), "room1", "bia", "Bia", NOW)
+                .is_err()
+        );
+
+        // A received relay, only from its own rooms.
+        let r = url("https://r.example");
+        saved
+            .receive(&r, &token("a"), "room1", "bia", "Bia", true, NOW)
+            .unwrap();
+        assert!(
+            saved
+                .stand_by(&r, &token("b"), "room2", "eve", "Eve", NOW)
+                .is_err()
+        );
+        assert!(
+            saved
+                .stand_by(&r, &token("b"), "room1", "dee", "Dee", NOW)
+                .unwrap()
+        );
+        assert!(saved.take_standby(r.as_str(), "b"));
+        let from = &saved.relays[1].received.as_ref().unwrap().rooms[0];
+        assert_eq!(
+            (from.from.as_str(), from.from_name.as_str()),
+            ("dee", "Dee")
+        );
+
+        // A room's renewal with the standby's code clears it.
+        saved
+            .stand_by(&r, &token("c"), "room1", "dee", "Dee", NOW)
+            .unwrap();
+        saved
+            .receive(&r, &token("c"), "room1", "dee", "Dee", true, NOW)
+            .unwrap();
+        assert!(saved.relays[1].standby.is_none());
+
+        // Its room left while it is received for another: the standby from
+        // that room goes (the review's finding).
+        saved
+            .receive(&r, &token("c"), "room2", "cai", "Cai", true, NOW)
+            .unwrap();
+        saved
+            .stand_by(&r, &token("e"), "room1", "dee", "Dee", NOW)
+            .unwrap();
+        assert!(saved.drop_room("room1"));
+        assert!(saved.relays[1].standby.is_none());
+        saved
+            .stand_by(&r, &token("e"), "room2", "cai", "Cai", NOW)
+            .unwrap();
+
+        // Passed-on codes turned off: nothing is kept, nor taken.
+        saved.refuse_passed_on = true;
+        assert!(
+            saved
+                .stand_by(&r, &token("d"), "room2", "cai", "Cai", NOW)
+                .is_err()
+        );
+        assert!(!saved.take_standby(r.as_str(), "e"));
     }
 
     /// M26b: the user's own relay takes a room's code only once it lets us
