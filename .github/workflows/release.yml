@@ -17,8 +17,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-    # TEMPORARY, for trying the workflow before it is on main: removed before the PR.
-    branches: [m26c-1-public-builds]
   workflow_dispatch:
 
 permissions:

@@ -495,8 +495,8 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
   The app: make it executable (chmod +x, or its Properties), then open it.
   Couch Co-App is free software under the GNU GPL, version 3 (the LICENSE
   file inside it). Its third-party licences are in
-  {notices_beside}, beside it, and inside it as {notices}
-  (Settings -> About).
+  {notices_beside}, beside it, and inside it as
+  {notices} (Settings -> About).
 
 The app's source code, for exactly this AppImage:
   {app_source}
@@ -507,8 +507,9 @@ and the scripts that built the included copy, are these two archives:
 {archives}
 The AppImage also carries system libraries from Ubuntu 24.04 (WebKitGTK,
 GTK, GLib and what they need), under the LGPL and other licences: the
-notices name each one's source package and version, and their sources, at
-exactly those versions, are in {sources_tar}, beside it.
+notices name each one's source package and version, and their sources,
+at exactly those versions, are in this archive beside it:
+  {sources_tar}
 ",
             notices = notices::FILE_NAME,
             archives = archives.join("\n"),
