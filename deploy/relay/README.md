@@ -1,6 +1,6 @@
 # Your own relay
 
-Couch Co-App always tries a direct connection between two PCs first. A relay starts each connection, helps the two ends find each other, and carries the traffic when no direct path works (some home routers and most phone networks). There are no official installers or relay ([ADR 0009](../../docs/adr/0009-source-only-releases.md)): whoever builds installers for their friends runs a relay for them, built into the installer or handed out as a relay code that anyone pastes into the app ([ADR 0014](../../docs/adr/0014-public-builds-and-registered-relays.md)). iroh's public relays work too, shared by everyone, with limits nobody publishes.
+Couch Co-App always tries a direct connection between two PCs first. A relay starts each connection, helps the two ends find each other, and carries the traffic when no direct path works (some home routers and most phone networks). The app's releases carry no relay ([ADR 0014](../../docs/adr/0014-public-builds-and-registered-relays.md)): they use iroh's public relays, shared by everyone with limits nobody publishes, until the user adds one. Whoever runs a relay hands out its code, which anyone pastes into the app, and the app passes it on to those who need it; a build of your own can also carry it ([development.md](../../docs/development.md#building-installers)).
 
 The relay is iroh's own server, `iroh-relay`, at the version the app's iroh pin names (`iroh = "=X.Y.Z"` in the root `Cargo.toml`; 1.3.0 now). It forwards encrypted traffic it can't read. Admission to rooms happens between the PCs, never at the relay.
 
@@ -51,23 +51,23 @@ Let's Encrypt needs a DNS name pointing at the server.
    - UDP 7842: QUIC address discovery.
 
    Keep SSH (TCP 22) open.
-3. **Install.** Copy this folder to the server (`scp -r deploy/relay you@server:`), then run `sudo ./install.sh <name> <your email>`. When asked, paste the `relay_token` from your `release.toml`, created on your PC by `cargo xtask release-config`.
+3. **Install.** Put this folder on the server, at your app's version (Settings → About): from a clone, `scp -r deploy/relay you@server:`; without one, on the server, `git clone --depth 1 --branch v<version> https://github.com/marcusvilete/couch-coapp`, then `cd couch-coapp/deploy/relay`. Then run `sudo bash install.sh <name> <your email>`. When asked, paste the relay's token: a long random string, such as `openssl rand -hex 32` makes (or the `relay_token` in your `release.toml`, if you build installers carrying the relay: `cargo xtask release-config` made it). Keep it in a password manager.
 4. **Check it.**
    - `https://<name>/` should show iroh-relay's page in a browser, with a valid certificate. The first certificate can take a minute.
    - `journalctl -u iroh-relay -f` shows its log.
-5. **Try it from your PC.** Run `couch-cli latency-probe --relay https://<name> --relay-token <token> --relay-only --secs 20`. The HUD shows "Relay", and the probe finishes.
+5. **Try it from your PC,** if you build the app ([development.md](../../docs/development.md)): run `couch-cli latency-probe --relay https://<name> --relay-token <token> --relay-only --secs 20`. The HUD shows "Relay", and the probe finishes.
 
    The same command without `--relay-token` must fail to connect: that proves the token is required.
 6. **Point the app at it**, in either of two ways:
-   - **Built in:** set `relay_url = "https://<name>"` in `release.toml`, bump the version, and build an installer with `scripts\build-installer.ps1`. Friends install it. Their Settings → Network lists it marked "this app's", and it can't be removed.
-   - **By its code** (since 0.35.0): give each friend the relay's code (below). They paste it in Settings → Network → Add a relay, in any build. The app connects with it before saving, and says so if the relay refuses it.
+   - **By its code** (since 0.35.0): make the relay's code (below) and paste it in your app's Settings → Network → Add a relay, in any build. The app connects with it before saving, and says so if the relay refuses it. Your rooms' members get it from there by themselves (below).
+   - **Built in:** set `relay_url = "https://<name>"` in `release.toml`, bump the version, and build an installer ([development.md](../../docs/development.md#building-installers)). Friends install it. Their Settings → Network lists it marked "this app's", and it can't be removed.
 
 ## Relay codes
 
 A relay code is the relay's address and a token on one line, such as `couch-relay-1.aHR0cHM6Ly9yZWxh….3f9a01c2`. The app checks it whole: a code cut short when copied is caught and said. Since 0.35.0 a profile holds several relays at once, each with its own code, so a friend can be on yours and on someone else's.
 
 - **Making one:**
-  - on the server, from this folder: `./relay-code.sh https://<name>/ <token>`;
+  - on the server, from this folder: `bash relay-code.sh https://<name>/ <token>`;
   - or in the app: Settings → Network → the relay's **⋯** → **Share its code**. It copies the code, kept out of Windows' clipboard history and its sync to other devices (and out of KDE's clipboard history on Linux). It works for any relay you hold, the built-in one included, except a personal one.
 - **Sending one:** the code lets whoever holds it use the relay. Send it privately (a direct message), never in a public channel, and only to people you'd let use your server's bandwidth.
 - **Using one:** paste it in Settings → Network → Add a relay. The app shows which relay it names and whether it holds a token, before anything is saved. Creating a room or an invite on a profile with no relay of its own also asks for one.
@@ -83,16 +83,16 @@ The shared token can't be taken back from one person, only changed for everyone.
    access.shared_token = ["<shared>", "<bia's>", "<caio's>"]
    ```
    Then comment out the line in `/etc/iroh-relay/token.env` (its variable would replace the list) and restart: `sudo systemctl restart iroh-relay`. The config file is readable by every user on the server; on a server only you log into, that's fine.
-3. **Make each friend's code personal:** `./relay-code.sh https://<name>/ <bia's token> --personal`. Their app never passes a personal code on: Share is off for it.
+3. **Make each friend's code personal:** `bash relay-code.sh https://<name>/ <bia's token> --personal`. Their app never passes a personal code on: Share is off for it.
 4. **To cut someone off:** take their token out of the list and restart. Their app then says the relay "no longer accepts your code: ask its owner for a new one", and their connections through it stop. Ban them from your rooms too: a direct path, or another member's relay, still reaches the rooms.
 
 Don't run `install.sh` while the list is in the config: it puts back the empty list from this folder, and with `token.env` commented out the relay would then refuse to start. Put the list back after an update.
 
 ## The token
 
-- **Its job:** it keeps other iroh apps, and other people's Couch Co-App builds, off your relay. It's inside every installer, so it isn't a secret; the rate limits and the bandwidth cap protect the server.
+- **Its job:** it keeps other iroh apps, and Couch Co-App users who don't hold its code, off your relay. It's in every code you hand out and passed on by the app (and inside every installer built with it), so it isn't a secret the way a password is; the rate limits and the bandwidth cap protect the server.
 - **Where it lives:**
-  - `release.toml` on your PC, outside the repository;
+  - `release.toml` on your PC, outside the repository, if you build installers carrying it;
   - `/etc/iroh-relay/token.env` on the server (root only, mode 600);
   - a password manager, as the backup.
 
@@ -101,8 +101,8 @@ Don't run `install.sh` while the list is in the config: it puts back the empty l
 - **Rotating it:** `IROH_RELAY_ACCESS_TOKEN` holds one token. During a rotation, put both tokens in the config instead:
   1. Write `access.shared_token = ["<old>", "<new>"]` in `/etc/iroh-relay/iroh-relay.toml`. Then comment out the line in `token.env`, since that variable would replace the list, and restart.
 
-     The config file is readable by every user on the server (the service's dynamic user needs it). That's acceptable for this token, which ships in every installer anyway.
-  2. Hand out the new token: builds with it built in (`release.toml`; a new build replaces the built-in token, but never a code the user pasted for the same relay), and the new code (`./relay-code.sh https://<name>/ <new>`) to whoever pasted the old one. They paste it in Settings → Network: pasting a code for a relay already in the list gives it the new code.
+     The config file is readable by every user on the server (the service's dynamic user needs it). That's acceptable for this token, which goes out in every code you hand out anyway.
+  2. Hand out the new token: builds with it built in (`release.toml`; a new build replaces the built-in token, but never a code the user pasted for the same relay), and the new code (`bash relay-code.sh https://<name>/ <new>`) to whoever pasted the old one. They paste it in Settings → Network: pasting a code for a relay already in the list gives it the new code.
   3. **Keep both for a while,** a day or so, while the apps pass the new code on. Since 0.38 they do it during this overlap: whoever pastes the new code (step 2) tells their rooms, and every app holding this relay asks them for it and keeps it in reserve while its old code still works, then tells its own rooms in turn. When the old token goes (step 4), each app switches to the code it kept, even a PC nobody is at. Apps that missed it (offline the whole time, or in no room with someone who had it) ask their rooms once the old code is refused, as since 0.37, which needs a way to reach them other than this relay. **A PC run from afar (remote play) whose only relay is this one** gets the code only if it was online during the overlap: turn it on meanwhile, or paste the new code there, or give it a second relay. A rotation without this overlap cuts such a PC off.
   4. Go back to the new token alone in `token.env`, and restart. Apps still on the old code ask their rooms for the new one; until one gets it, it sees "no longer accepts your code" in Settings → Network and the strip at the bottom of the app's window, with Paste a new code.
 

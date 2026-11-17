@@ -91,6 +91,49 @@ p {
   color: var(--ok);
 }
 
+/* The owner's relay needs a code this link doesn't carry. */
+.note {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0.7rem 0.9rem;
+  font-size: 0.93rem;
+
+  & strong {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+}
+
+.away a {
+  color: var(--text);
+}
+
+#downloads p {
+  margin-bottom: 0.6rem;
+}
+
+/* The download for the visitor's system: outlined, below the card's main action. */
+.download {
+  display: inline-block;
+  font: 600 0.95rem var(--font);
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  padding: 0.6rem 1.1rem;
+  margin-top: 0.4rem;
+  text-decoration: none;
+  transition: background 120ms;
+
+  &:hover {
+    background: var(--hover);
+  }
+}
+
+.download:focus-visible,
+.away a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .button,
 button {
   display: inline-block;
@@ -135,7 +178,9 @@ button:focus-visible {
 /* Windows' High Contrast themes pick their own colours; keep the edges. */
 @media (forced-colors: active) {
   .card,
+  .note,
   .button,
+  .download,
   button {
     border-color: CanvasText;
   }

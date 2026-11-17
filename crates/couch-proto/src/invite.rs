@@ -414,6 +414,40 @@ mod tests {
         assert_eq!(handed.payload(), PINNED_V2_PAYLOAD);
     }
 
+    /// M26c-3: what the invite page reads for its relay note (`check.js`):
+    /// a version 3 invite carrying its relay's code, one on iroh's public
+    /// relay, and one with direct addresses alone.
+    #[test]
+    fn the_invites_for_the_relay_note_are_pinned() {
+        let with_code = Invite {
+            relay_code: Some(RelaySecret("s3cret-token".into())),
+            ..invite()
+        };
+        assert_eq!(with_code.payload(), PINNED_V3_PAYLOAD);
+        let public = Invite {
+            addr: PeerAddr {
+                relay: Some("https://euc1-1.relay.n0.iroh.link./".into()),
+                ips: vec![],
+            },
+            ..invite()
+        };
+        assert_eq!(public.payload(), PINNED_PUBLIC_RELAY_PAYLOAD);
+        let lan = Invite {
+            addr: PeerAddr {
+                relay: None,
+                ips: vec!["192.168.1.20:7842".parse().unwrap()],
+            },
+            ..invite()
+        };
+        assert_eq!(lan.payload(), PINNED_LAN_PAYLOAD);
+    }
+
+    const PINNED_V3_PAYLOAD: &str = "inbqgaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayarw2duoryhgorpf5zgk3dbpexgk6dbnvygyzjomnxw2lrpaaaay4ztmnzgk5bnorxwwzlo";
+
+    const PINNED_PUBLIC_RELAY_PAYLOAD: &str = "inbqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayasg2duoryhgorpf5sxkyzrfuys44tfnrqxsltogaxgs4tpnaxgy2lonmxc6aa";
+
+    const PINNED_LAN_PAYLOAD: &str = "inbqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayaacagavaarjir5";
+
     const PINNED_V2_PAYLOAD: &str = "inbqeaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayarw2duoryhgorpf5zgk3dbpexgk6dbnvygyzjomnxw2lrpaaeqscijbeeqscijbeeqscijbeeqscijbeeqscijbeeqscijbeeqs";
 
     const PINNED_PAYLOAD: &str = "inbqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaibaeaqcaibaeaqcaibaeaqcaigfg33gyoqsazdbebaw4yieaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeasakjj62ayarw2duoryhgorpf5zgk3dbpexgk6dbnvygyzjomnxw2lrpaa";
