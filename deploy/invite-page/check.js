@@ -5,7 +5,8 @@
 "use strict";
 
 const assert = require("node:assert");
-const { payloadOf, roomName, relayToAsk, systemOf, downloadsFor, releasesOf } = require("./j/invite.js");
+const { payloadOf, roomName, relayToAsk } = require("./j/invite.js");
+const { systemOf, downloadsFor, releasesOf } = require("./j/download.js");
 
 // Version 1, on relay.example.com, with no code.
 const PINNED =
@@ -105,14 +106,14 @@ assert.match(downloadsFor("linux").first, /Linux/);
 assert.match(downloadsFor("linux").pick, /\.AppImage/);
 assert.strictEqual(downloadsFor("windows").note, null);
 assert.match(downloadsFor("mac").note, /isn't on macOS yet/);
-assert.match(downloadsFor("phone").note, /on yours/);
+assert.match(downloadsFor("phone").note, /on your PC/);
 assert.match(downloadsFor("other").first, /Windows/);
 // Only a repository as the workflow writes it; the placeholder gives no download.
 assert.strictEqual(releasesOf("marcusvilete/couch-coapp"), "https://github.com/marcusvilete/couch-coapp/releases/latest");
 for (const bad of ["", null, undefined, "couch-coapp", "a/b/c", "evil.example/x?y", "a/b#c", "javascript:x/y"]) {
   assert.strictEqual(releasesOf(bad), null, String(bad));
 }
-// The placeholder .github/workflows/invite-page.yml replaces when it publishes the page.
+// The placeholder deploy/build-site.mjs fills when the site is published.
 const page = require("node:fs").readFileSync(require("node:path").join(__dirname, "j", "index.html"), "utf8");
 assert.ok(page.includes('<meta name="couch-releases" content="">'), "the releases placeholder");
 console.log("invite page: ok");

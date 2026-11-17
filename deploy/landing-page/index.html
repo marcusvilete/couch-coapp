@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- No requests but the site's own files: no fonts, analytics or cookies. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Couch Co-App: couch co-op from afar</title>
+<meta name="description" content="A free app for Windows and Linux: stream a game from your PC and pass your friends the controller, as if they were on your couch.">
+<link rel="canonical" href="https://marcusvilete.github.io/couch-coapp/">
+<!-- What chat apps show for a shared link. -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Couch Co-App">
+<meta property="og:description" content="Stream a game from your PC and pass your friends the controller, as if they were on your couch. Free, for Windows and Linux.">
+<meta property="og:url" content="https://marcusvilete.github.io/couch-coapp/">
+<meta property="og:image" content="https://marcusvilete.github.io/couch-coapp/images/hosting-dark.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#6a3fe0">
+<link rel="icon" href="j/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="landing.css">
+<script src="j/download.js" defer></script>
+<script src="landing.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#what">Skip to the page</a>
+
+<header class="top">
+  <div class="wrap top-row">
+    <a class="brand" href="#">
+      <img src="j/icon.svg" alt="" width="32" height="32">
+      <span>Couch Co-App</span>
+    </a>
+    <nav aria-label="On this page">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#relays">Relays</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/marcusvilete/couch-coapp">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <h1>Couch co-op from afar</h1>
+      <p class="lead">Stream a game from your PC and pass your friends the controller, as if they were on your couch.</p>
+
+      <div class="get" id="download">
+        <p id="download-note" class="note" hidden></p>
+        <p><a id="download-first" class="button" href="https://github.com/marcusvilete/couch-coapp/releases/latest">Download for Windows or Linux</a></p>
+        <p id="download-pick" class="quiet small"></p>
+        <p id="download-other-line" class="small" hidden><a id="download-other" href="https://github.com/marcusvilete/couch-coapp/releases/latest"></a></p>
+      </div>
+      <p class="facts">Free and open source · Windows and Linux · No account</p>
+
+      <figure class="shot hero-shot">
+        <picture>
+          <source srcset="images/hosting-dark.png" media="(prefers-color-scheme: dark)">
+          <img src="images/hosting-light.png" width="1280" height="860" alt="The app while hosting Fling to the Finish: Dani asks to play, and the patch bay shows who plays which controller">
+        </picture>
+      </figure>
+    </div>
+  </section>
+
+  <section id="what" class="band">
+    <div class="wrap narrow">
+      <h2>What this is</h2>
+      <p>A free desktop app for playing games together over the internet, the way you would on one couch.</p>
+      <p>One person, the <strong>host</strong>, runs the game and streams it to friends in a <strong>room</strong>. Everyone sees and hears it. The host passes controllers around, and each friend's controller plays the game on the host's PC.</p>
+      <p>Only the host needs the game. No accounts, no cloud: a room lives on its members' PCs.</p>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <div class="picker steps">
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab"><span class="num">1</span>Make a room</button></h3>
+            <p>A name and a password. The room stays for the next game night.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/step-room-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/step-room-light.png" width="1232" height="1014" loading="lazy" alt="The Create a room dialog: the room's name, Sofá, and its password">
+            </picture>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab"><span class="num">2</span>Invite friends</button></h3>
+            <p>Send the room's link, and the password separately. The link also offers the app to whoever doesn't have it.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/step-invite-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/step-invite-light.png" width="1232" height="1038" loading="lazy" alt="The invite dialog with the room's link and a Copy link button">
+            </picture>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab"><span class="num">3</span>Stream the game</button></h3>
+            <p>Pick the game's window. Friends click Watch, and see and hear it in a window of their own.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/step-stream-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/step-stream-light.png" width="1752" height="1082" loading="lazy" alt="What to stream: a list of windows, Fling to the Finish first, with the frame rate and quality">
+            </picture>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab"><span class="num">4</span>Pass the controller</button></h3>
+            <p>A friend asks, you accept, and their controller plays your game. Take it back or pass it on any time.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/step-play-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/step-play-light.png" width="1280" height="640" loading="lazy" alt="A friend's side: playing on Controller 2 of Bia's session">
+            </picture>
+          </figure>
+        </div>
+      </div>
+
+      <div class="explain">
+        <h3>Behind the scenes</h3>
+        <ul>
+          <li><strong>The picture:</strong> the host's PC captures the game's window, compresses it on the graphics card and streams it to each friend, adapting to their connection.</li>
+          <li><strong>The controllers:</strong> the app plugs virtual Xbox controllers into the host's PC, and each friend's controller drives one. The game sees ordinary controllers.</li>
+          <li><strong>The connection:</strong> direct and encrypted between the PCs; through a <a href="#relays">relay</a> when that isn't possible.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="band">
+    <div class="wrap">
+      <h2>Features</h2>
+      <div class="picker">
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab">Seats your way</button></h3>
+            <p>Up to 4 controllers and a keyboard-and-mouse seat. 1 to 7 friends watching.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/seats-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/seats-light.png" width="1752" height="1664" loading="lazy" alt="Starting a session: four controllers and a keyboard-and-mouse seat, the host's two controllers on Controllers 1 and 2">
+            </picture>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab">Who plays what</button></h3>
+            <p>Every seat at a glance. Drag a friend onto a seat or pull them off, and play along with your own controllers.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/bay-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/bay-light.png" width="1388" height="1010" loading="lazy" alt="The patch bay: players on the left, cables to the seats on the right, Dani's request dashed">
+            </picture>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab">Draw on the stream</button></h3>
+            <p>Pens, arrows, boxes, text and pictures over the game, seen by everyone. Off until the host turns it on.</p>
+          </div>
+          <figure class="picker-shot">
+            <img src="images/drawing.jpg" width="1490" height="1080" loading="lazy" alt="Drawing over a game: arrows numbered 1 to 3 show the way, with the drawing tools below">
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab">Watch together</button></h3>
+            <p>A session with no controllers, just to watch.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/together-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/together-light.png" width="1280" height="640" loading="lazy" alt="Watching Bia's Movie night, a session with no seats">
+            </picture>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab">Play your PC remotely</button></h3>
+            <p>Run your gaming PC's sessions from your laptop, unlocked with a PIN.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/remote-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/remote-light.png" width="1280" height="760" loading="lazy" alt="A laptop running Ana's PC's session: live, with Bia asking to play">
+            </picture>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab">HDR, handled</button></h3>
+            <p>A game on an HDR monitor reaches friends in the right colours, not washed out (Windows). Drag across the picture to compare.</p>
+          </div>
+          <figure class="picker-shot">
+            <div class="compare">
+              <img src="images/hdr-after.jpg" width="1440" height="799" loading="lazy" alt="Converted by Couch Co-App: The Witcher 3 in HDR, the clouds and the sunset sky keep their detail">
+              <img class="compare-before" src="images/hdr-before.jpg" width="1440" height="799" loading="lazy" alt="Windows' own capture: the same frame with the sky blown out to white">
+              <input type="range" min="0" max="100" value="50" step="1" aria-label="Compare: left, Windows' own capture; right, converted by Couch Co-App">
+              <span class="compare-handle" aria-hidden="true"></span>
+              <span class="compare-label compare-left" aria-hidden="true">Windows' capture</span>
+              <span class="compare-label compare-right" aria-hidden="true">Converted</span>
+            </div>
+          </figure>
+        </div>
+        <div class="picker-item">
+          <div class="picker-text">
+            <h3><button type="button" class="picker-tab">Works on Linux</button></h3>
+            <p>Watch and play on Linux, and host on KDE or GNOME. A Steam Deck watches and plays.</p>
+          </div>
+          <figure class="picker-shot">
+            <picture>
+              <source srcset="images/linux-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="images/linux-light.png" width="1752" height="992" loading="lazy" alt="Streaming from Linux: the desktop picks the window, and you pick the sound guests hear">
+            </picture>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="trust">
+    <div class="wrap narrow">
+      <h2>Only with people you trust</h2>
+      <p>A controller presses buttons on your PC; a keyboard types on it. Play only with people you trust. The app's limits:</p>
+      <ul class="ticks">
+        <li>You approve every handover.</li>
+        <li>Guests get a controller only. Keyboard and mouse is a separate seat, for one person at a time.</li>
+        <li>Their keys reach only the game, while its window is in front. The Windows key, Alt+Tab, Alt+F4, Ctrl+Alt+Delete and the like never pass.</li>
+        <li>The panic key, Ctrl+Alt+Shift+Backspace, takes back every seat. Guests can't press it.</li>
+        <li>Held keys and buttons are let go on every handover and disconnect.</li>
+        <li>Only the room's owner lets people in, with an invite and the password.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="relays" class="band">
+    <div class="wrap narrow">
+      <h2>Relays?</h2>
+      <p>The PCs connect directly when they can. Some routers and most mobile networks block that; then a <strong>relay</strong>, a small server on the internet, passes the traffic along. It's encrypted: the relay can't read it.</p>
+      <div class="two">
+        <div>
+          <h3>Out of the box</h3>
+          <p><a href="https://www.iroh.computer/">iroh</a>'s free public relays: shared by everyone, for testing and hobby use, with no guarantees. Fine for trying.</p>
+        </div>
+        <div>
+          <h3>Your own</h3>
+          <p>A small Linux server (free tiers work). Add its code once, and your rooms pass it on to your friends. <a href="https://github.com/marcusvilete/couch-coapp/blob/main/docs/self-hosting.md#3-a-relay-of-your-own">How to set one up</a></p>
+        </div>
+      </div>
+      <figure class="shot relay-shot">
+        <picture>
+          <source srcset="images/relays-dark.png" media="(prefers-color-scheme: dark)">
+          <img src="images/relays-light.png" width="1280" height="760" loading="lazy" alt="Settings, Network: online, direct connections work, the public relays connected, and a box to paste a relay code">
+        </picture>
+      </figure>
+    </div>
+  </section>
+
+  <section id="need">
+    <div class="wrap narrow">
+      <h2>What you need</h2>
+      <div class="two">
+        <div>
+          <h3>To host</h3>
+          <ul>
+            <li>Windows 10 or 11, or Linux with KDE or GNOME</li>
+            <li>The game</li>
+            <li>Upload for each friend watching: up to 20 Mbit/s each by default</li>
+          </ul>
+        </div>
+        <div>
+          <h3>To play</h3>
+          <ul>
+            <li>A Windows or Linux PC, or a Steam Deck</li>
+            <li>A controller, or keyboard and mouse</li>
+          </ul>
+        </div>
+      </div>
+      <p class="quiet">Not on macOS, phones or tablets yet.</p>
+    </div>
+  </section>
+
+  <section id="faq" class="band">
+    <div class="wrap narrow">
+      <h2>Questions</h2>
+      <details>
+        <summary>Does it cost anything?</summary>
+        <p>No. It's free software (GPL-3.0).</p>
+      </details>
+      <details>
+        <summary>Do my friends need the game?</summary>
+        <p>No. It runs only on the host's PC.</p>
+      </details>
+      <details>
+        <summary>Which games work?</summary>
+        <p>Any game, with up to 4 controllers and/or keyboard and mouse.</p>
+      </details>
+      <details>
+        <summary>Do I need my own relay?</summary>
+        <p>No. The free public relays work out of the box. For regular game nights, a relay of your own is more dependable. <a href="https://github.com/marcusvilete/couch-coapp/blob/main/docs/self-hosting.md#3-a-relay-of-your-own">How to set one up</a></p>
+      </details>
+      <details>
+        <summary>The installer offers ViGEmBus and HidHide. Do I need them?</summary>
+        <p><strong>ViGEmBus</strong>: only to host. It's what plugs your friends' controllers into your PC. <strong>HidHide</strong>: optional. It lets your own controllers take seats too. To only watch and play, you need neither. Settings → Drivers installs either later. On Linux, neither exists.</p>
+      </details>
+      <details>
+        <summary>Windows warns me about the installer.</summary>
+        <p>It isn't signed, so SmartScreen warns once: "More info", then "Run anyway". Each release lists checksums to verify the download.</p>
+      </details>
+      <details>
+        <summary>How do I update?</summary>
+        <p>The app tells you when a new version is out. Install it over the old one.</p>
+      </details>
+      <details>
+        <summary>Is it finished?</summary>
+        <p>There is no such thing as finished software, I think. Most features envisioned are in, but expect rough edges. <a href="https://github.com/marcusvilete/couch-coapp/issues/new?template=problem.yml">Bugs, issues and suggestions</a> are welcome.</p>
+      </details>
+      <details>
+        <summary>Who made it?</summary>
+        <p><a href="https://github.com/marcusvilete">Marcus Vilete</a>, with Claude (Anthropic's AI) writing the code. <a href="https://github.com/marcusvilete/couch-coapp#readme">The README</a> has the story.</p>
+      </details>
+    </div>
+  </section>
+
+  <section class="end">
+    <div class="wrap narrow">
+      <h2>Bring the couch back</h2>
+      <p><a class="button" href="#download">Download Couch Co-App</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <nav aria-label="More">
+      <a href="https://github.com/marcusvilete/couch-coapp/blob/main/docs/self-hosting.md">Guide: play with friends</a>
+      <a href="https://github.com/marcusvilete/couch-coapp/blob/main/deploy/relay/README.md">Guide: your own relay</a>
+      <a href="https://github.com/marcusvilete/couch-coapp/releases">All releases</a>
+      <a href="https://github.com/marcusvilete/couch-coapp/issues/new?template=problem.yml">Report a problem</a>
+      <a href="https://github.com/marcusvilete/couch-coapp">Source code</a>
+    </nav>
+    <p class="quiet small">Free software under the <a href="https://github.com/marcusvilete/couch-coapp/blob/main/LICENSE">GPL-3.0</a>. Game names belong to their owners. This page loads nothing from elsewhere and sets no cookies.</p>
+  </div>
+</footer>
+</body>
+</html>

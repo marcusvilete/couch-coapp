@@ -1288,6 +1288,93 @@ export const SCENARIOS: Record<string, Scenario> = {
         ),
       ),
   },
+  // ---- The landing page's pictures (deploy/landing-page, taken by
+  // `npm run site-shots`): a public build on the public relays, everyone on
+  // this version, nothing wrong ----
+  "site-first-run": { title: "Landing page: no rooms yet", world: () => siteWorld([]) },
+  "site-owner": { title: "Landing page: our room, no session", world: () => siteWorld([siteSofa()]) },
+  "site-hosting-idle": {
+    title: "Landing page: a session started, nothing streamed yet",
+    world: () => siteWorld([siteSofa({ sessions: [hosting({ requests: [], viewerRelays: [null, null, null] }, false)] })]),
+  },
+  "site-together": {
+    title: "Landing page: watching a session nobody plays",
+    world: () => {
+      const s = othersSession(bia.id, "Movie night", { role: "watching", viewers: [ME, caio.id, dani.id], streamWindow: ourWindow({}) });
+      s.seats = [];
+      return siteWorld([siteSofa({ sessions: [s] })]);
+    },
+  },
+  "site-remote": {
+    title: "Landing page: running our own PC's session from the laptop",
+    world: () => {
+      const s = hostSession(HOME_PC, "Game night", 4, { controllers: 2, keyboardMouse: "none" }, []);
+      Object.assign(s, { role: "watching", operator: true, panicKey: null, answerKeys: null });
+      s.viewers = [ME, bia.id];
+      s.viewerControllers = [1, 1];
+      s.viewerPads = [[{ slot: 0, name: "Xbox Wireless Controller" }], [{ slot: 0, name: "DualSense Wireless Controller" }]];
+      s.seats[0].holder = ME;
+      s.seats[0].guestController = 0;
+      s.requests = [{ member: bia.id, seat: 1, controller: null }];
+      s.stream = { state: "live" };
+      s.streaming = { name: "Fling to the Finish", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
+      s.streamWindow = ourWindow({});
+      s.gameInFront = true;
+      return siteWorld([siteSofa({ members: [you(false), homePc({ unlocked: true }), bia, caio], sessions: [s] })]);
+    },
+  },
+  "site-hosting": {
+    title: "Landing page: hosting, Dani asking to play",
+    world: () => {
+      // Our two controllers on Controllers 1 and 2, Bia and Caio on 3 and 4,
+      // Dani asking for our second.
+      const s = hosting({ requests: [{ member: dani.id, seat: 1, controller: null }], viewerRelays: [null, null, null] });
+      s.viewerControllers = [1, 1, 1];
+      s.viewerPads = [[{ slot: 0, name: "DualSense Wireless Controller" }], [{ slot: 0, name: "Xbox Wireless Controller" }], [{ slot: 0, name: "Pro Controller" }]];
+      s.seats[2].holder = bia.id;
+      s.seats[2].guestController = 0;
+      s.seats[3].holder = caio.id;
+      s.seats[3].guestController = 0;
+      s.seats[4].holder = null;
+      // A game made for several controllers.
+      s.streaming = { name: "Fling to the Finish", fps: 60, maxMbps: 20, uploadMbps: null, screen: false };
+      return siteWorld([siteSofa({ sessions: [s] })]);
+    },
+  },
+  "site-playing": {
+    title: "Landing page: playing in Bia's session",
+    world: () => {
+      const s = othersSession(bia.id, "Overcooked with the gang", { role: "controlling", viewers: [ME, caio.id, dani.id] });
+      s.seats = seatsFor({ controllers: 4, keyboardMouse: "none" });
+      s.seats[0].holder = bia.id;
+      s.seats[1].holder = ME;
+      s.seats[2].holder = caio.id;
+      s.ourControllers = [{ slot: 0, name: "Xbox Wireless Controller", seat: 1 }];
+      return siteWorld([siteSofa({ sessions: [s] })]);
+    },
+  },
 };
+
+function siteWorld(rooms: FakeRoom[]): World {
+  const world = base(rooms, { network: publicOnly({ askForRelay: false }) });
+  world.sources.windows = [
+    { id: "101", title: "Fling to the Finish", app: "FlingToTheFinish.exe", elevated: false, refreshHz: 144 },
+    { id: "102", title: "Overcooked! 2", app: "Overcooked2.exe", elevated: false, refreshHz: 144 },
+    { id: "103", title: "Discord", app: "Discord.exe", elevated: false, refreshHz: 144 },
+    { id: "104", title: "Steam", app: "steam.exe", elevated: false, refreshHz: 144 },
+  ];
+  world.sources.hostControllers = [
+    { name: "DualSense Wireless Controller", vendor: 1356, product: 3302, kind: "physical" },
+    { name: "Xbox Wireless Controller", vendor: 1118, product: 2835, kind: "physical" },
+  ];
+  world.sources.controllers = 2;
+  world.drivers = [
+    { driver: "vigembus", state: "ready", installer: true },
+    { driver: "hidhide", state: "ready", installer: true },
+  ];
+  return world;
+}
+const siteSofa = (over: Partial<FakeRoom> = {}) =>
+  room("50fa0000000000000000000000000001", "Sofá", { members: [you(true), bia, caio, dani, edu], ...over });
 
 export const DEFAULT_SCENARIO = "lobby";

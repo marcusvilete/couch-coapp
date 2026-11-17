@@ -2,7 +2,7 @@
 // link. It reads only the part after "#", which browsers never send to the server, and
 // makes no requests. The app checks the invite itself; this only refuses obvious junk and
 // shows the room's name. Since M26c-3 it also offers the download, for the visitor's system
-// first, and says when the owner's relay needs a code the link doesn't carry.
+// first (download.js), and says when the owner's relay needs a code the link doesn't carry.
 "use strict";
 
 const LINK_PREFIX = "couchco://join#";
@@ -10,8 +10,6 @@ const MAX_CHARS = 4096;
 // The payload is base32 of "CC", a version byte and the invite (couch_proto::invite):
 // "inbq" is "CC" followed by the top bits of any version below 16.
 const PAYLOAD = /^inbq[a-z2-7]+$/;
-// The repository whose releases the download opens, as invite-page.yml writes it.
-const REPOSITORY = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 // iroh's public relays (couch_net::endpoint's `the_invite_page_knows_the_public_relays`
 // checks this against iroh's list): they need no code.
 const PUBLIC_RELAY = /\.relay\.n0\.iroh\.link$/;
@@ -132,53 +130,11 @@ function relayToAsk(payload) {
   }
 }
 
-// The visitor's system, from what the browser says: "windows", "linux", "mac", "phone"
-// (a phone or tablet: nothing to install there) or "other".
-function systemOf(platform, userAgent, touchPoints) {
-  const text = `${platform || ""} ${userAgent || ""}`;
-  if (/Android|iPhone|iPad|iPod/i.test(text)) return "phone";
-  // iPadOS says it's a Mac; a Mac has no touch screen.
-  if (/Mac/i.test(text)) return touchPoints > 1 ? "phone" : "mac";
-  if (/Windows/i.test(text)) return "windows";
-  if (/CrOS|Chrome OS/i.test(text)) return "other";
-  if (/Linux|X11/i.test(text)) return "linux";
-  return "other";
-}
-
-// What the download part says for a system: the note above it, the main link and the
-// file to pick on the release page, and the other system's link.
-const DOWNLOADS = {
-  windows: {
-    first: "Download for Windows",
-    pick: "On the release page, pick the file ending in x64-setup.exe and run it.",
-    other: "Also for Linux: the AppImage",
-  },
-  linux: {
-    first: "Download for Linux",
-    pick: "On the release page, pick the file ending in .AppImage, make it executable and open it.",
-    other: "Also for Windows: the setup file",
-  },
-};
-
-function downloadsFor(system) {
-  const note = {
-    mac: "Couch Co-App isn't on macOS yet: it runs on Windows and Linux PCs.",
-    phone: "Couch Co-App runs on Windows and Linux PCs: open this link on yours.",
-  }[system];
-  return { note: note || null, ...(DOWNLOADS[system] || DOWNLOADS.windows) };
-}
-
-function releasesOf(repository) {
-  return REPOSITORY.test(repository || "") ? `https://github.com/${repository}/releases/latest` : null;
-}
-
 function showDownloads() {
   const meta = document.querySelector('meta[name="couch-releases"]');
-  const releases = releasesOf(meta && meta.content);
+  const releases = CouchDownload.releasesOf(meta && meta.content);
   if (!releases) return;
-  const nav = navigator.userAgentData;
-  const system = systemOf(nav && nav.platform, navigator.userAgent, navigator.maxTouchPoints);
-  const text = downloadsFor(system);
+  const text = CouchDownload.downloadsFor(CouchDownload.visitorSystem());
   // On a Mac or a phone, the note says where it runs instead.
   document.getElementById("get-it").textContent = text.note || "Couch Co-App is free, for Windows and Linux.";
   const first = document.getElementById("download-first");
@@ -226,5 +182,5 @@ if (typeof document !== "undefined") {
   showDownloads();
 } else {
   // Under Node, for checking the decoding against invites the app made.
-  module.exports = { payloadOf, roomName, relayToAsk, systemOf, downloadsFor, releasesOf };
+  module.exports = { payloadOf, roomName, relayToAsk };
 }

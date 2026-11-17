@@ -2,6 +2,10 @@
 # whatever core.autocrlf says: bash fails on CRLF.
 deploy/** text eol=lf
 *.sh text eol=lf
+# Pictures are never text, inside deploy/ too (the landing page's): converting line endings
+# in one corrupts it.
+*.png binary
+*.jpg binary
 # Written by tauri-build on every build, always with LF: checked out the same, so a build on
 # Windows (core.autocrlf, as on GitHub's runners) leaves them as committed. The release
 # workflow's Windows build refuses a tree the build changed (M26c).
