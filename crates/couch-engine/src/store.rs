@@ -12,12 +12,15 @@
 //! - `drawing.json`: whether sessions start with drawing on the stream on
 //!   (M27a).
 //! - `app.json`: whether the app keeps an icon in the notification area
-//!   (M25c).
+//!   (M25c), and whether it tells of new versions (M26c-2).
 //! - `streaming.json`: how a host captures: HDR converted to SDR (M29).
 //! - `invite-relays.json`: for rooms we own, the relay each open invite
 //!   names, by the invite's tag (a hash of its token, never the token), so
 //!   links made before our home relay moved are marked (M26a-2). Never
 //!   backed up, like the invites.
+//! - `updates.json`: what the update notice last found, when it looked, and
+//!   the version the user dismissed (M26c-2, `crate::updates`). Never backed
+//!   up: it is this PC's.
 //!
 //! The room actor rewrites `settings.json` whole, so what the engine itself
 //! writes has files of its own.
@@ -79,6 +82,7 @@ const APP_FILE: &str = "app.json";
 const DRAWING_FILE: &str = "drawing.json";
 const INVITE_RELAYS_FILE: &str = "invite-relays.json";
 const STREAMING_FILE: &str = "streaming.json";
+const UPDATES_FILE: &str = "updates.json";
 const RELAYS_FILE: &str = "relays.sealed";
 /// Leads the sealed JSON of `relays.sealed`.
 const RELAYS_MAGIC: &[u8] = b"CCL1";
@@ -734,12 +738,26 @@ pub(crate) fn save_streaming(dir: &Path, settings: StreamingSettings) -> Result<
     write_atomic(&dir.join(STREAMING_FILE), &bytes)
 }
 
-/// `app.json` (M25c): the app's own behaviour on this PC.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `app.json` (M25c): the app's own behaviour on this PC. A field missing
+/// (a file from before it) takes its default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct AppSettings {
     /// An icon in the notification area: closing the window hides it there,
     /// and a start at sign-in stays there. Off, closing quits.
     pub tray: bool,
+    /// The update notice looks for new versions (M26c-2, ADR 0014), where
+    /// the build names its releases. On unless turned off.
+    pub updates: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            tray: false,
+            updates: true,
+        }
+    }
 }
 
 pub(crate) fn app(dir: &Path) -> AppSettings {
@@ -756,6 +774,26 @@ pub(crate) fn app(dir: &Path) -> AppSettings {
 pub(crate) fn save_app(dir: &Path, settings: AppSettings) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(&settings).expect("settings serialize");
     write_atomic(&dir.join(APP_FILE), &bytes)
+}
+
+/// `updates.json` (M26c-2): what the update notice keeps between starts.
+pub(crate) fn updates(dir: &Path) -> crate::updates::UpdateState {
+    let path = dir.join(UPDATES_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            crate::updates::UpdateState::default()
+        }),
+        Err(_) => crate::updates::UpdateState::default(),
+    }
+}
+
+pub(crate) fn save_updates(
+    dir: &Path,
+    state: &crate::updates::UpdateState,
+) -> Result<(), StoreError> {
+    let bytes = serde_json::to_vec_pretty(state).expect("update state serializes");
+    write_atomic(&dir.join(UPDATES_FILE), &bytes)
 }
 
 /// `host-audio.json` (P7): how loud guests hear our stream's sound.

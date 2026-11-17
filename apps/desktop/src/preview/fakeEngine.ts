@@ -15,6 +15,7 @@ import type { InviteCodeView } from "../bindings/InviteCodeView";
 import type { InviteRelay } from "../bindings/InviteRelay";
 import type { InviteRelayView } from "../bindings/InviteRelayView";
 import type { MemberView } from "../bindings/MemberView";
+import type { NewVersionView } from "../bindings/NewVersionView";
 import type { NetworkView } from "../bindings/NetworkView";
 import type { ProfileView } from "../bindings/ProfileView";
 import type { RemoteAccessView } from "../bindings/RemoteAccessView";
@@ -28,6 +29,7 @@ import type { SessionView } from "../bindings/SessionView";
 import type { ShortcutView } from "../bindings/ShortcutView";
 import type { GameWindowView } from "../bindings/GameWindowView";
 import type { SourceList } from "../bindings/SourceList";
+import type { UpdatesView } from "../bindings/UpdatesView";
 import { seatsFor } from "../model/seats";
 import { keeps, noDrawing, numbered, seatsOf } from "../model/sessions";
 import type { DrawingKeyView } from "../bindings/DrawingKeyView";
@@ -82,6 +84,9 @@ export type World = {
   picturesDefault: boolean;
   /** Settings → Streaming (M29): a monitor in HDR converted to SDR. */
   hdr: boolean;
+  /** New versions (M26c-2): whether the build looks, the switch, and a
+   * newer version found (shown unless dismissed or switched off). */
+  updates: { checks: boolean; on: boolean; latest: NewVersionView | null; dismissed: string | null };
   /** Remote play (M25): Settings → Remote play. Members offering it carry
    * their `remote` in the rooms. A PC unlocks with "246810". */
   remotePlay: RemotePlayView;
@@ -860,6 +865,14 @@ function remoteAction(room: FakeRoom, pc: MemberView, action: RemoteAction): Res
 
 // ---- Commands ----
 
+let updatesRevision = 0;
+
+function updatesView(): UpdatesView {
+  const u = w().updates;
+  const shown = u.checks && u.on && u.latest != null && u.latest.version !== u.dismissed;
+  return { revision: ++updatesRevision, checks: u.checks, on: u.on, newVersion: shown ? structuredClone(u.latest) : null };
+}
+
 function handle(cmd: Command): Response | Promise<Response> {
   const world = w();
   switch (cmd.type) {
@@ -1133,6 +1146,23 @@ function handle(cmd: Command): Response | Promise<Response> {
     case "setTray":
       world.tray = cmd.on;
       return { type: "tray", on: world.tray };
+    case "getUpdates":
+      return { type: "updates", ...updatesView() };
+    case "setUpdateChecks":
+      if (!world.updates.checks) throw "this build names no releases";
+      world.updates.on = cmd.on;
+      emit({ type: "updates", ...updatesView() });
+      return { type: "updates", ...updatesView() };
+    case "dismissUpdate":
+      if (updatesView().newVersion?.version !== cmd.version) throw "the notice doesn't show that version";
+      world.updates.dismissed = cmd.version;
+      emit({ type: "updates", ...updatesView() });
+      return { type: "updates", ...updatesView() };
+    case "openPage":
+      // The real engine opens the browser; here, nothing to show.
+      if (!world.updates.checks) throw "this build names no releases";
+      if (cmd.page === "newVersion" && world.updates.latest == null) throw "no newer version is known";
+      return { type: "done" };
     case "getRemotePlay":
     case "setRemotePlay":
     case "setStartAtSignIn":

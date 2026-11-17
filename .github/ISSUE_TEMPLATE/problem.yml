@@ -1,0 +1,70 @@
+# The form Settings → About → Report a problem opens (M26c-2): the app
+# sends nothing itself; the user pastes what they choose.
+name: Report a problem
+description: Something in Couch Co-App didn't work as it should.
+labels: ["problem"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Everything you write here is public: leave out passwords, invite links and relay codes.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen again
+      description: The steps, if you know them. "It happened once" is fine too.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Settings → About shows it, such as "Couch Co-App 0.39.0".
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux (the AppImage)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Where it happened
+      description: Pick every one that fits.
+      multiple: true
+      options:
+        - Rooms and invites (joining, members, relays)
+        - Hosting a session
+        - Watching or playing in someone's session
+        - Controllers, keyboard or mouse
+        - Picture or sound
+        - Drawing on the stream
+        - Remote play
+        - Installing or starting the app
+        - Something else
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        In the app, Settings → Network → Copy diagnostics, then paste here. It holds versions, relays by server name and how each answers, and your rooms' links numbered: no names, addresses, passwords or codes.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines (optional)
+      description: |
+        Settings → Network → Open the log folder, then the end of `desktop.log`, from around when it happened. Read it first: it may name your rooms and the people in them.
+      render: text

@@ -91,6 +91,8 @@ type Reply = oneshot::Sender<Result<Response, EngineError>>;
 pub(crate) enum Input {
     Command(Command, Reply),
     Connections(String, oneshot::Sender<Vec<(String, bool)>>),
+    /// Whether we host or watch a session now (the update notice waits).
+    Busy(oneshot::Sender<bool>),
     /// For tests: drop the connection with a member, as a dead path would.
     DropConnection(String, String),
     /// For tests: dial a member we are connected to again; the room keeps
@@ -733,6 +735,9 @@ impl Actor {
                     .unwrap_or_default();
                 let _ = reply.send(list);
             }
+            Input::Busy(reply) => {
+                let _ = reply.send(self.busy());
+            }
             Input::Restore(contents, reply) => {
                 let _ = reply.send(self.restore_backup(&contents));
             }
@@ -1084,6 +1089,10 @@ impl Actor {
             | Command::GetStreamWindow
             | Command::GetTray
             | Command::SetTray { .. }
+            | Command::GetUpdates
+            | Command::SetUpdateChecks { .. }
+            | Command::DismissUpdate { .. }
+            | Command::OpenPage { .. }
             | Command::GetDrawingDefault
             | Command::SetDrawingDefault { .. }
             | Command::GetStreaming

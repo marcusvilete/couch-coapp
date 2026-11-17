@@ -42,6 +42,7 @@ pub mod top_windows;
 pub mod video_caps;
 pub mod vigem;
 pub mod virtual_pads;
+pub mod web;
 pub mod wgc;
 pub mod wifi;
 pub mod xinput_slots;

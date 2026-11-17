@@ -1,11 +1,12 @@
 // Settings' sections but Shortcuts: the look, the overlay, the
 // drivers, a backup of the profile (M13), and About.
-import { Download, Monitor, Moon, Sun, Upload } from "lucide-react";
+import { Bug, Download, Monitor, Moon, Sun, Upload } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { DriverName } from "../bindings/DriverName";
 import type { DriverState } from "../bindings/DriverState";
 import type { DriverView } from "../bindings/DriverView";
 import type { EngineInfo } from "../bindings/EngineInfo";
+import type { UpdatesView } from "../bindings/UpdatesView";
 import { errorText, request } from "../engine";
 import type { Busy } from "../model/sessions";
 import { platform } from "../platform";
@@ -524,9 +525,14 @@ export function BackupSection(props: {
 // ---- About ----
 
 /** The version, the licence, where the source is, and every bundled
- * component's licence (THIRD-PARTY-NOTICES.txt, installed next to the app). */
+ * component's licence (THIRD-PARTY-NOTICES.txt, installed next to the app).
+ * Where the build names its releases (M26c-2): whether to hear of new
+ * versions, and reporting a problem. */
 export function AboutSection() {
   const [info, setInfo] = useState<EngineInfo | null>(null);
+  const [updates, setUpdates] = useState<UpdatesView | null>(null);
+  /** The switch waits for its answer: two at once could land out of order. */
+  const [switching, setSwitching] = useState(false);
   const [notices, setNotices] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -534,10 +540,31 @@ export function AboutSection() {
     request({ type: "getInfo" }, "info")
       .then(setInfo)
       .catch((e) => setError(errorText(e)));
+    request({ type: "getUpdates" }, "updates")
+      .then(setUpdates)
+      .catch((e) => setError(errorText(e)));
     request({ type: "getNotices" }, "notices")
       .then((r) => setNotices(r.text))
       .catch((e) => setError(errorText(e)));
   }, []);
+
+  const changeUpdates = (on: boolean) => {
+    const was = updates;
+    if (was) setUpdates({ ...was, on });
+    setError(null);
+    setSwitching(true);
+    request({ type: "setUpdateChecks", on }, "updates")
+      .then(setUpdates)
+      .catch((e) => {
+        setUpdates(was);
+        setError(errorText(e));
+      })
+      .finally(() => setSwitching(false));
+  };
+  const report = () => {
+    setError(null);
+    request({ type: "openPage", page: "reportProblem" }, "done").catch((e) => setError(errorText(e)));
+  };
 
   const source = info?.repository
     ? info.commit && !info.commit.endsWith("-dirty")
@@ -566,6 +593,26 @@ export function AboutSection() {
           FFmpeg's source came with the installer, in the files beside it.
         </p>
       </div>
+      {updates?.checks && (
+        <div className="settings-card">
+          <Switch
+            checked={updates.on}
+            disabled={switching}
+            onChange={changeUpdates}
+            label="Tell me about new versions"
+            detail="Once a day, Couch Co-App asks GitHub, where its releases are, for the latest version. GitHub sees your IP address, as any website does, and nothing else of yours. Nothing is downloaded or installed."
+          />
+          <div className="about-report">
+            <Button icon={<Bug />} onClick={report}>
+              Report a problem
+            </Button>
+            <span className="settings-note">
+              Opens a new issue on GitHub (you need an account there). Copy diagnostics in Settings → Network first,
+              and paste them in.
+            </span>
+          </div>
+        </div>
+      )}
       {error && (
         <p className="field-error selectable" role="alert">
           {error}

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EngineInfo } from "../bindings/EngineInfo";
 import type { NetworkView } from "../bindings/NetworkView";
+import type { UpdatesView } from "../bindings/UpdatesView";
 import type { Event as EngineEvent } from "../bindings/Event";
 import type { ProfileView } from "../bindings/ProfileView";
 import type { RoomGone } from "../bindings/RoomGone";
@@ -36,6 +37,10 @@ export type Lobby = {
   network: NetworkView | null;
   /** Keeps a view the engine just answered a command with. */
   setNetwork: (network: NetworkView) => void;
+  /** New versions (M26c-2): whether the build looks, the switch, the notice. */
+  updates: UpdatesView | null;
+  /** Keeps a view the engine just answered a command with. */
+  setUpdates: (updates: UpdatesView) => void;
   /** Forgets the opened link once the UI has it. */
   clearOpened: () => void;
   setProfile: (profile: ProfileView) => void;
@@ -129,6 +134,12 @@ export function useLobby(): Lobby {
   const [notices, setNotices] = useState<Notice[]>([]);
   const [opened, setOpened] = useState<OpenedInvite | null>(null);
   const [network, setNetwork] = useState<NetworkView | null>(null);
+  const [updates, setUpdatesView] = useState<UpdatesView | null>(null);
+  /** The newer of two views (a reply and an event come in either order). */
+  const setUpdates = useCallback(
+    (view: UpdatesView) => setUpdatesView((was) => (was != null && was.revision > view.revision ? was : view)),
+    [],
+  );
   const roomsRef = useRef(rooms);
   roomsRef.current = rooms;
   /** Counts room events, so a room list fetched meanwhile is known stale. */
@@ -219,6 +230,13 @@ export function useLobby(): Lobby {
         })
         .catch(() => {});
     };
+    const refreshUpdates = () => {
+      request({ type: "getUpdates" }, "updates")
+        .then((v) => {
+          if (live) setUpdates(v);
+        })
+        .catch(() => {});
+    };
     const handle = (event: EngineEvent) => {
       if (!live) return;
       switch (event.type) {
@@ -296,6 +314,11 @@ export function useLobby(): Lobby {
           setNetwork(view);
           break;
         }
+        case "updates": {
+          const { type: _, ...view } = event;
+          setUpdates(view);
+          break;
+        }
         case "inviteOpened":
           takeOpened().catch(() => {});
           break;
@@ -313,6 +336,7 @@ export function useLobby(): Lobby {
         ]);
         await refreshRooms();
         refreshNetwork();
+        refreshUpdates();
         if (!live) return;
         setInfo(infoReply);
         chimeByEngine(infoReply.platform === "linux");
@@ -333,7 +357,7 @@ export function useLobby(): Lobby {
       window.removeEventListener("focus", onFocus);
       unlisten.then((stop) => stop());
     };
-  }, [notify, putRoom, refreshRooms, takeOpened]);
+  }, [notify, putRoom, refreshRooms, setUpdates, takeOpened]);
 
   const clearOpened = useCallback(() => setOpened(null), []);
 
@@ -351,6 +375,8 @@ export function useLobby(): Lobby {
     opened,
     network,
     setNetwork,
+    updates,
+    setUpdates,
     clearOpened,
     setProfile,
     putRoom,

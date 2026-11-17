@@ -27,3 +27,13 @@
   font-size: var(--text-sm);
   line-height: 1.4;
 }
+
+/* A newer version (M26c-2): news, not trouble. */
+.trouble-strip.update-strip {
+  background: var(--info-soft);
+  border-top-color: var(--info);
+
+  & > svg {
+    color: var(--info);
+  }
+}

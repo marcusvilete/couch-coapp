@@ -94,6 +94,8 @@ Release installers, with your own relay, are in [self-hosting.md](self-hosting.m
 
 **A public build** (no relay and no token: iroh's public relays until someone registers a relay; from a clean, committed tree): `.\scripts\build-installer.ps1 -Public`, or `bash scripts/build-appimage.sh --public` on Linux. The repository's release workflow (`.github/workflows/release.yml`) makes both on a tag `v<version>`, into a draft GitHub Release; run by hand from the Actions tab, it builds them from any branch and keeps them as the run's artifacts, with no release.
 
+**The update notice:** builds that name their releases (public builds) look at GitHub's latest release once a day. To try it in a development build, serve the copy of GitHub's reply in the repository, `npx --yes http-server crates/couch-engine/tests/fixtures -p 8000`, and set `$env:COUCH_RELEASES_URL = 'http://localhost:8000/github-latest-release.json'` before `npm run tauri dev`: ten seconds after start, the strip at the bottom says 0.99.0 is out. Release and public builds ignore the variable.
+
 **A relay on this PC:** run `cargo xtask relay-tool` once, then `.\scripts\relay.ps1`. It serves `http://localhost:3340` with the token from your `release.toml` (`-Lan` opens it to your network, `-Open` drops the token). Point a development build at it by setting `COUCH_BUILD_RELAY_URL` and `COUCH_BUILD_RELAY_TOKEN` before `npm run tauri dev`.
 
 **The invite page** (optional): a static page that makes invite links clickable in chat apps. A workflow publishes it on the repository's GitHub Pages, and `build-installer.ps1 -InvitePage <address>` points one build at a page. [deploy/invite-page/README.md](../deploy/invite-page/README.md) covers trying and hosting it.

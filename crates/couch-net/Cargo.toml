@@ -37,6 +37,9 @@ noq-udp = { version = "=1.3.0", optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# The update notice's one request (M26c-2, `web`): the reqwest iroh brings,
+# on the TLS iroh configures (no provider of its own).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 
 # Timing tests need Windows' 1 ms timer resolution.
 [target.'cfg(windows)'.dev-dependencies]

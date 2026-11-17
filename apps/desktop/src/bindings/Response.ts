@@ -20,6 +20,7 @@ import type { SourceList } from "./SourceList";
 import type { StreamWindowSettingsView } from "./StreamWindowSettingsView";
 import type { StreamingSettingsView } from "./StreamingSettingsView";
 import type { TrayView } from "./TrayView";
+import type { UpdatesView } from "./UpdatesView";
 
 /**
  * The reply to a [`Command`]. Its `Debug` leaves out invite links.
@@ -38,4 +39,4 @@ without_code: string | null, } | { "type": "invitePreview" } & InvitePreview | {
 /**
  * The drawing editor's own keys (M27a): fixed, listed only.
  */
-drawingKeys: Array<DrawingKeyView>, } | { "type": "network" } & NetworkView | { "type": "relayCode" } & RelayCodeView | { "type": "relayCheck" } & RelayCheckView | { "type": "relayUse" } & RelayUseView | { "type": "diagnostics", text: string, } | { "type": "streamWindow" } & StreamWindowSettingsView | { "type": "tray" } & TrayView | { "type": "drawing" } & DrawingSettingsView | { "type": "streaming" } & StreamingSettingsView | { "type": "drivers", drivers: Array<DriverView>, } | { "type": "gameWindows", windows: Array<GameWindowView>, } | { "type": "sharedChoice", remembered: boolean, } | { "type": "fullScreenGame", on: boolean, } | { "type": "notices", text: string, } | { "type": "backup", path: string | null, } | { "type": "remotePlay" } & RemotePlayView | { "type": "done" };
+drawingKeys: Array<DrawingKeyView>, } | { "type": "updates" } & UpdatesView | { "type": "network" } & NetworkView | { "type": "relayCode" } & RelayCodeView | { "type": "relayCheck" } & RelayCheckView | { "type": "relayUse" } & RelayUseView | { "type": "diagnostics", text: string, } | { "type": "streamWindow" } & StreamWindowSettingsView | { "type": "tray" } & TrayView | { "type": "drawing" } & DrawingSettingsView | { "type": "streaming" } & StreamingSettingsView | { "type": "drivers", drivers: Array<DriverView>, } | { "type": "gameWindows", windows: Array<GameWindowView>, } | { "type": "sharedChoice", remembered: boolean, } | { "type": "fullScreenGame", on: boolean, } | { "type": "notices", text: string, } | { "type": "backup", path: string | null, } | { "type": "remotePlay" } & RemotePlayView | { "type": "done" };

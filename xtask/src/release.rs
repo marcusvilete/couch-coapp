@@ -12,9 +12,9 @@ use anyhow::{Context, bail};
 
 use crate::appimage::{git, one_version, workspace_repository};
 
-/// The line the update notice reads the wire revision from (M26c-2), kept
-/// out of sight on the release page: the visible text may be edited.
-pub const WIRE_MARKER: &str = "couch-wire-revision";
+/// The first line of a release's notes, which the update notice reads
+/// (`couch_proto::RELEASE_WIRE_MARKER`).
+pub use couch_proto::RELEASE_WIRE_MARKER as WIRE_MARKER;
 
 pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut tag = None;

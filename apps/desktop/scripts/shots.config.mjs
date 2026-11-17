@@ -437,6 +437,11 @@ export const SHOTS = [
   ["settings-backup", "lobby", settings("Backup")],
   ["settings-backup-empty", "first-run", settings("Backup")],
   ["settings-about", "lobby", settings("About")],
+  // M26c-2: a build that names no releases has no switch nor report.
+  ["settings-about-no-releases", "update-none", settings("About")],
+  // M26c-2: a member on a newer version: the latest release from their menu.
+  ["member-newer-menu", "many-members", member("Gui")],
+  ["member-newer-no-releases", "update-none", member("Gui")],
 ];
 
 const SETTINGS = [
@@ -504,6 +509,16 @@ export const STABLE = [
           await settingsTop(page);
         },
       ],
+    ],
+  ],
+  // The update notice (M26c-2) at the bottom, like the trouble strip.
+  [
+    "update strip",
+    "update-wire",
+    [".sidebar", ".room-header", ".members-panel"],
+    [
+      ["Sofá", async (page) => page.getByRole("button", { name: /^Sofá/ }).click()],
+      ["Friday games", async (page) => page.getByRole("button", { name: /^Friday games/ }).click()],
     ],
   ],
   // The trouble strip comes and goes at the bottom: the room above stays.

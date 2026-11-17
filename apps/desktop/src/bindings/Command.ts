@@ -8,6 +8,7 @@ import type { NoticeView } from "./NoticeView";
 import type { RemoteAction } from "./RemoteAction";
 import type { SourceChoice } from "./SourceChoice";
 import type { StreamWindowRequest } from "./StreamWindowRequest";
+import type { WebPage } from "./WebPage";
 
 /**
  * Everything the UI can ask of the engine. Its `Debug` leaves out passwords
@@ -72,4 +73,4 @@ pictures: boolean, } | { "type": "getStreaming" } | { "type": "setStreaming",
 /**
  * A monitor in HDR captured in FP16 and converted to SDR (Windows).
  */
-hdr: boolean, } | { "type": "setStreamVolume", percent: number, muted: boolean, } | { "type": "streamWindow", request: StreamWindowRequest, } | { "type": "getStreamWindow" } | { "type": "setStreamWindow", bar: boolean, } | { "type": "getTray" } | { "type": "setTray", on: boolean, } | { "type": "getRemotePlay" } | { "type": "setRemotePlay", on: boolean, } | { "type": "setStartAtSignIn", on: boolean, } | { "type": "setRemotePin", pin: string, } | { "type": "addRemoteDevice", member: string, } | { "type": "removeRemoteDevice", member: string, } | { "type": "acceptRemoteHost", member: string, } | { "type": "forgetRemoteHost", member: string, } | { "type": "unlockRemote", room: string, member: string, pin: string, } | { "type": "lockRemote", room: string, member: string, } | { "type": "remote", room: string, member: string, action: RemoteAction, };
+hdr: boolean, } | { "type": "setStreamVolume", percent: number, muted: boolean, } | { "type": "streamWindow", request: StreamWindowRequest, } | { "type": "getStreamWindow" } | { "type": "setStreamWindow", bar: boolean, } | { "type": "getTray" } | { "type": "setTray", on: boolean, } | { "type": "getUpdates" } | { "type": "setUpdateChecks", on: boolean, } | { "type": "dismissUpdate", version: string, } | { "type": "openPage", page: WebPage, } | { "type": "getRemotePlay" } | { "type": "setRemotePlay", on: boolean, } | { "type": "setStartAtSignIn", on: boolean, } | { "type": "setRemotePin", pin: string, } | { "type": "addRemoteDevice", member: string, } | { "type": "removeRemoteDevice", member: string, } | { "type": "acceptRemoteHost", member: string, } | { "type": "forgetRemoteHost", member: string, } | { "type": "unlockRemote", room: string, member: string, pin: string, } | { "type": "lockRemote", room: string, member: string, } | { "type": "remote", room: string, member: string, action: RemoteAction, };

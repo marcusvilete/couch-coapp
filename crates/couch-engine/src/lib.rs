@@ -22,6 +22,7 @@ pub mod remote;
 mod rooms;
 pub mod secrets;
 mod store;
+mod updates;
 
 use std::{
     collections::BTreeMap,
@@ -571,6 +572,25 @@ pub enum Command {
     SetTray {
         on: bool,
     },
+    // ---- New versions (M26c-2, ADR 0014) ----
+    /// Whether this build looks for new versions, the switch, and the
+    /// notice if a newer version is out.
+    GetUpdates,
+    /// Settings → About's "Tell me about new versions". Off, nothing is
+    /// looked at and the notice goes.
+    SetUpdateChecks {
+        on: bool,
+    },
+    /// The notice's dismiss: it stays away until a newer version.
+    DismissUpdate {
+        version: String,
+    },
+    /// Opens one of the build's pages in the browser. The webview names the
+    /// page, never its address: the engine makes every address from the
+    /// build's repository.
+    OpenPage {
+        page: WebPage,
+    },
     // ---- Remote play (M25, ADR 0010) ----
     /// Remote play's settings: on the home PC, the devices it trusts and the
     /// members that could be added; on a device, the home PCs it accepted.
@@ -785,6 +805,50 @@ pub struct StreamingSettingsView {
     /// SDR white level; off, Windows' own 8-bit capture (HDR content
     /// clipped at 80 nits).
     pub hdr: bool,
+}
+
+/// What the update notice says (M26c-2, ADR 0014).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdatesView {
+    /// Counts up with every view made: the UI keeps the newer of two (a
+    /// command's reply and an event come in either order).
+    #[ts(type = "number")]
+    pub revision: u64,
+    /// This build looks for new versions (it names its releases): the
+    /// switch is offered only then.
+    pub checks: bool,
+    /// "Tell me about new versions", on unless turned off.
+    pub on: bool,
+    /// A newer version is out, and its notice wasn't dismissed; never while
+    /// the switch is off.
+    pub new_version: Option<NewVersionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NewVersionView {
+    /// Such as "0.40.0".
+    pub version: String,
+    /// Its wire revision isn't ours: everyone in our rooms needs it to
+    /// play with whoever updates. Only when its notes say.
+    pub wire_changed: bool,
+}
+
+/// The build's pages the app opens in the browser (M26c-2,
+/// [`Command::OpenPage`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum WebPage {
+    /// The newer version's release page, the notice's link.
+    NewVersion,
+    /// The latest release: a member's newer version asks us to update.
+    Releases,
+    /// A new issue from the problem template.
+    ReportProblem,
 }
 
 /// Answer to [`Command::GetTray`] (M25c).
@@ -1751,6 +1815,8 @@ pub enum Response {
         #[ts(rename = "drawingKeys")]
         drawing_keys: Vec<DrawingKeyView>,
     },
+    /// [`Command::GetUpdates`] and the commands changing it (M26c-2).
+    Updates(UpdatesView),
     Network(NetworkView),
     /// What a pasted relay code holds ([`Command::ReadRelayCode`]).
     RelayCode(RelayCodeView),
@@ -2103,6 +2169,15 @@ impl fmt::Debug for Command {
             Self::GetStreamWindow => f.write_str("GetStreamWindow"),
             Self::GetTray => f.write_str("GetTray"),
             Self::SetTray { on } => f.debug_struct("SetTray").field("on", on).finish(),
+            Self::GetUpdates => f.write_str("GetUpdates"),
+            Self::SetUpdateChecks { on } => {
+                f.debug_struct("SetUpdateChecks").field("on", on).finish()
+            }
+            Self::DismissUpdate { version } => f
+                .debug_struct("DismissUpdate")
+                .field("version", version)
+                .finish(),
+            Self::OpenPage { page } => f.debug_struct("OpenPage").field("page", page).finish(),
             Self::SetStreamWindow { bar } => {
                 f.debug_struct("SetStreamWindow").field("bar", bar).finish()
             }
@@ -2197,6 +2272,7 @@ impl fmt::Debug for Response {
                 .finish(),
             Self::StreamWindow(settings) => f.debug_tuple("StreamWindow").field(settings).finish(),
             Self::Tray(tray) => f.debug_tuple("Tray").field(tray).finish(),
+            Self::Updates(updates) => f.debug_tuple("Updates").field(updates).finish(),
             Self::Drawing(d) => f.debug_tuple("Drawing").field(d).finish(),
             Self::Streaming(s) => f.debug_tuple("Streaming").field(s).finish(),
             Self::Drivers { drivers } => {
@@ -2253,6 +2329,9 @@ pub struct EngineInfo {
     /// Settings offers the home PC's side of remote play only then (a Linux
     /// host until M16c-1's fifth part doesn't).
     pub home_pc: bool,
+    /// This build names its releases (M26c-2): the update notice's switch,
+    /// the version mismatch's link and Report a problem are offered.
+    pub release_pages: bool,
 }
 
 /// What a system can host (M16c, ADR 0012): Windows everything; Linux
@@ -2505,6 +2584,9 @@ pub enum Event {
         room: String,
         reason: RoomGone,
     },
+    /// What the update notice shows changed (M26c-2): a newer version
+    /// found, or the switch moved.
+    Updates(UpdatesView),
     /// Our connection changed (M26a): a relay's state, the network's, or
     /// the trouble the shell's strip and the tray show.
     Network(NetworkView),
@@ -2870,6 +2952,9 @@ pub struct EngineOptions {
     pub start_at_sign_in: bool,
     /// How our own connection is watched (M26a).
     pub network: NetworkTimings,
+    /// Where the update notice looks for new versions (M26c-2): the
+    /// desktop app's [`build_config::release_source`]; `None` never looks.
+    pub releases: Option<build_config::ReleaseSource>,
 }
 
 impl EngineOptions {
@@ -2895,6 +2980,7 @@ impl EngineOptions {
             board_windows: None,
             start_at_sign_in: false,
             network: NetworkTimings::default(),
+            releases: None,
         }
     }
 
@@ -2916,6 +3002,7 @@ impl EngineOptions {
                 && !cfg!(debug_assertions)
                 && profile.is_default(),
             backend: pipeline::profile_backend(profile.data_dir()),
+            releases: build_config::release_source(),
             ..Self::development()
         }
     }
@@ -3025,6 +3112,11 @@ pub struct Engine {
     /// Whether the app keeps an icon in the notification area (M25c,
     /// `app.json`).
     tray: AtomicBool,
+    /// The update notice (M26c-2): where it looks and what it found.
+    updates: Arc<updates::Updates>,
+    /// Held while `app.json` is read, changed and written (the tray and the
+    /// update switch share it).
+    app_edit: Mutex<()>,
     /// Held while this engine runs; see [`lock_profile`].
     _lock: std::fs::File,
 }
@@ -3075,6 +3167,10 @@ impl Engine {
         let backup_files = options.backup_files.clone();
         let timings = options.network;
         let tray = store::app(profile.data_dir()).tray;
+        let updates = Arc::new(updates::Updates::new(
+            options.releases.clone(),
+            profile.data_dir().to_path_buf(),
+        ));
         // Our own relays are in the dial rules before the actor's first dial.
         relays.refresh_dial();
         let (carrying_tx, carrying) = tokio::sync::watch::channel(Default::default());
@@ -3113,6 +3209,11 @@ impl Engine {
             events.clone(),
             timings,
         );
+        tokio::spawn(updates::run(
+            updates.clone(),
+            events.clone(),
+            started.inbox.clone(),
+        ));
         Ok(Self {
             profile,
             secrets,
@@ -3133,6 +3234,8 @@ impl Engine {
             shortcuts_edit: Mutex::new(()),
             installing_driver: AtomicBool::new(false),
             tray: AtomicBool::new(tray),
+            updates,
+            app_edit: Mutex::new(()),
             _lock: lock,
         })
     }
@@ -3622,6 +3725,7 @@ impl Engine {
                 platform: Platform::current(),
                 capabilities: self.backend.capabilities(),
                 home_pc: self.backend.capabilities().sessions && self.backend.home_pc(),
+                release_pages: self.updates.has_releases(),
             })),
             Command::Ping { nonce } => {
                 // No subscribers is fine: the UI may not be listening yet.
@@ -3863,9 +3967,54 @@ impl Engine {
                 Ok(Response::Streaming(StreamingSettingsView { hdr }))
             }
             Command::SetTray { on } => {
-                store::save_app(self.profile.data_dir(), store::AppSettings { tray: on })?;
+                {
+                    let _edit = self.app_edit.lock().unwrap_or_else(PoisonError::into_inner);
+                    let dir = self.profile.data_dir();
+                    store::save_app(
+                        dir,
+                        store::AppSettings {
+                            tray: on,
+                            ..store::app(dir)
+                        },
+                    )?;
+                }
                 self.tray.store(on, Ordering::SeqCst);
                 Ok(Response::Tray(TrayView { on }))
+            }
+            Command::GetUpdates => Ok(Response::Updates(self.updates.view())),
+            Command::SetUpdateChecks { on } => {
+                if !self.updates.has_releases() {
+                    return Err(EngineError::Refused("this build names no releases"));
+                }
+                {
+                    let _edit = self.app_edit.lock().unwrap_or_else(PoisonError::into_inner);
+                    let dir = self.profile.data_dir();
+                    store::save_app(
+                        dir,
+                        store::AppSettings {
+                            updates: on,
+                            ..store::app(dir)
+                        },
+                    )?;
+                }
+                let view = self.updates.view();
+                let _ = self.events.send(Event::Updates(view.clone()));
+                Ok(Response::Updates(view))
+            }
+            Command::DismissUpdate { version } => {
+                self.updates.dismiss(&version)?;
+                let view = self.updates.view();
+                let _ = self.events.send(Event::Updates(view.clone()));
+                Ok(Response::Updates(view))
+            }
+            Command::OpenPage { page } => {
+                let url = self.updates.page(page)?;
+                let backend = self.backend.clone();
+                tokio::task::spawn_blocking(move || backend.open_page(&url))
+                    .await
+                    .map_err(|e| EngineError::Media(e.to_string()))?
+                    .map_err(|e| EngineError::Media(e.to_string()))?;
+                Ok(Response::Done)
             }
             Command::ListSources => {
                 let backend = self.backend.clone();
