@@ -135,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: System packages
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: sudo bash scripts/linux-deps.sh
       - name: Rust (the version in rust-toolchain.toml)
         run: rustup toolchain install
