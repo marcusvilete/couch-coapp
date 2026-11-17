@@ -70,12 +70,6 @@ A fresh agent over the diff (it also ran the update tests, GitHub's real reply i
 
 Left, as the review judged it: a session starting during a look already under way (one small request, 30 s at most) isn't stopped; an older build (0.38 or before) on the same profile rewriting `app.json` for its tray switch drops `updates: false`, so the switch comes back on there; environment proxies (`HTTPS_PROXY`) apply, Windows' own proxy setting doesn't.
 
-**Still to come in M26c**
-- If not tried yet: See the release and Report a problem through the portal on Linux (a test AppImage in the VM); Report a problem showing the form once this is on `main`.
-- The first public tag (0.39.0 or later), and with the second, the notice seen for real.
-- M26c-3: the invite page's download and relay note; `self-hosting.md` rewritten, the README below your note.
-- Install the workflow's own installer once (Settings → About, Copy diagnostics: "public build", the public relays) and run its AppImage in WSLg.
-
 ## M26c-3: the invite page's download and relay note, the guides
 
 No app change, so no version of its own: the first public tag can be 0.39.0.
@@ -102,5 +96,11 @@ A fresh agent over the diff: the page held (the parser matches the Rust layout f
 
 Left, as judged: a Mac or a phone still sees the download buttons under its note (to send the link on, or pick it later); an ARM PC gets the x86-64 package first (there is no other); ADR 0009's line on `self-hosting.md` listing the toolchain stays as history.
 
+## The first public release (0.39.0)
+
+**Published 2026-11-17** (18:07 UTC), from `main` after M26c-3 (#86): you tagged `v0.39.0` from a terminal (GitHub Desktop offered no push for a tag), `release.yml` built the draft, and you published it. What it carries, as the workflow made it: the Windows setup (`_x64-setup.exe`), the AppImage (`_amd64.AppImage`, a name you kept), `SHA256SUMS`, each system's notices and `SOURCES.txt` (`-windows`, `-linux`), the AppImage's system sources (`_amd64-system-sources.tar`) and FFmpeg's two archives; its notes start with the wire marker, revision 21. The invite page's download now leads to it. Friends on the 0.38.0 friends' installer (wire revision 21) talk to it, and can move to it and paste your relay's code.
+
 **Still to come**
-- Once merged, the page goes out by itself (`invite-page.yml`): until the first release is published, its download opens an empty releases page. Tag and publish soon after.
+- The second public release, and with it the update notice seen for real (in 0.39.0, against GitHub's own latest release).
+- Install the public setup once (Settings → About, Copy diagnostics: "public build", the public relays) and run its AppImage in WSLg.
+- Report a problem opening the issue form, now that it's on `main`; See the release and Report a problem through the portal on Linux (the public AppImage in the VM).
