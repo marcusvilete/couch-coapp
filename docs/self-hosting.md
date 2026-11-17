@@ -74,12 +74,18 @@ A profile holds several relays at once, each with its own code, and they all app
 
 ## How to know it worked
 
-- **Settings → Network** lists your relay as connected, with "others reach you through it" when it's the one your PC is reached at (with the public relays kept on, that may be one of theirs).
-- **Settings → About** shows the version and the commit it was built from.
+- **Settings → Network** lists your relay as connected, with "others reach you through it" when it's the one your PC is reached at (with the public relays kept on, that may be one of theirs):
 
-| Settings → Network | Settings → About |
-|---|---|
-| ![Settings, Network tab: the relay chosen and connected](images/settings-network.png) | ![Settings, About tab: the version, the commit and the licences](images/settings-about.png) |
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/settings-network-dark.png">
+    <img alt="Settings, Network: your relay connected, others reaching you through it, the public relays off" src="images/settings-network-light.png">
+  </picture>
+- **Settings → About** shows the version and the commit it was built from:
+
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/settings-about-dark.png">
+    <img alt="Settings, About: the version and its commit, the switch for new versions, Report a problem and the licences" src="images/settings-about-light.png">
+  </picture>
 - **Your friends can join your room** from an invite link and the password, from their own networks.
 
 ## When something goes wrong

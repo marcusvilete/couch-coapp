@@ -1353,7 +1353,46 @@ export const SCENARIOS: Record<string, Scenario> = {
       return siteWorld([siteSofa({ sessions: [s] })]);
     },
   },
+  // ---- The self-hosting guide's pictures (docs/images, taken by
+  // `npm run site-shots`) ----
+  "guide-own-relay": {
+    title: "Self-hosting guide: our own relay added by its code, connected, others reach us through it",
+    world: () => guideWorld(),
+  },
+  "guide-about": { title: "Self-hosting guide: a public release's About", world: () => guideWorld() },
 };
+
+/** The self-hosting guide's world: the landing page's, once the user added a
+ * relay of their own, on a public release. */
+function guideWorld(): World {
+  const world = siteWorld([siteSofa()]);
+  world.network = network({
+    relays: [relay("ana-relay.duckdns.org", { type: "home" })],
+    homeRelay: "https://ana-relay.duckdns.org/",
+  });
+  world.info = { ...world.info, appVersion: "0.39.0", commit: "ead99eebc9" };
+  world.notices = [
+    "Couch Co-App 0.39.0, built from commit ead99eebc9",
+    "Copyright (C) 2026 the Couch Co-App contributors",
+    "",
+    "This program is free software: you can redistribute it and/or modify it",
+    "under the terms of the GNU General Public License, version 3 only, as",
+    "published by the Free Software Foundation: see the LICENSE file beside it.",
+    "It comes with ABSOLUTELY NO WARRANTY.",
+    "",
+    "Its source code:",
+    "  https://github.com/marcusvilete/couch-coapp/tree/ead99eebc9",
+    "",
+    "FFmpeg's source code and the scripts that built the copy included here",
+    "come with the installer, as files beside it (see SOURCES.txt there).",
+    "",
+    "The rest of this file lists the licences of everything bundled with it:",
+    "FFmpeg, SDL3 and the drivers first,",
+    "then the front end's packages, then the Rust crates.",
+    "",
+  ].join("\n");
+  return world;
+}
 
 function siteWorld(rooms: FakeRoom[]): World {
   const world = base(rooms, { network: publicOnly({ askForRelay: false }) });
