@@ -81,7 +81,7 @@ impl Options {
         {
             bail!("pass one of --config, --test-relay or --public");
         }
-        if options.test_relay && options.releases.is_some() {
+        if options.test_relay && options.releases.as_deref().is_some_and(|r| !r.is_empty()) {
             bail!("a test AppImage never checks for new versions: leave out --releases");
         }
         if options.invite_page.is_some() && options.no_invite_page {
@@ -317,9 +317,15 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // choice, else a public build's own repository, else release.toml's.
     let releases = match (&options.releases, &release) {
         (Some(repo), _) => repo.clone(),
-        (None, _) if options.public => workspace_repository(root)?
-            .and_then(|url| url.strip_prefix("https://github.com/").map(str::to_string))
-            .unwrap_or_default(),
+        (None, _) if options.public => {
+            let url = workspace_repository(root)?.unwrap_or_default();
+            match url.strip_prefix("https://github.com/") {
+                Some(repo) => repo.to_string(),
+                None => bail!(
+                    "a public build checks the releases of the workspace's repository, which must be on GitHub: Cargo.toml has '{url}'. Pass --releases <owner>/<name>, or --releases '' for none"
+                ),
+            }
+        }
         (None, Some(config)) => config.releases.clone(),
         (None, None) => String::new(),
     };
@@ -370,7 +376,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "warning: uncommitted changes: this test AppImage's notices ask friends to request its source from you."
         );
     }
-    if git(root, &["branch", "-r", "--contains", "HEAD"])?.is_empty() {
+    // A tag's build in the release workflow checks out the tag alone: no
+    // remote branch to see.
+    let tag_build = std::env::var("GITHUB_REF_TYPE").is_ok_and(|t| t == "tag");
+    if !tag_build && git(root, &["branch", "-r", "--contains", "HEAD"])?.is_empty() {
         println!(
             "warning: this commit is on no remote branch yet: push it, or friends can't reach the source the notices link to."
         );
@@ -446,7 +455,13 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     fs::create_dir_all(&out)?;
     fs::copy(&built, out.join(&name))?;
-    fs::write(out.join(notices::FILE_NAME), &notices)?;
+    // A public build's sits on a release page beside the Windows one's.
+    let notices_beside = if options.public {
+        "THIRD-PARTY-NOTICES-linux.txt"
+    } else {
+        notices::FILE_NAME
+    };
+    fs::write(out.join(notices_beside), &notices)?;
     let mut archives = Vec::new();
     for source in deps::SOURCES {
         let from = deps::third_party(root).join("sources").join(source.file);
@@ -470,7 +485,8 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
   The app: make it executable (chmod +x, or its Properties), then open it.
   Couch Co-App is free software under the GNU GPL, version 3 (the LICENSE
   file inside it). Its third-party licences are in
-  {notices}, beside it and inside it (Settings -> About).
+  {notices_beside}, beside it, and inside it as {notices}
+  (Settings -> About).
 
 The app's source code, for exactly this AppImage:
   {app_source}
@@ -653,7 +669,7 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
         .context("could not run git")?;
     if !output.status.success() {
         bail!(
-            "git {} failed (the AppImage is built from a git clone): {}",
+            "git {} failed (builds are made from a git clone): {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -712,6 +728,8 @@ mod tests {
         assert!(Options::parse(&args(&["--public", "--test-relay"])).is_err());
         assert!(Options::parse(&args(&["--public", "--config", "a.toml"])).is_err());
         assert!(Options::parse(&args(&["--test-relay", "--releases", "a/b"])).is_err());
+        // An empty one says "none", which a test build may say too.
+        assert!(Options::parse(&args(&["--test-relay", "--releases", ""])).is_ok());
         assert!(Options::parse(&args(&["--releases"])).is_err());
     }
 

@@ -98,17 +98,21 @@ if ($test) { $build.COUCH_BUILD_TEST = '1' }
 # Whose GitHub releases the update notice checks (M26c): this build's choice, else a public
 # build's own repository, else release.toml's. Never a test build's, which the app ignores.
 $repository = (Select-String -Path (Join-Path $repo 'Cargo.toml') -Pattern '^repository = "([^"]+)"').Matches | Select-Object -First 1
-$releasesRepo = if ($Releases) {
-    $Releases
-} elseif ($Public -and $repository) {
-    $repository.Groups[1].Value -replace '^https://github\.com/', ''
+$releasesRepo = if ($PSBoundParameters.ContainsKey('Releases')) {
+    $Releases   # '' for none
+} elseif ($Public) {
+    $url = if ($repository) { $repository.Groups[1].Value } else { '' }
+    if ($url -cnotmatch '^https://github\.com/(.+)$') {
+        throw "A public build checks the releases of the workspace's repository, which must be on GitHub: Cargo.toml has '$url'. Pass -Releases <owner>/<name>, or -Releases '' for none."
+    }
+    $Matches[1]
 } elseif ($release) {
     $release.releases
 } else { '' }
 if ($releasesRepo) {
     if ($test) { throw 'A test build never checks for new versions: leave out releases (release.toml) or -Releases.' }
     # As couch_engine::build_config checks it: the app treats one it can't read as none.
-    if ($releasesRepo -cnotmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$') {
+    if ($releasesRepo -cnotmatch '\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/(?!\.\.?\z)[A-Za-z0-9._-]{1,100}\z') {
         throw "Releases must be a GitHub repository as <owner>/<name>, not '$releasesRepo'."
     }
     $build.COUCH_BUILD_RELEASES = $releasesRepo
@@ -136,7 +140,8 @@ if ($dirtyTree) {
     }
     Write-Warning 'Uncommitted changes: this test installer''s notices ask friends to request its source from you.'
 }
-if (-not (git -C $repo branch -r --contains HEAD 2>$null)) {
+# A tag's build in the release workflow checks out the tag alone: no remote branch to see.
+if ($env:GITHUB_REF_TYPE -ne 'tag' -and -not (git -C $repo branch -r --contains HEAD 2>$null)) {
     Write-Warning 'This commit is on no remote branch yet: push it, or friends can''t reach the source the notices link to.'
 }
 
@@ -182,6 +187,10 @@ try {
 $built = Get-ChildItem (Join-Path $repo 'target\release\bundle\nsis') -Filter "*_$($cargo)_x64-setup.exe" |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $built) { throw 'No installer was produced.' }
+# The build may not change what the notices link to (Cargo.lock, say), as the AppImage's checks.
+if (-not $dirtyTree -and (git -C $repo status --porcelain)) {
+    throw 'The build changed files in the repository (git status): the installer no longer matches its commit.'
+}
 
 $commit = git -C $repo rev-parse --short HEAD
 $dirty = if ($dirtyTree) { '-dirty' } else { '' }

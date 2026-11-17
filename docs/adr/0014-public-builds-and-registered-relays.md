@@ -4,7 +4,7 @@
 
 The author's choices (2026-11-13):
 - **public binaries, built by CI** and published as GitHub Releases;
-- **unsigned**, with a note on getting past SmartScreen;
+- **unsigned**, with a note on getting past SmartScreen (where that note goes is the author's call with the README's rewrite: "Settled for M26c");
 - **a notice of new versions**, from GitHub's latest release, with a switch to turn it off;
 - **several relays registered, all used at once**, each with its own token, so moving between rooms on different relays needs no switching (revised the same day, after the check below showed it works: the first draft had one relay in use at a time, which needed a restart to move between rooms);
 - **the app says what went wrong and what to do**, whatever it is ("users must have the absolute best experience and understand when something goes wrong");
@@ -39,7 +39,7 @@ The author's choices (2026-11-13):
 - **Who checks for new versions:** public builds always (their own repository, from the workspace's `repository`); a friends' release build only with `releases` in `release.toml`; test and development builds never (`build_config::releases`, `owner/name`).
 - **The notice goes in the shell's bottom strip,** after network trouble, with its link and a dismiss.
 - **Friends moving to a public build keep the author's relay:** a profile's build relay becomes an ordinary registered relay, its code kept, once a build without it starts (`SavedRelays::keep_built_in`); nobody needs a code passed by hand for it.
-- **Built in M26c-1** (0.38.1): `COUCH_BUILD_PUBLIC` (`build_config::public_build`, "public build" in Copy diagnostics) and `COUCH_BUILD_RELEASES`; `build-installer.ps1 -Public` and `build-appimage.sh --public` (no `release.toml`, a clean tree, `-Releases`/`--releases` for one build); the packages named by their version alone (`Couch-Co-App_<version>_x64-setup.exe`, `Couch-Co-App_<version>_amd64.AppImage`); `.github/workflows/release.yml`, with `cargo xtask release-notes` checking the tag first and writing the notes, whose first line `<!-- couch-wire-revision: N -->` the update notice reads; each package's notices and `SOURCES.txt` named by system on the release.
+- **Built in M26c-1** (0.38.1): `COUCH_BUILD_PUBLIC` (`build_config::public_build`, "public build" in Copy diagnostics) and `COUCH_BUILD_RELEASES`; `build-installer.ps1 -Public` and `build-appimage.sh --public` (no `release.toml`, a clean tree, `-Releases`/`--releases` for one build); the packages named by their version alone (`Couch-Co-App_<version>_x64-setup.exe`, `Couch-Co-App_<version>_amd64.AppImage`); `.github/workflows/release.yml`, with `cargo xtask release-notes` checking the tag first and writing the notes, whose first line `<!-- couch-wire-revision: N -->` the update notice reads; each package's notices and `SOURCES.txt` named by system on the release. The workflow refuses a tag not on `main`, a workspace `repository` other than the repository running it (a fork's links), and a second draft for one tag; `build_config::relay` is none in a public build whatever its environment, and the Windows build, like the AppImage's, refuses a tree the build changed.
 
 ## Context
 
@@ -72,7 +72,7 @@ The author's choices (2026-11-13):
   The author reads the draft and publishes it. The release notes link the source at the tag.
 - **A public build carries no secret.** No relay URL, no token: its default relay is iroh's public relays, said so in Settings and the wizard (below). It carries the invite page's address (public anyway) and the releases' address for the update notice. A new build kind, neither test nor release-with-relay: named without `-test`, refusing a dirty tree like a release.
 - **The private route stays.** `release.toml` with a relay still builds a friends' installer by hand (`build-installer.ps1`, `build-appimage.sh`); its relay is a registered relay from the start (below), so nothing changes for friends on it. Self-builders keep both routes.
-- **Unsigned.** The release page and the README say how to get past SmartScreen ("More info", "Run anyway") and how to check the SHA-256. Signing can come later, in its own ADR (SignPath's free plan for open source needs CI builds, which this gives).
+- **Unsigned.** The release page and the README say how to get past SmartScreen ("More info", "Run anyway") and how to check the SHA-256. (Since 2026-11-17 the release notes say how to check the SHA-256, and the SmartScreen text waits for the author's README rewrite: "Settled for M26c".) Signing can come later, in its own ADR (SignPath's free plan for open source needs CI builds, which this gives).
 - **No wire freeze.** Builds of different wire revisions keep refusing each other, and the member list says who needs to update (ADR 0009 stands). The update notice makes that cheap.
 - **The ALPN stays `couch-coapp/0`.**
 
@@ -160,7 +160,7 @@ A room where nobody can be reached says why in one line at the top, when the mem
 
 **Public builds' own troubles** (M26b):
 - **antivirus:** an unsigned app with a keyboard hook and input injection can be taken for malware. ~~Each release is sent to Microsoft's file submission portal before it's published, and the release notes say what to do if a scanner still flags it~~ (dropped for now, 2026-11-17: "Settled for M26c" above);
-- **SmartScreen and the checksum:** the release page shows the two clicks past SmartScreen with pictures, and how to check the SHA-256.
+- **SmartScreen and the checksum:** the release page shows the two clicks past SmartScreen with pictures, and how to check the SHA-256. (The SmartScreen part waits for the author's README rewrite: "Settled for M26c".)
 
 The room's relay in the owner's signed policy stays out (a wire revision for little: the members' records already say where each is).
 

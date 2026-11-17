@@ -48,6 +48,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-check
+      # The notes, the notices and the releases address all link Cargo.toml's
+      # repository: in a fork, they must be the fork's, not upstream's.
+      - name: The repository is this one
+        run: |
+          declared=$(sed -n 's/^repository = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          expected="https://github.com/$GITHUB_REPOSITORY"
+          if [ "${declared,,}" != "${expected,,}" ]; then
+            echo "Cargo.toml's repository is '$declared', but this is $expected: set it to this repository first."
+            exit 1
+          fi
+      # A release is made only from what main has merged.
+      - name: The tag is on main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --no-tags --depth=200 origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "The tag $GITHUB_REF_NAME isn't on main (or is more than 200 commits behind it): tag a merged commit."
+            exit 1
+          fi
       - name: The tag and the notes
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
@@ -149,7 +168,7 @@ jobs:
           mkdir release
           cp target/appimage/* release/
           mv release/SOURCES.txt release/SOURCES-linux.txt
-          mv release/THIRD-PARTY-NOTICES.txt release/THIRD-PARTY-NOTICES-linux.txt
+          test -e release/THIRD-PARTY-NOTICES-linux.txt
       - uses: actions/upload-artifact@v7
         with:
           name: linux
@@ -188,6 +207,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
+          # A run again (after a failure) must not leave a second draft beside the first.
+          if gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' | grep -Fqx "$GITHUB_REF_NAME"; then
+            echo "A release (or draft) for $GITHUB_REF_NAME exists already: delete it on GitHub first, then run this job again."
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" release/* \
             --repo "$GITHUB_REPOSITORY" \
             --draft \

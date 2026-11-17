@@ -25,10 +25,11 @@ relay_token = "0000000000000000000000000000000000000000000000000000000000000000"
 # -NoInvitePage overrides it for one build.
 invite_page = "https://example.github.io/couch-coapp/j/"
 
-# Whose GitHub releases the app checks for new versions (M26c), as <owner>/<name>: it then
-# says "Couch Co-App X is out" with a link, at most once a day, unless the user turns it off.
-# Empty (or left out): it never checks. A public build always checks the repository it was
-# built from; a test build never does. -Releases <owner>/<name> (--releases) sets it for one build.
+# Whose GitHub releases the app will check for new versions (M26c-2, still to come), as
+# <owner>/<name>: it will then say "Couch Co-App X is out" with a link, at most once a day,
+# unless the user turns it off. Empty (or left out): it never checks. A public build checks
+# the workspace's `repository` (Cargo.toml); a test build never does. For one build:
+# -Releases <owner>/<name> (--releases), or -Releases '' for none.
 releases = ""
 
 # true only for a copy used to test on your LAN: it allows http:// in relay_url and
