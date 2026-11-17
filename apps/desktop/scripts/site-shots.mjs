@@ -1,5 +1,6 @@
 // The landing page's pictures of the app (deploy/landing-page/images), from the preview's
-// `site-*` scenarios, dark and light, through the Microsoft Edge already on Windows
+// `site-*` scenarios, and the self-hosting guide's (docs/images), from its `guide-*` ones,
+// dark and light, through the Microsoft Edge already on Windows
 // (headless; Playwright downloads nothing):
 //
 //   npm run site-shots                   every picture
@@ -15,7 +16,8 @@ import { chromium } from "playwright-core";
 import { createServer } from "vite";
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const out = resolve(app, "../../deploy/landing-page/images");
+const site = resolve(app, "../../deploy/landing-page/images");
+const guide = resolve(app, "../../docs/images");
 
 const i = process.argv.indexOf("--only");
 const only = i >= 0 ? process.argv[i + 1] : "";
@@ -27,7 +29,7 @@ const settings = (section) => async (page) => {
 };
 const DIALOG = '[role="dialog"]';
 
-/** [name, scenario, steps, what to keep (null: the window), size]. */
+/** [name, scenario, steps, what to keep (null: the window), size, folder (the landing page's)]. */
 const SHOTS = [
   // At the top of the page.
   ["hosting", "site-hosting", null, null, [1280, 860]],
@@ -63,6 +65,9 @@ const SHOTS = [
   ["linux", "linux-keyboard-idle", click("Start streaming…"), DIALOG, [1100, 800]],
   // Relays
   ["relays", "site-owner", settings("Network"), null, [1280, 760]],
+  // The self-hosting guide's "How to know it worked"
+  ["settings-network", "guide-own-relay", settings("Network"), null, [1100, 650], guide],
+  ["settings-about", "guide-about", settings("About"), null, [1100, 650], guide],
 ];
 
 const server = await createServer({
@@ -75,12 +80,12 @@ const server = await createServer({
 await server.listen();
 const base = "http://localhost:1431/preview.html";
 
-mkdirSync(out, { recursive: true });
+for (const dir of [site, guide]) mkdirSync(dir, { recursive: true });
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 let failures = 0;
 try {
   for (const look of ["dark", "light"]) {
-    for (const [name, scenario, steps, keep, [width, height]] of SHOTS.filter(([n]) => n.includes(only))) {
+    for (const [name, scenario, steps, keep, [width, height], out = site] of SHOTS.filter(([n]) => n.includes(only))) {
       // A fresh context each: the preview remembers the last room picked.
       const context = await browser.newContext({
         viewport: { width, height },
@@ -147,5 +152,5 @@ try {
   await browser.close();
   await server.close();
 }
-console.log(failures ? `${failures} failed` : `Pictures in ${out}`);
+console.log(failures ? `${failures} failed` : `Pictures in ${site} and ${guide}`);
 process.exit(failures ? 1 : 0);
