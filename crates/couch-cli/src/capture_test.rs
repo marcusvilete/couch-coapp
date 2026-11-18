@@ -3,6 +3,9 @@
 //! clock's barcode, reporting how long each stage takes. With `--psnr`, also
 //! how close each decoded picture is to what was captured, as PSNR and SSIM
 //! (M12c: H.264 against HEVC at the same bitrate; P8: NVENC's settings).
+//! With `--keyframe-every` or `--bitrate-every`, what a forced keyframe or a
+//! bitrate change costs the frames after it (M12d); with `--gpu`, frames stay
+//! on the GPU and go to NVENC directly (or `--ffmpeg-nvenc`, FFmpeg's).
 
 use std::{
     fs::File,
@@ -13,9 +16,10 @@ use std::{
 
 use anyhow::{Context, bail};
 use couch_codec_ffmpeg::{FfmpegDecoder, FfmpegEncoder};
+use couch_codec_nvenc::NvencEncoder;
 use couch_media::{
-    BgraFrame, CaptureEvent, Capturer, Codec, DecodedFrame, EncoderConfig, EncoderInput, Nv12Frame,
-    VideoDecoder, VideoEncoder, barcode, clock::LATENCY_CLOCK_TITLE,
+    BgraFrame, CaptureEvent, Capturer, Codec, DecodedFrame, EncoderConfig, EncoderInput, GpuFrame,
+    Nv12Frame, VideoDecoder, VideoEncoder, VideoFrame, barcode, clock::LATENCY_CLOCK_TITLE,
 };
 use couch_platform_win::{
     capture::{CaptureOptions, CaptureSource, FrameOutput, WgcCapturer},
@@ -34,9 +38,64 @@ pub struct Args {
     /// Measure each decoded picture against the captured one.
     pub psnr: bool,
     pub out: Option<PathBuf>,
+    /// Keyframes forced or bitrate changes, with the frames after each
+    /// measured against those before (M12d).
+    pub events: Option<Events>,
+    /// One row per frame.
+    pub frames_csv: Option<PathBuf>,
+    /// Frames stay on the GPU and go to NVENC directly (M12d)...
+    pub gpu: bool,
+    /// ...or to FFmpeg's NVENC, to compare.
+    pub ffmpeg_nvenc: bool,
 }
 
+/// What happens every so often during a run (M12d).
+#[derive(Debug, Clone, Copy)]
+pub enum Events {
+    /// A keyframe forced every `every` seconds.
+    Keyframe { every: f64 },
+    /// The bitrate switched every `every` seconds between `--bitrate-mbps`
+    /// and `to_mbps`.
+    Bitrate { every: f64, to_mbps: u32 },
+}
+
+impl Events {
+    fn every(self) -> f64 {
+        match self {
+            Self::Keyframe { every } | Self::Bitrate { every, .. } => every,
+        }
+    }
+}
+
+/// One encoded frame.
+#[derive(Debug, Clone, Default)]
+struct Row {
+    at_ms: f64,
+    bytes: usize,
+    keyframe: bool,
+    bitrate_bps: u32,
+    /// An event happened on this frame (a keyframe forced or a new bitrate).
+    event: bool,
+    psnr: Option<f64>,
+    ssim: Option<f64>,
+}
+
+/// Frames compared before and after each event.
+const AROUND: usize = 10;
+
 pub fn run(args: Args) -> anyhow::Result<()> {
+    if let Some(events) = args.events {
+        let every = events.every();
+        if !(every.is_finite() && every > 0.0) {
+            bail!("events need a positive interval, not {every}");
+        }
+        if let Events::Bitrate { to_mbps, .. } = events
+            && to_mbps == args.bitrate_mbps
+        {
+            bail!("--bitrate-to is --bitrate-mbps: nothing would change");
+        }
+    }
+    let measure = args.psnr || args.events.is_some() || args.frames_csv.is_some();
     let source = if args.monitor {
         CaptureSource::PrimaryMonitor
     } else {
@@ -47,20 +106,23 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         CaptureOptions {
             min_interval: Duration::from_secs(1) / args.fps,
             cursor: false,
-            output: FrameOutput::Cpu,
+            output: if args.gpu {
+                FrameOutput::Gpu
+            } else {
+                FrameOutput::Cpu
+            },
             hdr: true,
         },
     )
     .with_context(|| format!("starting capture of {source:?}"))?;
 
     let first = match capturer.next_event(Duration::from_secs(5))? {
-        Some(CaptureEvent::Frame(frame)) => frame.cpu()?.cropped_to_even(),
+        Some(CaptureEvent::Frame(frame)) => taken(frame)?,
         Some(CaptureEvent::SourceClosed) => bail!("the source closed"),
-        // (Frames in memory: never a GPU failure.)
-        Some(CaptureEvent::GpuFramesFailed) | None => {
-            bail!("no frame within 5 s (is the window visible and changing?)")
-        }
+        Some(CaptureEvent::GpuFramesFailed) => bail!("frames can't stay on the GPU here"),
+        None => bail!("no frame within 5 s (is the window visible and changing?)"),
     };
+    let (first, first_gpu) = first;
     let config = EncoderConfig {
         codec: args.codec,
         width: first.width,
@@ -68,7 +130,11 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         fps: args.fps,
         bitrate_bps: args.bitrate_mbps * 1_000_000,
     };
-    let mut encoder = FfmpegEncoder::open_best(config)?;
+    let mut encoder: Box<dyn VideoEncoder> = match &first_gpu {
+        Some(gpu) if args.ffmpeg_nvenc => Box::new(FfmpegEncoder::open_gpu(config, gpu)?),
+        Some(gpu) => Box::new(NvencEncoder::open_gpu(config, gpu)?),
+        None => Box::new(FfmpegEncoder::open_best(config)?),
+    };
     let mut decoder = FfmpegDecoder::new(config.codec, true)?;
     let mut out = args.out.as_ref().map(File::create).transpose()?;
     println!(
@@ -93,32 +159,75 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let mut similarity = Samples::default();
     let (mut frames, mut bytes) = (0u64, 0u64);
     let mut barcode_at: Option<(u32, u32)> = None;
+    let mut rows: Vec<Row> = Vec::new();
+    let mut bitrate_bps = config.bitrate_bps;
+    let mut next_event = args.events.map(|e| Duration::from_secs_f64(e.every()));
     let started = Instant::now();
-    let mut pending = Some(first);
+    let pool = first_gpu.as_ref().map(|g| g.source);
+    let mut pending = Some((first, first_gpu));
 
     while started.elapsed() < Duration::from_secs(args.secs) {
-        let frame = match pending.take() {
+        let (frame, gpu) = match pending.take() {
             Some(frame) => frame,
             None => match capturer.next_event(Duration::from_millis(100))? {
-                Some(CaptureEvent::Frame(frame)) => frame.cpu()?.cropped_to_even(),
+                Some(CaptureEvent::Frame(frame)) => taken(frame)?,
                 Some(CaptureEvent::SourceClosed) => {
                     println!("source closed");
                     break;
                 }
-                Some(CaptureEvent::GpuFramesFailed) | None => continue,
+                Some(CaptureEvent::GpuFramesFailed) => bail!("GPU frames failed; restart the test"),
+                None => continue,
             },
         };
+        // An encoder on GPU frames reads one pool's textures (M9b).
+        if gpu.as_ref().map(|g| g.source) != pool {
+            bail!("the capture made a new texture pool; restart the test");
+        }
         if (frame.width, frame.height) != (config.width, config.height) {
             bail!("the source changed size; restart the test");
         }
         let got = clock::now();
         capture_delivery.push(ms(got.0, frame.captured_at.0));
 
-        let units = encoder.encode(EncoderInput::Cpu(&frame), frames == 0)?;
+        let mut force_keyframe = frames == 0;
+        let mut row = Row {
+            at_ms: started.elapsed().as_secs_f64() * 1000.0,
+            ..Row::default()
+        };
+        if let (Some(events), Some(due)) = (args.events, next_event.as_mut())
+            && started.elapsed() >= *due
+        {
+            // Events a stall made late are skipped, not fired back to back.
+            let every = Duration::from_secs_f64(events.every());
+            while *due <= started.elapsed() {
+                *due += every;
+            }
+            row.event = true;
+            match events {
+                Events::Keyframe { .. } => force_keyframe = true,
+                Events::Bitrate { to_mbps, .. } => {
+                    bitrate_bps = if bitrate_bps == config.bitrate_bps {
+                        to_mbps * 1_000_000
+                    } else {
+                        config.bitrate_bps
+                    };
+                    encoder.set_bitrate(bitrate_bps)?;
+                }
+            }
+        }
+        row.bitrate_bps = bitrate_bps;
+
+        let input = match &gpu {
+            Some(gpu) => EncoderInput::Gpu(gpu),
+            None => EncoderInput::Cpu(&frame),
+        };
+        let units = encoder.encode(input, force_keyframe)?;
         let encoded = clock::now();
         encode.push(ms(encoded.0, got.0));
         for unit in units {
             bytes += unit.data.len() as u64;
+            row.bytes += unit.data.len();
+            row.keyframe |= unit.keyframe;
             if let Some(file) = out.as_mut() {
                 file.write_all(&unit.data)?;
             }
@@ -128,10 +237,13 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                 };
                 let done = clock::now();
                 decode.push(ms(done.0, encoded.0));
-                if args.psnr {
+                if measure {
                     let l = lumas(&frame, &nv12);
-                    psnr_db.push(psnr(&l));
-                    similarity.push(ssim(&l));
+                    let (db, s) = (psnr(&l), ssim(&l));
+                    psnr_db.push(db);
+                    similarity.push(s);
+                    row.psnr = Some(db);
+                    row.ssim = Some(s);
                 }
                 let size = (nv12.width, nv12.height);
                 let stride = nv12.y_stride as usize;
@@ -148,6 +260,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                 }
             }
         }
+        rows.push(row);
         frames += 1;
     }
 
@@ -163,7 +276,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     println!("decode              {}", decode.summary_ms());
     println!("clock -> captured   {}", clock_to_capture.summary_ms());
     println!("clock -> decoded    {}", clock_to_decoded.summary_ms());
-    if args.psnr {
+    if measure {
         // Over 99 dB counts as identical (a still picture).
         println!(
             "PSNR (luma, dB)     p5 {:.2}  p50 {:.2}  min {:.2}  (n={})",
@@ -180,10 +293,137 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             similarity.len()
         );
     }
+    if args.events.is_some() {
+        print_events(&rows);
+    }
+    if let Some(path) = &args.frames_csv {
+        let mut file = File::create(path)?;
+        writeln!(
+            file,
+            "frame,at_ms,bytes,keyframe,event,bitrate_bps,psnr,ssim"
+        )?;
+        for (i, r) in rows.iter().enumerate() {
+            let opt = |v: Option<f64>, digits: usize| {
+                v.map_or(String::new(), |v| format!("{v:.digits$}"))
+            };
+            writeln!(
+                file,
+                "{i},{:.1},{},{},{},{},{},{}",
+                r.at_ms,
+                r.bytes,
+                u8::from(r.keyframe),
+                u8::from(r.event),
+                r.bitrate_bps,
+                opt(r.psnr, 3),
+                opt(r.ssim, 5)
+            )?;
+        }
+        println!("wrote {}", path.display());
+    }
     if let Some(path) = args.out {
         println!("wrote {}", path.display());
     }
     Ok(())
+}
+
+/// A captured frame in memory, for measuring, and its texture if it came on
+/// the GPU (`--gpu`), for the encoder.
+fn taken(frame: VideoFrame) -> anyhow::Result<(BgraFrame, Option<GpuFrame>)> {
+    Ok(match frame {
+        VideoFrame::Cpu(cpu) => (cpu.cropped_to_even(), None),
+        // The pool's textures are already cropped to even.
+        VideoFrame::Gpu(gpu) => (gpu.cpu()?, Some(gpu)),
+    })
+}
+
+/// The frames after the events, then after points halfway between them
+/// (nothing happens there: what the picture's own changes account for).
+fn print_events(rows: &[Row]) {
+    let events: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].event).collect();
+    let keyframes = events.iter().filter(|&&i| rows[i].keyframe).count();
+    let others = (1..rows.len())
+        .filter(|&i| rows[i].keyframe && !rows[i].event)
+        .count();
+    println!(
+        "{} events, {keyframes} of them keyframes; {others} other keyframes after the first frame",
+        events.len()
+    );
+    let halfway: Vec<usize> = events.windows(2).map(|w| (w[0] + w[1]) / 2).collect();
+    for (label, at) in [("after an event", &events), ("halfway between", &halfway)] {
+        let Some(table) = around(rows, at) else {
+            println!("{label}: too few events with {AROUND} measured frames each side");
+            continue;
+        };
+        println!(
+            "{label} (mean of {}, against the {AROUND} frames before):",
+            table.points
+        );
+        println!("  frame  PSNR dB   SSIM      size");
+        for (k, (db, s, size)) in table.rows.iter().enumerate() {
+            println!("  +{k:<4} {db:+7.2}  {s:+8.4}  {size:5.2}x");
+        }
+        // From the frame on which it stays within, not the first that is.
+        let healed = table
+            .rows
+            .iter()
+            .rposition(|(db, ..)| *db <= -0.5)
+            .map_or(Some(0), |last| (last + 1 < AROUND).then_some(last + 1));
+        match healed {
+            Some(k) => println!("  within 0.5 dB from frame +{k}"),
+            None => println!("  not within 0.5 dB after {AROUND} frames"),
+        }
+    }
+}
+
+/// The mean change after each of `at`, against the frames before it.
+struct Around {
+    /// How many points counted.
+    points: usize,
+    /// Per frame after the point: PSNR and SSIM minus the mean of the
+    /// frames before, and its size over theirs.
+    rows: Vec<(f64, f64, f64)>,
+}
+
+/// Points count only with [`AROUND`] measured frames on each side and no
+/// other event among them; `None` if none does.
+fn around(rows: &[Row], at: &[usize]) -> Option<Around> {
+    let mut sums = vec![(0.0, 0.0, 0.0); AROUND];
+    let mut points = 0;
+    for &p in at {
+        if p < AROUND || p + AROUND > rows.len() {
+            continue;
+        }
+        let before = &rows[p - AROUND..p];
+        let after = &rows[p..p + AROUND];
+        let clean = before
+            .iter()
+            .chain(after)
+            .enumerate()
+            .all(|(i, r)| r.psnr.is_some() && r.ssim.is_some() && (i == AROUND || !r.event));
+        if !clean {
+            continue;
+        }
+        let mean = |f: fn(&Row) -> f64| before.iter().map(f).sum::<f64>() / AROUND as f64;
+        let db = mean(|r| r.psnr.unwrap_or_default());
+        let s = mean(|r| r.ssim.unwrap_or_default());
+        let size = mean(|r| r.bytes as f64).max(1.0);
+        for (sum, r) in sums.iter_mut().zip(after) {
+            sum.0 += r.psnr.unwrap_or_default() - db;
+            sum.1 += r.ssim.unwrap_or_default() - s;
+            sum.2 += r.bytes as f64 / size;
+        }
+        points += 1;
+    }
+    (points > 0).then(|| Around {
+        points,
+        rows: sums
+            .into_iter()
+            .map(|(a, b, c)| {
+                let n = points as f64;
+                (a / n, b / n, c / n)
+            })
+            .collect(),
+    })
 }
 
 /// Both pictures' luma, row by row, over the size they share: the captured
@@ -300,6 +540,47 @@ mod tests {
             .flat_map(|y| (0..width).map(move |x| (x, y)))
             .map(|(x, y)| f(x, y))
             .collect()
+    }
+
+    fn frame(psnr: f64, bytes: usize, event: bool) -> Row {
+        Row {
+            bytes,
+            event,
+            psnr: Some(psnr),
+            ssim: Some(psnr / 100.0),
+            ..Row::default()
+        }
+    }
+
+    /// M12d: each frame after a point is compared with the mean of the ten
+    /// before; points too near the ends, or with another event within ten
+    /// frames, don't count.
+    #[test]
+    fn frames_after_a_point_are_measured_against_those_before() {
+        let mut rows: Vec<Row> = (0..60)
+            .map(|i| frame(40.0 + (i % 2) as f64, 100, false))
+            .collect();
+        // A dip of 6 dB that heals 2 dB a frame, at a frame twice the size.
+        rows[30] = frame(34.5, 200, true);
+        rows[31] = frame(36.5, 100, false);
+        rows[32] = frame(38.5, 100, false);
+        rows[5].event = true; // too near the start
+        rows[55].event = true; // too near the end
+        let table = around(&rows, &[5, 30, 55]).expect("one point counts");
+        assert_eq!(table.points, 1);
+        let (db, ssim, size) = table.rows[0];
+        assert!((db - -6.0).abs() < 1e-9, "{db}");
+        assert!((ssim - -0.06).abs() < 1e-9, "{ssim}");
+        assert!((size - 2.0).abs() < 1e-9, "{size}");
+        assert!((table.rows[1].0 - -4.0).abs() < 1e-9);
+        assert!((table.rows[3].0 - 0.5).abs() < 1e-9);
+        // Another event among the frames around a point rules it out.
+        rows[35].event = true;
+        assert!(around(&rows, &[30]).is_none());
+        // A frame not measured does too.
+        rows[35].event = false;
+        rows[25].psnr = None;
+        assert!(around(&rows, &[30]).is_none());
     }
 
     fn pair(source: Vec<f32>, decoded: Vec<f32>) -> Lumas {

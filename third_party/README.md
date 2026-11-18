@@ -9,6 +9,8 @@ Native dependencies downloaded by `cargo xtask fetch-deps`, git-ignored; and two
 | `vigem-rust/` | vigem-rust 0.2.0 (MIT OR Apache-2.0), **committed, not downloaded**: patched to plug pads from serial 1 and to keep a pad Windows is still setting up (`vigem-rust/PATCHED.md`) | `[patch.crates-io]` in `Cargo.toml` |
 | `evdev/` | evdev 0.13.2 (Apache-2.0 OR MIT), **committed, not downloaded**: patched so `UI_SET_PHYS` works, which a Linux host's virtual controllers name themselves with (`evdev/PATCHED.md`) | `[patch.crates-io]` in `Cargo.toml` |
 
+| `nv-codec-headers/` | NVENC's API header, SDK 13.0 (MIT), **committed, not downloaded**: the one FFmpeg's build uses, which `couch-codec-nvenc`'s bindings are generated from (`nv-codec-headers/README.md`) | the commit in its README |
+
 Each download is checked against a pinned SHA-256 before it is extracted.
 
 The FFmpeg build is LGPL-3.0-or-later. It is linked dynamically and its DLLs ship unmodified, so they stay replaceable.

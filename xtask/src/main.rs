@@ -6,6 +6,8 @@
 //!   run without PATH changes;
 //! - `gen-ffmpeg-bindings`: regenerate the committed FFmpeg FFI bindings
 //!   (after bumping FFmpeg; needs LLVM);
+//! - `gen-nvenc-bindings`: regenerate NVENC's committed FFI bindings from
+//!   the vendored header (M12d; needs LLVM);
 //! - `doctor`: check that this machine can build and run Couch Co-App;
 //! - `release-config`: create the private `release.toml` (outside the
 //!   repository) with a fresh relay token;
@@ -25,6 +27,7 @@ mod deps;
 mod doctor;
 mod ffmpeg_bindings;
 mod notices;
+mod nvenc_bindings;
 mod relay;
 mod release;
 mod system_sources;
@@ -48,6 +51,7 @@ fn main() -> ExitCode {
         Some("fetch-deps") => deps::fetch(&root),
         Some("stage-dlls") => deps::stage_dlls(&root),
         Some("gen-ffmpeg-bindings") => ffmpeg_bindings::generate(&root),
+        Some("gen-nvenc-bindings") => nvenc_bindings::generate(&root),
         Some("doctor") => return doctor::run(&root),
         Some("release-config") => relay::release_config(&root),
         Some("relay-tool") => relay::relay_tool(&root),
@@ -57,7 +61,7 @@ fn main() -> ExitCode {
         Some("release-notes") => release::run(&root, &std::env::args().skip(2).collect::<Vec<_>>()),
         _ => {
             eprintln!(
-                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | doctor | release-config | relay-tool | notices | appimage | bump patch|minor | release-notes>"
+                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | gen-nvenc-bindings | doctor | release-config | relay-tool | notices | appimage | bump patch|minor | release-notes>"
             );
             return ExitCode::from(2);
         }

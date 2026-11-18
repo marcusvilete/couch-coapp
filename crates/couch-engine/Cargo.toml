@@ -35,6 +35,7 @@ unicode-normalization.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+couch-codec-nvenc.workspace = true
 couch-gamepad.workspace = true
 couch-platform-win.workspace = true
 

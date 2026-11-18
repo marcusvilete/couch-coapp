@@ -236,7 +236,7 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
 5. **Clamp** between the minimum (1.5 Mbit/s) and the cap. The cap is the user maximum (20 Mbit/s), or the relay maximum (2 Mbit/s) on a relayed path. With an upload cap, the cap is also this viewer's share of it ([Sessions](#sessions)).
 6. **Apply.**
    - Decreases apply at once.
-   - Increases of more than 3% apply too, except where every bitrate change costs a keyframe (FFmpeg's NVENC, below). There, increases go in steps of at least 15%, at most once a second.
+   - Increases of more than 3% apply too, except where every bitrate change costs a keyframe (FFmpeg's NVENC and the encoders that reopen, below). There, increases go in steps of at least 15%, at most once a second. NVENC directly (M12d) changes the bitrate in place, so a Windows host on an NVIDIA GPU taking GPU frames applies them at once.
 
 **QUIC settings**
 - Timeouts: idle timeout 15 s, keep-alive 2 s. A silent peer is noticed sooner, after 5 s, by the missing `Alive` ([Liveness](#liveness)).
@@ -248,7 +248,8 @@ The rate controller is the congestion control. QUIC's own controller only keeps 
 - Preset p1, tune ull, `rc=cbr`, High profile.
 - No B-frames, `delay=0`, `zerolatency=1`, `rc-lookahead=0`.
 - `forced-idr=1` with an infinite GOP; `bufsize` = bitrate / fps (a one-frame VBV, which also keeps keyframes small).
-- **Known cost.** FFmpeg 8.1's NVENC wrapper turns any bitrate change into an encoder reset with an IDR frame. That is why costly increases are batched. Calling NVENC directly (M9) reconfigures without one.
+- **Known cost.** FFmpeg 8.1's NVENC wrapper turns any bitrate change into an encoder reset with an IDR frame (`nvenc.c`'s `reconfig_encoder`): a soft picture healing over 7 to 10 frames (about 5 dB of PSNR in Witcher 3, M12d), so costly increases are batched.
+- **NVENC directly** (M12d, `couch-codec-nvenc`, [ADR 0016](adr/0016-nvenc-directly-and-continuation-epochs.md)): on a Windows host's GPU frames, the same stream as `h264_nvenc` and `hevc_nvenc` with the settings here (the same parameter sets, checked), but a bitrate change reconfigures in place, with no keyframe, where the driver supports it. FFmpeg's NVENC stays behind it: if ours can't open, or fails to encode, that viewer gets FFmpeg's.
 
 **`hevc_nvenc` settings** (M12c): the same as `h264_nvenc`'s, with the Main profile (8-bit). Only an NVIDIA host taking GPU frames sends HEVC.
 

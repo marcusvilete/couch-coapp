@@ -310,6 +310,14 @@ impl RateController {
         self.share = bps;
     }
 
+    /// Whether a bitrate change costs the encoder a keyframe now (M12d):
+    /// NVENC directly changes it in place, but a viewer whose encoder fell
+    /// back to FFmpeg's mid-stream pays a keyframe per change again, and its
+    /// raises must go back to being batched.
+    pub fn set_keyframe_costly(&mut self, costly: bool) {
+        self.cfg.keyframe_costly = costly;
+    }
+
     /// The ceiling now: the path's (lower through a relay) and our share
     /// of the upload cap, never below the minimum.
     fn cap(&self, fb: &FeedbackSnapshot) -> u32 {
@@ -706,6 +714,22 @@ mod tests {
         // About 8.7 s from 10 to 20 Mbit/s at 8%/s; batched into >=15% steps
         // at most once a second, that is a handful of changes, not 200.
         assert!(actions.len() <= 6, "{actions:?}");
+        assert_eq!(c.applied_bps(), 20 * MBPS);
+    }
+
+    /// M12d: an encoder that starts free and then costs a keyframe per
+    /// change (NVENC directly falling back to FFmpeg's) gets batched raises
+    /// from then on.
+    #[test]
+    fn raises_are_batched_once_changes_cost_a_keyframe() {
+        let start = Instant::now();
+        let mut c = RateController::new(config(false));
+        let free = run(&mut c, start, 12.0, |_| clean());
+        assert!(free.len() > 6, "free raises apply as they come: {free:?}");
+        let mut c = RateController::new(config(false));
+        c.set_keyframe_costly(true);
+        let costly = run(&mut c, start, 12.0, |_| clean());
+        assert!(costly.len() <= 6, "{costly:?}");
         assert_eq!(c.applied_bps(), 20 * MBPS);
     }
 

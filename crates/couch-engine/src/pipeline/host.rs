@@ -2035,6 +2035,9 @@ fn encode(
         {
             last_tick = Instant::now();
             c.set_share(feed.share());
+            // An encoder may come to pay a keyframe per change (M12d's
+            // fallback from NVENC directly to FFmpeg's).
+            c.set_keyframe_costly(enc.caps().bitrate_change_costs_keyframe);
             let fb = video.feedback();
             let action = c.tick(last_tick, &fb);
             feed.target.store(c.target_bps(), Ordering::Relaxed);

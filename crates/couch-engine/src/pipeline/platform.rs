@@ -1,6 +1,7 @@
-//! The Windows backend: Windows.Graphics.Capture, FFmpeg's encoders, WASAPI
-//! loopback, `SendInput`, ViGEm pads, the host's controller through SDL3 and
-//! HidHide, the panic-key hook, and `couch-viewer` as a child process.
+//! The Windows backend: Windows.Graphics.Capture, NVENC directly (M12d) and
+//! FFmpeg's encoders, WASAPI loopback, `SendInput`, ViGEm pads, the host's
+//! controller through SDL3 and HidHide, the panic-key hook, and
+//! `couch-viewer` as a child process.
 
 use std::{
     any::Any,
@@ -9,14 +10,15 @@ use std::{
 };
 
 use couch_codec_ffmpeg::{FfmpegEncoder, encoder::gpu_input_encoder};
+use couch_codec_nvenc::NvencEncoder;
 use couch_input::{
     DEV_PAD_IDS, HidUsage, InputError, KbmInjector, Plugged, VirtualPadFactory,
     local::{ControllerIds, LocalPads},
     shortcuts::Shortcut,
 };
 use couch_media::{
-    AudioSource, Capturer, Codec, EncoderConfig, GpuFrame, MediaError, VideoEncoder,
-    audio::ToneSource, clock::Clock, testpattern::TestPattern,
+    AudioSource, Capturer, Codec, EncodedFrame, EncoderCaps, EncoderConfig, EncoderInput, GpuFrame,
+    MediaError, VideoEncoder, audio::ToneSource, clock::Clock, testpattern::TestPattern,
 };
 use couch_platform_win::{
     audio::{LoopbackCapture, LoopbackTarget},
@@ -71,6 +73,84 @@ type Capture = (Box<dyn Capturer>, Option<NativeId>);
 /// switch for measuring against the copy through memory from before.
 fn zero_copy() -> bool {
     std::env::var("COUCH_HOST_ZERO_COPY").map_or(true, |v| v.trim() != "0")
+}
+
+/// GPU frames go to NVENC directly (M12d, `couch-codec-nvenc`) unless
+/// `COUCH_HOST_NVENC_DIRECT=0`, a switch for measuring against FFmpeg's NVENC.
+fn direct_nvenc() -> bool {
+    std::env::var("COUCH_HOST_NVENC_DIRECT").map_or(true, |v| v.trim() != "0")
+}
+
+/// NVENC directly (M12d), with FFmpeg's NVENC behind it: if ours fails to
+/// encode, FFmpeg's takes this viewer's GPU frames from then on, at the
+/// bitrate asked for last and from a keyframe, rather than the stream
+/// turning GPU frames off for every viewer. Its caps become FFmpeg's, and the
+/// host reads them every tick (`RateController::set_keyframe_costly`), so its
+/// raises are batched again.
+struct DirectNvenc {
+    direct: Option<NvencEncoder>,
+    fallback: Option<FfmpegEncoder>,
+    /// The active encoder's caps, kept when the fallback can't open (the
+    /// stream then turns GPU frames off, as for any GPU encoder failing).
+    caps: EncoderCaps,
+    config: EncoderConfig,
+}
+
+impl DirectNvenc {
+    fn new(direct: NvencEncoder, config: EncoderConfig) -> Self {
+        Self {
+            caps: direct.caps().clone(),
+            direct: Some(direct),
+            fallback: None,
+            config,
+        }
+    }
+}
+
+impl VideoEncoder for DirectNvenc {
+    fn caps(&self) -> &EncoderCaps {
+        &self.caps
+    }
+
+    fn encode(
+        &mut self,
+        input: EncoderInput<'_>,
+        force_keyframe: bool,
+    ) -> Result<Vec<EncodedFrame>, MediaError> {
+        if let Some(direct) = self.direct.as_mut() {
+            let EncoderInput::Gpu(frame) = input else {
+                return direct.encode(input, force_keyframe);
+            };
+            let e = match direct.encode(EncoderInput::Gpu(frame), force_keyframe) {
+                Ok(units) => return Ok(units),
+                Err(e) => e,
+            };
+            tracing::warn!("NVENC directly failed ({e}); FFmpeg's NVENC for this viewer");
+            // Closed first: its session and registrations go before
+            // FFmpeg's open on the same device.
+            self.direct = None;
+            let fallback = FfmpegEncoder::open_gpu(self.config, frame)?;
+            self.caps = fallback.caps().clone();
+            // A fresh encoder: its first frame is a keyframe anyway.
+            return self
+                .fallback
+                .insert(fallback)
+                .encode(EncoderInput::Gpu(frame), true);
+        }
+        match self.fallback.as_mut() {
+            Some(fallback) => fallback.encode(input, force_keyframe),
+            None => Err(MediaError::Backend("no encoder left".into())),
+        }
+    }
+
+    fn set_bitrate(&mut self, bps: u32) -> Result<(), MediaError> {
+        self.config.bitrate_bps = bps;
+        match (self.direct.as_mut(), self.fallback.as_mut()) {
+            (Some(direct), _) => direct.set_bitrate(bps),
+            (None, Some(fallback)) => fallback.set_bitrate(bps),
+            (None, None) => Ok(()),
+        }
+    }
 }
 
 /// Windows' minimum interval between captured frames on the GPU when the
@@ -212,6 +292,22 @@ impl Backend for WindowsBackend {
             return Ok(Box::new(FfmpegEncoder::open(name.trim(), config)?));
         }
         if let Some(frame) = gpu {
+            if direct_nvenc() {
+                // P8's measuring switches tune FFmpeg's NVENC only.
+                let (_, measuring) = couch_codec_ffmpeg::options::nvenc_overrides();
+                if !measuring.is_empty() {
+                    tracing::warn!(
+                        "{measuring} apply to FFmpeg's NVENC only; set \
+                         COUCH_HOST_NVENC_DIRECT=0 to measure them"
+                    );
+                }
+                match NvencEncoder::open_gpu(config, frame) {
+                    Ok(encoder) => return Ok(Box::new(DirectNvenc::new(encoder, config))),
+                    // No NVIDIA driver or too old a one, another vendor's GPU,
+                    // the session limit: FFmpeg's encoders, as before M12d.
+                    Err(e) => tracing::info!("NVENC directly unavailable ({e}); FFmpeg's encoder"),
+                }
+            }
             match FfmpegEncoder::open_gpu(config, frame) {
                 Ok(encoder) => return Ok(Box::new(encoder)),
                 // Not NVIDIA, or the capture runs on another GPU (a laptop's
@@ -516,5 +612,53 @@ impl Backend for WindowsBackend {
         })
         .map_err(|e| MediaError::Backend(format!("the host-keys hook: {e}")))?;
         Ok(Box::new(hook))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use couch_media::{clock::ProcessClock, testpattern::TestPattern};
+    use couch_platform_win::gpu_frames::Uploader;
+
+    use super::*;
+
+    /// M12d: when NVENC directly fails to encode (here, a frame from a pool
+    /// it wasn't opened for), FFmpeg's NVENC takes over for this viewer from
+    /// a keyframe, and the caps say a bitrate change costs a keyframe again.
+    /// Needs an NVIDIA GPU: `cargo test -p couch-engine direct_nvenc -- --ignored`.
+    #[test]
+    #[ignore = "needs an NVIDIA GPU"]
+    fn direct_nvenc_falls_back_to_ffmpegs() {
+        let (w, h) = (1280, 720);
+        let config = EncoderConfig {
+            codec: Codec::H264,
+            width: w,
+            height: h,
+            fps: 60,
+            bitrate_bps: 8_000_000,
+        };
+        let mut uploader = Uploader::new(w, h).expect("D3D11 device");
+        let mut pattern = TestPattern::new(w, h, 60, Arc::new(ProcessClock::new()));
+        let first = uploader.upload(&pattern.render()).unwrap().unwrap();
+        let mut encoder = DirectNvenc::new(
+            NvencEncoder::open_gpu(config, &first).expect("NVENC directly"),
+            config,
+        );
+        assert!(!encoder.caps().bitrate_change_costs_keyframe);
+        assert!(encoder.encode(EncoderInput::Gpu(&first), true).unwrap()[0].keyframe);
+        encoder.set_bitrate(6_000_000).unwrap();
+        uploader.new_pool().unwrap();
+        let other = uploader.upload(&pattern.render()).unwrap().unwrap();
+        let units = encoder.encode(EncoderInput::Gpu(&other), false).unwrap();
+        assert!(units[0].keyframe, "the fallback starts from a keyframe");
+        assert_eq!(encoder.caps().name, "h264_nvenc");
+        assert!(encoder.caps().gpu_input);
+        assert!(encoder.caps().bitrate_change_costs_keyframe);
+        // It carries on, at the bitrate asked for last.
+        let next = uploader.upload(&pattern.render()).unwrap().unwrap();
+        assert!(!encoder.encode(EncoderInput::Gpu(&next), false).unwrap()[0].keyframe);
+        assert_eq!(encoder.config.bitrate_bps, 6_000_000);
     }
 }

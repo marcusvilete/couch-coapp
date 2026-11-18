@@ -142,6 +142,31 @@ enum Cmd {
         /// Also write the encoded stream here (Annex B; `ffplay` plays it).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Force a keyframe every this many seconds and report, with PSNR
+        /// and SSIM, how much worse the frames after each one are (M12d:
+        /// what a keyframe costs the picture).
+        #[arg(long, conflicts_with = "bitrate_every")]
+        keyframe_every: Option<f64>,
+        /// Switch the bitrate every this many seconds between
+        /// `--bitrate-mbps` and `--bitrate-to`, reporting the frames after
+        /// each change as `--keyframe-every` does (FFmpeg's NVENC resets
+        /// with a keyframe on every change).
+        #[arg(long, requires = "bitrate_to")]
+        bitrate_every: Option<f64>,
+        /// The other bitrate for `--bitrate-every`, in Mbit/s.
+        #[arg(long, requires = "bitrate_every")]
+        bitrate_to: Option<u32>,
+        /// Write one row per frame here (CSV: its size, whether it is a
+        /// keyframe, the bitrate, PSNR and SSIM).
+        #[arg(long)]
+        frames_csv: Option<PathBuf>,
+        /// Keep frames on the GPU and encode them with NVENC directly (M12d),
+        /// as a host does.
+        #[arg(long)]
+        gpu: bool,
+        /// With `--gpu`: FFmpeg's NVENC instead, to compare.
+        #[arg(long, requires = "gpu")]
+        ffmpeg_nvenc: bool,
     },
     /// Stream a window, the monitor or the test pattern to viewers, each with
     /// an encoder of its own. Prints a `TICKET` line to pass to `view`.
@@ -491,7 +516,20 @@ async fn main() -> ExitCode {
             codec,
             psnr,
             out,
+            keyframe_every,
+            bitrate_every,
+            bitrate_to,
+            frames_csv,
+            gpu,
+            ffmpeg_nvenc,
         } => tokio::task::block_in_place(|| {
+            let events = match (keyframe_every, bitrate_every.zip(bitrate_to)) {
+                (Some(every), _) => Some(capture_test::Events::Keyframe { every }),
+                (None, Some((every, to_mbps))) => {
+                    Some(capture_test::Events::Bitrate { every, to_mbps })
+                }
+                (None, None) => None,
+            };
             // Capture and codecs block; keep them off the async runtime's threads.
             capture_test::run(capture_test::Args {
                 window,
@@ -502,6 +540,10 @@ async fn main() -> ExitCode {
                 codec: codec.into(),
                 psnr,
                 out,
+                events,
+                frames_csv,
+                gpu,
+                ffmpeg_nvenc,
             })
         }),
         Cmd::Host {
