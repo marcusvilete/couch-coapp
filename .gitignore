@@ -6,6 +6,7 @@
 !/third_party/vigem-rust/
 !/third_party/evdev/
 !/third_party/iroh/
+!/third_party/nv-codec-headers/
 
 # Per-developer editor settings
 .vscode/*

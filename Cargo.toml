@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.40.0"
+version = "0.41.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -23,6 +23,7 @@ couch-room = { path = "crates/couch-room" }
 couch-media = { path = "crates/couch-media" }
 couch-codec-ffmpeg = { path = "crates/couch-codec-ffmpeg" }
 couch-codec-opus = { path = "crates/couch-codec-opus" }
+couch-codec-nvenc = { path = "crates/couch-codec-nvenc" }
 couch-input = { path = "crates/couch-input" }
 couch-gamepad = { path = "crates/couch-gamepad" }
 couch-platform-win = { path = "crates/couch-platform-win" }
@@ -44,6 +45,7 @@ opus = "0.4"
 sdl3 = "=0.20.0"
 windows = "0.62"
 windows-core = "0.62"
+libloading = "0.8"
 vigem-rust = "0.2"
 # Linux system calls (M16): the clock, the viewer's stdout, polling a pad.
 rustix = { version = "1", default-features = false, features = ["std"] }

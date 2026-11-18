@@ -101,11 +101,11 @@ async fn probe_ffmpeg(report: &mut Report) {
         }
     }
     #[cfg(windows)]
-    match tokio::task::spawn_blocking(probe_gpu_frames)
+    match tokio::task::spawn_blocking(|| probe_gpu_frames(false))
         .await
         .expect("GPU frames probe panicked")
     {
-        Ok(()) => report.line(
+        Ok(_) => report.line(
             Status::Ok,
             "GPU frames (M9b)",
             "h264_nvenc encodes captured frames on the GPU",
@@ -116,12 +116,33 @@ async fn probe_ffmpeg(report: &mut Report) {
             format!("frames go through memory: {e}"),
         ),
     }
+    #[cfg(windows)]
+    match tokio::task::spawn_blocking(|| probe_gpu_frames(true))
+        .await
+        .expect("NVENC probe panicked")
+    {
+        Ok(in_place) => report.line(
+            Status::Ok,
+            "NVENC directly (M12d)",
+            if in_place {
+                "encodes captured frames, bitrate changes in place"
+            } else {
+                "encodes captured frames; this driver resets on each bitrate change"
+            },
+        ),
+        Err(e) => report.line(
+            Status::Info,
+            "NVENC directly (M12d)",
+            format!("FFmpeg's encoder instead: {e}"),
+        ),
+    }
 }
 
 /// Whether NVENC takes a frame from a texture on a D3D11 device made as the
-/// capture makes its own (M9b), at 1080p.
+/// capture makes its own (M9b), at 1080p: through FFmpeg, or `direct`ly
+/// (M12d). Says whether bitrate changes go in place (only ours can).
 #[cfg(windows)]
-fn probe_gpu_frames() -> Result<(), String> {
+fn probe_gpu_frames(direct: bool) -> Result<bool, String> {
     use couch_media::{BgraFrame, Codec, EncoderConfig, EncoderInput, Micros, VideoEncoder};
     let (width, height) = (1920, 1080);
     let mut uploader =
@@ -144,13 +165,20 @@ fn probe_gpu_frames() -> Result<(), String> {
         fps: 60,
         bitrate_bps: 20_000_000,
     };
-    let mut encoder =
-        couch_codec_ffmpeg::FfmpegEncoder::open_gpu(config, &gpu).map_err(|e| e.to_string())?;
+    let mut encoder: Box<dyn VideoEncoder> = if direct {
+        Box::new(
+            couch_codec_nvenc::NvencEncoder::open_gpu(config, &gpu).map_err(|e| e.to_string())?,
+        )
+    } else {
+        Box::new(
+            couch_codec_ffmpeg::FfmpegEncoder::open_gpu(config, &gpu).map_err(|e| e.to_string())?,
+        )
+    };
     let units = encoder
         .encode(EncoderInput::Gpu(&gpu), true)
         .map_err(|e| e.to_string())?;
     match units.first() {
-        Some(unit) if unit.keyframe => Ok(()),
+        Some(unit) if unit.keyframe => Ok(!encoder.caps().bitrate_change_costs_keyframe),
         _ => Err("no keyframe came out".into()),
     }
 }

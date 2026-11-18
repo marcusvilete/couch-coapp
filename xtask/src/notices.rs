@@ -303,6 +303,22 @@ fn components(root: &Path) -> anyhow::Result<String> {
         },
     );
 
+    // NVENC directly (M12d): the app's bindings are generated from NVIDIA's
+    // header, whose notice is its first comment.
+    if cfg!(windows) {
+        push_group(
+            &mut out,
+            &Group {
+                title:
+                    "NVIDIA Video Codec SDK 13.0's nvEncodeAPI.h (from nv-codec-headers), whose\n\
+                        types and constants are built into the app's own NVENC encoder"
+                        .to_string(),
+                text: header_notice(&root.join(crate::nvenc_bindings::HEADER))?,
+                users: BTreeSet::new(),
+            },
+        );
+    }
+
     if !cfg!(windows) {
         let lucide = deps::DEPS
             .iter()
@@ -339,6 +355,26 @@ fn components(root: &Path) -> anyhow::Result<String> {
         );
     }
     Ok(out)
+}
+
+/// A C header's licence: its first comment, without the comment's marks.
+fn header_notice(path: &Path) -> anyhow::Result<String> {
+    let text = read(path)?;
+    let start = text
+        .find("/*")
+        .ok_or_else(|| anyhow::anyhow!("{} has no comment", path.display()))?;
+    let end = text[start..]
+        .find("*/")
+        .ok_or_else(|| anyhow::anyhow!("{}'s first comment doesn't end", path.display()))?;
+    let notice: Vec<&str> = text[start + 2..start + end]
+        .lines()
+        .map(|l| l.trim().trim_start_matches('*').trim_start())
+        .collect();
+    let notice = notice.join("\n").trim().to_string();
+    if !notice.contains("Permission is hereby granted") {
+        bail!("{}'s first comment isn't its MIT notice", path.display());
+    }
+    Ok(notice + "\n")
 }
 
 /// The crates linked into the shipped binaries, grouped by licence text.
@@ -638,6 +674,17 @@ fn read(path: &Path) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M12d: NVENC's header notice is its MIT text, without comment marks.
+    #[test]
+    fn the_nvenc_header_notice_is_its_mit_text() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let notice = header_notice(&root.join(crate::nvenc_bindings::HEADER)).unwrap();
+        assert!(notice.starts_with("This copyright notice applies to this header file only:"));
+        assert!(notice.contains("Copyright (c) 2010-2024 NVIDIA Corporation"));
+        assert!(notice.contains("Permission is hereby granted"));
+        assert!(!notice.contains("/*") && !notice.contains("*/") && !notice.contains("\n*"));
+    }
 
     /// Windows' SDL3.dll and Linux's built-in SDL3 are one version, so one
     /// set of licences covers both: a `cargo update` moving `sdl3-src`
