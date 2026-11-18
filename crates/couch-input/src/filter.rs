@@ -70,7 +70,10 @@ pub fn key_allowed(key: HidUsage, held: &BTreeSet<HidUsage>) -> bool {
 /// lock screen) and Ctrl+F7 to F12 (KDE's window overviews and the desktop);
 /// and GNOME's Alt+F7 and Alt+F8 (moving and resizing the window by the
 /// keyboard, which takes the keys) and Alt+F10 (maximizing it), P18's VM
-/// run. Refused only on a Linux host: on Windows, Ctrl+Alt+key is
+/// run. And the X server's own Ctrl+Alt with the keypad's plus and minus
+/// (switching its video mode), divide and multiply (breaking or killing
+/// another client's grab, where the server allows it), for an X11 host
+/// (M28). Refused only on a Linux host: on Windows, Ctrl+Alt+key is
 /// AltGr+key, a character on many layouts.
 pub fn desktop_key(key: HidUsage, held: &BTreeSet<HidUsage>) -> bool {
     let any = |keys: [HidUsage; 2]| keys.iter().any(|k| held.contains(k));
@@ -78,6 +81,8 @@ pub fn desktop_key(key: HidUsage, held: &BTreeSet<HidUsage>) -> bool {
     let alt = any([LEFT_ALT, RIGHT_ALT]);
     match key {
         T | L => ctrl && alt,
+        // The keypad's divide, multiply, minus and plus.
+        HidUsage(0x54..=0x57) => ctrl && alt,
         F7 | F8 | F10 => ctrl || alt,
         HidUsage(code) if (F7.0..=F12.0).contains(&code) => ctrl,
         _ => false,
@@ -155,6 +160,11 @@ mod tests {
         assert!(!desktop_key(L, &held(&[LEFT_ALT])));
         assert!(!desktop_key(T, &held(&[])));
         assert!(!desktop_key(HidUsage(F1.0 + 5), &held(&[LEFT_CTRL])));
+        // The X server's own keypad combinations (M28).
+        for k in 0x54..=0x57 {
+            assert!(desktop_key(HidUsage(k), &held(&[LEFT_CTRL, RIGHT_ALT])));
+            assert!(!desktop_key(HidUsage(k), &held(&[LEFT_CTRL])));
+        }
         // GNOME's moving, resizing and maximizing by the keyboard (P18).
         for f in [F7, F8, F10] {
             assert!(desktop_key(f, &held(&[LEFT_ALT])));

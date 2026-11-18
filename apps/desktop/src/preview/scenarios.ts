@@ -183,6 +183,7 @@ function base(rooms: FakeRoom[], over: Partial<World> = {}): World {
       homePc: true,
       // A public build (M26c-2): the update notice, Report a problem.
       releasePages: true,
+      sharesThroughDialog: false,
     },
     profile: { displayName: "Ana", memberId: ME },
     rooms,
@@ -339,6 +340,7 @@ function linuxKeyboard(
       capabilities: { sessions: true, keyboardSeat: true, desktopControl: true },
       homePc: false,
       dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+      sharesThroughDialog: true,
     },
     drivers: [
       { driver: "uinput", state: "ready", installer: true },
@@ -874,6 +876,7 @@ export const SCENARIOS: Record<string, Scenario> = {
           capabilities: { sessions: false, keyboardSeat: false, desktopControl: false },
           homePc: false,
           dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+          sharesThroughDialog: true,
         },
       }),
   },
@@ -901,6 +904,7 @@ export const SCENARIOS: Record<string, Scenario> = {
           capabilities: { sessions: true, keyboardSeat: false, desktopControl: false },
           homePc: false,
           dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+          sharesThroughDialog: true,
         },
         drivers: [{ driver: "uinput", state: "missing", installer: true }],
         // The stream picker offers Choose again.
@@ -923,6 +927,32 @@ export const SCENARIOS: Record<string, Scenario> = {
         },
       }),
   },
+  "linux-x11-host": {
+    title: "Linux on X11: hosting, its windows and screens listed, the sound picked (M28)",
+    world: () => {
+      const world = SCENARIOS["linux-host"].world();
+      world.info = {
+        ...world.info,
+        sharesThroughDialog: false,
+        capabilities: { sessions: true, keyboardSeat: true, desktopControl: true },
+      };
+      world.drivers = [{ driver: "uinput", state: "ready", installer: true }];
+      world.sharedRemembered = false;
+      world.sources = {
+        ...world.sources,
+        windows: [
+          { id: "41943047", title: "Hollow Knight", app: "hollow_knight.x86_64", elevated: false, refreshHz: null },
+          { id: "62914566", title: "Steam", app: "steam", elevated: false, refreshHz: null },
+          { id: "56623110", title: "Dolphin: ~/Games", app: "dolphin", elevated: false, refreshHz: null },
+        ],
+        screens: [
+          { id: "512", name: "eDP", width: 1280, height: 800, primary: true, refreshHz: null },
+          { id: "513", name: "DisplayPort-0", width: 1920, height: 1080, primary: false, refreshHz: null },
+        ],
+      };
+      return world;
+    },
+  },
   "linux-extension-outdated": {
     title: "Linux on GNOME: an older version of our extension, so no keyboard seat until it's updated (P18)",
     world: () => ({
@@ -944,6 +974,7 @@ export const SCENARIOS: Record<string, Scenario> = {
           capabilities: { sessions: true, keyboardSeat: false, desktopControl: true },
           homePc: true,
           dataDir: "/home/ana/.local/share/CouchCoApp/profiles/default",
+          sharesThroughDialog: true,
         },
       });
       Object.assign(world.remotePlay, {

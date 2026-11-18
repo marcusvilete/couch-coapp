@@ -32,8 +32,9 @@ struct Watcher {
     look: Notify,
 }
 
-/// Whether the lock screen was up when last looked at (unlocked until
-/// known), and looks again.
+/// Whether the lock screen was up, or the user's session wasn't the one in
+/// front (logind's `Active`: another console or user switched to), when
+/// last looked at (unlocked until known), and looks again.
 pub fn locked() -> bool {
     static WATCHER: OnceLock<Option<Arc<Watcher>>> = OnceLock::new();
     let watcher = WATCHER.get_or_init(|| {
@@ -98,7 +99,7 @@ async fn locked_hint(bus: &zbus::Connection) -> zbus::Result<bool> {
         // No graphical session of the user's: this process's own.
         Ok(None) | Err(_) => manager(bus, "GetSessionByPID", std::process::id()).await?,
     };
-    match property(
+    let locked = match property(
         bus,
         &session,
         "org.freedesktop.login1.Session",
@@ -106,11 +107,25 @@ async fn locked_hint(bus: &zbus::Connection) -> zbus::Result<bool> {
     )
     .await?
     {
-        Value::Bool(locked) => Ok(locked),
-        other => Err(zbus::Error::Failure(format!(
-            "LockedHint isn't a boolean: {other:?}"
-        ))),
-    }
+        Value::Bool(locked) => locked,
+        other => {
+            return Err(zbus::Error::Failure(format!(
+                "LockedHint isn't a boolean: {other:?}"
+            )));
+        }
+    };
+    // Another session in front (a switch to a console or another user's
+    // desktop, M28's review): as good as locked, since the keyboard and
+    // mouse reach that one now. Unread, only the lock counts.
+    let active = property(bus, &session, "org.freedesktop.login1.Session", "Active")
+        .await
+        .ok()
+        .and_then(|v| match v {
+            Value::Bool(active) => Some(active),
+            _ => None,
+        })
+        .unwrap_or(true);
+    Ok(locked || !active)
 }
 
 /// The object logind's manager names for an id (a user's, a process's).

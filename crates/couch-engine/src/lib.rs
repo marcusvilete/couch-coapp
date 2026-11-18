@@ -2332,6 +2332,11 @@ pub struct EngineInfo {
     /// This build names its releases (M26c-2): the update notice's switch,
     /// the version mismatch's link and Report a problem are offered.
     pub release_pages: bool,
+    /// What to stream is chosen in the desktop's own dialog
+    /// (`Backend::shares_through_dialog`: a Linux host on Wayland, M16c),
+    /// so the stream picker lists nothing but that; on an X11 desktop (M28)
+    /// and on Windows it lists the windows and screens.
+    pub shares_through_dialog: bool,
 }
 
 /// What a system can host (M16c, ADR 0012): Windows everything; Linux
@@ -3726,6 +3731,7 @@ impl Engine {
                 capabilities: self.backend.capabilities(),
                 home_pc: self.backend.capabilities().sessions && self.backend.home_pc(),
                 release_pages: self.updates.has_releases(),
+                shares_through_dialog: self.backend.shares_through_dialog(),
             })),
             Command::Ping { nonce } => {
                 // No subscribers is fine: the UI may not be listening yet.

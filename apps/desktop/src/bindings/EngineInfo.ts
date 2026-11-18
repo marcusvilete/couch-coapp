@@ -34,4 +34,11 @@ homePc: boolean,
  * This build names its releases (M26c-2): the update notice's switch,
  * the version mismatch's link and Report a problem are offered.
  */
-releasePages: boolean, };
+releasePages: boolean, 
+/**
+ * What to stream is chosen in the desktop's own dialog
+ * (`Backend::shares_through_dialog`: a Linux host on Wayland, M16c),
+ * so the stream picker lists nothing but that; on an X11 desktop (M28)
+ * and on Windows it lists the windows and screens.
+ */
+sharesThroughDialog: boolean, };

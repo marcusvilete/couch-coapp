@@ -178,6 +178,16 @@
   border-top: 1px solid var(--divider);
 }
 
+/* Under the windows and screens (an X11 desktop, M28): set apart from the
+   list, which scrolls above it. */
+.picker-sound-below {
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--divider);
+}
+
 @media (forced-colors: active) {
   .source.picked {
     outline: 2px solid Highlight;

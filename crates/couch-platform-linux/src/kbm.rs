@@ -14,12 +14,14 @@
 //! - **A crash holds nothing:** the kernel releases a device's keys and
 //!   buttons when the device goes, and it goes with this process.
 //! - **The mouse moves relatively,** as games want; the desktop's pointer
-//!   acceleration applies to it, and nothing keeps it on one screen
-//!   (`set_bounds` does nothing here: Wayland tells no program where the
-//!   pointer is).
+//!   acceleration applies to it. On Wayland nothing keeps it on one screen
+//!   (no program is told where the pointer is); on an X11 desktop (M28)
+//!   desktop control's is kept on the streamed screen (`set_bounds`), from
+//!   where the X server says it is.
 //! - **A guest's pointer stays inside the game window** (`confine`): each
 //!   move is cut to what keeps it in the window's client area, from where
-//!   the desktop's helper last said the pointer is (`front::pointer`), by
+//!   the desktop's helper last said the pointer is (`front::pointer`; on an
+//!   X11 desktop the X server, `x11::tracker`, M28), by
 //!   `couch_input::confine`. Only our moves are cut: the host's own mouse
 //!   drives the same pointer, and stays free.
 //!
@@ -28,7 +30,10 @@
 
 use std::{ffi::CString, io};
 
-use couch_input::{HidUsage, InputError, KbmInjector, MouseButton, confine::Confiner};
+use couch_input::{
+    Bounds, HidUsage, InputError, KbmInjector, MouseButton,
+    confine::{Confiner, PointerReport},
+};
 use evdev::{
     AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode, RelativeAxisCode,
     uinput::VirtualDevice,
@@ -142,6 +147,9 @@ pub struct UinputKbm {
     wheel_rest: (i32, i32),
     /// The game window a guest's pointer is kept in, by `front`'s id.
     confined: Option<(isize, Confiner)>,
+    /// The streamed screen desktop control's pointer is kept on, where the
+    /// X server says where the pointer is (M28).
+    bounded: Option<(Bounds, Confiner)>,
 }
 
 impl UinputKbm {
@@ -196,6 +204,7 @@ impl UinputKbm {
             mouse,
             wheel_rest: (0, 0),
             confined: None,
+            bounded: None,
         })
     }
 }
@@ -260,6 +269,18 @@ fn wheel_events(rest: &mut (i32, i32), dx: i32, dy: i32) -> Vec<InputEvent> {
     events
 }
 
+/// Where the X server last said the pointer is, against `area` (M28).
+fn x11_report(area: Bounds) -> Option<PointerReport> {
+    crate::x11::tracker::pointer().map(|p| PointerReport {
+        x: p.x,
+        y: p.y,
+        area,
+        changes: p.changes,
+        came: Some(p.came),
+        told: Some(p.told),
+    })
+}
+
 impl KbmInjector for UinputKbm {
     fn key(&mut self, key: HidUsage, down: bool) -> Result<(), InputError> {
         // A key we don't send is dropped, as on Windows.
@@ -272,11 +293,27 @@ impl KbmInjector for UinputKbm {
     }
 
     fn mouse_move(&mut self, dx: i32, dy: i32) -> Result<(), InputError> {
-        let (dx, dy) = match &mut self.confined {
-            Some((window, confiner)) => {
-                confiner.cut(front::pointer(*window), dx, dy, std::time::Instant::now())
+        let now = std::time::Instant::now();
+        let (dx, dy) = match (&mut self.confined, &mut self.bounded) {
+            // On an X11 desktop (M28), where the X server says the pointer
+            // is and the game's client area.
+            (Some((window, confiner)), _) if crate::x11::session() => {
+                let area = u32::try_from(*window)
+                    .ok()
+                    .and_then(crate::x11::tracker::area)
+                    .and_then(|a| {
+                        Some(Bounds {
+                            x: a.x,
+                            y: a.y,
+                            width: i32::try_from(a.width).ok()?,
+                            height: i32::try_from(a.height).ok()?,
+                        })
+                    });
+                confiner.cut(area.and_then(x11_report), dx, dy, now)
             }
-            None => (dx, dy),
+            (Some((window, confiner)), _) => confiner.cut(front::pointer(*window), dx, dy, now),
+            (None, Some((area, confiner))) => confiner.cut(x11_report(*area), dx, dy, now),
+            (None, None) => (dx, dy),
         };
         if dx == 0 && dy == 0 {
             return Ok(());
@@ -315,6 +352,23 @@ impl KbmInjector for UinputKbm {
             "a guest's pointer kept in the game window"
         );
         self.confined = window.map(|w| (w, Confiner::new()));
+    }
+
+    /// Desktop control's pointer kept on the streamed screen (M25b), on an
+    /// X11 desktop only (M28): each move cut to keep it there from where the
+    /// X server last said it is, as a guest's is kept in the game window,
+    /// never placed. Wayland tells no program where the pointer is: there it
+    /// moves freely.
+    fn set_bounds(&mut self, bounds: Option<Bounds>) {
+        let bounds = bounds.filter(|_| crate::x11::session());
+        if self.bounded.as_ref().map(|(b, _)| *b) == bounds {
+            return;
+        }
+        tracing::info!(
+            on = bounds.is_some(),
+            "the pointer kept on the streamed screen"
+        );
+        self.bounded = bounds.map(|b| (b, Confiner::new()));
     }
 }
 

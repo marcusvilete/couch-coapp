@@ -816,7 +816,7 @@ fn number(props: &DictRef, key: &str) -> Option<u32> {
 }
 
 /// Whether `pid` is `us` or one of its descendants, by `/proc`.
-fn is_ours(pid: u32, us: u32) -> bool {
+pub(crate) fn is_ours(pid: u32, us: u32) -> bool {
     let mut pid = pid;
     // A tree deeper than this is no one's.
     for _ in 0..64 {

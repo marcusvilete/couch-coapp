@@ -274,6 +274,17 @@ export const SHOTS = [
       await page.getByRole("option", { name: "Hollow Knight" }).click();
     },
   ],
+  // M28: an X11 desktop lists its windows and screens, as on Windows, with
+  // the sound picked as on Wayland.
+  ["stream-picker-linux-x11", "linux-x11-host", click("Start streaming…")],
+  [
+    "stream-picker-linux-x11-window",
+    "linux-x11-host",
+    async (page) => {
+      await click("Start streaming…")(page);
+      await page.locator(".source", { hasText: "Hollow Knight" }).click();
+    },
+  ],
   // M16c-2: the picker on a Linux host whose session has a keyboard seat:
   // the desktop's dialog is offered, never refused for being a screen (the
   // VM run found it refused).
@@ -571,6 +582,20 @@ export const STABLE = [
     [
       ["open", click("Start streaming…")],
       // M16c-1's fourth part: one program's sound.
+      ["sound", async (page) => page.getByRole("combobox", { name: "Sound guests hear" }).click()],
+      ["program", async (page) => page.getByRole("option", { name: "Hollow Knight" }).click()],
+    ],
+  ],
+  // M28: an X11 desktop's picker, its windows and screens, and the sound.
+  [
+    "stream picker on X11",
+    "linux-x11-host",
+    [".dialog"],
+    [
+      ["open", click("Start streaming…")],
+      ["Screens", async (page) => page.getByRole("tab", { name: /Screens/ }).click()],
+      ["Windows", async (page) => page.getByRole("tab", { name: /Windows/ }).click()],
+      ["pick", async (page) => page.locator(".source", { hasText: "Hollow Knight" }).click()],
       ["sound", async (page) => page.getByRole("combobox", { name: "Sound guests hear" }).click()],
       ["program", async (page) => page.getByRole("option", { name: "Hollow Knight" }).click()],
     ],
