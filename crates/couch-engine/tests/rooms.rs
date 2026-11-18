@@ -1848,6 +1848,94 @@ async fn a_received_code_stays_in_its_room_and_a_personal_one_with_its_holder() 
     stop_all(&mut [&mut a, &mut b, &mut c, &mut d, &mut e]).await;
 }
 
+/// A record naming a relay proves nothing about the room (M26b, the review's
+/// test gap): a member answers with a relay's code only when its own home is
+/// that relay or one of its connections in the room runs through it now.
+/// Cai, on Rc alone, and Dee, holding Rc and a personal code for Rb, go
+/// offline once Bia, on Rb, got Rc from Dee for the room. Cai's record still
+/// names Rc, a claim nobody is on, the same to Bia as a record lying about
+/// its home. Eve, joining on a relay open to all, can't reach Cai and asks
+/// the room for Rc: Bia holds its code, passable in this room (received for
+/// it, so never her home), and gives nothing; Eve hears that nobody here can
+/// pass it on, and never holds it.
+#[tokio::test]
+async fn a_relay_a_record_merely_names_gets_no_code() {
+    let open = TestRelay::start(None).await;
+    let rb = TestRelay::start(Some("bees")).await;
+    let rc = TestRelay::start(Some("cees")).await;
+    let mut a = on_relays_member("Ana").await;
+    let mut b = on_relays_member("Bia").await;
+    let mut c = on_relays_member("Cai").await;
+    let mut d = on_relays_member("Dee").await;
+    a.add_relay(&open.url, None, false).await;
+    b.add_relay(&rb.url, Some("bees"), false).await;
+    c.add_relay(&rc.url, Some("cees"), false).await;
+    // Dee's Rb is personal, so Cai never gets it: Bia alone asks, and Dee
+    // answers (her home, or her connection to Cai, runs through Rc).
+    d.add_relay(&rb.url, Some("bees"), true).await;
+    d.add_relay(&rc.url, Some("cees"), false).await;
+    let room = a.create("Sofá").await.id;
+    let invite = a.invite(&room).await;
+    for m in [&d, &c, &b] {
+        m.join(&invite, PASSWORD).await.unwrap();
+    }
+    full_mesh(&room, &[&a, &b, &c, &d]).await;
+    let from_dee = |n: &couch_engine::NetworkView| {
+        n.relays.iter().any(|r| {
+            passed_on_by(r) == ["Dee"] && r.received.as_ref().unwrap().rooms[0].room == room
+        })
+    };
+    b.wait_network("Rc from Dee, for the room", from_dee).await;
+    assert_eq!(c.relay(&rb.url).await, None, "Cai never got Rb");
+
+    // Nobody on Rc any more; Cai's record still names it.
+    let (cid, did) = (c.id(), d.id());
+    c.stop().await;
+    d.stop().await;
+    b.wait_for(&room, "Cai and Dee offline", |v| {
+        v.is_some_and(|v| {
+            v.members
+                .iter()
+                .filter(|m| m.id == cid || m.id == did)
+                .all(|m| m.link == MemberLink::Offline)
+        })
+    })
+    .await;
+
+    let mut e = on_relays_member("Eve").await;
+    e.add_relay(&open.url, None, false).await;
+    e.join(&invite, PASSWORD).await.unwrap();
+    e.wait_connected(&room, &[&a, &b], Some(5)).await;
+    let nobody = |v: Option<&RoomView>| {
+        v.and_then(|v| v.members.iter().find(|m| m.id == cid))
+            .and_then(|m| m.unreachable.as_ref())
+            .is_some_and(|u| {
+                matches!(
+                    &u.reason,
+                    MemberReason::NeedsCode {
+                        passing: CodePassing::Nobody,
+                        ..
+                    }
+                )
+            })
+    };
+    e.wait_for(&room, "nobody can pass Cai's relay on", nobody)
+        .await;
+    // Asks are repeated (at most `check_every` apart here), so Bia, connected
+    // to Eve, has been asked by now or will be soon; a code from her would be
+    // checked and kept within `check_timeout`.
+    let deadline = Instant::now() + Duration::from_secs(5 + 3 + 1);
+    while Instant::now() < deadline {
+        assert_eq!(e.relay(&rc.url).await, None, "Eve never holds Cai's relay");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    e.wait_for(&room, "nobody can pass Cai's relay on, still", nobody)
+        .await;
+    // And Bia still holds the code she could have given.
+    assert!(from_dee(&b.network().await));
+    stop_all(&mut [&mut a, &mut b, &mut e]).await;
+}
+
 /// A join with the code in the link (M26b): Ana's link carries her relay's
 /// code, so Bia, who lacks it, joins through it, and keeps it for the room
 /// only once admitted: a wrong password leaves her nothing. A link made
