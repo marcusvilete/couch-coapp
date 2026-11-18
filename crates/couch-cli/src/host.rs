@@ -25,7 +25,9 @@ use couch_net::{
     Connection, NetError, admission, control, datagrams::Datagrams, endpoint, streams::Streams,
 };
 use couch_proto::{
-    control::{ALIVE_EVERY, Alive, ControlMessage, SeatAssigned, SeatReleased, close_code},
+    control::{
+        ALIVE_EVERY, Alive, ControlMessage, KeyframeReason, SeatAssigned, SeatReleased, close_code,
+    },
     session::SeatKind,
 };
 use iroh_tickets::endpoint::EndpointTicket;
@@ -73,7 +75,7 @@ enum FromViewer {
         conn: Connection,
         control: mpsc::UnboundedSender<ControlMessage>,
     },
-    Keyframe(MemberId),
+    Keyframe(MemberId, KeyframeReason),
     Left(MemberId),
 }
 
@@ -105,6 +107,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // without HEVC, set COUCH_HOST_CODEC=h264 (or COUCH_VIEWER_HEVC=0) here,
     // on the host: `view`'s own environment isn't asked.
     let viewer_codecs = backend.decodes();
+    // And continues as the app's stream window does (M12d-2).
+    let viewer_continues = couch_engine::pipeline::watch::continues_in(viewer_codecs);
     // A host here that was killed may have left a guest's keys held.
     let left = backend.release_left_input();
     if left > 0 {
@@ -234,7 +238,14 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     }
                     println!("viewer {} connected", short(member));
                     let channels = (Datagrams::start(conn.clone()), Streams::start(conn.clone()));
-                    stream.add_viewer(member, viewer_codecs, conn.clone(), &channels.0, &channels.1);
+                    stream.add_viewer(
+                        member,
+                        viewer_codecs,
+                        viewer_continues,
+                        conn.clone(),
+                        &channels.0,
+                        &channels.1,
+                    );
                     if let Some(free) = holders.iter().position(Option::is_none) {
                         holders[free] = Some(member);
                         let permissions = if free == first_guest_seat { args.permissions } else { Permissions::GAMEPAD };
@@ -242,7 +253,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                     }
                     viewers.insert(member, Viewer { conn, control, _channels: channels });
                 }
-                FromViewer::Keyframe(member) => stream.keyframe(member),
+                FromViewer::Keyframe(member, reason) => stream.keyframe(member, reason),
                 FromViewer::Left(member) => {
                     if viewers.remove(&member).is_some() {
                         println!("viewer {} disconnected", short(member));
@@ -517,7 +528,7 @@ async fn accept_viewers(endpoint: couch_net::Endpoint, to_main: mpsc::UnboundedS
                 match rx.recv().await {
                     Ok(Some(ControlMessage::KeyframeRequest(request))) => {
                         tracing::debug!(?request, "keyframe requested");
-                        let _ = to_main.send(FromViewer::Keyframe(member));
+                        let _ = to_main.send(FromViewer::Keyframe(member, request.reason));
                     }
                     Ok(Some(_)) => {}
                     Err(NetError::TimedOut) => {

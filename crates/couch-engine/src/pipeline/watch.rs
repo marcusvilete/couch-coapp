@@ -37,7 +37,7 @@ use couch_net::{
 };
 use couch_proto::{
     board::{BoardSnapshot, PictureId},
-    control::{SeatAssigned, SeatController, SeatReleased},
+    control::{KeyframeReason, SeatAssigned, SeatController, SeatReleased},
     input::RumbleDatagram,
     ipc::{
         self, AudioPacket, AudioStats, BoardNews, ControllerNames, Draw, FrameTiming, HudState,
@@ -51,6 +51,15 @@ use couch_room::board::Replica;
 use tokio::{io::AsyncWrite, sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 
 use super::{Backend, ViewerOptions, ViewerProcess, ipc as pipe};
+
+/// The codecs, as `couch_proto::codec` bits, in which this member's stream
+/// window accepts epochs that continue from a frame it decoded (M12d-2,
+/// `SessionJoin::continues`): HEVC alone, of those it decodes, where the spike
+/// checked FFmpeg's decoders bit for bit (ADR 0016); H.264 gained
+/// too little to be worth it.
+pub fn continues_in(codecs: u8) -> u8 {
+    codecs & couch_proto::codec::DECODES_HEVC
+}
 
 /// After asking the viewer to close, how long to let it finish (it releases
 /// what it held) before ending it.
@@ -82,8 +91,9 @@ pub struct WatchOptions {
 /// What watching reports.
 #[derive(Debug, Clone)]
 pub enum WatchEvent {
-    /// The decoder needs a keyframe: ask the host (`KeyframeRequest`).
-    KeyframeNeeded { epoch: u32 },
+    /// The decoder needs a keyframe, or fell behind and asks to continue
+    /// (M12d-2): ask the host (`KeyframeRequest`).
+    KeyframeNeeded { epoch: u32, reason: KeyframeReason },
     /// The user asked for something in the viewer.
     Action(UserAction),
     /// A presented frame (with `measure`).
@@ -460,7 +470,10 @@ async fn restart(ctx: &mut Ctx, forwarder: &mut Forwarder) -> bool {
     if let Some(link) = &ctx.link {
         link.video.note_decode_error();
         let epoch = link.video.latest_epoch();
-        ctx.event(WatchEvent::KeyframeNeeded { epoch });
+        ctx.event(WatchEvent::KeyframeNeeded {
+            epoch,
+            reason: KeyframeReason::Start,
+        });
     }
     ctx.event(WatchEvent::ViewerRestarted);
     true
@@ -541,10 +554,12 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
             from = from_host(&mut ctx.link) => match from {
                 FromHost::Frame(frame) => {
                     received_bytes += frame.data.len() as u64;
+                    // An older epoch's frame is still wanted up to the one
+                    // the newest continues from (M12d-2).
                     let stale = ctx
                         .link
                         .as_ref()
-                        .is_some_and(|l| frame.epoch < l.video.latest_epoch());
+                        .is_some_and(|l| !l.video.wanted(frame.epoch, frame.header.seq));
                     if stale {
                         continue;
                     }
@@ -557,6 +572,7 @@ async fn watch(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<WatchCmd>) -> O
                         capture_us: frame.header.capture_us,
                         encode_us: frame.header.encode_us,
                         arrived_us: frame.arrived.0,
+                        continues: frame.continues,
                     }
                     .write(&frame.data, &mut payload);
                     ctx.window.to.send(ipc::kinds::VIDEO_FRAME, &payload).await
@@ -771,9 +787,12 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
         }
         ipc::kinds::KEYFRAME_REQUEST => {
             if let Some(link) = &ctx.link {
+                // Why (M12d-2); a window that says nothing lost its decoder.
+                let reason = ipc::from_payload::<KeyframeReason>(&frame.payload)
+                    .unwrap_or(KeyframeReason::DecoderError);
                 link.video.note_decode_error();
                 let epoch = link.video.latest_epoch();
-                ctx.event(WatchEvent::KeyframeNeeded { epoch });
+                ctx.event(WatchEvent::KeyframeNeeded { epoch, reason });
             }
         }
         ipc::kinds::VOLUME_CHANGED => {

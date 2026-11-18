@@ -82,7 +82,10 @@ pub const ALPN: &[u8] = b"couch-coapp/0";
 /// of version 3 carrying the code of the owner's relay.
 /// 21: a rotated relay code moving during the overlap (the M26b follow-up):
 /// `RelayHint`.
-pub const PROTOCOL_MINOR: u16 = 21;
+/// 22: epochs that continue from a frame the viewer decoded (M12d-2, ADR
+/// 0016): `EpochPreamble::continues` (preamble version 1),
+/// `KeyframeReason::FellBehind` and `CantContinue`, `SessionJoin::continues`.
+pub const PROTOCOL_MINOR: u16 = 22;
 
 /// What a public release's notes say first, as `<!-- couch-wire-revision: N -->`
 /// with [`PROTOCOL_MINOR`] for N (M26c, `cargo xtask release-notes`): the
@@ -118,6 +121,7 @@ pub const REVISIONS: &[(u16, &str)] = &[
     (19, "0.33"),
     (20, "0.37"),
     (21, "0.38"),
+    (22, "0.42"),
 ];
 
 /// Video codecs on the wire: in an epoch's preamble and the viewer's IPC

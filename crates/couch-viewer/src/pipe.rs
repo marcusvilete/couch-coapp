@@ -6,6 +6,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use couch_proto::control::KeyframeReason;
 use couch_proto::ipc::{
     self, AudioPacket, AudioStats, BoardNews, ControllerNames, Draw, FrameTiming, HudState,
     LocalInput, NetStats, RumbleState, SeatState, ShortcutKeys, StreamVolume, UserAction,
@@ -43,7 +44,9 @@ pub enum Outgoing {
     /// The user's picture (M27e).
     PictureUp(couch_proto::ipc::PictureUp),
     Timing(FrameTiming),
-    KeyframeRequest,
+    /// The decoder needs a fresh start, and why: a keyframe, or (M12d-2) a
+    /// continuation from a frame it holds.
+    KeyframeRequest(KeyframeReason),
     Input(LocalInput),
     AudioStats(AudioStats),
     Action(UserAction),
@@ -212,7 +215,10 @@ pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>, out: Box<dyn Write + Send>) ->
                         timing.write(&mut payload);
                         ipc::kinds::FRAME_TIMING
                     }
-                    Outgoing::KeyframeRequest => ipc::kinds::KEYFRAME_REQUEST,
+                    Outgoing::KeyframeRequest(reason) => {
+                        payload = ipc::to_payload(&reason);
+                        ipc::kinds::KEYFRAME_REQUEST
+                    }
                     Outgoing::Input(input) => {
                         payload = ipc::to_payload(&input);
                         ipc::kinds::INPUT

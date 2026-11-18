@@ -11,12 +11,13 @@ use crate::{
     bytes::{Reader, Writer},
     ids::Permissions,
     input::PadSnapshot,
+    media::FrameRef,
     session::GuestController,
 };
 
 /// Bumped whenever an IPC payload changes. The viewer is always shipped with
 /// the app, so a mismatch means a broken install, not an old peer.
-pub const IPC_VERSION: u16 = 21;
+pub const IPC_VERSION: u16 = 22;
 
 /// Largest frame (kind plus payload). Sized for a high-bitrate keyframe.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -62,7 +63,9 @@ pub mod kinds {
     pub const FRAME_TIMING: u8 = 0x82;
     /// viewer -> main: something the user asked of the session ([`super::UserAction`]).
     pub const USER_ACTION: u8 = 0x83;
-    /// viewer -> main: the decoder lost sync and needs a keyframe.
+    /// viewer -> main: the decoder lost sync and needs a keyframe, or fell
+    /// behind and asks to continue from a frame it holds; why, as
+    /// [`crate::control::KeyframeReason`] (M12d-2; empty before).
     pub const KEYFRAME_REQUEST: u8 = 0x84;
     /// viewer -> main: audio playback counters ([`super::AudioStats`]), every second.
     pub const AUDIO_STATS: u8 = 0x85;
@@ -98,10 +101,13 @@ pub struct VideoFrameHeader {
     pub encode_us: u32,
     /// When the frame finished arriving, on this machine's clock.
     pub arrived_us: u64,
+    /// On an epoch's first frame, the frame the epoch continues from
+    /// (M12d-2, `EpochPreamble::continues`); `None` otherwise.
+    pub continues: Option<FrameRef>,
 }
 
 impl VideoFrameHeader {
-    pub const LEN: usize = 4 + 4 + 1 + 1 + 8 + 4 + 8;
+    pub const LEN: usize = 4 + 4 + 1 + 1 + 8 + 4 + 8 + 1 + 4 + 4;
 
     /// Appends the header and then `access_unit`, forming a complete payload.
     pub fn write(&self, access_unit: &[u8], out: &mut Vec<u8>) {
@@ -113,7 +119,10 @@ impl VideoFrameHeader {
             .u8(self.codec)
             .u64(self.capture_us)
             .u32(self.encode_us)
-            .u64(self.arrived_us);
+            .u64(self.arrived_us)
+            .u8(u8::from(self.continues.is_some()))
+            .u32(self.continues.map_or(0, |f| f.epoch))
+            .u32(self.continues.map_or(0, |f| f.seq));
         out.extend_from_slice(access_unit);
     }
 
@@ -128,6 +137,14 @@ impl VideoFrameHeader {
             capture_us: r.u64()?,
             encode_us: r.u32()?,
             arrived_us: r.u64()?,
+            continues: {
+                let (flag, epoch, seq) = (r.u8()?, r.u32()?, r.u32()?);
+                match flag {
+                    0 => None,
+                    1 => Some(FrameRef { epoch, seq }),
+                    _ => return None,
+                }
+            },
         };
         Some((header, r.rest()))
     }
@@ -699,14 +716,22 @@ mod tests {
             capture_us: 1_000,
             encode_us: 1_500,
             arrived_us: 9_000,
+            continues: None,
         };
-        let mut payload = Vec::new();
-        header.write(b"annex-b", &mut payload);
-        assert_eq!(payload.len(), VideoFrameHeader::LEN + 7);
-        assert_eq!(
-            VideoFrameHeader::read(&payload),
-            Some((header, &b"annex-b"[..]))
-        );
+        let continuing = VideoFrameHeader {
+            keyframe: false,
+            continues: Some(FrameRef { epoch: 1, seq: 40 }),
+            ..header
+        };
+        for header in [header, continuing] {
+            let mut payload = Vec::new();
+            header.write(b"annex-b", &mut payload);
+            assert_eq!(payload.len(), VideoFrameHeader::LEN + 7);
+            assert_eq!(
+                VideoFrameHeader::read(&payload),
+                Some((header, &b"annex-b"[..]))
+            );
+        }
     }
 
     #[test]

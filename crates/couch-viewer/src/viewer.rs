@@ -24,11 +24,13 @@ use couch_media::{
 };
 use couch_proto::{
     board::{BoardOp, Refusal},
+    control::KeyframeReason,
     ids::MemberId,
     ipc::{
         BoardNews, Draw, FrameTiming, HudBoard, HudLink, HudRole, HudSeat, HudState, LocalInput,
         NetStats, PictureUp, StreamVolume, UserAction, WindowRequest, WindowState,
     },
+    media::FrameRef,
     session::StreamState,
 };
 use sdl3::{
@@ -40,6 +42,7 @@ use sdl3::{
 
 use crate::{
     audio::AudioOut,
+    chain::Chain,
     clock,
     draw_ui::{Drawing, MOVING_EVERY},
     editor::{Editor, TextKey},
@@ -1979,16 +1982,21 @@ fn decode_loop(
     // behind that aren't stale.
     let mut ready_us = u64::MAX;
     let mut locator = BarcodeLocator::default();
-    // After a decode error, or when decoding falls behind, wait for the next
-    // keyframe instead of showing garbage or ever older frames.
+    // After a decode error, or when decoding falls behind, wait for a fresh
+    // start instead of showing garbage or ever older frames: a keyframe, or
+    // an epoch continuing from a frame the decoder holds (M12d-2). What we
+    // ask the host for meanwhile.
     let mut need_keyframe = false;
+    let mut asked = KeyframeReason::DecoderError;
+    // The frames decoded since the decoder last broke (M12d-2).
+    let mut chain = Chain::default();
     // Decode errors in a row on a D3D12 decoder.
     let mut d3d12_errors = 0u32;
     let mut last_request: Option<Instant> = None;
-    let mut request_keyframe = || {
+    let mut request_keyframe = |reason: KeyframeReason| {
         if last_request.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
             last_request = Some(Instant::now());
-            let _ = out.send(Outgoing::KeyframeRequest);
+            let _ = out.send(Outgoing::KeyframeRequest(reason));
         }
     };
 
@@ -2013,6 +2021,8 @@ fn decode_loop(
             }
             ready_us = u64::MAX;
             need_keyframe = true;
+            asked = KeyframeReason::DecoderError;
+            chain.broke();
         }
         // Another codec (the host chose it at join): a decoder for it, from
         // a keyframe; on the GPU still, unless frames already go through
@@ -2021,9 +2031,12 @@ fn decode_loop(
         if codec != decoder.codec() {
             if !header.keyframe {
                 need_keyframe = true;
-                request_keyframe();
+                asked = KeyframeReason::DecoderError;
+                chain.broke();
+                request_keyframe(asked);
                 continue;
             }
+            chain.broke();
             let reopened = if decoder.kind() == DecoderKind::D3d12 {
                 open_decoder(codec, device.clone())
             } else {
@@ -2051,17 +2064,41 @@ fn decode_loop(
         // Frames queue here unseen by the host (its reports measure arrival),
         // so a decoder slower than the stream must catch up on its own.
         let now = now_us().0;
-        if !need_keyframe && !header.keyframe && is_stale(header.arrived_us, ready_us, now) {
+        // An epoch that continues from a frame (M12d-2) is a fresh start
+        // where the decoder holds that frame, and can't be decoded otherwise:
+        // only a keyframe helps then. A keyframe is a fresh start whatever its
+        // epoch says (an encoder that fell back, or had nothing left to refer to).
+        let continues = header.continues.map(|from| chain.holds(from));
+        if continues == Some(false) && !header.keyframe {
+            if !(need_keyframe && asked == KeyframeReason::CantContinue) {
+                tracing::info!(
+                    epoch = header.epoch,
+                    "an epoch continues from a frame not decoded here; asking for a keyframe"
+                );
+            }
+            need_keyframe = true;
+            asked = KeyframeReason::CantContinue;
+            request_keyframe(asked);
+            continue;
+        }
+        let fresh_start = header.keyframe || continues == Some(true);
+        if !need_keyframe && !fresh_start && is_stale(header.arrived_us, ready_us, now) {
             let waited = Duration::from_micros(now.saturating_sub(header.arrived_us));
+            // The host may continue from the last frame decoded (M12d-2);
+            // otherwise it sends a keyframe.
+            asked = match chain.last() {
+                Some(holds) => KeyframeReason::FellBehind { holds },
+                None => KeyframeReason::DecoderError,
+            };
             tracing::warn!(
                 seq = header.seq,
                 ?waited,
-                "decoding fell behind; skipping to a keyframe"
+                "decoding fell behind; skipping to a fresh start"
             );
             need_keyframe = true;
         }
-        if need_keyframe && !header.keyframe {
-            request_keyframe();
+        if need_keyframe && !fresh_start {
+            request_keyframe(asked);
             continue;
         }
         let kind = decoder.kind();
@@ -2074,6 +2111,13 @@ fn decode_loop(
         match decoded_now {
             Ok(frames) => {
                 need_keyframe = false;
+                chain.decoded(
+                    FrameRef {
+                        epoch: header.epoch,
+                        seq: header.seq,
+                    },
+                    header.keyframe,
+                );
                 d3d12_errors = 0;
                 for frame in frames {
                     if ready_us == u64::MAX {
@@ -2123,7 +2167,9 @@ fn decode_loop(
                 }
                 ready_us = u64::MAX;
                 need_keyframe = true;
-                request_keyframe();
+                asked = KeyframeReason::DecoderError;
+                chain.broke();
+                request_keyframe(asked);
             }
             Err(e) => {
                 tracing::warn!(seq = header.seq, "decode failed: {e}");
@@ -2140,7 +2186,9 @@ fn decode_loop(
                     ready_us = u64::MAX;
                 }
                 need_keyframe = true;
-                request_keyframe();
+                asked = KeyframeReason::DecoderError;
+                chain.broke();
+                request_keyframe(asked);
             }
         }
     }

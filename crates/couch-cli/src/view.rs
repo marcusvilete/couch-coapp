@@ -228,12 +228,14 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             event = events.recv() => match event {
                 Some(WatchEvent::Timing(t)) => latency.record(&t),
                 Some(WatchEvent::AudioStats(stats)) => audio_stats = stats,
-                Some(WatchEvent::KeyframeNeeded { epoch }) => {
+                Some(WatchEvent::KeyframeNeeded { epoch, reason }) => {
+                    // Every fresh start the window asked for, as before M12d-2: a
+                    // continuation it couldn't take (`CantContinue`) included.
                     decode_errors += 1;
                     control_tx
                         .send(&ControlMessage::KeyframeRequest(KeyframeRequest {
                             epoch,
-                            reason: KeyframeReason::DecoderError,
+                            reason,
                         }))
                         .await?;
                 }

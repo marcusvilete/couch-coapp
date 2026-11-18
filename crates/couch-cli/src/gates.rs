@@ -39,6 +39,9 @@ pub struct Args {
     pub quick: bool,
     pub out: PathBuf,
     pub congestion: CongestionArg,
+    /// HEVC where this PC encodes and decodes it, instead of H.264 (M12d-2:
+    /// recoveries continue there).
+    pub hevc: bool,
 }
 
 const MAX_MBPS: f64 = 20.0;
@@ -202,8 +205,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             clock_fps: None,
             gpu_load: None,
             pacing_trace: None,
-            // The throttles must touch the stream (M12c).
-            h264: true,
+            // The throttles must touch the stream (M12c); in HEVC, they
+            // touch it less, and recoveries continue (M12d-2).
+            h264: !args.hevc,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,
@@ -300,8 +304,9 @@ async fn run_g7(spec: &Spec, args: &Args) -> anyhow::Result<Report> {
             clock_fps: None,
             gpu_load: None,
             pacing_trace: None,
-            // The throttles must touch the stream (M12c).
-            h264: true,
+            // The throttles must touch the stream (M12c); in HEVC, they
+            // touch it less, and recoveries continue (M12d-2).
+            h264: !args.hevc,
             net: NetArgs {
                 relay: "none".into(),
                 relay_token: None,
@@ -506,7 +511,7 @@ fn judge(
             let keyframes = count(&ticks, &["resume", "catch-up"], at);
             report.check(
                 gate,
-                "recovery keyframes",
+                "recoveries",
                 keyframes.to_string(),
                 "exactly 1 (resume + catch-ups)",
                 keyframes == 1,

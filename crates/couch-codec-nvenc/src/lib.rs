@@ -28,4 +28,6 @@ mod ffi {
     include!("../bindings/nvenc-x86_64-pc-windows-msvc.rs");
 }
 
-pub use encoder::NvencEncoder;
+pub use encoder::{
+    CONTINUING, Continuation, ContinuationCaps, FrameControl, FrameReport, NvencEncoder,
+};

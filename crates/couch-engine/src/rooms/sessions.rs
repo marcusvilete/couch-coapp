@@ -24,7 +24,7 @@ use std::{
 use couch_input::{HidUsage, shortcuts::Shortcut};
 use couch_proto::remote::{RemoteDrawing, RemoteGuest, RemoteRequest, RemoteSession, RemoteStream};
 use couch_proto::{
-    control::{KeyframeReason, KeyframeRequest},
+    control::KeyframeRequest,
     ids::SeatEpoch,
     ipc::{
         BoardNews, HudBoard, HudLink, HudRole, HudSeat, HudState, ShortcutKeys, StreamVolume,
@@ -92,8 +92,9 @@ struct Hosting {
     /// has gone: its stream and input were bound to it.
     viewer_conns: BTreeMap<MemberId, ConnId>,
     /// What each viewer said it decodes when it joined (`couch_proto::codec`
-    /// bits, M12c).
-    viewer_codecs: BTreeMap<MemberId, u8>,
+    /// bits, M12c), and in which codecs it
+    /// continues (M12d-2).
+    viewer_codecs: BTreeMap<MemberId, (u8, u8)>,
     /// Each viewer's controllers and which drives each of its seats, as it
     /// last said (P12), for the patch bay.
     guest_controllers: BTreeMap<MemberId, ControllerReport>,
@@ -582,9 +583,14 @@ impl Actor {
         w.attempt += 1;
         let (session, attempt) = (w.session, w.attempt);
         let codecs = self.backend.decodes();
+        let continues = crate::pipeline::watch::continues_in(codecs);
         self.send(
             conn,
-            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session, codecs })),
+            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin {
+                session,
+                codecs,
+                continues,
+            })),
         );
         self.join_timer(session, attempt);
         true
@@ -631,7 +637,7 @@ impl Actor {
                     // What its PC decodes: the host picks its stream's
                     // codec from it (M12c).
                     if let Some(h) = self.hosting_mut() {
-                        h.viewer_codecs.insert(peer, m.codecs);
+                        h.viewer_codecs.insert(peer, (m.codecs, m.continues));
                     }
                     let fx = self.hosting_mut().map(|h| h.session.join(peer));
                     self.apply_session(room, fx.unwrap_or_default(), now);
@@ -715,13 +721,13 @@ impl Actor {
                     self.apply_session(room, fx, now);
                 }
             }
-            ControlMessage::KeyframeRequest(_) => {
+            ControlMessage::KeyframeRequest(m) => {
                 if let Some(h) = self.sessions.hosting.as_ref()
                     && h.room == room
                     && h.session.is_viewer(peer)
                     && let Some(pipeline) = &h.pipeline
                 {
-                    pipeline.keyframe(peer);
+                    pipeline.keyframe(peer, m.reason);
                 }
             }
             // From a host, about its own session.
@@ -1070,10 +1076,12 @@ impl Actor {
                     let started = conn.and_then(|id| {
                         let c = self.conns.get(&id)?;
                         let h = self.sessions.hosting.as_ref()?;
-                        let codecs = h.viewer_codecs.get(&member).copied().unwrap_or(0);
+                        let (codecs, continues) =
+                            h.viewer_codecs.get(&member).copied().unwrap_or_default();
                         h.pipeline.as_ref()?.add_viewer(
                             member,
                             codecs,
+                            continues,
                             c.conn.clone(),
                             &c.datagrams,
                             &c.streams,
@@ -2661,9 +2669,14 @@ impl Actor {
         });
         self.join_timer(session, 0);
         let codecs = self.backend.decodes();
+        let continues = crate::pipeline::watch::continues_in(codecs);
         self.send(
             conn,
-            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin { session, codecs })),
+            Outgoing::Message(ControlMessage::SessionJoin(SessionJoin {
+                session,
+                codecs,
+                continues,
+            })),
         );
         self.sessions.watching = Some(Watching {
             room,
@@ -2953,11 +2966,8 @@ impl Actor {
             return;
         };
         match event {
-            WatchEvent::KeyframeNeeded { epoch } => {
-                let ask = ControlMessage::KeyframeRequest(KeyframeRequest {
-                    epoch,
-                    reason: KeyframeReason::DecoderError,
-                });
+            WatchEvent::KeyframeNeeded { epoch, reason } => {
+                let ask = ControlMessage::KeyframeRequest(KeyframeRequest { epoch, reason });
                 self.send(w.conn, Outgoing::Message(ask));
             }
             WatchEvent::Action(UserAction::RequestControl { seat, controller }) => {

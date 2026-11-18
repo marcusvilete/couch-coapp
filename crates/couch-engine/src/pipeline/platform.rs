@@ -18,7 +18,7 @@ use couch_input::{
 };
 use couch_media::{
     AudioSource, Capturer, Codec, EncodedFrame, EncoderCaps, EncoderConfig, EncoderInput, GpuFrame,
-    MediaError, VideoEncoder, audio::ToneSource, clock::Clock, testpattern::TestPattern,
+    LongTerm, MediaError, VideoEncoder, audio::ToneSource, clock::Clock, testpattern::TestPattern,
 };
 use couch_platform_win::{
     audio::{LoopbackCapture, LoopbackTarget},
@@ -151,6 +151,46 @@ impl VideoEncoder for DirectNvenc {
             (None, None) => Ok(()),
         }
     }
+
+    /// Only while NVENC directly encodes: FFmpeg's never continues.
+    fn continues(&self) -> bool {
+        self.direct.as_ref().is_some_and(|d| d.continues())
+    }
+
+    fn encode_marking(
+        &mut self,
+        input: EncoderInput<'_>,
+        force_keyframe: bool,
+        mark: Option<u32>,
+    ) -> Result<Vec<(EncodedFrame, Option<LongTerm>)>, MediaError> {
+        if let (Some(direct), EncoderInput::Gpu(frame)) = (self.direct.as_mut(), &input) {
+            match direct.encode_marking(EncoderInput::Gpu(frame), force_keyframe, mark) {
+                Ok(units) => return Ok(units),
+                Err(e) => {
+                    tracing::warn!("NVENC directly failed ({e}); FFmpeg's NVENC for this viewer")
+                }
+            }
+            self.direct = None;
+            let fallback = FfmpegEncoder::open_gpu(self.config, frame)?;
+            self.caps = fallback.caps().clone();
+            let units = self
+                .fallback
+                .insert(fallback)
+                .encode(EncoderInput::Gpu(frame), true)?;
+            return Ok(units.into_iter().map(|u| (u, None)).collect());
+        }
+        let units = self.encode(input, force_keyframe)?;
+        Ok(units.into_iter().map(|u| (u, None)).collect())
+    }
+
+    fn invalidate(&mut self, timestamp: u64) -> Result<(), MediaError> {
+        match self.direct.as_mut() {
+            Some(direct) => direct.invalidate(timestamp),
+            None => Err(MediaError::Unsupported(
+                "FFmpeg's NVENC invalidates nothing".into(),
+            )),
+        }
+    }
 }
 
 /// Windows' minimum interval between captured frames on the GPU when the
@@ -280,6 +320,7 @@ impl Backend for WindowsBackend {
         &self,
         config: EncoderConfig,
         gpu: Option<&GpuFrame>,
+        continuing: bool,
     ) -> Result<Box<dyn VideoEncoder>, MediaError> {
         // A developer switch: one encoder by FFmpeg's name, taking frames in
         // memory, to measure another machine's path here (M9d; e.g.
@@ -301,7 +342,19 @@ impl Backend for WindowsBackend {
                          COUCH_HOST_NVENC_DIRECT=0 to measure them"
                     );
                 }
-                match NvencEncoder::open_gpu(config, frame) {
+                // Continuing (M12d-2): long-term frames and three references.
+                // One that won't open with them opens without: in-place
+                // bitrate changes are worth keeping without continuing.
+                let opened = if continuing {
+                    NvencEncoder::open_continuing(config, frame, couch_codec_nvenc::CONTINUING)
+                        .or_else(|e| {
+                            tracing::info!("NVENC directly won't continue here ({e})");
+                            NvencEncoder::open_gpu(config, frame)
+                        })
+                } else {
+                    NvencEncoder::open_gpu(config, frame)
+                };
+                match opened {
                     Ok(encoder) => return Ok(Box::new(DirectNvenc::new(encoder, config))),
                     // No NVIDIA driver or too old a one, another vendor's GPU,
                     // the session limit: FFmpeg's encoders, as before M12d.

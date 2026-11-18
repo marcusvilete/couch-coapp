@@ -156,6 +156,20 @@ enum Cmd {
         /// The other bitrate for `--bitrate-every`, in Mbit/s.
         #[arg(long, requires = "bitrate_every")]
         bitrate_to: Option<u32>,
+        /// Every this many seconds, leave `--drop-ms` of frames undecoded (a
+        /// viewer that never got them), then recover, alternately with a
+        /// keyframe and by continuing from a long-term frame the decoder
+        /// holds (M12d-2's spike); each reported as `--keyframe-every` does.
+        /// NVENC directly only.
+        #[arg(
+            long,
+            requires = "gpu",
+            conflicts_with_all = ["keyframe_every", "bitrate_every", "ffmpeg_nvenc"]
+        )]
+        recover_every: Option<f64>,
+        /// How long each `--recover-every` drop lasts, in milliseconds.
+        #[arg(long, default_value_t = 300, requires = "recover_every")]
+        drop_ms: u64,
         /// Write one row per frame here (CSV: its size, whether it is a
         /// keyframe, the bitrate, PSNR and SSIM).
         #[arg(long)]
@@ -344,6 +358,11 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, value_enum, default_value = "media")]
         congestion: CongestionArg,
+        /// The stream's codec. H.264 by default: HEVC needs so little that the
+        /// throttles barely touch it (M12c). HEVC shows recoveries continuing
+        /// instead of keyframes (M12d-2).
+        #[arg(long, value_enum, default_value = "h264")]
+        codec: CodecArg,
     },
     /// What the desktop's helper says is in front, live (Linux, M16c-2):
     /// KDE's KWin script, or our GNOME extension. Reads only.
@@ -519,16 +538,22 @@ async fn main() -> ExitCode {
             keyframe_every,
             bitrate_every,
             bitrate_to,
+            recover_every,
+            drop_ms,
             frames_csv,
             gpu,
             ffmpeg_nvenc,
         } => tokio::task::block_in_place(|| {
-            let events = match (keyframe_every, bitrate_every.zip(bitrate_to)) {
-                (Some(every), _) => Some(capture_test::Events::Keyframe { every }),
-                (None, Some((every, to_mbps))) => {
+            let events = match (keyframe_every, bitrate_every.zip(bitrate_to), recover_every) {
+                (Some(every), ..) => Some(capture_test::Events::Keyframe { every }),
+                (None, Some((every, to_mbps)), _) => {
                     Some(capture_test::Events::Bitrate { every, to_mbps })
                 }
-                (None, None) => None,
+                (None, None, Some(every)) => Some(capture_test::Events::Recover {
+                    every,
+                    drop: Duration::from_millis(drop_ms),
+                }),
+                (None, None, None) => None,
             };
             // Capture and codecs block; keep them off the async runtime's threads.
             capture_test::run(capture_test::Args {
@@ -689,12 +714,14 @@ async fn main() -> ExitCode {
             only,
             out,
             congestion,
+            codec,
         } => {
             gates::run(gates::Args {
                 only,
                 quick,
                 out,
                 congestion,
+                hevc: matches!(codec, CodecArg::Hevc),
             })
             .await
         }

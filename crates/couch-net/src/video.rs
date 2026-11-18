@@ -10,6 +10,7 @@
 //! sessions that use it.
 
 use std::{
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -21,11 +22,11 @@ use couch_media::{
     ratecontrol::{FeedbackTracker, PathSample, SendDelays},
 };
 use couch_proto::media::{
-    DelaySample, EpochPreamble, FrameHeader, MAX_DELAY_SAMPLES, ReceiverReport, datagram,
+    DelaySample, EpochPreamble, FrameHeader, FrameRef, MAX_DELAY_SAMPLES, ReceiverReport, datagram,
     decode_payload, encode_datagram, reset_code, stream_kind,
 };
 use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::{datagrams::Datagrams, streams::Streams};
 
@@ -49,6 +50,54 @@ pub fn selected_path(conn: &Connection) -> PathSample {
         .unwrap_or_default()
 }
 
+/// Where each frame of the current epoch ends in its stream, to tell from
+/// the viewer's reports (`epoch_bytes_received`) which frames it received
+/// whole (M12d-2).
+#[derive(Default)]
+struct Receipts {
+    epoch: u32,
+    /// Each frame's sequence number and the byte its stream had after it,
+    /// for the frames not yet known to be received.
+    ends: VecDeque<(u32, u64)>,
+    written: u64,
+    newest: Option<FrameRef>,
+}
+
+/// Frames whose receipt is still awaited, at most: 8 s at 120 fps. Past it,
+/// the oldest are forgotten (a viewer that silent is paused anyway).
+const AWAITED: usize = 1024;
+
+impl Receipts {
+    fn epoch(&mut self, epoch: u32) {
+        self.epoch = epoch;
+        self.ends.clear();
+        self.written = EpochPreamble::LEN as u64;
+    }
+
+    fn sent(&mut self, seq: u32, bytes: u64) {
+        self.written += bytes;
+        self.ends.push_back((seq, self.written));
+        if self.ends.len() > AWAITED {
+            self.ends.pop_front();
+        }
+    }
+
+    /// The viewer reports `bytes` of `epoch`'s stream: every frame ending
+    /// within them is received.
+    fn report(&mut self, epoch: u32, bytes: u64) {
+        if epoch != self.epoch {
+            return;
+        }
+        while let Some(&(seq, end)) = self.ends.front() {
+            if end > bytes {
+                break;
+            }
+            self.newest = Some(FrameRef { epoch, seq });
+            self.ends.pop_front();
+        }
+    }
+}
+
 enum WriterCmd {
     StartEpoch(EpochPreamble),
     Frame {
@@ -70,6 +119,7 @@ pub struct HostVideo {
     tracker: Arc<Mutex<FeedbackTracker>>,
     /// Each frame's time on the host, taken off the viewer's delays.
     send_delays: Arc<Mutex<SendDelays>>,
+    receipts: Arc<Mutex<Receipts>>,
     /// The clock frames' capture times are on.
     clock: Arc<dyn Clock>,
     session: u64,
@@ -91,11 +141,13 @@ impl HostVideo {
         let (epoch_tx, epoch_rx) = watch::channel(0);
         let tracker = Arc::new(Mutex::new(FeedbackTracker::new(Instant::now())));
         let send_delays = Arc::new(Mutex::new(SendDelays::new()));
+        let receipts = Arc::new(Mutex::new(Receipts::default()));
         tokio::spawn(write_video(conn.clone(), rx, epoch_rx.clone()));
         tokio::spawn(read_reports(
             datagrams.subscribe(datagram::RECEIVER_REPORT),
             tracker.clone(),
             send_delays.clone(),
+            receipts.clone(),
             epoch_rx,
         ));
         Self {
@@ -104,6 +156,7 @@ impl HostVideo {
             epoch_tx,
             tracker,
             send_delays,
+            receipts,
             clock,
             session,
             epoch: None,
@@ -137,12 +190,17 @@ impl HostVideo {
 }
 
 impl VideoSender for HostVideo {
-    fn start_epoch(&mut self, params: &VideoParams) -> Result<EpochId, MediaError> {
+    fn start_epoch(
+        &mut self,
+        params: &VideoParams,
+        continues: Option<FrameRef>,
+    ) -> Result<EpochId, MediaError> {
         let epoch = self.next_epoch;
         self.next_epoch += 1;
         self.epoch = Some(epoch);
         self.seq = 0;
         self.tracker.lock().unwrap().on_epoch(epoch);
+        self.receipts.lock().unwrap().epoch(epoch);
         // Abort any write still blocked on the old epoch's stream.
         self.epoch_tx.send_replace(epoch);
         let preamble = EpochPreamble {
@@ -152,6 +210,7 @@ impl VideoSender for HostVideo {
             width: params.width as u16,
             height: params.height as u16,
             fps: params.fps as u16,
+            continues,
         };
         self.commands
             .send(WriterCmd::StartEpoch(preamble))
@@ -179,6 +238,10 @@ impl VideoSender for HostVideo {
         let mut buf = Vec::with_capacity(FrameHeader::LEN + frame.data.len());
         header.write(&mut buf);
         buf.extend_from_slice(&frame.data);
+        self.receipts
+            .lock()
+            .unwrap()
+            .sent(header.seq, buf.len() as u64);
         self.tracker
             .lock()
             .unwrap()
@@ -189,6 +252,17 @@ impl VideoSender for HostVideo {
                 bytes: buf.into(),
             })
             .map_err(|_| MediaError::Closed)
+    }
+
+    fn next_frame(&self) -> Option<FrameRef> {
+        self.epoch.map(|epoch| FrameRef {
+            epoch,
+            seq: self.seq,
+        })
+    }
+
+    fn received(&self) -> Option<FrameRef> {
+        self.receipts.lock().unwrap().newest
     }
 
     fn feedback(&self) -> FeedbackSnapshot {
@@ -278,6 +352,7 @@ async fn read_reports(
     mut reports: mpsc::Receiver<Bytes>,
     tracker: Arc<Mutex<FeedbackTracker>>,
     send_delays: Arc<Mutex<SendDelays>>,
+    receipts: Arc<Mutex<Receipts>>,
     mut epoch_rx: watch::Receiver<u32>,
 ) {
     loop {
@@ -304,6 +379,10 @@ async fn read_reports(
                 .map(|d| sent.network_part(report.epoch, d.seq, d.one_way_us))
                 .collect()
         };
+        receipts
+            .lock()
+            .unwrap()
+            .report(report.epoch, report.epoch_bytes_received);
         tracker.lock().unwrap().on_report(
             Instant::now(),
             report.epoch,
@@ -323,6 +402,9 @@ pub struct VideoFrameIn {
     pub header: FrameHeader,
     pub data: Bytes,
     pub arrived: Micros,
+    /// On an epoch's first frame, the frame the epoch continues from
+    /// (M12d-2, `EpochPreamble::continues`).
+    pub continues: Option<FrameRef>,
 }
 
 #[derive(Default)]
@@ -333,7 +415,52 @@ struct ViewerState {
     frames: u64,
     delays: Vec<DelaySample>,
     decode_errors: u32,
+    /// The frame each recent epoch continues from (M12d-2), by epoch: the
+    /// chain back from the latest says which older frames are still wanted.
+    continued: BTreeMap<u32, FrameRef>,
+    /// Epochs whose stream is still being read.
+    reading: Vec<u32>,
 }
+
+/// Recent continuing epochs remembered.
+const CONTINUED_KEPT: usize = 32;
+
+impl ViewerState {
+    /// Whether a frame of `epoch` is still wanted: of the latest epoch, or of
+    /// an older one up to the frame the latest continues from, following the
+    /// chain back (an epoch continuing from one that continued too).
+    fn wanted(&self, epoch: u32, seq: u32) -> bool {
+        if epoch >= self.latest_epoch {
+            return true;
+        }
+        let mut at = self.latest_epoch;
+        while let Some(from) = self.continued.get(&at) {
+            if from.epoch == epoch {
+                return seq <= from.seq;
+            }
+            if from.epoch < epoch {
+                return false;
+            }
+            at = from.epoch;
+        }
+        false
+    }
+
+    /// The latest epoch is `epoch`, continuing from `continues` if it does.
+    fn begin(&mut self, epoch: u32, continues: Option<FrameRef>) {
+        self.latest_epoch = epoch;
+        if let Some(from) = continues.filter(|f| f.epoch < epoch) {
+            self.continued.insert(epoch, from);
+            while self.continued.len() > CONTINUED_KEPT {
+                self.continued.pop_first();
+            }
+        }
+    }
+}
+
+/// How long a continuing epoch's first frame waits for an older epoch's
+/// reader to hand over its last frames, which it may continue from.
+const OLDER_READERS: Duration = Duration::from_millis(200);
 
 /// Viewer side: takes the epoch streams `streams` hands over, delivers
 /// frames in order, and sends a receiver report every 50 ms. Its tasks end
@@ -341,6 +468,12 @@ struct ViewerState {
 pub struct ViewerVideo {
     pub frames: mpsc::Receiver<VideoFrameIn>,
     state: Arc<Mutex<ViewerState>>,
+}
+
+/// Woken whenever an epoch's reader ends.
+#[derive(Clone, Default)]
+struct Readers {
+    ended: Arc<Notify>,
 }
 
 impl ViewerVideo {
@@ -359,6 +492,7 @@ impl ViewerVideo {
             epochs,
             session,
             state.clone(),
+            Readers::default(),
             tx.clone(),
             clock,
         ));
@@ -371,6 +505,13 @@ impl ViewerVideo {
         self.state.lock().unwrap().latest_epoch
     }
 
+    /// Whether a frame of `epoch` that arrived is still to be decoded: of the
+    /// latest epoch, or of an older one up to the frame the latest continues
+    /// from (M12d-2).
+    pub fn wanted(&self, epoch: u32, seq: u32) -> bool {
+        self.state.lock().unwrap().wanted(epoch, seq)
+    }
+
     pub fn note_decode_error(&self) {
         self.state.lock().unwrap().decode_errors += 1;
     }
@@ -380,6 +521,7 @@ async fn accept_epochs(
     mut epochs: mpsc::Receiver<RecvStream>,
     session: Option<u64>,
     state: Arc<Mutex<ViewerState>>,
+    readers: Readers,
     tx: mpsc::Sender<VideoFrameIn>,
     clock: Arc<dyn Clock>,
 ) {
@@ -396,9 +538,46 @@ async fn accept_epochs(
             recv,
             session,
             state.clone(),
+            readers.clone(),
             tx.clone(),
             clock.clone(),
         ));
+    }
+}
+
+/// An epoch's reader, counted in [`ViewerState::reading`] until it ends.
+struct Reading {
+    state: Arc<Mutex<ViewerState>>,
+    readers: Readers,
+    epoch: u32,
+}
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap()
+            .reading
+            .retain(|&e| e != self.epoch);
+        self.readers.ended.notify_waiters();
+    }
+}
+
+/// Waits, at most [`OLDER_READERS`], until no epoch older than `epoch` is
+/// still being read: their last frames, which a continuation may refer to,
+/// go to the decoder before its first (M12d-2). The host resets an old epoch
+/// before it opens the next, so they end at once.
+async fn older_readers_done(state: &Mutex<ViewerState>, readers: &Readers, epoch: u32) {
+    let deadline = tokio::time::Instant::now() + OLDER_READERS;
+    loop {
+        let ended = readers.ended.notified();
+        if !state.lock().unwrap().reading.iter().any(|&e| e < epoch) {
+            return;
+        }
+        if tokio::time::timeout_at(deadline, ended).await.is_err() {
+            tracing::debug!(epoch, "an older epoch's reader still runs; going on");
+            return;
+        }
     }
 }
 
@@ -406,6 +585,7 @@ async fn read_epoch(
     mut recv: RecvStream,
     session: Option<u64>,
     state: Arc<Mutex<ViewerState>>,
+    readers: Readers,
     tx: mpsc::Sender<VideoFrameIn>,
     clock: Arc<dyn Clock>,
 ) {
@@ -434,22 +614,29 @@ async fn read_epoch(
         return;
     }
     let epoch = preamble.epoch;
-    {
+    let _reading = {
         let mut s = state.lock().unwrap();
         if epoch < s.latest_epoch {
             let _ = recv.stop(VarInt::from_u32(reset_code::SKIP_AHEAD));
             return;
         }
         if epoch > s.latest_epoch {
-            s.latest_epoch = epoch;
+            s.begin(epoch, preamble.continues);
             s.epoch_bytes = EpochPreamble::LEN as u64;
             // Samples are reported with the latest epoch: the abandoned
             // one's go, so the host matches each to the right frame.
             s.delays.clear();
         }
-    }
+        s.reading.push(epoch);
+        Reading {
+            state: state.clone(),
+            readers: readers.clone(),
+            epoch,
+        }
+    };
 
     let mut header = [0u8; FrameHeader::LEN];
+    let mut first = true;
     loop {
         if recv.read_exact(&mut header).await.is_err() {
             return; // finished, reset by the host, or connection gone
@@ -466,28 +653,44 @@ async fn read_epoch(
         let arrived = clock.now();
         {
             let mut s = state.lock().unwrap();
-            if s.latest_epoch != epoch {
-                let _ = recv.stop(VarInt::from_u32(reset_code::SKIP_AHEAD));
-                return;
-            }
             let bytes = (FrameHeader::LEN + data.len()) as u64;
-            s.epoch_bytes += bytes;
-            s.total_bytes += bytes;
-            s.frames += 1;
-            if s.delays.len() < MAX_DELAY_SAMPLES {
-                s.delays.push(DelaySample {
-                    seq: h.seq,
-                    // `capture_us` comes from the peer; don't let it overflow.
-                    one_way_us: (arrived.0 as i64).saturating_sub(h.capture_us as i64),
-                });
+            if s.latest_epoch != epoch {
+                // A newer epoch began. Frames up to the one it continues
+                // from still go to the decoder; the rest are dropped.
+                if !s.wanted(epoch, h.seq) {
+                    let _ = recv.stop(VarInt::from_u32(reset_code::SKIP_AHEAD));
+                    return;
+                }
+                s.total_bytes += bytes;
+                s.frames += 1;
+            } else {
+                s.epoch_bytes += bytes;
+                s.total_bytes += bytes;
+                s.frames += 1;
+                if s.delays.len() < MAX_DELAY_SAMPLES {
+                    s.delays.push(DelaySample {
+                        seq: h.seq,
+                        // `capture_us` comes from the peer; don't let it overflow.
+                        one_way_us: (arrived.0 as i64).saturating_sub(h.capture_us as i64),
+                    });
+                }
             }
         }
+        let continues = if std::mem::take(&mut first) {
+            if preamble.continues.is_some() {
+                older_readers_done(&state, &readers, epoch).await;
+            }
+            preamble.continues
+        } else {
+            None
+        };
         let frame = VideoFrameIn {
             epoch,
             codec: preamble.codec,
             header: h,
             data: data.into(),
             arrived,
+            continues,
         };
         if tx.send(frame).await.is_err() {
             return;
@@ -533,6 +736,26 @@ async fn send_reports(
 mod tests {
     use couch_media::Codec;
     use couch_proto::codec;
+
+    use super::{FrameRef, ViewerState};
+
+    /// M12d-2: an epoch continuing from one that continued too still wants
+    /// the frames both continue from (the review's finding).
+    #[test]
+    fn a_chain_of_continuations_keeps_what_each_needs() {
+        let mut s = ViewerState::default();
+        s.begin(1, None);
+        s.begin(2, Some(FrameRef { epoch: 1, seq: 20 }));
+        s.begin(3, Some(FrameRef { epoch: 2, seq: 3 }));
+        assert!(s.wanted(3, 0) && s.wanted(2, 3) && s.wanted(1, 20));
+        assert!(!s.wanted(2, 4) && !s.wanted(1, 21));
+        // A keyframe epoch ends the chain.
+        s.begin(4, None);
+        assert!(!s.wanted(3, 0) && !s.wanted(1, 20));
+        // So does one continuing from a newer epoch than asked about.
+        s.begin(5, Some(FrameRef { epoch: 4, seq: 9 }));
+        assert!(s.wanted(4, 9) && !s.wanted(3, 0));
+    }
 
     #[test]
     fn codec_numbers_agree_with_the_wire() {

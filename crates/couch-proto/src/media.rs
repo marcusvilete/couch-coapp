@@ -32,6 +32,13 @@ pub mod reset_code {
     pub const STREAM_END: u32 = 4;
 }
 
+/// One video frame: its epoch and its sequence number in it (M12d-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FrameRef {
+    pub epoch: u32,
+    pub seq: u32,
+}
+
 /// Opens a video epoch stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpochPreamble {
@@ -42,12 +49,18 @@ pub struct EpochPreamble {
     pub width: u16,
     pub height: u16,
     pub fps: u16,
+    /// The frame this epoch continues from (M12d-2, ADR 0016): its first
+    /// frame refers to it, or to frames before it, and to none after it. A
+    /// viewer that didn't decode it since its decoder last broke drops the
+    /// epoch and asks for a keyframe (`KeyframeReason::CantContinue`).
+    /// `None`: the epoch begins with a keyframe.
+    pub continues: Option<FrameRef>,
 }
 
 impl EpochPreamble {
     /// Including the stream-kind byte.
-    pub const LEN: usize = 1 + 1 + 8 + 4 + 1 + 2 + 2 + 2;
-    const VERSION: u8 = 0;
+    pub const LEN: usize = 1 + 1 + 8 + 4 + 1 + 2 + 2 + 2 + 1 + 4 + 4;
+    const VERSION: u8 = 1;
     pub const CODEC_H264: u8 = crate::codec::H264;
     pub const CODEC_HEVC: u8 = crate::codec::HEVC;
 
@@ -60,7 +73,10 @@ impl EpochPreamble {
             .u8(self.codec)
             .u16(self.width)
             .u16(self.height)
-            .u16(self.fps);
+            .u16(self.fps)
+            .u8(u8::from(self.continues.is_some()))
+            .u32(self.continues.map_or(0, |f| f.epoch))
+            .u32(self.continues.map_or(0, |f| f.seq));
     }
 
     /// Parses a preamble, including the stream-kind byte.
@@ -76,6 +92,14 @@ impl EpochPreamble {
             width: r.u16()?,
             height: r.u16()?,
             fps: r.u16()?,
+            continues: {
+                let (flag, epoch, seq) = (r.u8()?, r.u32()?, r.u32()?);
+                match flag {
+                    0 => None,
+                    1 => Some(FrameRef { epoch, seq }),
+                    _ => return None,
+                }
+            },
         })
     }
 }
@@ -214,20 +238,58 @@ mod tests {
 
     #[test]
     fn preamble_roundtrip() {
+        for continues in [
+            None,
+            Some(FrameRef {
+                epoch: 2,
+                seq: u32::MAX,
+            }),
+        ] {
+            let p = EpochPreamble {
+                session: 9,
+                epoch: 3,
+                codec: EpochPreamble::CODEC_HEVC,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                continues,
+            };
+            let mut buf = Vec::new();
+            p.write(&mut buf);
+            assert_eq!(buf.len(), EpochPreamble::LEN);
+            assert_eq!(
+                EpochPreamble::read(buf.as_slice().try_into().unwrap()),
+                Some(p)
+            );
+        }
+    }
+
+    /// M12d-2: a continuation flag other than 0 or 1, or a preamble of the
+    /// version before, is refused.
+    #[test]
+    fn a_malformed_preamble_is_refused() {
         let p = EpochPreamble {
             session: 9,
             epoch: 3,
             codec: EpochPreamble::CODEC_H264,
-            width: 1920,
-            height: 1080,
+            width: 1280,
+            height: 720,
             fps: 60,
+            continues: None,
         };
         let mut buf = Vec::new();
         p.write(&mut buf);
-        assert_eq!(buf.len(), EpochPreamble::LEN);
+        let mut bad_flag = buf.clone();
+        bad_flag[EpochPreamble::LEN - 9] = 2;
         assert_eq!(
-            EpochPreamble::read(buf.as_slice().try_into().unwrap()),
-            Some(p)
+            EpochPreamble::read(bad_flag.as_slice().try_into().unwrap()),
+            None
+        );
+        let mut old = buf;
+        old[1] = 0;
+        assert_eq!(
+            EpochPreamble::read(old.as_slice().try_into().unwrap()),
+            None
         );
     }
 

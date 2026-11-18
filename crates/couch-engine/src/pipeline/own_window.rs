@@ -215,6 +215,8 @@ async fn serve(ctx: &mut Ctx, cmds: &mut mpsc::UnboundedReceiver<OwnCmd>) -> Opt
                     capture_us: frame.capture_us,
                     encode_us: frame.encode_us,
                     arrived_us: ctx.clock.now().0,
+                    // Its own feed always starts from a keyframe.
+                    continues: None,
                 }
                 .write(&frame.data, &mut payload);
                 send(&mut ctx.window.to, ipc::kinds::VIDEO_FRAME, &payload, limit).await

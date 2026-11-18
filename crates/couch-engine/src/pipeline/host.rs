@@ -54,6 +54,7 @@ use couch_media::{
     Micros, VideoEncoder, VideoFrame, VideoParams, VideoSender,
     audio::{Framer, Level, LevelMeter, host_gain_for_percent, ramp_gain, soft_limit},
     clock::Clock,
+    continuation::Continuity,
     mailbox::Mailbox,
     pacing::Pacer,
     ratecontrol::{RateAction, RateConfig, RateController, UploadShare},
@@ -67,8 +68,9 @@ use couch_net::{
     video::HostVideo,
 };
 use couch_proto::{
+    control::KeyframeReason,
     input::{PadDatagram, RumbleDatagram},
-    media::{AudioDatagram, reset_code},
+    media::{AudioDatagram, FrameRef, reset_code},
     session::SeatKind,
 };
 use couch_room::session::GrantTicket;
@@ -120,6 +122,13 @@ pub fn choose_codec(codecs: u8, gpu_input_off: bool, forced_h264: bool) -> Codec
     } else {
         Codec::H264
     }
+}
+
+/// Recoveries continue from a frame the viewer holds where they can
+/// (M12d-2, ADR 0016), unless `COUCH_HOST_CONTINUE=0`, the switch for
+/// measuring against keyframes. Read once a viewer's encoder opens.
+fn continuations() -> bool {
+    std::env::var("COUCH_HOST_CONTINUE").map_or(true, |v| v.trim() != "0")
 }
 
 /// Captured frames are paced to the stream's rate (M9d) unless
@@ -475,6 +484,9 @@ struct Feed {
     /// epoch, and an ended one's frames are dropped.
     frames: Mailbox<(Arc<Stream>, VideoFrame)>,
     keyframe: AtomicBool,
+    /// The viewer fell behind decoding and holds this frame (M12d-2): continue
+    /// from it if the encoder can. A keyframe asked for meanwhile wins.
+    fell_behind: Mutex<Option<FrameRef>>,
     stop: AtomicBool,
     /// How its epoch stream ends: `VIEWER_REMOVED` or `SESSION_END`.
     end_code: AtomicU32,
@@ -489,6 +501,7 @@ impl Feed {
         Self {
             frames: Mailbox::new(),
             keyframe: AtomicBool::new(true),
+            fell_behind: Mutex::new(None),
             stop: AtomicBool::new(false),
             end_code: AtomicU32::new(reset_code::VIEWER_REMOVED),
             target: AtomicU32::new(start_bps),
@@ -1108,6 +1121,7 @@ impl HostPipeline {
         &self,
         member: MemberId,
         codecs: u8,
+        continues: u8,
         conn: Connection,
         datagrams: &Datagrams,
         streams: &Streams,
@@ -1131,6 +1145,7 @@ impl HostPipeline {
         let ctx = EncodeCtx {
             member,
             codecs,
+            continues,
             video: HostVideo::start(
                 conn.clone(),
                 sh.options.session,
@@ -1262,14 +1277,18 @@ impl HostPipeline {
         stop_unwatched(sh, &mut state);
     }
 
-    /// `member`'s decoder needs a keyframe.
-    pub fn keyframe(&self, member: MemberId) {
+    /// `member`'s decoder needs a keyframe, or, having fallen behind, asks to
+    /// continue from a frame it holds (M12d-2: done if its encoder can).
+    pub fn keyframe(&self, member: MemberId, reason: KeyframeReason) {
         let feed = lock(&self.shared.state)
             .viewers
             .get(&member)
             .map(|viewer| viewer.feed.clone());
         if let Some(feed) = feed {
-            feed.keyframe.store(true, Ordering::SeqCst);
+            match reason {
+                KeyframeReason::FellBehind { holds } => *lock(&feed.fell_behind) = Some(holds),
+                _ => feed.keyframe.store(true, Ordering::SeqCst),
+            }
             // On a still picture no frame may come to carry it.
             hand_last(&self.shared, &feed);
         }
@@ -1966,6 +1985,9 @@ struct EncodeCtx {
     /// What the viewer decodes (`couch_proto::codec` bits): its codec is
     /// chosen from them for each stream.
     codecs: u8,
+    /// The codecs, as the same bits, in which it accepts epochs that
+    /// continue (M12d-2).
+    continues: u8,
     /// Lives as long as the viewer watches, across streams, so its epochs
     /// keep counting: the viewer drops older ones (M19).
     video: HostVideo,
@@ -1978,12 +2000,20 @@ fn encode_loop(ctx: EncodeCtx) {
     let EncodeCtx {
         member,
         codecs,
+        continues,
         mut video,
         feed,
         shared,
         trace,
     } = ctx;
-    match encode(member, codecs, &mut video, &feed, &shared, trace.as_deref()) {
+    match encode(
+        member,
+        (codecs, continues),
+        &mut video,
+        &feed,
+        &shared,
+        trace.as_deref(),
+    ) {
         // The connection went: the viewer is gone, nothing failed.
         Ok(()) | Err(MediaError::Closed) => {}
         Err(e) => shared.event(HostEvent::ViewerFailed {
@@ -1998,7 +2028,7 @@ fn encode_loop(ctx: EncodeCtx) {
 /// encoder, rate controller and epochs; between streams, nothing (M19).
 fn encode(
     member: MemberId,
-    codecs: u8,
+    (codecs, continues): (u8, u8),
     video: &mut HostVideo,
     feed: &Feed,
     shared: &Shared,
@@ -2016,6 +2046,9 @@ fn encode(
     let mut force_keyframe = true;
     let mut last_tick = Instant::now();
     let mut stats = PeriodStats::new();
+    // What the viewer received and holds, while its encoder continues
+    // (M12d-2).
+    let mut continuity: Option<Continuity> = None;
 
     while !feed.stop.load(Ordering::SeqCst) {
         // The stream stopped: its epoch ends, its encoder closes (with its
@@ -2027,7 +2060,7 @@ fn encode(
         {
             current = None;
             drop(encoder.take());
-            (controller, params, gpu_pool) = (None, None, None);
+            (controller, params, gpu_pool, continuity) = (None, None, None, None);
             video.end_epoch(reset_code::STREAM_END);
         }
         if let (Some(c), Some(enc), Some(p)) = (controller.as_mut(), encoder.as_mut(), params)
@@ -2039,6 +2072,9 @@ fn encode(
             // fallback from NVENC directly to FFmpeg's).
             c.set_keyframe_costly(enc.caps().bitrate_change_costs_keyframe);
             let fb = video.feedback();
+            if let (Some(cont), Some(received)) = (continuity.as_mut(), video.received()) {
+                cont.received(received);
+            }
             let action = c.tick(last_tick, &fb);
             feed.target.store(c.target_bps(), Ordering::Relaxed);
             if let Some(trace) = trace.as_mut() {
@@ -2048,21 +2084,30 @@ fn encode(
             match action {
                 RateAction::Keep => {}
                 RateAction::SetBitrate(bps) => enc.set_bitrate(bps)?,
+                // From the newest frame the viewer received, or an older one
+                // it said it holds, having fallen behind decoding.
                 RateAction::CatchUp { bitrate } => {
                     enc.set_bitrate(bitrate)?;
-                    video.start_epoch(&p)?;
-                    force_keyframe = true;
+                    let from = lock(&feed.fell_behind).take();
+                    let from = from.or_else(|| continuity.as_ref()?.newest_received());
+                    // A keyframe asked for meanwhile wins.
+                    let from = from.filter(|_| !feed.keyframe.swap(false, Ordering::SeqCst));
+                    force_keyframe = !recover(video, enc.as_mut(), &mut continuity, &p, from)?;
                     stats.catch_ups += 1;
                 }
                 RateAction::Pause => {
-                    // Drop what is queued; nothing more until reports return.
-                    video.start_epoch(&p)?;
+                    // Drop what is queued; nothing more until reports return,
+                    // when a new epoch begins (M12d-2: it may continue).
+                    video.end_epoch(reset_code::SKIP_AHEAD);
                     stats.pauses += 1;
                     shared.note("viewer silent: paused".into());
                 }
                 RateAction::Resume { bitrate } => {
                     enc.set_bitrate(bitrate)?;
-                    force_keyframe = true;
+                    let from = lock(&feed.fell_behind).take();
+                    let from = from.or_else(|| continuity.as_ref()?.newest_received());
+                    let from = from.filter(|_| !feed.keyframe.swap(false, Ordering::SeqCst));
+                    force_keyframe = !recover(video, enc.as_mut(), &mut continuity, &p, from)?;
                     shared.note(format!(
                         "viewer back: resuming at {:.1} Mbit/s",
                         f64::from(bitrate) / 1e6
@@ -2084,7 +2129,7 @@ fn encode(
         // A new stream: its own codec, encoder, controller and epoch.
         if !current.as_ref().is_some_and(|c| Arc::ptr_eq(c, &stream)) {
             drop(encoder.take());
-            (controller, params, gpu_pool) = (None, None, None);
+            (controller, params, gpu_pool, continuity) = (None, None, None, None);
             codec = choose_codec(
                 codecs,
                 stream.gpu_input_off.load(Ordering::SeqCst),
@@ -2138,6 +2183,9 @@ fn encode(
                 fps: options.fps,
                 bitrate_bps: start,
             };
+            // Long-term frames for a viewer that continues in this codec
+            // (M12d-2): HEVC alone, by what viewers say.
+            let continuing = |codec: Codec| continuations() && continues & codec.bit() != 0;
             // HEVC only as NVENC on GPU frames (M12c). With frames in memory
             // (from the start, or since another encoder couldn't read them),
             // not even tried: H.264, as on a host without NVENC.
@@ -2145,7 +2193,9 @@ fn encode(
                 shared.note("HEVC unavailable (frames in memory); H.264 for this viewer".into());
                 codec = Codec::H264;
             }
-            let mut opened = shared.backend.encoder(config(codec), gpu);
+            let mut opened = shared
+                .backend
+                .encoder(config(codec), gpu, continuing(codec));
             // If HEVC can't read the GPU frames, H.264 for this viewer, rather
             // than turn GPU frames off for every viewer below.
             let usable = match &opened {
@@ -2160,7 +2210,9 @@ fn encode(
                 shared.note(format!("HEVC unavailable ({why}); H.264 for this viewer"));
                 drop(opened);
                 codec = Codec::H264;
-                opened = shared.backend.encoder(config(codec), gpu);
+                opened = shared
+                    .backend
+                    .encoder(config(codec), gpu, continuing(codec));
             }
             let enc = opened?;
             gpu_pool = gpu.filter(|_| enc.caps().gpu_input).map(|f| f.source);
@@ -2182,6 +2234,7 @@ fn encode(
                 },
                 f64::from(start) / 1e6
             ));
+            continuity = enc.continues().then(Continuity::new);
             rate.keyframe_costly = enc.caps().bitrate_change_costs_keyframe;
             let mut c = RateController::new(rate);
             c.set_share(share);
@@ -2192,20 +2245,28 @@ fn encode(
                 height,
                 fps: options.fps,
             };
-            video.start_epoch(&p)?;
+            video.start_epoch(&p, None)?;
             params = Some(p);
             encoder = Some(enc);
             force_keyframe = true;
         }
 
         let enc = encoder.as_mut().expect("opened above");
-        let key = std::mem::take(&mut force_keyframe) | feed.keyframe.swap(false, Ordering::SeqCst);
+        let mut key =
+            std::mem::take(&mut force_keyframe) | feed.keyframe.swap(false, Ordering::SeqCst);
+        // A viewer that fell behind decoding: continue from what it holds,
+        // unless a keyframe was asked for anyway (M12d-2).
+        let fell_behind = lock(&feed.fell_behind).take();
+        if let (Some(holds), false, Some(p)) = (fell_behind, key, params) {
+            key = !recover(video, enc.as_mut(), &mut continuity, &p, Some(holds))?;
+        }
+        let mark = continuity.as_ref().and_then(|c| c.mark(Instant::now()));
         let encoded = match gpu {
-            Some(f) if enc.caps().gpu_input => enc.encode(EncoderInput::Gpu(f), key),
+            Some(f) if enc.caps().gpu_input => enc.encode_marking(EncoderInput::Gpu(f), key, mark),
             // Copied to memory once per frame, for every viewer that needs it.
             _ => frame
                 .cpu()
-                .and_then(|cpu| enc.encode(EncoderInput::Cpu(&cpu), key)),
+                .and_then(|cpu| enc.encode_marking(EncoderInput::Cpu(&cpu), key, mark)),
         };
         let units = match encoded {
             Ok(units) => units,
@@ -2227,11 +2288,26 @@ fn encode(
             }
             Err(e) => return Err(e),
         };
-        for unit in units {
+        for (unit, long_term) in units {
             stats.bytes += unit.data.len() as u64;
             stats.keyframes += u32::from(unit.keyframe);
             stats.encode_us_max = stats.encode_us_max.max(unit.encode_time_us);
+            let sent_as = video.next_frame();
             video.send_frame(&unit)?;
+            match (long_term, sent_as) {
+                (Some(long_term), Some(frame)) => {
+                    // A report it can't follow: keyframes from now on.
+                    if continuity
+                        .as_mut()
+                        .is_some_and(|c| !c.sent(frame, unit.keyframe, long_term, Instant::now()))
+                    {
+                        continuity = None;
+                    }
+                }
+                // The encoder no longer continues (NVENC directly fell back
+                // to FFmpeg's, from a keyframe): keyframes from now on.
+                _ => continuity = None,
+            }
         }
         stats.frames += 1;
 
@@ -2255,6 +2331,47 @@ fn encode(
         }
     }
     Ok(())
+}
+
+/// Starts a new epoch to recover: one continuing from `from` (the frame the
+/// viewer holds) where the encoder and the viewer can (M12d-2, ADR 0016),
+/// the frames after it invalidated first; otherwise one that begins with a
+/// keyframe. Returns whether it continues.
+fn recover(
+    video: &mut HostVideo,
+    encoder: &mut dyn VideoEncoder,
+    continuity: &mut Option<Continuity>,
+    params: &VideoParams,
+    from: Option<FrameRef>,
+) -> Result<bool, MediaError> {
+    let plan = match (continuity.as_mut(), from) {
+        (Some(c), Some(from)) if encoder.continues() => c.plan(from, Instant::now()),
+        _ => None,
+    };
+    if let Some(plan) = plan {
+        match plan
+            .invalidate
+            .iter()
+            .try_for_each(|&t| encoder.invalidate(t))
+        {
+            Ok(()) => {
+                video.start_epoch(params, Some(plan.from))?;
+                tracing::info!(
+                    from = ?plan.from,
+                    invalidated = plan.invalidate.len(),
+                    "continuing instead of a keyframe"
+                );
+                return Ok(true);
+            }
+            // The encoder may be in any state now: no more continuing.
+            Err(e) => {
+                tracing::warn!("invalidating frames failed ({e}); a keyframe instead");
+                *continuity = None;
+            }
+        }
+    }
+    video.start_epoch(params, None)?;
+    Ok(false)
 }
 
 // ---- The host's own window (M27d) ----
@@ -2374,7 +2491,7 @@ fn own_encode_loop(feed: &Feed, shared: &Shared, out: &mpsc::Sender<OwnFrame>) {
                 fps: OWN_FPS,
                 bitrate_bps: own_bitrate(width, height),
             };
-            let enc = match shared.backend.encoder(config, gpu) {
+            let enc = match shared.backend.encoder(config, gpu, false) {
                 Ok(enc) => enc,
                 Err(e) => {
                     tracing::warn!("the host's own window's encoder failed to open: {e}");
