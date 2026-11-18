@@ -517,7 +517,8 @@ export default function App() {
       {dialog?.kind === "streamPicker" && !dialog.remote && host && (
         <StreamPicker
           session={host.session}
-          shared={linux}
+          shared={lobby.info?.sharesThroughDialog === true}
+          picksSound={linux}
           onClose={close}
           onRoom={lobby.putRoom}
           notify={lobby.notify}

@@ -7,7 +7,9 @@
 //! front (a KWin script, or our GNOME extension), PipeWire (the shared
 //! picture, the PC's sound), and what a home
 //! PC run from afar needs: staying awake (logind and the inhibit portal),
-//! its lock screen (logind), and starting at sign-in (XDG autostart).
+//! its lock screen (logind), and starting at sign-in (XDG autostart). On an
+//! X11 desktop (M28, ADR 0015), the X server itself: its windows and
+//! screens, their capture, the input focus and the pointer.
 //!
 //! Compiles to nothing on other platforms.
 
@@ -33,3 +35,4 @@ pub mod session_lock;
 pub mod sound;
 pub mod stdio;
 pub mod web;
+pub mod x11;

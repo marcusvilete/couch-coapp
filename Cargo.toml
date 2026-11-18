@@ -6,7 +6,7 @@ members = ["crates/*", "xtask", "apps/desktop/src-tauri"]
 # The app's version, shown in the installer and to other members. Bump it
 # with each installer handed out, together with tauri.conf.json's and
 # apps/desktop/package.json's (scripts/build-installer.ps1 checks).
-version = "0.39.1"
+version = "0.40.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
@@ -59,6 +59,10 @@ pipewire = "0.10"
 # The clipboard on Linux (M26a): a relay code copied as a secret, kept out of
 # clipboard managers' history (KDE's x-kde-passwordManagerHint). No images.
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+# The X protocol (M28, ADR 0015): a Linux host on an X11 desktop captures,
+# lists windows and screens, and reads the pointer from the X server. Pure
+# Rust, no libxcb; already in the tree through arboard.
+x11rb = { version = "0.13", default-features = false, features = ["shm", "composite", "xfixes", "randr"] }
 
 # Viewer rendering
 egui = "0.36"

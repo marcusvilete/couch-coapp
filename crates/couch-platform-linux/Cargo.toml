@@ -22,8 +22,9 @@ pipewire.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rustix = { workspace = true, features = ["time", "stdio", "event", "process", "fs"] }
+rustix = { workspace = true, features = ["time", "stdio", "event", "process", "fs", "mm"] }
 tracing.workspace = true
+x11rb.workspace = true
 
 [lints]
 workspace = true

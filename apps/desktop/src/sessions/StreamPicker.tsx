@@ -38,11 +38,16 @@ export function StreamPicker(props: {
   notify: Notify;
   /** One of our PCs run from here (M25): its windows and screens. */
   remote?: RemoteTarget;
-  /** This PC shares what its desktop's dialog offers (Linux, M16c): one
-   * choice, made in that dialog when the stream starts. */
+  /** This PC shares what its desktop's dialog offers (Linux on Wayland,
+   * M16c): one choice, made in that dialog when the stream starts. */
   shared?: boolean;
+  /** This PC sends everything it plays but the app's own sounds, or one
+   * program's (Linux, M16c): picked here, for a window too on an X11
+   * desktop (M28), where the windows and screens are listed. */
+  picksSound?: boolean;
 }) {
   const s = props.session;
+  const picksSound = props.shared === true || props.picksSound === true;
   const { busy, run } = useRun(props.notify, props.onRoom, props.remote);
   const [sources, setSources] = useState<SourceList | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -86,10 +91,8 @@ export function StreamPicker(props: {
     request(viaRemote(props.remote, { type: "listSources" }), "sources")
       .then(setSources)
       .catch((e) => setLoadError(errorText(e)));
-    if (props.shared) {
-      loadPrograms();
-      void sharedChoice(false);
-    }
+    if (picksSound) loadPrograms();
+    if (props.shared) void sharedChoice(false);
   };
   useEffect(load, []);
   // Its one source, picked at once.
@@ -137,7 +140,7 @@ export function StreamPicker(props: {
     setError(null);
     writeStored(KEYS.streamFps, String(fps));
     writeStored(KEYS.streamQuality, String(quality));
-    if (props.shared) writeStored(KEYS.streamSound, sound);
+    if (picksSound) writeStored(KEYS.streamSound, sound);
     rememberStream(picked.title, pickedElevated);
     const started = await run("stream", {
       type: "startStream",
@@ -146,10 +149,39 @@ export function StreamPicker(props: {
       fps,
       max_mbps: quality,
       upload_mbps: uploadMbps,
-      program: props.shared && sound !== "" ? sound : null,
+      program: picksSound && sound !== "" ? sound : null,
     });
     if (started) props.onClose();
   }
+
+  // The sound guests hear, where this PC picks it by program (Linux).
+  const soundChoice = (
+    <>
+      <Field label="Sound guests hear">
+        {(id) => (
+          <div className="picker-sound">
+            <Select
+              id={id}
+              value={sound === "" ? EVERYTHING : sound}
+              onChange={(v) => setSound(v === EVERYTHING ? "" : v)}
+              options={soundChoices(programs, sound)}
+              disabled={programs == null}
+            />
+            <IconButton label="Refresh what plays" onClick={loadPrograms} variant="secondary">
+              <RefreshCw />
+            </IconButton>
+          </div>
+        )}
+      </Field>
+      {/* Reserved, so nothing below moves when it comes. */}
+      <p className="picker-note selectable">
+        {programsError ??
+          (sound === ""
+            ? "Everything your PC plays, except Couch Co-App's own sounds. For one program's alone, start it, then refresh."
+            : `Only ${sound}'s sound, whenever it plays.`)}
+      </p>
+    </>
+  );
 
   const qualityLabel = (mbps: number) => QUALITIES.find((q) => q.mbps === mbps)?.label ?? `${mbps} Mbit/s`;
 
@@ -159,7 +191,9 @@ export function StreamPicker(props: {
       description={
         props.shared
           ? "Your desktop asks which window or screen; pick here the sound guests hear."
-          : "A window is best: only the game is shown, and only its sound is sent."
+          : picksSound
+            ? "A window is best: only the game is shown. Pick below the sound guests hear."
+            : "A window is best: only the game is shown, and only its sound is sent."
       }
       onClose={props.onClose}
       busy={busy != null}
@@ -244,31 +278,10 @@ export function StreamPicker(props: {
                   </label>
                 </div>
               )}
-              <Field label="Sound guests hear">
-                {(id) => (
-                  <div className="picker-sound">
-                    <Select
-                      id={id}
-                      value={sound === "" ? EVERYTHING : sound}
-                      onChange={(v) => setSound(v === EVERYTHING ? "" : v)}
-                      options={soundChoices(programs, sound)}
-                      disabled={programs == null}
-                    />
-                    <IconButton label="Refresh what plays" onClick={loadPrograms} variant="secondary">
-                      <RefreshCw />
-                    </IconButton>
-                  </div>
-                )}
-              </Field>
-              {/* Reserved, so nothing below moves when it comes. */}
-              <p className="picker-note selectable">
-                {programsError ??
-                  (sound === ""
-                    ? "Everything your PC plays, except Couch Co-App's own sounds. For one program's alone, start it, then refresh."
-                    : `Only ${sound}'s sound, whenever it plays.`)}
-              </p>
+              {soundChoice}
             </div>
           ) : (
+            <>
             <Tabs
               label="Sources"
               value={tab}
@@ -358,11 +371,13 @@ export function StreamPicker(props: {
                   ))}
                 </div>
                 <p className="picker-note">
-                  For a screen, guests hear everything your PC plays, except Couch Co-App.
-                  {kbmSeats && " A keyboard-and-mouse seat needs a window."}
+                  {!picksSound && "For a screen, guests hear everything your PC plays, except Couch Co-App."}
+                  {kbmSeats && `${picksSound ? "" : " "}A keyboard-and-mouse seat needs a window.`}
                 </p>
               </TabPanel>
             </Tabs>
+            {picksSound && <div className="picker-sound-below">{soundChoice}</div>}
+            </>
           )}
         </div>
 

@@ -360,6 +360,13 @@ pub trait Backend: Send + Sync + 'static {
         true
     }
 
+    /// Whether what to stream is chosen in the desktop's screen-sharing
+    /// dialog (Linux on Wayland, M16c), whose one choice [`Backend::sources`]
+    /// lists as a screen; elsewhere it lists the windows and screens.
+    fn shares_through_dialog(&self) -> bool {
+        false
+    }
+
     /// Whether a stream shares again, without asking, what was last chosen
     /// in the desktop's screen-sharing dialog (Linux, M16c).
     fn remembers_shared_choice(&self) -> bool {

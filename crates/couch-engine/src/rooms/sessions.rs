@@ -1631,7 +1631,7 @@ impl Actor {
             Ok(())
         } else {
             Err(EngineError::Refused(
-                "Windows wouldn't bring that window to the front",
+                "your PC wouldn't bring that window to the front",
             ))
         }
     }

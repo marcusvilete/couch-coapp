@@ -285,6 +285,13 @@ pub fn chord(usage: u16) -> Option<String> {
     key_name(usage).map(|key| format!("CTRL+ALT+SHIFT+{key}"))
 }
 
+/// The same chord as people write it ("Ctrl+Alt+Shift+Backspace"), as the
+/// console shows keys the desktop bound: for the keys an X11 desktop's own
+/// grab holds (M28-2), which no desktop names.
+pub fn described(usage: u16) -> Option<String> {
+    key_name(usage).map(|key| readable(&format!("<Control><Alt><Shift>{key}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
