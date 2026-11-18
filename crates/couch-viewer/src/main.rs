@@ -21,6 +21,7 @@
 
 mod audio;
 mod board;
+mod chain;
 mod clock;
 mod draw_ui;
 mod editor;

@@ -404,6 +404,7 @@ impl Backend for LinuxBackend {
         &self,
         config: EncoderConfig,
         _gpu: Option<&GpuFrame>,
+        _continuing: bool,
     ) -> Result<Box<dyn VideoEncoder>, MediaError> {
         // One encoder by FFmpeg's name, as on Windows: another machine's path
         // here (`libopenh264`, say).

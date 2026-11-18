@@ -11,7 +11,7 @@ use std::{any::Any, collections::HashMap, ffi::c_void, ptr, sync::Arc, time::Ins
 
 use bytes::Bytes;
 use couch_media::{
-    Codec, EncodedFrame, EncoderCaps, EncoderConfig, EncoderInput, GpuFrame, MediaError,
+    Codec, EncodedFrame, EncoderCaps, EncoderConfig, EncoderInput, GpuFrame, LongTerm, MediaError,
     VideoEncoder,
 };
 
@@ -19,6 +19,52 @@ use crate::{
     api::{self, Api, check, check_on},
     ffi::*,
 };
+
+/// Long-term reference frames, for continuing a stream after frames the
+/// viewer never got (M12d-2, ADR 0016). Off by default: the stream is then
+/// FFmpeg's exactly. On, the parameter sets change (the DPB, LTR's flags).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Continuation {
+    /// Long-term frames NVENC keeps (`ltrNumFrames`); 0 leaves LTR off.
+    pub ltr_frames: u32,
+    /// The DPB's size (`maxNumRefFrames`, HEVC's `maxNumRefFramesInDPB`);
+    /// 0 is the driver's choice.
+    pub max_ref_frames: u32,
+    /// The references a frame may predict from (`numRefL0`, 1 to 7); 0 is
+    /// the driver's choice.
+    pub refs_l0: u32,
+}
+
+/// What one frame asks of NVENC beyond its picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameControl {
+    pub keyframe: bool,
+    /// Mark this frame long-term, in this slot.
+    pub mark_ltr: Option<u32>,
+    /// Let it predict from the long-term frames in this bitmap of slots.
+    pub use_ltr: Option<u32>,
+}
+
+/// What NVENC says it did with a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameReport {
+    /// The timestamp it was encoded under, which [`NvencEncoder::invalidate`]
+    /// names it by.
+    pub timestamp: u64,
+    /// `NV_ENC_PIC_TYPE_*`: 0 P, 2 I, 3 IDR, 7 a P no frame refers to.
+    pub picture_type: u32,
+    /// Marked long-term, in this slot.
+    pub ltr_marked: Option<u32>,
+    /// The long-term slots it predicted from.
+    pub ltr_used: u32,
+}
+
+/// What this GPU offers for continuing ([`Continuation`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinuationCaps {
+    pub invalidation: bool,
+    pub max_ltr_frames: i32,
+}
 
 /// An NVENC session reading one texture pool's frames.
 pub struct NvencEncoder {
@@ -40,6 +86,9 @@ pub struct NvencEncoder {
     config: EncoderConfig,
     source: u64,
     last_pts: u64,
+    codec_guid: GUID,
+    /// Opened with long-term frames ([`Continuation`]): it continues.
+    long_term: bool,
     /// Every texture of the pool, kept alive until the session is gone
     /// (dropped after `drop` destroyed it).
     _textures: Arc<dyn Any + Send + Sync>,
@@ -63,6 +112,16 @@ impl NvencEncoder {
     /// another vendor's GPU, the session limit), so the caller can open
     /// FFmpeg's encoder instead.
     pub fn open_gpu(config: EncoderConfig, frame: &GpuFrame) -> Result<Self, MediaError> {
+        Self::open_continuing(config, frame, Continuation::default())
+    }
+
+    /// [`open_gpu`](Self::open_gpu) with long-term frames as `continuation`
+    /// asks.
+    pub fn open_continuing(
+        config: EncoderConfig,
+        frame: &GpuFrame,
+        mut continuation: Continuation,
+    ) -> Result<Self, MediaError> {
         if (frame.width, frame.height) != (config.width, config.height) {
             return Err(MediaError::Backend(format!(
                 "a {}x{} frame for a {}x{} encoder",
@@ -102,6 +161,8 @@ impl NvencEncoder {
             config,
             source: frame.source,
             last_pts: 0,
+            codec_guid,
+            long_term: continuation.ltr_frames > 0,
             _textures: frame.texture().keep_alive(),
         };
 
@@ -127,6 +188,18 @@ impl NvencEncoder {
                 "this GPU can't change NVENC's bitrate in place".into(),
             ));
         }
+        // Continuing needs invalidation and the long-term frames asked for
+        // (M12d-2): without them, the plain stream, which recovers with
+        // keyframes, rather than an encoder that might refer to frames a viewer
+        // never got.
+        if continuation.ltr_frames > 0 {
+            let caps = encoder.continuation_caps()?;
+            if !caps.invalidation || caps.max_ltr_frames < continuation.ltr_frames as i32 {
+                tracing::info!(?caps, "NVENC can't continue here; keyframes for recoveries");
+                continuation = Continuation::default();
+            }
+        }
+        encoder.long_term = continuation.ltr_frames > 0;
 
         let mut preset = NV_ENC_PRESET_CONFIG {
             version: api::PRESET_CONFIG_VER,
@@ -150,6 +223,7 @@ impl NvencEncoder {
         check_on(api, encoder.session, status, "NvEncGetEncodePresetConfigEx")?;
         *encoder.encode_config = preset.presetCfg;
         configure(&mut encoder.encode_config, config);
+        continue_with(&mut encoder.encode_config, config.codec, continuation);
 
         let (dar_width, dar_height) = reduced(config.width, config.height);
         *encoder.init = NV_ENC_INITIALIZE_PARAMS {
@@ -188,6 +262,81 @@ impl NvencEncoder {
 
     pub fn config(&self) -> EncoderConfig {
         self.config
+    }
+
+    /// Whether this GPU invalidates references and keeps long-term frames.
+    pub fn continuation_caps(&self) -> Result<ContinuationCaps, MediaError> {
+        Ok(ContinuationCaps {
+            invalidation: self.cap(self.codec_guid, NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION)? != 0,
+            max_ltr_frames: self.cap(self.codec_guid, NV_ENC_CAPS_NUM_MAX_LTR_FRAMES)?,
+        })
+    }
+
+    /// No later frame predicts from the frame encoded under `timestamp`, nor
+    /// from any frame predicted from it (`NvEncInvalidateRefFrames`).
+    pub fn invalidate(&mut self, timestamp: u64) -> Result<(), MediaError> {
+        let invalidate = self.api.fns.nvEncInvalidateRefFrames.ok_or_else(missing)?;
+        // SAFETY: a live session; the timestamp is a plain number.
+        let status = unsafe { invalidate(self.session, timestamp) };
+        check_on(self.api, self.session, status, "NvEncInvalidateRefFrames")
+    }
+
+    /// One GPU frame, with what `control` asks, and NVENC's report on it.
+    pub fn encode_frame(
+        &mut self,
+        frame: &GpuFrame,
+        control: FrameControl,
+    ) -> Result<Option<(EncodedFrame, FrameReport)>, MediaError> {
+        if (frame.width, frame.height) != (self.config.width, self.config.height) {
+            return Err(MediaError::Backend(format!(
+                "frame is {}x{}, encoder was opened for {}x{}",
+                frame.width, frame.height, self.config.width, self.config.height
+            )));
+        }
+        // Another pool's texture may sit at the address of one of ours that
+        // was freed: NVENC would take it for the one it registered.
+        if frame.source != self.source {
+            return Err(MediaError::Backend(format!(
+                "frame from texture pool {}, encoder opened for pool {}",
+                frame.source, self.source
+            )));
+        }
+        let started = Instant::now();
+        if let Some(bps) = self.pending_bitrate.take() {
+            self.reconfigure(bps)?;
+        }
+        let pts = frame.captured_at.0.max(self.last_pts.saturating_add(1));
+        self.last_pts = pts;
+
+        let registered = self.registered(frame)?;
+        let mut map = NV_ENC_MAP_INPUT_RESOURCE {
+            version: api::MAP_INPUT_RESOURCE_VER,
+            registeredResource: registered,
+            ..Default::default()
+        };
+        let map_input = self.api.fns.nvEncMapInputResource.ok_or_else(missing)?;
+        let unmap_input = self.api.fns.nvEncUnmapInputResource.ok_or_else(missing)?;
+        // SAFETY: a live session and a resource it registered; `frame` holds
+        // the texture out of its pool until after the unmap below.
+        let status = unsafe { map_input(self.session, &mut map) };
+        check_on(self.api, self.session, status, "NvEncMapInputResource")?;
+        let encoded = self.encode_mapped(map.mappedResource, map.mappedBufferFmt, pts, control);
+        // SAFETY: mapped above, unmapped once, whatever the encode did.
+        let unmapped = unsafe { unmap_input(self.session, map.mappedResource) };
+        let encoded = encoded?;
+        check_on(self.api, self.session, unmapped, "NvEncUnmapInputResource")?;
+
+        Ok(encoded.map(|(data, report)| {
+            (
+                EncodedFrame {
+                    data,
+                    keyframe: report.picture_type == NV_ENC_PIC_TYPE_IDR as u32,
+                    captured_at: frame.captured_at,
+                    encode_time_us: started.elapsed().as_micros() as u32,
+                },
+                report,
+            )
+        }))
     }
 
     fn cap(&self, codec: GUID, which: NV_ENC_CAPS) -> Result<i32, MediaError> {
@@ -263,8 +412,8 @@ impl NvencEncoder {
         input: NV_ENC_INPUT_PTR,
         format: NV_ENC_BUFFER_FORMAT,
         pts: u64,
-        keyframe: bool,
-    ) -> Result<Option<(Bytes, bool)>, MediaError> {
+        control: FrameControl,
+    ) -> Result<Option<(Bytes, FrameReport)>, MediaError> {
         let fns = &self.api.fns;
         let mut pic = NV_ENC_PIC_PARAMS {
             version: api::PIC_PARAMS_VER,
@@ -273,7 +422,7 @@ impl NvencEncoder {
             inputPitch: 0,
             // FFmpeg's `forced-idr=1`: a requested keyframe is an IDR, which
             // carries SPS and PPS (`repeatSPSPPS`).
-            encodePicFlags: if keyframe {
+            encodePicFlags: if control.keyframe {
                 NV_ENC_PIC_FLAG_FORCEIDR as u32
             } else {
                 0
@@ -286,14 +435,35 @@ impl NvencEncoder {
             ..Default::default()
         };
         // FFmpeg repeats the configured slice mode in every picture.
-        match self.config.codec {
-            Codec::Hevc => {
-                pic.codecPicParams.hevcPicParams.sliceMode = 3;
-                pic.codecPicParams.hevcPicParams.sliceModeData = 1;
-            }
-            _ => {
-                pic.codecPicParams.h264PicParams.sliceMode = 3;
-                pic.codecPicParams.h264PicParams.sliceModeData = 1;
+        // SAFETY: the union's member for the codec being encoded.
+        unsafe {
+            match self.config.codec {
+                Codec::Hevc => {
+                    let p = &mut pic.codecPicParams.hevcPicParams;
+                    p.sliceMode = 3;
+                    p.sliceModeData = 1;
+                    if let Some(slot) = control.mark_ltr {
+                        p.set_ltrMarkFrame(1);
+                        p.ltrMarkFrameIdx = slot;
+                    }
+                    if let Some(bitmap) = control.use_ltr {
+                        p.set_ltrUseFrames(1);
+                        p.ltrUseFrameBitmap = bitmap;
+                    }
+                }
+                _ => {
+                    let p = &mut pic.codecPicParams.h264PicParams;
+                    p.sliceMode = 3;
+                    p.sliceModeData = 1;
+                    if let Some(slot) = control.mark_ltr {
+                        p.set_ltrMarkFrame(1);
+                        p.ltrMarkFrameIdx = slot;
+                    }
+                    if let Some(bitmap) = control.use_ltr {
+                        p.set_ltrUseFrames(1);
+                        p.ltrUseFrameBitmap = bitmap;
+                    }
+                }
             }
         }
         let encode = fns.nvEncEncodePicture.ok_or_else(missing)?;
@@ -327,11 +497,16 @@ impl NvencEncoder {
                 )
             })
         };
-        let keyframe = lock.pictureType == NV_ENC_PIC_TYPE_IDR;
+        let report = FrameReport {
+            timestamp: pts,
+            picture_type: lock.pictureType as u32,
+            ltr_marked: (lock.ltrFrame() != 0).then_some(lock.ltrFrameIdx),
+            ltr_used: lock.ltrFrameBitmap,
+        };
         // SAFETY: the buffer locked above, unlocked once.
         let status = unsafe { unlock_bitstream(self.session, self.output) };
         check_on(self.api, self.session, status, "NvEncUnlockBitstream")?;
-        Ok(Some((data, keyframe)))
+        Ok(Some((data, report)))
     }
 }
 
@@ -350,53 +525,13 @@ impl VideoEncoder for NvencEncoder {
                 "a frame in memory for an encoder opened for GPU frames".into(),
             ));
         };
-        if (frame.width, frame.height) != (self.config.width, self.config.height) {
-            return Err(MediaError::Backend(format!(
-                "frame is {}x{}, encoder was opened for {}x{}",
-                frame.width, frame.height, self.config.width, self.config.height
-            )));
-        }
-        // Another pool's texture may sit at the address of one of ours that
-        // was freed: NVENC would take it for the one it registered.
-        if frame.source != self.source {
-            return Err(MediaError::Backend(format!(
-                "frame from texture pool {}, encoder opened for pool {}",
-                frame.source, self.source
-            )));
-        }
-        let started = Instant::now();
-        let keyframe = force_keyframe;
-        if let Some(bps) = self.pending_bitrate.take() {
-            self.reconfigure(bps)?;
-        }
-        let pts = frame.captured_at.0.max(self.last_pts.saturating_add(1));
-        self.last_pts = pts;
-
-        let registered = self.registered(frame)?;
-        let mut map = NV_ENC_MAP_INPUT_RESOURCE {
-            version: api::MAP_INPUT_RESOURCE_VER,
-            registeredResource: registered,
+        let control = FrameControl {
+            keyframe: force_keyframe,
             ..Default::default()
         };
-        let map_input = self.api.fns.nvEncMapInputResource.ok_or_else(missing)?;
-        let unmap_input = self.api.fns.nvEncUnmapInputResource.ok_or_else(missing)?;
-        // SAFETY: a live session and a resource it registered; `frame` holds
-        // the texture out of its pool until after the unmap below.
-        let status = unsafe { map_input(self.session, &mut map) };
-        check_on(self.api, self.session, status, "NvEncMapInputResource")?;
-        let encoded = self.encode_mapped(map.mappedResource, map.mappedBufferFmt, pts, keyframe);
-        // SAFETY: mapped above, unmapped once, whatever the encode did.
-        let unmapped = unsafe { unmap_input(self.session, map.mappedResource) };
-        let encoded = encoded?;
-        check_on(self.api, self.session, unmapped, "NvEncUnmapInputResource")?;
-
-        Ok(encoded
-            .map(|(data, keyframe)| EncodedFrame {
-                data,
-                keyframe,
-                captured_at: frame.captured_at,
-                encode_time_us: started.elapsed().as_micros() as u32,
-            })
+        Ok(self
+            .encode_frame(frame, control)?
+            .map(|(encoded, _)| encoded)
             .into_iter()
             .collect())
     }
@@ -405,7 +540,54 @@ impl VideoEncoder for NvencEncoder {
         self.pending_bitrate = (bps != self.config.bitrate_bps).then_some(bps);
         Ok(())
     }
+
+    fn continues(&self) -> bool {
+        self.long_term
+    }
+
+    fn encode_marking(
+        &mut self,
+        input: EncoderInput<'_>,
+        force_keyframe: bool,
+        mark: Option<u32>,
+    ) -> Result<Vec<(EncodedFrame, Option<LongTerm>)>, MediaError> {
+        let EncoderInput::Gpu(frame) = input else {
+            return Err(MediaError::Unsupported(
+                "a frame in memory for an encoder opened for GPU frames".into(),
+            ));
+        };
+        let control = FrameControl {
+            keyframe: force_keyframe,
+            mark_ltr: mark.filter(|_| self.long_term),
+            use_ltr: None,
+        };
+        Ok(self
+            .encode_frame(frame, control)?
+            .map(|(encoded, report)| {
+                let long_term = LongTerm {
+                    timestamp: report.timestamp,
+                    marked: report.ltr_marked,
+                };
+                (encoded, Some(long_term))
+            })
+            .into_iter()
+            .collect())
+    }
+
+    fn invalidate(&mut self, timestamp: u64) -> Result<(), MediaError> {
+        NvencEncoder::invalidate(self, timestamp)
+    }
 }
+
+/// What a continuing encoder opens with (ADR 0016, the spike): two long-term
+/// frames, and three references, since with long-term frames on the driver
+/// predicts from one short-term frame (H.264 lost 1 dB a frame; HEVC gained
+/// 1 dB over the driver's choice).
+pub const CONTINUING: Continuation = Continuation {
+    ltr_frames: 2,
+    max_ref_frames: 0,
+    refs_l0: 3,
+};
 
 impl Drop for NvencEncoder {
     fn drop(&mut self) {
@@ -508,6 +690,40 @@ fn configure(c: &mut NV_ENC_CONFIG, config: EncoderConfig) {
                 // `s12m_tc` is on by default in `h264_nvenc` (a frame without
                 // a timecode leaves its picture's empty).
                 h264.set_enableTimeCode(1);
+            }
+        }
+    }
+}
+
+/// Long-term frames in per-picture mode, where `continuation` asks for them.
+fn continue_with(c: &mut NV_ENC_CONFIG, codec: Codec, continuation: Continuation) {
+    if continuation == Continuation::default() {
+        return;
+    }
+    let ltr = u32::from(continuation.ltr_frames > 0);
+    let refs = if continuation.refs_l0 == 0 {
+        NV_ENC_NUM_REF_FRAMES_AUTOSELECT
+    } else {
+        continuation.refs_l0 as NV_ENC_NUM_REF_FRAMES
+    };
+    // SAFETY: the union's member for the codec being configured.
+    unsafe {
+        match codec {
+            Codec::Hevc => {
+                let hevc = &mut c.encodeCodecConfig.hevcConfig;
+                hevc.set_enableLTR(ltr);
+                hevc.ltrTrustMode = 0;
+                hevc.ltrNumFrames = continuation.ltr_frames;
+                hevc.maxNumRefFramesInDPB = continuation.max_ref_frames;
+                hevc.numRefL0 = refs;
+            }
+            _ => {
+                let h264 = &mut c.encodeCodecConfig.h264Config;
+                h264.set_enableLTR(ltr);
+                h264.ltrTrustMode = 0;
+                h264.ltrNumFrames = continuation.ltr_frames;
+                h264.maxNumRefFrames = continuation.max_ref_frames;
+                h264.numRefL0 = refs;
             }
         }
     }

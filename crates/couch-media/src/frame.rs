@@ -393,8 +393,9 @@ pub enum CaptureEvent {
     GpuFramesFailed,
 }
 
-/// Identifies an epoch: a keyframe plus the frames that depend on it, sent in
-/// order on one stream (docs/protocol.md).
+/// Identifies an epoch: a keyframe (or, since M12d-2, a frame continuing from
+/// one the viewer decoded) plus the frames that depend on it, sent in order on
+/// one stream (docs/protocol.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EpochId(pub u32);
 

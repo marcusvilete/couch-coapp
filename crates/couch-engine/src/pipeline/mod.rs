@@ -257,11 +257,14 @@ pub trait Backend: Send + Sync + 'static {
 
     /// An encoder. With `gpu` (a frame like the ones to come), one that reads
     /// GPU frames where it can (`caps().gpu_input`); otherwise one that takes
-    /// frames in memory, which GPU frames are copied to.
+    /// frames in memory, which GPU frames are copied to. With `continuing`,
+    /// one that continues where it can (`continues()`, M12d-2): NVENC directly
+    /// with long-term frames; elsewhere the flag changes nothing.
     fn encoder(
         &self,
         config: EncoderConfig,
         gpu: Option<&GpuFrame>,
+        continuing: bool,
     ) -> Result<Box<dyn VideoEncoder>, MediaError>;
 
     /// The sound `kind` names. `stop` is the stream's: a source that waits
@@ -749,6 +752,7 @@ impl Backend for ViewerOnly {
         &self,
         _: EncoderConfig,
         _: Option<&GpuFrame>,
+        _: bool,
     ) -> Result<Box<dyn VideoEncoder>, MediaError> {
         Err(unsupported())
     }

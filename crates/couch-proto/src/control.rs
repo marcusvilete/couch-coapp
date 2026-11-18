@@ -14,6 +14,7 @@ use crate::{
     },
     envelope::{self, EnvelopeError, Frame, MUST_UNDERSTAND},
     ids::{Permissions, SeatEpoch, SeatId},
+    media::FrameRef,
     remote::{
         RemoteCommand, RemoteLock, RemoteOffer, RemoteReply, RemoteState, RemoteUnlock,
         RemoteUnlockReply,
@@ -163,7 +164,8 @@ pub struct SeatReleased {
     pub seat_epoch: SeatEpoch,
 }
 
-/// A viewer can't decode without a fresh keyframe (start, decoder error).
+/// A viewer can't decode without a fresh keyframe (start, decoder error), or
+/// asks to continue from a frame it holds (M12d-2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyframeRequest {
     /// The newest epoch the viewer has seen.
@@ -175,6 +177,16 @@ pub struct KeyframeRequest {
 pub enum KeyframeReason {
     Start,
     DecoderError,
+    /// Decoding fell behind (M12d-2): the viewer stopped decoding after
+    /// `holds`, decoded cleanly. The host may continue from it, in a codec
+    /// the viewer said it continues in (`SessionJoin::continues`), or send a
+    /// keyframe.
+    FellBehind {
+        holds: FrameRef,
+    },
+    /// An epoch continued from a frame this viewer doesn't hold (M12d-2):
+    /// only a keyframe helps.
+    CantContinue,
 }
 
 /// "Still here": each side sends it after a second of saying nothing, so a
@@ -576,6 +588,27 @@ mod tests {
         roundtrip(ControlMessage::Alive(Alive {}));
     }
 
+    /// M12d-2: every reason a viewer gives, a frame it holds included.
+    #[test]
+    fn keyframe_requests_roundtrip() {
+        for reason in [
+            KeyframeReason::Start,
+            KeyframeReason::DecoderError,
+            KeyframeReason::FellBehind {
+                holds: FrameRef {
+                    epoch: 7,
+                    seq: u32::MAX,
+                },
+            },
+            KeyframeReason::CantContinue,
+        ] {
+            roundtrip(ControlMessage::KeyframeRequest(KeyframeRequest {
+                epoch: 8,
+                reason,
+            }));
+        }
+    }
+
     #[test]
     fn admission_and_room_messages_roundtrip() {
         use crate::{
@@ -711,6 +744,7 @@ mod tests {
             ControlMessage::SessionJoin(SessionJoin {
                 session,
                 codecs: crate::codec::DECODES_H264 | crate::codec::DECODES_HEVC,
+                continues: crate::codec::DECODES_HEVC,
             }),
             ControlMessage::SessionJoinReply(SessionJoinReply {
                 session,

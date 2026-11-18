@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod barcode;
 pub mod clock;
+pub mod continuation;
 mod frame;
 pub mod hdr;
 pub mod mailbox;

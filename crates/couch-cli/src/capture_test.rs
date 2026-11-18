@@ -5,7 +5,9 @@
 //! (M12c: H.264 against HEVC at the same bitrate; P8: NVENC's settings).
 //! With `--keyframe-every` or `--bitrate-every`, what a forced keyframe or a
 //! bitrate change costs the frames after it (M12d); with `--gpu`, frames stay
-//! on the GPU and go to NVENC directly (or `--ffmpeg-nvenc`, FFmpeg's).
+//! on the GPU and go to NVENC directly (or `--ffmpeg-nvenc`, FFmpeg's). With
+//! `--recover-every`, what recovering from frames a viewer never got costs:
+//! a keyframe, against continuing from a long-term frame (M12d-2's spike).
 
 use std::{
     fs::File,
@@ -16,7 +18,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use couch_codec_ffmpeg::{FfmpegDecoder, FfmpegEncoder};
-use couch_codec_nvenc::NvencEncoder;
+use couch_codec_nvenc::{Continuation, FrameControl, NvencEncoder};
 use couch_media::{
     BgraFrame, CaptureEvent, Capturer, Codec, DecodedFrame, EncoderConfig, EncoderInput, GpuFrame,
     Nv12Frame, VideoDecoder, VideoEncoder, VideoFrame, barcode, clock::LATENCY_CLOCK_TITLE,
@@ -57,12 +59,73 @@ pub enum Events {
     /// The bitrate switched every `every` seconds between `--bitrate-mbps`
     /// and `to_mbps`.
     Bitrate { every: f64, to_mbps: u32 },
+    /// Every `every` seconds, `drop` of frames left undecoded, then a
+    /// recovery: a keyframe and a continuation in turn (M12d-2's spike).
+    Recover { every: f64, drop: Duration },
 }
 
 impl Events {
     fn every(self) -> f64 {
         match self {
-            Self::Keyframe { every } | Self::Bitrate { every, .. } => every,
+            Self::Keyframe { every }
+            | Self::Bitrate { every, .. }
+            | Self::Recover { every, .. } => every,
+        }
+    }
+}
+
+/// The encoder: NVENC directly kept as itself, for continuations.
+enum Encoder {
+    Direct(Box<NvencEncoder>),
+    Other(Box<dyn VideoEncoder>),
+}
+
+impl Encoder {
+    fn get(&mut self) -> &mut dyn VideoEncoder {
+        match self {
+            Self::Direct(e) => e.as_mut(),
+            Self::Other(e) => e.as_mut(),
+        }
+    }
+}
+
+/// Long-term frames in two slots, as ADR 0016 has them: the next mark goes
+/// into the slot not holding the newest mark the viewer got, and only once
+/// the last mark was got, at most every [`MARK_EVERY`].
+#[derive(Default)]
+struct Marks {
+    /// Each slot's frame number, and whether the viewer got it.
+    slots: [Option<(u64, bool)>; 2],
+    last: Option<Instant>,
+}
+
+const MARK_EVERY: Duration = Duration::from_millis(100);
+
+impl Marks {
+    /// The slot to mark this frame into, if any.
+    fn next(&self, now: Instant, keyframe: bool) -> Option<u32> {
+        let newest = self.slots.iter().flatten().max_by_key(|&&(f, _)| f);
+        let due = self.last.is_none_or(|t| now - t >= MARK_EVERY);
+        (keyframe || due && newest.is_none_or(|&(_, got)| got)).then(|| {
+            let held = (0..2)
+                .filter_map(|s| self.slots[s].filter(|&(_, got)| got).map(|(f, _)| (f, s)))
+                .max()
+                .map(|(_, s)| s as u32);
+            held.map_or(0, |h| 1 - h)
+        })
+    }
+
+    fn marked(&mut self, slot: u32, frame: u64, got: bool, now: Instant) {
+        self.slots[slot as usize] = Some((frame, got));
+        self.last = Some(now);
+    }
+
+    /// The viewer never got these: invalidated with their frames.
+    fn forget_lost(&mut self) {
+        for slot in &mut self.slots {
+            if matches!(slot, Some((_, false))) {
+                *slot = None;
+            }
         }
     }
 }
@@ -74,8 +137,13 @@ struct Row {
     bytes: usize,
     keyframe: bool,
     bitrate_bps: u32,
-    /// An event happened on this frame (a keyframe forced or a new bitrate).
+    /// An event happened on this frame (a keyframe forced, a new bitrate, a
+    /// recovery).
     event: bool,
+    /// Which, for the summary.
+    kind: &'static str,
+    /// Left undecoded (`--recover-every`).
+    dropped: bool,
     psnr: Option<f64>,
     ssim: Option<f64>,
 }
@@ -94,7 +162,13 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         {
             bail!("--bitrate-to is --bitrate-mbps: nothing would change");
         }
+        if let Events::Recover { drop, .. } = events
+            && drop.as_secs_f64() * 2.0 >= every
+        {
+            bail!("a drop must be under half of --recover-every");
+        }
     }
+    let recover = matches!(args.events, Some(Events::Recover { .. }));
     let measure = args.psnr || args.events.is_some() || args.frames_csv.is_some();
     let source = if args.monitor {
         CaptureSource::PrimaryMonitor
@@ -130,19 +204,37 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         fps: args.fps,
         bitrate_bps: args.bitrate_mbps * 1_000_000,
     };
-    let mut encoder: Box<dyn VideoEncoder> = match &first_gpu {
-        Some(gpu) if args.ffmpeg_nvenc => Box::new(FfmpegEncoder::open_gpu(config, gpu)?),
-        Some(gpu) => Box::new(NvencEncoder::open_gpu(config, gpu)?),
-        None => Box::new(FfmpegEncoder::open_best(config)?),
+    let mut encoder = match &first_gpu {
+        Some(gpu) if args.ffmpeg_nvenc => {
+            Encoder::Other(Box::new(FfmpegEncoder::open_gpu(config, gpu)?))
+        }
+        Some(gpu) if recover => {
+            // What ADR 0016 settled on: two long-term frames, and three
+            // references (with LTR on, the driver would pick one).
+            let continuation = Continuation {
+                ltr_frames: 2,
+                max_ref_frames: 0,
+                refs_l0: 3,
+            };
+            Encoder::Direct(Box::new(NvencEncoder::open_continuing(
+                config,
+                gpu,
+                continuation,
+            )?))
+        }
+        Some(gpu) => Encoder::Direct(Box::new(NvencEncoder::open_gpu(config, gpu)?)),
+        None if recover => bail!("--recover-every needs --gpu"),
+        None => Encoder::Other(Box::new(FfmpegEncoder::open_best(config)?)),
     };
     let mut decoder = FfmpegDecoder::new(config.codec, true)?;
     let mut out = args.out.as_ref().map(File::create).transpose()?;
+    let caps = encoder.get().caps().clone();
     println!(
         "capturing {}x{} with {} ({}), decoding with {}",
         config.width,
         config.height,
-        encoder.caps().name,
-        encoder.caps().options,
+        caps.name,
+        caps.options,
         if decoder.is_hardware() {
             "D3D11VA"
         } else {
@@ -162,6 +254,13 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let mut rows: Vec<Row> = Vec::new();
     let mut bitrate_bps = config.bitrate_bps;
     let mut next_event = args.events.map(|e| Duration::from_secs_f64(e.every()));
+    // `--recover-every`: a drop lasting until then, the timestamps of the
+    // frames it left out, the recoveries so far, and the long-term marks.
+    let mut drop_until: Option<Duration> = None;
+    let mut lost: Vec<u64> = Vec::new();
+    let mut recoveries = 0usize;
+    let mut intra_continuations = 0usize;
+    let mut marks = Marks::default();
     let started = Instant::now();
     let pool = first_gpu.as_ref().map(|g| g.source);
     let mut pending = Some((first, first_gpu));
@@ -190,10 +289,38 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         capture_delivery.push(ms(got.0, frame.captured_at.0));
 
         let mut force_keyframe = frames == 0;
+        let mut continuing = false;
         let mut row = Row {
             at_ms: started.elapsed().as_secs_f64() * 1000.0,
             ..Row::default()
         };
+        // The end of a drop: this frame recovers, a keyframe and a
+        // continuation in turn.
+        if let Some(until) = drop_until {
+            if started.elapsed() < until {
+                row.dropped = true;
+            } else {
+                drop_until = None;
+                row.event = true;
+                if recoveries.is_multiple_of(2) {
+                    row.kind = "recovery keyframe";
+                    force_keyframe = true;
+                    // An IDR empties the encoder's references, marks too.
+                    marks = Marks::default();
+                } else {
+                    row.kind = "continuation";
+                    continuing = true;
+                    if let Encoder::Direct(direct) = &mut encoder {
+                        for &timestamp in &lost {
+                            direct.invalidate(timestamp)?;
+                        }
+                    }
+                    marks.forget_lost();
+                }
+                lost.clear();
+                recoveries += 1;
+            }
+        }
         if let (Some(events), Some(due)) = (args.events, next_event.as_mut())
             && started.elapsed() >= *due
         {
@@ -202,26 +329,65 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             while *due <= started.elapsed() {
                 *due += every;
             }
-            row.event = true;
             match events {
-                Events::Keyframe { .. } => force_keyframe = true,
+                Events::Keyframe { .. } => {
+                    row.event = true;
+                    row.kind = "keyframe";
+                    force_keyframe = true;
+                }
                 Events::Bitrate { to_mbps, .. } => {
+                    row.event = true;
+                    row.kind = "bitrate change";
                     bitrate_bps = if bitrate_bps == config.bitrate_bps {
                         to_mbps * 1_000_000
                     } else {
                         config.bitrate_bps
                     };
-                    encoder.set_bitrate(bitrate_bps)?;
+                    encoder.get().set_bitrate(bitrate_bps)?;
+                }
+                // A drop begins with this frame (none is under way: it
+                // lasts under half the interval).
+                Events::Recover { drop, .. } => {
+                    drop_until = Some(started.elapsed() + drop);
+                    row.dropped = true;
                 }
             }
         }
         row.bitrate_bps = bitrate_bps;
 
-        let input = match &gpu {
-            Some(gpu) => EncoderInput::Gpu(gpu),
-            None => EncoderInput::Cpu(&frame),
+        let units = match (&mut encoder, &gpu) {
+            (Encoder::Direct(direct), Some(gpu)) if recover => {
+                let now = Instant::now();
+                let mark = marks.next(now, force_keyframe);
+                let control = FrameControl {
+                    keyframe: force_keyframe,
+                    mark_ltr: mark,
+                    use_ltr: None,
+                };
+                let Some((unit, report)) = direct.encode_frame(gpu, control)? else {
+                    bail!("NVENC returned no frame");
+                };
+                if let Some(slot) = mark {
+                    marks.marked(slot, frames, !row.dropped, now);
+                }
+                if row.dropped {
+                    lost.push(report.timestamp);
+                }
+                // P is 0, NONREF_P 7; anything else is coded without the
+                // reference it continues from.
+                if continuing && !matches!(report.picture_type, 0 | 7) {
+                    intra_continuations += 1;
+                }
+                vec![unit]
+            }
+            (encoder, gpu) => {
+                let input = match gpu {
+                    Some(gpu) => EncoderInput::Gpu(gpu),
+                    None => EncoderInput::Cpu(&frame),
+                };
+                encoder.get().encode(input, force_keyframe)?
+            }
         };
-        let units = encoder.encode(input, force_keyframe)?;
         let encoded = clock::now();
         encode.push(ms(encoded.0, got.0));
         for unit in units {
@@ -230,6 +396,10 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             row.keyframe |= unit.keyframe;
             if let Some(file) = out.as_mut() {
                 file.write_all(&unit.data)?;
+            }
+            // A viewer that never got it.
+            if row.dropped {
+                continue;
             }
             for decoded in decoder.decode(&unit.data, frame.captured_at)? {
                 let DecodedFrame::CpuNv12(nv12) = decoded else {
@@ -296,6 +466,12 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     if args.events.is_some() {
         print_events(&rows);
     }
+    if recover {
+        println!(
+            "{} continuations, {intra_continuations} of them coded without a reference",
+            recoveries / 2
+        );
+    }
     if let Some(path) = &args.frames_csv {
         let mut file = File::create(path)?;
         writeln!(
@@ -349,7 +525,21 @@ fn print_events(rows: &[Row]) {
         events.len()
     );
     let halfway: Vec<usize> = events.windows(2).map(|w| (w[0] + w[1]) / 2).collect();
-    for (label, at) in [("after an event", &events), ("halfway between", &halfway)] {
+    let mut kinds: Vec<&str> = Vec::new();
+    for &i in &events {
+        if !kinds.contains(&rows[i].kind) {
+            kinds.push(rows[i].kind);
+        }
+    }
+    let mut tables: Vec<(String, Vec<usize>)> = kinds
+        .iter()
+        .map(|&kind| {
+            let at = events.iter().copied().filter(|&i| rows[i].kind == kind);
+            (format!("after a {kind}"), at.collect())
+        })
+        .collect();
+    tables.push(("halfway between".into(), halfway));
+    for (label, at) in &tables {
         let Some(table) = around(rows, at) else {
             println!("{label}: too few events with {AROUND} measured frames each side");
             continue;
@@ -385,25 +575,34 @@ struct Around {
 }
 
 /// Points count only with [`AROUND`] measured frames on each side and no
-/// other event among them; `None` if none does.
+/// other event among them; `None` if none does. The frames before are those
+/// the viewer got: before a drop, for a recovery.
 fn around(rows: &[Row], at: &[usize]) -> Option<Around> {
     let mut sums = vec![(0.0, 0.0, 0.0); AROUND];
     let mut points = 0;
     for &p in at {
-        if p < AROUND || p + AROUND > rows.len() {
+        if p + AROUND > rows.len() {
             continue;
         }
-        let before = &rows[p - AROUND..p];
-        let after = &rows[p..p + AROUND];
-        let clean = before
+        let before: Vec<&Row> = rows[..p]
             .iter()
-            .chain(after)
-            .enumerate()
-            .all(|(i, r)| r.psnr.is_some() && r.ssim.is_some() && (i == AROUND || !r.event));
+            .rev()
+            .filter(|r| !r.dropped)
+            .take(AROUND)
+            .collect();
+        let after = &rows[p..p + AROUND];
+        let clean = before.len() == AROUND
+            && before
+                .iter()
+                .all(|r| r.psnr.is_some() && r.ssim.is_some() && !r.event)
+            && after
+                .iter()
+                .enumerate()
+                .all(|(i, r)| r.psnr.is_some() && r.ssim.is_some() && (i == 0 || !r.event));
         if !clean {
             continue;
         }
-        let mean = |f: fn(&Row) -> f64| before.iter().map(f).sum::<f64>() / AROUND as f64;
+        let mean = |f: fn(&Row) -> f64| before.iter().map(|r| f(r)).sum::<f64>() / AROUND as f64;
         let db = mean(|r| r.psnr.unwrap_or_default());
         let s = mean(|r| r.ssim.unwrap_or_default());
         let size = mean(|r| r.bytes as f64).max(1.0);
@@ -580,6 +779,27 @@ mod tests {
         // A frame not measured does too.
         rows[35].event = false;
         rows[25].psnr = None;
+        assert!(around(&rows, &[30]).is_none());
+    }
+
+    /// M12d-2: after a drop, a recovery is measured against the frames
+    /// before the drop, which the viewer got.
+    #[test]
+    fn a_recovery_is_measured_against_the_frames_before_its_drop() {
+        let mut rows: Vec<Row> = (0..60).map(|_| frame(40.0, 100, false)).collect();
+        for r in &mut rows[20..30] {
+            *r = Row {
+                dropped: true,
+                bytes: 100,
+                ..Row::default()
+            };
+        }
+        rows[10..20].iter_mut().for_each(|r| r.psnr = Some(42.0));
+        rows[30] = frame(37.0, 100, true);
+        let table = around(&rows, &[30]).expect("the point counts");
+        assert!((table.rows[0].0 - -5.0).abs() < 1e-9, "{}", table.rows[0].0);
+        // Without enough measured frames before the drop, it doesn't count.
+        rows[15].psnr = None;
         assert!(around(&rows, &[30]).is_none());
     }
 

@@ -24,6 +24,7 @@ libloading.workspace = true
 # GPU frames and a decoder for the gpu-tests; never normal dependencies.
 couch-platform-win.workspace = true
 couch-codec-ffmpeg.workspace = true
+couch-proto.workspace = true
 
 [lints]
 workspace = true

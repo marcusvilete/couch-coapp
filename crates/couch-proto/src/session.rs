@@ -224,6 +224,11 @@ pub struct SessionJoin {
     /// The codecs this viewer decodes in hardware, as [`crate::codec`]
     /// bits; H.264's is always set (M12c). The host picks the stream's.
     pub codecs: u8,
+    /// The codecs, as the same bits, in which this viewer accepts epochs
+    /// that continue from a frame it decoded (M12d-2, ADR 0016): HEVC's
+    /// alone, where its decoder was checked. Without a codec's bit, every
+    /// epoch in it begins with a keyframe.
+    pub continues: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

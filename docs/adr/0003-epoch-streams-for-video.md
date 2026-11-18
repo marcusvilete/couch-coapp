@@ -8,7 +8,7 @@ The encoder uses an infinite GOP: a keyframe only on demand, every other frame d
 
 ## Decision
 
-An epoch is one keyframe plus the frames that depend on it. Each epoch gets one unidirectional QUIC stream: a preamble, then length-prefixed frames.
+An epoch is one keyframe plus the frames that depend on it. (Amended by [ADR 0016](0016-nvenc-directly-and-continuation-epochs.md): since M12d-2, in HEVC, an epoch may instead begin with a frame continuing from one the viewer decoded, named in its preamble.) Each epoch gets one unidirectional QUIC stream: a preamble, then length-prefixed frames.
 
 When the host decides to skip ahead after a stall (the catch-up rule in [protocol.md](../protocol.md)), it does two things:
 - resets the old stream with `SKIP_AHEAD`;

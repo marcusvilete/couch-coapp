@@ -43,12 +43,14 @@ use couch_media::{
 use couch_net::endpoint::{Relay, RelayChoice, RelayToken};
 use couch_proto::{
     board::{BoardOp, Element, ElementKind, Point, Refusal},
+    control::KeyframeReason,
     ids::MemberId,
     input::PadSnapshot,
     ipc::{
         BoardNews, Draw, HudLink, HudState, LocalInput, SeatState, ShortcutKeys, StreamVolume,
         UserAction, VideoFrameHeader, WindowRequest, WindowState,
     },
+    media::FrameRef,
     session::{EndReason, SeatKind, StreamState},
 };
 use couch_room::{
@@ -215,6 +217,10 @@ struct Fake {
     capture_slow: AtomicBool,
     /// The codec of every encoder opened, in order.
     codecs: Mutex<Vec<Codec>>,
+    /// Whether each encoder was asked to continue (M12d-2), in order, and
+    /// the timestamps continuing encoders invalidated.
+    continuing: Mutex<Vec<bool>>,
+    invalidated: Arc<Mutex<Vec<u64>>>,
     /// The host draws over the game here (M27b, as on Windows).
     draws: AtomicBool,
     /// A game in exclusive full screen is in front (M27b).
@@ -653,8 +659,10 @@ impl Backend for Fake {
         &self,
         config: EncoderConfig,
         gpu: Option<&GpuFrame>,
+        continuing: bool,
     ) -> Result<Box<dyn VideoEncoder>, MediaError> {
         self.codecs.lock().unwrap().push(config.codec);
+        self.continuing.lock().unwrap().push(continuing);
         if config.codec == Codec::Hevc && self.hevc_fails.load(Ordering::SeqCst) {
             return Err(MediaError::Unsupported("no HEVC encoder here".into()));
         }
@@ -664,7 +672,10 @@ impl Backend for Fake {
             .lock()
             .unwrap()
             .push(gpu.filter(|_| gpu_input).map(|f| f.source));
-        Ok(Box::new(if gpu_input {
+        Ok(Box::new(if gpu_input && continuing {
+            // As NVENC directly: continuing on GPU frames only.
+            FakeEncoder::gpu(self.gpu.fail.clone()).continuing(self.invalidated.clone())
+        } else if gpu_input {
             FakeEncoder::gpu(self.gpu.fail.clone())
         } else {
             FakeEncoder::default()
@@ -1013,7 +1024,13 @@ struct FakeViewer {
     refusals: Arc<Mutex<Vec<Refusal>>>,
     /// The pictures' bytes the window was given (M27e), by id.
     pictures: Arc<Mutex<std::collections::BTreeMap<couch_proto::board::PictureId, Vec<u8>>>>,
+    /// Each frame received, and the frame its epoch continues from on an
+    /// epoch's first (M12d-2).
+    heard: Arc<Mutex<Heard>>,
 }
+
+/// Each frame a fake window received, and what its epoch continues from.
+type Heard = Vec<(FrameRef, Option<FrameRef>)>;
 
 /// A fake power request: gone from the list when dropped.
 struct AwakeGuard(Arc<Mutex<Vec<(u64, bool)>>>, u64);
@@ -1098,6 +1115,8 @@ impl FakeViewer {
                                     v.frames.fetch_add(1, Ordering::SeqCst);
                                     v.keyframes.fetch_add(u64::from(header.keyframe), Ordering::SeqCst);
                                     v.codec.store(u32::from(header.codec), Ordering::SeqCst);
+                                    let frame = FrameRef { epoch: header.epoch, seq: header.seq };
+                                    v.heard.lock().unwrap().push((frame, header.continues));
                                 }
                             }
                             couch_proto::ipc::kinds::SEAT => {
@@ -1358,6 +1377,29 @@ impl FakeViewer {
 
     fn keyframes(&self) -> u64 {
         self.keyframes.load(Ordering::SeqCst)
+    }
+
+    /// The last frame received.
+    fn last_frame(&self) -> Option<FrameRef> {
+        self.heard.lock().unwrap().last().map(|&(f, _)| f)
+    }
+
+    /// The frames epochs continued from, in order (M12d-2).
+    fn continued_from(&self) -> Vec<FrameRef> {
+        self.heard
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|&(_, c)| c)
+            .collect()
+    }
+
+    /// Decoding fell behind: the window asks to continue from `holds`.
+    fn fell_behind(&self, holds: FrameRef) {
+        self.say(
+            couch_proto::ipc::kinds::KEYFRAME_REQUEST,
+            couch_proto::ipc::to_payload(&KeyframeReason::FellBehind { holds }),
+        );
     }
 
     /// The HUD as the main process last sent it.
@@ -2618,6 +2660,53 @@ async fn each_viewer_gets_the_best_codec_it_decodes() {
     })
     .await;
     assert_eq!(*a.fake.codecs.lock().unwrap(), [Codec::Hevc, Codec::H264]);
+    stop_all(&mut [&mut a, &mut b, &mut c]).await;
+}
+
+/// M12d-2: a window that fell behind decoding asks to continue from the last
+/// frame it decoded. In HEVC, which B continues in, the host's encoder
+/// (opened to continue) invalidates what it sent after that frame and
+/// starts an epoch naming it, with no keyframe. C watches in H.264, where
+/// nobody continues: the same ask gets it a keyframe.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_that_fell_behind_continues_in_hevc() {
+    let (mut a, mut b, mut c, room) = three().await;
+    a.fake.gpu.capture_on_gpu.store(true, Ordering::SeqCst);
+    a.fake.gpu.encoders_take_it.store(true, Ordering::SeqCst);
+    b.fake.decodes_hevc.store(true, Ordering::SeqCst);
+    a.go_live(&room, 4).await;
+    let b_window = watching(&room, &a, &b).await;
+    let c_window = watching(&room, &a, &c).await;
+    wait("frames in both", || {
+        b_window.frames() > 10 && c_window.frames() > 10
+    })
+    .await;
+    assert_eq!(b_window.codec(), Some(Codec::Hevc));
+    assert_eq!(*a.fake.continuing.lock().unwrap(), [true, false]);
+
+    // B stops decoding at a frame; more are sent after it meanwhile.
+    let holds = b_window.last_frame().unwrap();
+    let keyframes = b_window.keyframes();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    b_window.fell_behind(holds);
+    wait("an epoch continuing from B's frame", || {
+        b_window.continued_from() == [holds]
+    })
+    .await;
+    let after = b_window.frames();
+    wait("B's frames going on", || b_window.frames() > after + 5).await;
+    assert_eq!(b_window.keyframes(), keyframes, "no keyframe for B");
+    assert!(
+        !a.fake.invalidated.lock().unwrap().is_empty(),
+        "the frames sent after it were invalidated"
+    );
+
+    // C, in H.264: a keyframe, in a new epoch.
+    let holds = c_window.last_frame().unwrap();
+    let keyframes = c_window.keyframes();
+    c_window.fell_behind(holds);
+    wait("a keyframe for C", || c_window.keyframes() > keyframes).await;
+    assert!(c_window.continued_from().is_empty());
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 

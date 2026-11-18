@@ -19,7 +19,7 @@ use couch_input::{
 };
 use couch_media::{
     BgraFrame, CaptureEvent, Capturer, EncodedFrame, EncoderCaps, EncoderInput, GpuFrame,
-    GpuTexture, MediaError, VideoEncoder, VideoFrame, clock::Clock,
+    GpuTexture, LongTerm, MediaError, VideoEncoder, VideoFrame, clock::Clock,
 };
 
 /// What a [`FakeCapturer`] making GPU frames shares with the test.
@@ -168,6 +168,10 @@ pub struct FakeEncoder {
     started: bool,
     /// With GPU input: encoding fails while set.
     fail: Arc<AtomicBool>,
+    /// It continues (M12d-2): marks the frames it is asked to, and records
+    /// the timestamps invalidated here.
+    continuing: Option<Arc<Mutex<Vec<u64>>>>,
+    timestamp: u64,
 }
 
 impl Default for FakeEncoder {
@@ -182,6 +186,8 @@ impl Default for FakeEncoder {
             },
             started: false,
             fail: Arc::default(),
+            continuing: None,
+            timestamp: 0,
         }
     }
 }
@@ -194,6 +200,13 @@ impl FakeEncoder {
         encoder.caps.gpu_input = true;
         encoder.fail = fail;
         encoder
+    }
+
+    /// One that continues (M12d-2), recording into `invalidated` the
+    /// timestamps it is asked to invalidate.
+    pub fn continuing(mut self, invalidated: Arc<Mutex<Vec<u64>>>) -> Self {
+        self.continuing = Some(invalidated);
+        self
     }
 }
 
@@ -230,6 +243,41 @@ impl VideoEncoder for FakeEncoder {
 
     fn set_bitrate(&mut self, _bps: u32) -> Result<(), MediaError> {
         Ok(())
+    }
+
+    fn continues(&self) -> bool {
+        self.continuing.is_some()
+    }
+
+    fn encode_marking(
+        &mut self,
+        input: EncoderInput<'_>,
+        force_keyframe: bool,
+        mark: Option<u32>,
+    ) -> Result<Vec<(EncodedFrame, Option<LongTerm>)>, MediaError> {
+        let continuing = self.continuing.is_some();
+        let units = self.encode(input, force_keyframe)?;
+        Ok(units
+            .into_iter()
+            .map(|unit| {
+                self.timestamp += 1;
+                let long_term = continuing.then_some(LongTerm {
+                    timestamp: self.timestamp,
+                    marked: mark,
+                });
+                (unit, long_term)
+            })
+            .collect())
+    }
+
+    fn invalidate(&mut self, timestamp: u64) -> Result<(), MediaError> {
+        match &self.continuing {
+            Some(invalidated) => {
+                invalidated.lock().unwrap().push(timestamp);
+                Ok(())
+            }
+            None => Err(MediaError::Unsupported("invalidating frames".into())),
+        }
     }
 }
 

@@ -146,8 +146,8 @@ async fn video_and_input_share_one_connection_both_ways() {
     let a_sends = InputSender::start(a.conn.clone());
     let b_sends = InputSender::start(b.conn.clone());
 
-    a_video.start_epoch(&PARAMS).unwrap();
-    b_video.start_epoch(&PARAMS).unwrap();
+    a_video.start_epoch(&PARAMS, None).unwrap();
+    b_video.start_epoch(&PARAMS, None).unwrap();
     for i in 0..3 {
         a_video.send_frame(&frame(i)).unwrap();
         b_video.send_frame(&frame(i)).unwrap();
@@ -179,7 +179,7 @@ async fn epochs_of_another_session_are_refused_and_watching_again_works() {
         std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
     );
     let mut watching = viewer.watch(7);
-    stale.start_epoch(&PARAMS).unwrap();
+    stale.start_epoch(&PARAMS, None).unwrap();
     stale.send_frame(&frame(0)).unwrap();
     let nothing = tokio::time::timeout(Duration::from_millis(500), watching.frames.recv()).await;
     assert!(nothing.is_err(), "no frame of session 6 gets through");
@@ -191,7 +191,7 @@ async fn epochs_of_another_session_are_refused_and_watching_again_works() {
         &host.datagrams,
         std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
     );
-    current.start_epoch(&PARAMS).unwrap();
+    current.start_epoch(&PARAMS, None).unwrap();
     current.send_frame(&frame(0)).unwrap();
     let first = next_frame(&mut watching).await;
     assert_eq!((first.epoch, first.header.seq), (1, 0));
@@ -206,7 +206,7 @@ async fn epochs_of_another_session_are_refused_and_watching_again_works() {
         &host.datagrams,
         std::sync::Arc::new(couch_media::clock::ProcessClock::new()),
     );
-    next.start_epoch(&PARAMS).unwrap();
+    next.start_epoch(&PARAMS, None).unwrap();
     for i in 0..2 {
         next.send_frame(&frame(i)).unwrap();
     }

@@ -213,7 +213,8 @@ impl RateConfig {
 pub enum RateAction {
     Keep,
     SetBitrate(u32),
-    /// Abandon the current epoch, restart with a keyframe at this bitrate.
+    /// Abandon the current epoch, restart at this bitrate: with a keyframe,
+    /// or continuing from the newest frame the viewer received (M12d-2).
     CatchUp {
         bitrate: u32,
     },
@@ -221,7 +222,8 @@ pub enum RateAction {
     /// stop sending. Frames sent into an outage only become stale backlog
     /// when it ends.
     Pause,
-    /// Reports are back after a pause: resume with one keyframe at this bitrate.
+    /// Reports are back after a pause: resume at this bitrate, with one
+    /// keyframe or continuing from the newest frame received (M12d-2).
     Resume {
         bitrate: u32,
     },
@@ -336,7 +338,7 @@ impl RateController {
         });
         self.last_tick = Some(now);
 
-        // 0. Outages: stop sending into the void, resume with one keyframe.
+        // 0. Outages: stop sending into the void, resume with one recovery.
         if self.paused {
             if fb.report_age_ms > RESUME_REPORT_AGE_MS {
                 return RateAction::Keep;
