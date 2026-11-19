@@ -85,7 +85,7 @@ cargo build --release -p couch-cli -p couch-viewer
 .\target\release\couch-cli.exe latency-probe --secs 30 --relay none   # end-to-end latency on this PC
 ```
 
-**The update notice:** builds that name their releases (public builds) look at GitHub's latest release once a day. To try it in a development build, serve the copy of GitHub's reply in the repository, `npx --yes http-server crates/couch-engine/tests/fixtures -p 8000`, and set `$env:COUCH_RELEASES_URL = 'http://localhost:8000/github-latest-release.json'` before `npm run tauri dev`: ten seconds after start, the strip at the bottom says 0.99.0 is out. Release and public builds ignore the variable.
+**The update notice:** builds that name their releases (public builds) look at GitHub's latest release once a day. To try it in a development build, serve the copy of GitHub's reply in the repository, `npx --yes http-server crates/couch-engine/tests/fixtures -p 8000`, and set `$env:COUCH_RELEASES_URL = 'http://localhost:8000/github-latest-release.json'` before `npm run tauri dev`: ten seconds after start, the strip at the bottom says 99.0.0 is out. Release and public builds ignore the variable.
 
 **A relay on this PC:** run `cargo xtask relay-tool` once, then `.\scripts\relay.ps1`. It serves `http://localhost:3340` with the token from your `release.toml` (`-Lan` opens it to your network, `-Open` drops the token). Point a development build at it by setting `COUCH_BUILD_RELAY_URL` and `COUCH_BUILD_RELAY_TOKEN` before `npm run tauri dev`.
 

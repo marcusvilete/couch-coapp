@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn reads_githubs_reply() {
         let release = parse_release(FIXTURE.as_bytes()).unwrap();
-        assert_eq!(release, self::release("0.99.0", Some(99)));
+        assert_eq!(release, self::release("99.0.0", Some(99)));
     }
 
     /// GitHub itself, over TLS (needs internet): a repository with releases
@@ -422,9 +422,9 @@ mod tests {
         for text in [
             with("\"draft\": false", "\"draft\": true"),
             with("\"prerelease\": false", "\"prerelease\": true"),
-            with("\"tag_name\": \"v0.99.0\"", "\"tag_name\": \"0.99.0\""),
-            with("\"tag_name\": \"v0.99.0\"", "\"tag_name\": \"v0.99.0-rc1\""),
-            with("\"tag_name\": \"v0.99.0\"", "\"tag_name\": \"v0.99\""),
+            with("\"tag_name\": \"v99.0.0\"", "\"tag_name\": \"99.0.0\""),
+            with("\"tag_name\": \"v99.0.0\"", "\"tag_name\": \"v99.0.0-rc1\""),
+            with("\"tag_name\": \"v99.0.0\"", "\"tag_name\": \"v99.0\""),
             "{}".to_string(),
             "not json".to_string(),
         ] {
@@ -638,7 +638,7 @@ Connection: close
         assert_eq!(
             view.new_version,
             Some(NewVersionView {
-                version: "0.99.0".into(),
+                version: "99.0.0".into(),
                 wire_changed: true,
             })
         );
@@ -655,9 +655,9 @@ Connection: close
             .unwrap();
         // The stand-in keeps what it found in memory: the profile is the
         // installed app's too.
-        assert_eq!(updates.view().new_version.unwrap().version, "0.99.0");
+        assert_eq!(updates.view().new_version.unwrap().version, "99.0.0");
         assert!(!dir.path().join("updates.json").exists());
-        updates.dismiss("0.99.0").unwrap();
+        updates.dismiss("99.0.0").unwrap();
         assert!(!dir.path().join("updates.json").exists());
     }
 

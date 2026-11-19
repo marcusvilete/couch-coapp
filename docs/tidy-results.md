@@ -128,4 +128,4 @@ A fresh review agent read the whole diff. It found no high or medium findings, a
 Checked on Windows (clippy, every test, the front end's tests, type check and build, and the hardware checks above) and on Linux in WSL (clippy and every test).
 
 ## Still to come
-- **1.0:** the version, and the release notes saying profiles from before 1.0 start fresh.
+- **1.0:** done in 1.0.0: `cargo xtask bump major`, and the release notes saying what profiles from earlier versions lose (`xtask/src/release.rs`, `UPGRADING_TO_1_0`). The tag, `v1.0.0`, once merged (the `release-installer` skill).

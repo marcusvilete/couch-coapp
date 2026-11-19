@@ -2,7 +2,7 @@
   "url": "https://api.github.com/repos/marcusvilete/couch-coapp/releases/1",
   "assets_url": "https://api.github.com/repos/marcusvilete/couch-coapp/releases/1/assets",
   "upload_url": "https://uploads.github.com/repos/marcusvilete/couch-coapp/releases/1/assets{?name,label}",
-  "html_url": "https://github.com/marcusvilete/couch-coapp/releases/tag/v0.99.0",
+  "html_url": "https://github.com/marcusvilete/couch-coapp/releases/tag/v99.0.0",
   "id": 1,
   "author": {
     "login": "github-actions[bot]",
@@ -11,9 +11,9 @@
     "site_admin": false
   },
   "node_id": "RE_kwDOAAAAAA",
-  "tag_name": "v0.99.0",
+  "tag_name": "v99.0.0",
   "target_commitish": "main",
-  "name": "Couch Co-App 0.99.0",
+  "name": "Couch Co-App 99.0.0",
   "draft": false,
   "immutable": false,
   "prerelease": false,
@@ -24,16 +24,16 @@
     {
       "url": "https://api.github.com/repos/marcusvilete/couch-coapp/releases/assets/1",
       "id": 1,
-      "name": "Couch-Co-App_0.99.0_x64-setup.exe",
+      "name": "Couch-Co-App_99.0.0_x64-setup.exe",
       "label": null,
       "content_type": "application/x-msdownload",
       "state": "uploaded",
       "size": 1048576,
       "download_count": 0,
-      "browser_download_url": "https://github.com/marcusvilete/couch-coapp/releases/download/v0.99.0/Couch-Co-App_0.99.0_x64-setup.exe"
+      "browser_download_url": "https://github.com/marcusvilete/couch-coapp/releases/download/v99.0.0/Couch-Co-App_99.0.0_x64-setup.exe"
     }
   ],
-  "tarball_url": "https://api.github.com/repos/marcusvilete/couch-coapp/tarball/v0.99.0",
-  "zipball_url": "https://api.github.com/repos/marcusvilete/couch-coapp/zipball/v0.99.0",
-  "body": "<!-- couch-wire-revision: 99 -->\nCouch Co-App 0.99.0, built from [v0.99.0](https://github.com/marcusvilete/couch-coapp/tree/v0.99.0) (commit `0000000`) by the release workflow.\n\n**Wire revision 99.** Members of a room play together only on builds of the same wire revision: the app says who needs to update.\n"
+  "tarball_url": "https://api.github.com/repos/marcusvilete/couch-coapp/tarball/v99.0.0",
+  "zipball_url": "https://api.github.com/repos/marcusvilete/couch-coapp/zipball/v99.0.0",
+  "body": "<!-- couch-wire-revision: 99 -->\nCouch Co-App 99.0.0, built from [v99.0.0](https://github.com/marcusvilete/couch-coapp/tree/v99.0.0) (commit `0000000`) by the release workflow.\n\n**Wire revision 99.** Members of a room play together only on builds of the same wire revision: the app says who needs to update.\n"
 }
