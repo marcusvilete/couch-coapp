@@ -100,6 +100,23 @@ async fn probe_ffmpeg(report: &mut Report) {
             Err(e) => report.line(Status::Fail, &label, e),
         }
     }
+    // What a stream window here tells a host (M12c): HEVC goes only to a
+    // viewer whose GPU decodes it.
+    #[cfg(windows)]
+    {
+        let hevc = tokio::task::spawn_blocking(couch_platform_win::video_caps::hevc_decode)
+            .await
+            .expect("HEVC decode probe panicked");
+        report.line(
+            Status::Info,
+            "HEVC decode (M12c)",
+            if hevc {
+                "this GPU decodes it: hosts may send HEVC"
+            } else {
+                "not on this GPU: hosts send H.264"
+            },
+        );
+    }
     #[cfg(windows)]
     match tokio::task::spawn_blocking(|| probe_gpu_frames(false))
         .await

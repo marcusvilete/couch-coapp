@@ -14,11 +14,21 @@ apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::http
 # A fetch that trickles gets past those limits (CI hung silently for its
 # whole 10 minutes on 2026-11-17, where this step takes under a minute): each
 # command is capped and tried once more, saying when it starts, so a log
-# shows where it stalled.
+# shows where it stalled. `--once` tries each command once: CI then tries
+# another mirror itself (.github/workflows/linux.yml).
+tries=2
+case "${1:-}" in
+  "") ;;
+  --once) tries=1 ;;
+  *)
+    echo "linux-deps: unknown argument ${1} (only --once)" >&2
+    exit 2
+    ;;
+esac
 attempt() {
   local limit=$1
   shift
-  for try in 1 2; do
+  for ((try = 1; try <= tries; try++)); do
     echo "linux-deps: $(date -u +%T) ${1} (try ${try})"
     if timeout --kill-after=10 "$limit" "${@:2}"; then
       return 0

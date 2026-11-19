@@ -14,6 +14,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod clock;
 pub mod controllers;
+mod device_file;
 pub mod device_tree;
 pub mod dpapi;
 pub mod drivers;

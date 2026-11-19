@@ -57,16 +57,3 @@ fn has_profile(wanted: &GUID) -> bool {
             .any(|i| video.GetVideoDecoderProfile(i).is_ok_and(|p| p == *wanted))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// This PC's answer; needs a GPU. By hand:
-    /// `cargo test -p couch-platform-win video_caps -- --ignored --nocapture`.
-    #[test]
-    #[ignore = "needs a GPU"]
-    fn this_gpu_says_whether_it_decodes_hevc() {
-        eprintln!("HEVC decode: {}", hevc_decode());
-    }
-}

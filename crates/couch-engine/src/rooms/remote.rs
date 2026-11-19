@@ -284,16 +284,9 @@ impl Actor {
         message: ControlMessage,
         now: Instant,
     ) {
-        let Some(peer) = self.conns.get(&conn).map(|c| c.peer) else {
+        let Some(peer) = self.member_speaking(room, conn) else {
             return;
         };
-        let member = self
-            .rooms
-            .get(&room)
-            .is_some_and(|e| !e.room.is_leaving() && e.room.is_member(peer));
-        if !member || self.current_conn(room, peer) != Some(conn) {
-            return;
-        }
         match message {
             // To us, the home PC.
             ControlMessage::RemoteUnlock(m) => self.remote_unlock(conn, peer, m),

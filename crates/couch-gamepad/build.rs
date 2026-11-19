@@ -1,5 +1,7 @@
 //! sdl3-sys links `SDL3` without a search path when it isn't building SDL from
-//! source, so point the linker at the prebuilt SDL3 in third_party/.
+//! source, so point the linker at the prebuilt SDL3 in third_party/. Cargo
+//! passes this search path on to everything that links this crate, so
+//! `couch-viewer` needs no copy of it.
 
 fn main() {
     println!("cargo::rerun-if-env-changed=COUCH_SDL3_DIR");
