@@ -1,11 +1,12 @@
-//! `cargo xtask bump patch|minor`: the app's version, the same in every file
-//! that names it, in one step.
+//! `cargo xtask bump patch|minor|major`: the app's version, the same in
+//! every file that names it, in one step.
 //!
 //! The rules (CLAUDE.md, "Versions"): every PR that changes the app bumps
 //! the version once; a patch for fixes and small features, a minor for a
 //! milestone or any change to `couch_proto::PROTOCOL_MINOR` (older builds
 //! then refuse the new one, and `couch_proto::REVISIONS` must say which
-//! version brought it). Docs, skills, tests and tooling alone don't bump.
+//! version brought it). A major only when the author says so (1.0, after
+//! the tidy pass). Docs, skills, tests and tooling alone don't bump.
 //!
 //! It sets the version in `Cargo.toml` (`[workspace.package]`),
 //! `apps/desktop/src-tauri/tauri.conf.json` and `apps/desktop/package.json`,
@@ -22,13 +23,15 @@ use anyhow::{Context, Result, anyhow, bail};
 pub(crate) enum Part {
     Patch,
     Minor,
+    Major,
 }
 
 pub(crate) fn run(root: &Path, part: Option<&str>) -> Result<()> {
     let part = match part {
         Some("patch") => Part::Patch,
         Some("minor") => Part::Minor,
-        _ => bail!("usage: cargo xtask bump <patch | minor>"),
+        Some("major") => Part::Major,
+        _ => bail!("usage: cargo xtask bump <patch | minor | major>"),
     };
     let cargo_path = root.join("Cargo.toml");
     let tauri_path = root.join("apps/desktop/src-tauri/tauri.conf.json");
@@ -84,6 +87,7 @@ fn bumped(version: &str, part: Part) -> Result<String> {
     Ok(match part {
         Part::Patch => format!("{major}.{minor}.{}", patch + 1),
         Part::Minor => format!("{major}.{}.0", minor + 1),
+        Part::Major => format!("{}.0.0", major + 1),
     })
 }
 
@@ -178,6 +182,8 @@ mod tests {
     fn versions_go_up_by_their_part() {
         assert_eq!(bumped("0.11.1", Part::Patch).unwrap(), "0.11.2");
         assert_eq!(bumped("0.11.1", Part::Minor).unwrap(), "0.12.0");
+        assert_eq!(bumped("0.42.2", Part::Major).unwrap(), "1.0.0");
+        assert_eq!(bumped("1.3.4", Part::Major).unwrap(), "2.0.0");
         assert!(bumped("0.11", Part::Patch).is_err());
         assert!(bumped("0.11.x", Part::Patch).is_err());
     }

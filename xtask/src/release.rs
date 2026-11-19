@@ -69,6 +69,20 @@ struct Facts<'a> {
     wire: u16,
 }
 
+/// What 1.0's notes say of profiles from earlier versions: the tidy pass
+/// (0.42.1, `docs/tidy-results.md`) removed the code that read what they
+/// wrote. From 1.0 on a profile survives an upgrade (the room-security-checks
+/// skill), so no later release needs this.
+const UPGRADING_TO_1_0: &str = "
+### Coming from an earlier version
+
+Your identity and settings carry over, but not everything versions before 1.0 saved:
+
+- a room last saved by a version before 0.16 is set aside (as `*.room.old` in the profile's `rooms` folder): join it again with a new invite;
+- a backup made by a version before 0.35 can't be restored: make a new one in Settings → Backup;
+- a profile last opened by a version before 0.35 loses its relay choice (a relay's address, or iroh's public relays): set it again in Settings → Network.
+";
+
 fn notes(facts: &Facts<'_>) -> String {
     let Facts {
         version,
@@ -77,6 +91,11 @@ fn notes(facts: &Facts<'_>) -> String {
         repository,
         wire,
     } = facts;
+    let upgrading = if *version == "1.0.0" {
+        UPGRADING_TO_1_0
+    } else {
+        ""
+    };
     let source = match tag {
         Some(tag) => format!("[{tag}]({repository}/tree/{tag}) (commit `{commit}`)"),
         None => format!("commit [`{commit}`]({repository}/tree/{commit})"),
@@ -86,7 +105,7 @@ fn notes(facts: &Facts<'_>) -> String {
 Couch Co-App {version}, built from {source} by the release workflow.
 
 **Wire revision {wire}.** Members of a room play together only on builds of the same wire revision: the app says who needs to update.
-
+{upgrading}
 ### Downloads
 
 - **Windows** 10 and 11 (x64): `Couch-Co-App_{version}_x64-setup.exe`. It asks whether to install for you or for everyone, and offers the two controller drivers it uses after installing.
@@ -138,5 +157,27 @@ mod tests {
             wire: 21,
         });
         assert!(untagged.contains("https://github.com/a/b/tree/0123456789abcdef"));
+        assert!(!text.contains("Coming from an earlier version"));
+    }
+
+    #[test]
+    fn only_1_0_says_what_earlier_profiles_lose() {
+        let text = notes(&Facts {
+            version: "1.0.0",
+            tag: Some("v1.0.0"),
+            commit: "0123456789abcdef",
+            repository: "https://github.com/a/b",
+            wire: 22,
+        });
+        assert!(text.contains("### Coming from an earlier version"));
+        assert!(text.contains("\n\n### Downloads"));
+        let later = notes(&Facts {
+            version: "1.0.1",
+            tag: Some("v1.0.1"),
+            commit: "0123456789abcdef",
+            repository: "https://github.com/a/b",
+            wire: 22,
+        });
+        assert!(!later.contains("Coming from an earlier version"));
     }
 }

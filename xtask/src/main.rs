@@ -16,7 +16,7 @@
 //!   bundled with the app (needs cargo-about);
 //! - `appimage`: build the Linux AppImage, with its notices and FFmpeg's
 //!   sources beside it (`scripts/build-appimage.sh` runs it);
-//! - `bump patch|minor`: the app's version, the same in every file that
+//! - `bump patch|minor|major`: the app's version, the same in every file that
 //!   names it;
 //! - `release-notes`: the release workflow's check of its tag, and the draft
 //!   release's notes (M26c).
@@ -61,7 +61,7 @@ fn main() -> ExitCode {
         Some("release-notes") => release::run(&root, &std::env::args().skip(2).collect::<Vec<_>>()),
         _ => {
             eprintln!(
-                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | gen-nvenc-bindings | doctor | release-config | relay-tool | notices | appimage | bump patch|minor | release-notes>"
+                "usage: cargo xtask <fetch-deps | stage-dlls | gen-ffmpeg-bindings | gen-nvenc-bindings | doctor | release-config | relay-tool | notices | appimage | bump patch|minor|major | release-notes>"
             );
             return ExitCode::from(2);
         }
