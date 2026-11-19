@@ -83,7 +83,7 @@ type DecoderDevice = std::convert::Infallible;
 /// Where the stream window goes. Latency tests place it at a known spot and
 /// at the stream's own size, so it shows the stream 1:1.
 #[derive(Debug, Clone, Copy)]
-pub struct WindowOptions {
+pub(crate) struct WindowOptions {
     pub position: Option<(i32, i32)>,
     pub size: (u32, u32),
     /// Start with the HUD hidden (it would cover the latency barcode on screen).
@@ -127,7 +127,7 @@ impl Default for WindowOptions {
 
 /// What `--hud-preview` shows: each state of the bar worth seeing (M21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Preview {
+pub(crate) enum Preview {
     Watching,
     Asking,
     /// Playing two seats, the game out of front on the host, a note.
@@ -169,7 +169,7 @@ pub enum Preview {
 }
 
 impl Preview {
-    pub const NAMES: [(&'static str, Preview); 19] = [
+    pub(crate) const NAMES: [(&'static str, Preview); 19] = [
         ("watching", Preview::Watching),
         ("asking", Preview::Asking),
         ("controlling", Preview::Controlling),
@@ -191,7 +191,7 @@ impl Preview {
         ("reconnecting", Preview::Reconnecting),
     ];
 
-    pub fn named(name: &str) -> Option<Self> {
+    pub(crate) fn named(name: &str) -> Option<Self> {
         Self::NAMES
             .iter()
             .find(|(n, _)| *n == name)
@@ -215,7 +215,7 @@ fn hud_scale(window: &Window, scale: Option<f32>) -> f32 {
         .clamp(0.5, 4.0)
 }
 
-pub fn run(options: WindowOptions) -> Result<()> {
+pub(crate) fn run(options: WindowOptions) -> Result<()> {
     // Before any library loads (`pipe::ipc_output`); a preview has no pipe.
     let ipc_out = options.preview.is_none().then(pipe::ipc_output);
     let own = options.own_stream;
@@ -1281,12 +1281,7 @@ pub fn run(options: WindowOptions) -> Result<()> {
                 shown.unwrap_or((0, 0)),
                 &decoder_name.lock().unwrap(),
                 &gpu.adapter_name,
-                &format!(
-                    "{:?} (latency {}), {} scaling",
-                    gpu.present_mode(),
-                    gpu.frame_latency(),
-                    video_pass.scaler.name()
-                ),
+                &format!("{:?}", gpu.present_mode()),
                 decoded.replaced_count() + behind.load(Ordering::Relaxed),
                 (*net.lock().unwrap(), hud.relay()),
             );

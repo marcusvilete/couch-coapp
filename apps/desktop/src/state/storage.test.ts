@@ -14,13 +14,11 @@ describe("the last session setup", () => {
     expect(storedSetup()).toEqual({ controllers: 0, keyboardMouse: "none" });
   });
 
-  it("brings keyboard and mouse with Controller 1, from before M24, back as a seat of their own", () => {
-    stored({ [KEYS.sessionSetup]: JSON.stringify({ controllers: 2, keyboardMouse: "withController1" }) });
-    expect(storedSetup()).toEqual({ controllers: 2, keyboardMouse: "ownSeat" });
-  });
-
   it("falls back to one controller for anything else", () => {
     stored({ [KEYS.sessionSetup]: JSON.stringify({ controllers: 5, keyboardMouse: "none" }) });
+    expect(storedSetup()).toEqual({ controllers: 1, keyboardMouse: "none" });
+    // A value from before 1.0 (keyboard and mouse "with Controller 1").
+    stored({ [KEYS.sessionSetup]: JSON.stringify({ controllers: 2, keyboardMouse: "withController1" }) });
     expect(storedSetup()).toEqual({ controllers: 1, keyboardMouse: "none" });
     stored({});
     expect(storedSetup()).toEqual({ controllers: 1, keyboardMouse: "none" });

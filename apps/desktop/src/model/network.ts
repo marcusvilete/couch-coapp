@@ -13,7 +13,7 @@ export const RELAY_LINE = "A relay passes your connection along when your PCs ca
 
 export type Tone = "ok" | "idle" | "pending" | "warn" | "danger";
 
-export type Said = { text: string; tone: Tone };
+type Said = { text: string; tone: Tone };
 
 /** A relay's state, with iroh's error or the relay's own words behind
  * Details. */

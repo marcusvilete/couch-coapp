@@ -35,7 +35,7 @@ use sdl3::{
 /// every 500 ms, so a lost "stop" ends it within a second.
 const RUMBLE_MS: u32 = 1_000;
 
-pub struct InputCapture {
+pub(crate) struct InputCapture {
     gamepads: GamepadSubsystem,
     pads: HashMap<JoystickId, Gamepad>,
     /// Controllers are opened at all: never in the host's own window (M27d),
@@ -124,13 +124,13 @@ impl Keys {
 impl InputCapture {
     /// Call before the SDL joystick subsystem starts: pads keep working while
     /// another window has the focus.
-    pub fn allow_background_pads() {
+    pub(crate) fn allow_background_pads() {
         sdl3::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     }
 
     /// Without `with_pads`, no controller is ever opened (the host's own
     /// window, M27d).
-    pub fn new(sdl: &sdl3::Sdl, with_pads: bool) -> Result<Self> {
+    pub(crate) fn new(sdl: &sdl3::Sdl, with_pads: bool) -> Result<Self> {
         let gamepads = sdl.gamepad().map_err(|e| anyhow!("SDL gamepads: {e}"))?;
         Ok(Self {
             gamepads,
@@ -160,7 +160,7 @@ impl InputCapture {
         self.seats.may(permission)
     }
 
-    pub fn set_seat(&mut self, seats: SeatState) {
+    pub(crate) fn set_seat(&mut self, seats: SeatState) {
         // A controller no longer driving a seat it drove (let go of, or
         // driven by another now) stops shaking.
         let stopped: Vec<u8> = self
@@ -204,12 +204,12 @@ impl InputCapture {
 
     /// The user's shortcut keys. Keys forwarded and still down stay
     /// tracked, so a key that becomes a shortcut while held still goes up.
-    pub fn set_shortcuts(&mut self, shortcuts: Shortcuts) {
+    pub(crate) fn set_shortcuts(&mut self, shortcuts: Shortcuts) {
         self.shortcuts = shortcuts;
     }
 
     /// The game shakes `rumble.seat`: the controller driving it shakes.
-    pub fn rumble(&mut self, rumble: RumbleState) {
+    pub(crate) fn rumble(&mut self, rumble: RumbleState) {
         if let Some(slot) = self.slot_for(rumble.seat) {
             self.shake(slot, rumble.low, rumble.high);
         }
@@ -218,7 +218,7 @@ impl InputCapture {
     /// The stats card's Input row: what this viewer drives and with what.
     /// With several pad seats (M18), which controller drives which: "pad A →
     /// seat 1, pad B → seat 3" (seats by number from 1, pads by slot).
-    pub fn hud_line(&self) -> String {
+    pub(crate) fn hud_line(&self) -> String {
         let pad_seats: Vec<&HeldSeat> = self
             .seats
             .seats
@@ -263,7 +263,7 @@ impl InputCapture {
 
     /// What the bar tells a player holding the mouse (M21): how to capture
     /// it, or how to free it again. `None` without the mouse.
-    pub fn mouse_hint(&self) -> Option<String> {
+    pub(crate) fn mouse_hint(&self) -> Option<String> {
         if !self.seats.holding() || !self.may(Permissions::MOUSE) || self.drawing {
             return None;
         }
@@ -284,7 +284,7 @@ impl InputCapture {
 
     /// Handles one event, appending what to send to `out`.
     /// Returns a shortcut for the viewer itself, which goes nowhere else.
-    pub fn event(&mut self, event: &Event, out: &mut Vec<LocalInput>) -> Option<Shortcut> {
+    pub(crate) fn event(&mut self, event: &Event, out: &mut Vec<LocalInput>) -> Option<Shortcut> {
         match event {
             Event::Window { win_event, .. } => match win_event {
                 WindowEvent::FocusGained => self.focused = true,
@@ -409,7 +409,7 @@ impl InputCapture {
 
     /// The mouse is captured for the game: the pointer is hidden and every
     /// click is the game's.
-    pub fn mouse_captured(&self) -> bool {
+    pub(crate) fn mouse_captured(&self) -> bool {
         self.captured
     }
 
@@ -419,7 +419,7 @@ impl InputCapture {
     /// the focus. Only after a click into the picture, never by itself, and
     /// the free shortcut gives both back (Ctrl+Alt+Del always stays this
     /// PC's). Call after events.
-    pub fn sync_capture(&mut self, mouse: &MouseUtil, window: &mut Window) {
+    pub(crate) fn sync_capture(&mut self, mouse: &MouseUtil, window: &mut Window) {
         let want =
             self.focused && !self.mouse_freed && !self.drawing && self.may(Permissions::MOUSE);
         if want != self.captured {
@@ -439,7 +439,7 @@ impl InputCapture {
     /// forwarded go up, and the mouse is freed at the next
     /// [`Self::sync_capture`]; the caller then hands the keyboard and mouse
     /// to the board, never to [`Self::event`].
-    pub fn set_drawing(&mut self, on: bool, out: &mut Vec<LocalInput>) {
+    pub(crate) fn set_drawing(&mut self, on: bool, out: &mut Vec<LocalInput>) {
         if on && !self.drawing {
             self.release_all(out);
         }
@@ -455,14 +455,14 @@ impl InputCapture {
 
     /// Whether this member holds the keyboard: drawing is then never theirs
     /// (M27a).
-    pub fn has_keyboard(&self) -> bool {
+    pub(crate) fn has_keyboard(&self) -> bool {
         self.may(Permissions::KEYBOARD)
     }
 
     /// The window's own chord shortcut a key press is, if it is one, for a
     /// key the board would otherwise take (M27a). The press's release then
     /// stays here too.
-    pub fn chord_shortcut(&mut self, event: &Event) -> Option<Shortcut> {
+    pub(crate) fn chord_shortcut(&mut self, event: &Event) -> Option<Shortcut> {
         let Event::KeyDown {
             scancode: Some(scancode),
             keymod,
@@ -486,7 +486,7 @@ impl InputCapture {
     }
 
     /// Lets go of everything forwarded (focus lost, seat gone).
-    pub fn release_all(&mut self, out: &mut Vec<LocalInput>) {
+    pub(crate) fn release_all(&mut self, out: &mut Vec<LocalInput>) {
         for usage in self.keys.take_down() {
             out.push(LocalInput::Key { usage, down: false });
         }
@@ -577,7 +577,7 @@ impl InputCapture {
 
     /// The connected controllers for the bar's choice (P13): each with the
     /// seat it drives, as the main process decided.
-    pub fn hud_controllers(&self) -> Vec<crate::hud::HudController> {
+    pub(crate) fn hud_controllers(&self) -> Vec<crate::hud::HudController> {
         self.controller_names()
             .controllers
             .into_iter()
@@ -596,7 +596,7 @@ impl InputCapture {
 
     /// The connected controllers' names, by slot (P12): sent after
     /// [`Self::controller_slots`], for the host's patch bay.
-    pub fn controller_names(&self) -> ControllerNames {
+    pub(crate) fn controller_names(&self) -> ControllerNames {
         ControllerNames {
             controllers: self
                 .slots
@@ -620,7 +620,7 @@ impl InputCapture {
     /// opened, say) closes; one held back that turns out physical or another
     /// program's (its player light set since, or the host gone) opens. Call
     /// every second or so.
-    pub fn recheck_host_pads(&mut self, out: &mut Vec<LocalInput>) {
+    pub(crate) fn recheck_host_pads(&mut self, out: &mut Vec<LocalInput>) {
         let mut changed = false;
         for id in self.xbox_360.clone() {
             let path = self.pads.get(&id).and_then(|pad| pad.path());
@@ -673,7 +673,7 @@ impl InputCapture {
 /// `couch_platform_win::pad_origin`): a physical controller or another
 /// program's virtual pad is read. Where that can't be told, any Xbox 360 pad
 /// counts as a host's while a host here has pads, as before P9.
-pub fn may_be_hosts(path: Option<&str>, ids: (u16, u16)) -> bool {
+pub(crate) fn may_be_hosts(path: Option<&str>, ids: (u16, u16)) -> bool {
     host_check(path, ids) == HostCheck::MaybeAHosts
 }
 
@@ -727,7 +727,7 @@ fn host_check(_path: Option<&str>, _ids: (u16, u16)) -> HostCheck {
     HostCheck::NoHostHere
 }
 
-pub fn button_code(button: MouseButton) -> Option<u8> {
+pub(crate) fn button_code(button: MouseButton) -> Option<u8> {
     Some(match button {
         MouseButton::Left => mouse_button::LEFT,
         MouseButton::Right => mouse_button::RIGHT,

@@ -350,7 +350,7 @@ function linuxKeyboard(
   });
 }
 
-export type Scenario = { title: string; world: () => World; release?: boolean };
+type Scenario = { title: string; world: () => World; release?: boolean };
 
 export const SCENARIOS: Record<string, Scenario> = {
   "first-run": { title: "First run: no rooms", world: () => base([]) },

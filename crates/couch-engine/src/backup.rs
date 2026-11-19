@@ -40,8 +40,9 @@ use crate::store::RememberedRoom;
 pub const MIN_PASSPHRASE_CHARS: usize = 12;
 
 const MAGIC: &[u8; 4] = b"CCBK";
-/// The format written: 3 since M26a (the relays and their tokens); 2 (M13,
-/// rooms with their chain of handovers) and 1 still open.
+/// The format written, and the only one read: 3 (M26a: the relays and their
+/// tokens). Backups made before 1.0 in formats 1 and 2 are refused: profiles
+/// start fresh at 1.0 (the author's choice).
 const FORMAT: u8 = 3;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
@@ -68,6 +69,8 @@ pub enum BackupError {
     NotABackup,
     #[error("that backup was made by a newer Couch Co-App: update this one first")]
     NewerFormat,
+    #[error("that backup was made before Couch Co-App 1.0, which this version can't read")]
+    OlderFormat,
     #[error("wrong passphrase, or the file is damaged")]
     WrongPassphrase,
     #[error("the backup couldn't be made: {0}")]
@@ -229,6 +232,7 @@ pub fn open(bytes: &[u8], passphrase: &str) -> Result<Contents, BackupError> {
     match format {
         0 => return Err(BackupError::NotABackup),
         f if f > FORMAT => return Err(BackupError::NewerFormat),
+        f if f < FORMAT => return Err(BackupError::OlderFormat),
         _ => {}
     }
     let (header, sealed) = bytes.split_at(HEADER_LEN);
@@ -260,62 +264,9 @@ pub fn open(bytes: &[u8], passphrase: &str) -> Result<Contents, BackupError> {
     );
     key.zeroize();
     let mut body = opened.map_err(|_| BackupError::WrongPassphrase)?;
-    let contents = match format {
-        // From before M13: rooms as they were saved then.
-        1 => postcard::from_bytes::<ContentsV1>(&body).map(Contents::from),
-        // From before M26a: no relays.
-        2 => postcard::from_bytes::<ContentsV2>(&body).map(Contents::from),
-        _ => postcard::from_bytes(&body),
-    }
-    .map_err(|_| BackupError::WrongPassphrase);
+    let contents = postcard::from_bytes(&body).map_err(|_| BackupError::WrongPassphrase);
     body.zeroize();
     contents
-}
-
-/// What format 1 held (before M13): the same, with rooms saved without
-/// their chain of handovers.
-#[derive(Serialize, Deserialize)]
-struct ContentsV1 {
-    identity: [u8; 32],
-    rooms: Vec<crate::store::legacy::RememberedRoom>,
-    files: Vec<(String, Vec<u8>)>,
-}
-
-impl From<ContentsV1> for Contents {
-    fn from(mut old: ContentsV1) -> Self {
-        let contents = Self {
-            identity: old.identity,
-            rooms: std::mem::take(&mut old.rooms)
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            files: std::mem::take(&mut old.files),
-            relays: None,
-        };
-        old.identity.zeroize();
-        contents
-    }
-}
-
-/// What format 2 held (M13 to M26a): the same, without the relays.
-#[derive(Serialize, Deserialize)]
-struct ContentsV2 {
-    identity: [u8; 32],
-    rooms: Vec<RememberedRoom>,
-    files: Vec<(String, Vec<u8>)>,
-}
-
-impl From<ContentsV2> for Contents {
-    fn from(mut old: ContentsV2) -> Self {
-        let contents = Self {
-            identity: old.identity,
-            rooms: std::mem::take(&mut old.rooms),
-            files: std::mem::take(&mut old.files),
-            relays: None,
-        };
-        old.identity.zeroize();
-        contents
-    }
 }
 
 #[cfg(test)]
@@ -424,60 +375,15 @@ mod tests {
         assert_eq!(read_file(&huge), Err(BackupError::NotABackup));
     }
 
-    /// A backup made before M13 (format 1) still opens: its rooms come back
-    /// with their founder as owner and no handovers.
+    /// A backup from before 1.0 (formats 1 and 2) is refused, with a message
+    /// saying so.
     #[test]
-    fn a_format_1_backup_still_opens() {
-        use couch_proto::ids::RoomNonce;
-        use couch_room::{
-            SigningKey,
-            room::{Identity, Room},
-        };
-
-        let room = Room::create(
-            Identity {
-                key: SigningKey::from_bytes(&[1; 32]),
-                name: "Ana".into(),
-                addr: Default::default(),
-            },
-            RoomNonce([1; 16]),
-            "Couch",
-            Default::default(),
-            std::time::Instant::now(),
-        )
-        .unwrap();
-        let remembered = crate::store::RememberedRoom {
-            saved: room.saved(),
-            password: None,
-        };
-        let old = ContentsV1 {
-            identity: [7; 32],
-            rooms: vec![crate::store::legacy::RememberedRoom::from_new(&remembered)],
-            files: contents().files.clone(),
-        };
-        let sealed = seal_body(1, &postcard::to_stdvec(&old).unwrap(), PASSPHRASE).unwrap();
-        let opened = open(&sealed, PASSPHRASE).unwrap();
-        assert_eq!(opened.identity, [7; 32]);
-        assert_eq!(opened.rooms, vec![remembered]);
-        assert_eq!(opened.files, contents().files);
-        // And what is written now is format 3.
-        assert_eq!(opened.relays, None);
-        assert_eq!(seal(&contents(), PASSPHRASE).unwrap()[MAGIC.len()], 3);
-    }
-
-    /// A backup made before M26a (format 2) still opens, without relays.
-    #[test]
-    fn a_format_2_backup_still_opens() {
-        let old = ContentsV2 {
-            identity: [7; 32],
-            rooms: Vec::new(),
-            files: contents().files.clone(),
-        };
-        let sealed = seal_body(2, &postcard::to_stdvec(&old).unwrap(), PASSPHRASE).unwrap();
-        let opened = open(&sealed, PASSPHRASE).unwrap();
-        assert_eq!(opened.identity, [7; 32]);
-        assert_eq!(opened.files, contents().files);
-        assert_eq!(opened.relays, None);
+    fn a_backup_from_before_1_0_is_refused() {
+        for old in [1, 2] {
+            let body = postcard::to_stdvec(&contents()).unwrap();
+            let sealed = seal_body(old, &body, PASSPHRASE).unwrap();
+            assert_eq!(open(&sealed, PASSPHRASE), Err(BackupError::OlderFormat));
+        }
     }
 
     #[test]

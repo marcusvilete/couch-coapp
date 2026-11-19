@@ -19,12 +19,12 @@ use anyhow::{Context, Result, anyhow, bail};
 
 /// Which part of the version goes up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Part {
+pub(crate) enum Part {
     Patch,
     Minor,
 }
 
-pub fn run(root: &Path, part: Option<&str>) -> Result<()> {
+pub(crate) fn run(root: &Path, part: Option<&str>) -> Result<()> {
     let part = match part {
         Some("patch") => Part::Patch,
         Some("minor") => Part::Minor,

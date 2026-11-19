@@ -210,7 +210,7 @@ pub(crate) enum Passable {
 }
 
 impl Passable {
-    pub fn allows(&self, room: &str) -> bool {
+    pub(crate) fn allows(&self, room: &str) -> bool {
         match self {
             Self::Never => false,
             Self::Everywhere => true,
@@ -265,7 +265,7 @@ pub(crate) struct Network {
 }
 
 impl Network {
-    pub fn new(test_build: bool, changeable: bool) -> Self {
+    pub(crate) fn new(test_build: bool, changeable: bool) -> Self {
         Self {
             listed: Vec::new(),
             public_in_use: false,
@@ -294,7 +294,7 @@ impl Network {
     }
 
     /// The relay `url`, if we hold it: its state now.
-    pub fn held(&self, url: &str) -> Option<RelayStateView> {
+    pub(crate) fn held(&self, url: &str) -> Option<RelayStateView> {
         let facts = self.facts();
         self.listed
             .iter()
@@ -304,7 +304,7 @@ impl Network {
 
     /// The code of `url` if it may go to a member of `room` (M26b): the
     /// code in use, as invites carry it.
-    pub fn passable_token(&self, url: &str, room: &str) -> Option<RelayToken> {
+    pub(crate) fn passable_token(&self, url: &str, room: &str) -> Option<RelayToken> {
         self.listed
             .iter()
             .find(|l| l.view.url == url)
@@ -316,7 +316,7 @@ impl Network {
     /// standby code while that is fresh (the M26b follow-up: it came after a
     /// rotation's hint and outlasts the code in use, so a member spreading
     /// a hint passes on the new code, never the old), else the code in use.
-    pub fn answer_token(&self, url: &str, room: &str, now_unix: u64) -> Option<RelayToken> {
+    pub(crate) fn answer_token(&self, url: &str, room: &str, now_unix: u64) -> Option<RelayToken> {
         let listed = self
             .listed
             .iter()
@@ -339,7 +339,7 @@ impl Network {
     /// Whether a member of `room` may give us a standby code for `url` (the
     /// M26b follow-up): we hold it with a code that isn't personal, and a
     /// received one came for that room. As `relays::standby_allowed`.
-    pub fn may_stand_by(&self, url: &str, room: &str) -> bool {
+    pub(crate) fn may_stand_by(&self, url: &str, room: &str) -> bool {
         self.may_ask(url)
             && self.listed.iter().any(|l| {
                 l.view.url == url
@@ -353,12 +353,12 @@ impl Network {
     }
 
     /// Whether a code for `url` may be asked for and kept (M26b).
-    pub fn may_ask(&self, url: &str) -> bool {
+    pub(crate) fn may_ask(&self, url: &str) -> bool {
         self.use_passed_on && !self.dont_ask.contains(url)
     }
 
     /// Our code for relay `url`, if we hold it with one.
-    pub fn token(&self, url: &str) -> Option<RelayToken> {
+    pub(crate) fn token(&self, url: &str) -> Option<RelayToken> {
         self.listed
             .iter()
             .find(|l| l.view.url == url)
@@ -366,12 +366,12 @@ impl Network {
     }
 
     /// iroh's public relays' state, while they are in use.
-    pub fn public(&self) -> Option<RelayStateView> {
+    pub(crate) fn public(&self) -> Option<RelayStateView> {
         self.public_in_use.then(|| public_state(&self.facts()))
     }
 
     /// The trouble that breaks every room, as shown (once it has lasted).
-    pub fn trouble(&self) -> Option<&NetworkTrouble> {
+    pub(crate) fn trouble(&self) -> Option<&NetworkTrouble> {
         self.trouble.shown.as_ref()
     }
 
@@ -379,7 +379,7 @@ impl Network {
     /// that we don't hold, nor iroh's public ones (open to all). What was
     /// found of a relay no longer wanted is forgotten. Whether one is new
     /// (the watch should look at once).
-    pub fn want_probes(&mut self, urls: BTreeSet<String>) -> bool {
+    pub(crate) fn want_probes(&mut self, urls: BTreeSet<String>) -> bool {
         let wanted: BTreeSet<String> = urls
             .into_iter()
             .filter(|url| !self.listed.iter().any(|l| l.view.url == *url))
@@ -393,7 +393,7 @@ impl Network {
     }
 
     /// What probing `url` found, if it was.
-    pub fn probe(&self, url: &str) -> Option<&Probe> {
+    pub(crate) fn probe(&self, url: &str) -> Option<&Probe> {
         self.probes.get(url).map(|p| &p.probe)
     }
 
@@ -411,14 +411,14 @@ impl Network {
 
     /// The relay's code changed or it went: what was learned of it before
     /// no longer holds, and it is tried again.
-    pub fn forget_check(&mut self, url: &str) {
+    pub(crate) fn forget_check(&mut self, url: &str) {
         self.checks.remove(url);
         self.fresh.insert(url.to_string(), Instant::now());
         self.benched.remove(url);
     }
 
     /// A relay was just checked (adding it, or the watch).
-    pub fn checked(&mut self, url: &str, result: RelayCheck, now: Instant) {
+    pub(crate) fn checked(&mut self, url: &str, result: RelayCheck, now: Instant) {
         self.checks.insert(
             url.to_string(),
             Checked {
@@ -433,7 +433,7 @@ impl Network {
     /// still held with that very code. A change since forgot the old
     /// answer, and an answer about the old code must not come back after it
     /// (it would bench a relay whose new code works, or hide a wrong one).
-    pub fn checked_with(
+    pub(crate) fn checked_with(
         &mut self,
         url: &str,
         token: Option<&RelayToken>,
@@ -456,7 +456,13 @@ impl Network {
     /// ([`NetworkTimings::suspect_every`]), then twice as long each time, up
     /// to `most` (the regular checks' interval), while members on it stay
     /// away (a friend's PC off is the usual cause). Whether one is due now.
-    pub fn suspect(&mut self, url: &str, now: Instant, every: Duration, most: Duration) -> bool {
+    pub(crate) fn suspect(
+        &mut self,
+        url: &str,
+        now: Instant,
+        every: Duration,
+        most: Duration,
+    ) -> bool {
         let wait = *self.suspicion.get(url).unwrap_or(&every);
         match self.checks.get_mut(url) {
             Some(check)
@@ -475,14 +481,14 @@ impl Network {
 
     /// Relays no unreachable member is on any more: suspected afresh next
     /// time.
-    pub fn calm(&mut self, suspects: &BTreeSet<String>) {
+    pub(crate) fn calm(&mut self, suspects: &BTreeSet<String>) {
         self.suspicion.retain(|url, _| suspects.contains(url));
     }
 
     /// "Check again": every code is due a check now. One that refused stays
     /// set aside until its check says otherwise, so iroh doesn't take it
     /// back as its home relay meanwhile.
-    pub fn forget_checks(&mut self) {
+    pub(crate) fn forget_checks(&mut self) {
         for check in self.checks.values_mut() {
             check.stale = true;
         }
@@ -504,12 +510,12 @@ impl Network {
     /// that let us in again (or whose code changed). A refusal the home
     /// relay reports is kept as a check, since once set aside iroh no
     /// longer reports on it. Whether the set changed.
-    pub fn falling_back(&self) -> bool {
+    pub(crate) fn falling_back(&self) -> bool {
         self.falling_back
     }
 
     /// The setting went off: no standing in, at once.
-    pub fn stop_falling_back(&mut self) {
+    pub(crate) fn stop_falling_back(&mut self) {
         self.falling_back = false;
         self.fallback_since = None;
     }
@@ -587,7 +593,7 @@ impl Network {
         changed
     }
 
-    pub fn view(&self) -> NetworkView {
+    pub(crate) fn view(&self) -> NetworkView {
         let facts = self.facts();
         NetworkView {
             relays: self
@@ -616,7 +622,7 @@ impl Network {
 
     /// The wizard asks for a relay while only iroh's public relays are in
     /// use (nothing registered) and the user hasn't put the question off.
-    pub fn asks_for_relay(&self, now_unix: u64) -> bool {
+    pub(crate) fn asks_for_relay(&self, now_unix: u64) -> bool {
         self.changeable
             && self.public_offered
             && // Relays rooms passed on aren't the user's own (M26b).

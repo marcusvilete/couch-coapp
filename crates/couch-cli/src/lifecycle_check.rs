@@ -442,7 +442,7 @@ fn stale_key(run: &mut Run) -> anyhow::Result<Outcome> {
 
 /// Runs every scenario, or only those named (`swap`, `exit`, `close`,
 /// `kill-host`, `stale-key`).
-pub fn run(only: &[String]) -> anyhow::Result<()> {
+pub(crate) fn run(only: &[String]) -> anyhow::Result<()> {
     println!(
         "Each scenario opens a fake game and a viewer window for a few seconds; leave them be."
     );
@@ -489,7 +489,7 @@ pub fn run(only: &[String]) -> anyhow::Result<()> {
 /// `couch-cli hold-key <usage>`: presses one key through the host's injector
 /// (so it is recorded as held), says so, and lets go after 30 s unless
 /// killed first. Only for `lifecycle-check`.
-pub fn hold_key(usage: &str) -> anyhow::Result<()> {
+pub(crate) fn hold_key(usage: &str) -> anyhow::Result<()> {
     let usage = u16::from_str_radix(usage.trim_start_matches("0x"), 16).context("a hex usage")?;
     let mut injector = sendinput::SendInputInjector::new();
     couch_input::KbmInjector::key(&mut injector, couch_input::HidUsage(usage), true)?;

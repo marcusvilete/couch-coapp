@@ -3,7 +3,6 @@
 #   .\scripts\viewers.ps1                 # 4 viewers, 20 s
 #   .\scripts\viewers.ps1 -Viewers 7      # the most a session takes
 #   .\scripts\viewers.ps1 -Screen         # capture the primary screen instead (M9b: GPU frames)
-#   .\scripts\viewers.ps1 -Screen -CopyThroughMemory   # the same, frames through memory as before M9b
 #   .\scripts\viewers.ps1 -Screen -CopyFrames          # the viewers copy decoded frames through memory, as before M9c
 #   .\scripts\viewers.ps1 -Screen -Fps 120             # the stream at 120 fps (M9d; 60 by default)
 #   .\scripts\viewers.ps1 -Screen -Trace               # also pacing.csv (the host's frames) and view<N>.csv (each viewer's presented frames), M9e
@@ -21,7 +20,7 @@
 # Needs the release build: cargo build --release -p couch-cli -p couch-viewer
 # Logs go to %TEMP%\couch-viewers-<N>. Leave the machine alone while it runs.
 
-param([int]$Viewers = 4, [int]$Secs = 20, [int]$Fps = 60, [switch]$Screen, [switch]$CopyThroughMemory, [switch]$CopyFrames, [switch]$Trace, [switch]$Clock, [int]$ClockFps = 0)
+param([int]$Viewers = 4, [int]$Secs = 20, [int]$Fps = 60, [switch]$Screen, [switch]$CopyFrames, [switch]$Trace, [switch]$Clock, [int]$ClockFps = 0)
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path .\target\release\couch-cli.exe)) {
     throw 'No release build: run cargo build --release -p couch-cli -p couch-viewer from the repo root.'
@@ -53,13 +52,8 @@ if ($Clock) {
 
 $hostOut = Join-Path $dir 'host.txt'
 $source = if ($Screen) { '--source monitor' } else { '--source testpattern --pattern-size 1920 1080' }
-# The host inherits this process's environment. A value already set (to try
-# something) is kept, and restored afterwards.
-$hostSwitch = $env:COUCH_HOST_ZERO_COPY
-if ($CopyThroughMemory) { $env:COUCH_HOST_ZERO_COPY = '0' }
 $hostTrace = if ($Trace) { " --pacing-trace `"$(Join-Path $dir 'pacing.csv')`"" } else { '' }
 $h = Start-Hidden "host $source --fps $Fps --relay none --max-viewers 7 --audio off$hostTrace" $hostOut
-$env:COUCH_HOST_ZERO_COPY = $hostSwitch
 $ticket = $null
 for ($i = 0; $i -lt 100 -and -not $ticket; $i++) {
     Start-Sleep -Milliseconds 200

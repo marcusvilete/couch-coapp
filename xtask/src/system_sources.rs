@@ -22,7 +22,7 @@ const LAUNCHPAD: &str = "https://launchpad.net/ubuntu/+archive/primary/+sourcefi
 
 /// Fetches every package (source name to version) and packs them into
 /// `tar`, with a README. Returns how many files it holds.
-pub fn fetch(
+pub(crate) fn fetch(
     root: &Path,
     packages: &BTreeMap<String, String>,
     tar: &Path,

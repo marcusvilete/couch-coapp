@@ -11,7 +11,7 @@ use couch_media::{Nv12Frame, YuvMatrix};
 
 /// `COUCH_VIEWER_ZERO_COPY`: whether decoded frames stay on the GPU (M9c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ZeroCopy {
+pub(crate) enum ZeroCopy {
     /// `0`: decoded frames are copied through memory, as before M9c.
     Off,
     /// Unset: on for NVIDIA GPUs, the only ones it was tested on.
@@ -21,7 +21,7 @@ pub enum ZeroCopy {
 }
 
 impl ZeroCopy {
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         if !cfg!(windows) {
             return Self::Off;
         }
@@ -35,7 +35,7 @@ impl ZeroCopy {
 
 const NVIDIA: u32 = 0x10de;
 
-pub struct Gpu {
+pub(crate) struct Gpu {
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -50,7 +50,7 @@ impl Gpu {
     /// # Safety
     /// `window` must outlive the returned value (declare `Gpu` before the
     /// window in any struct holding both, so it drops first).
-    pub unsafe fn new(window: &sdl3::video::Window) -> Result<Self> {
+    pub(crate) unsafe fn new(window: &sdl3::video::Window) -> Result<Self> {
         let wanted = ZeroCopy::from_env();
         if wanted != ZeroCopy::Off {
             // SAFETY: as for this function.
@@ -133,13 +133,9 @@ impl Gpu {
         // Moonlight warns that a maximum frame latency of 1 makes
         // non-blocking presents wait on the compositor. Measured in M9a on
         // NVIDIA: 1, 2 and 3 give the same latency at 60 and 120 fps, so 1
-        // stays. COUCH_VIEWER_FRAME_LATENCY (1 to 3) overrides it, for
-        // measuring on other GPUs (Moonlight saw AMD behave differently).
-        config.desired_maximum_frame_latency = std::env::var("COUCH_VIEWER_FRAME_LATENCY")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|v| (1..=3).contains(v))
-            .unwrap_or(1);
+        // stays (Moonlight saw AMD behave differently: that would need
+        // measuring there).
+        config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
         tracing::info!(
             "GPU {} ({:?}), present mode {:?} of {:?}, frame latency {}{}",
@@ -168,7 +164,7 @@ impl Gpu {
     /// The device for a decoder whose frames stay on the GPU, or `None` when
     /// this device doesn't take them.
     #[cfg(windows)]
-    pub fn decoder_device(&self) -> Option<crate::zero_copy::DecoderDevice> {
+    pub(crate) fn decoder_device(&self) -> Option<crate::zero_copy::DecoderDevice> {
         if self.zero_copy {
             crate::zero_copy::DecoderDevice::of(&self.device)
         } else {
@@ -176,7 +172,7 @@ impl Gpu {
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub(crate) fn resize(&mut self, width: u32, height: u32) {
         if (width, height) != (self.config.width, self.config.height) {
             self.reconfigure(width, height);
         }
@@ -184,7 +180,7 @@ impl Gpu {
 
     /// Configures the surface again, as after it went out of date. A zero
     /// size (minimized) keeps the old configuration; restoring resizes it.
-    pub fn reconfigure(&mut self, width: u32, height: u32) {
+    pub(crate) fn reconfigure(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.config.width = width;
             self.config.height = height;
@@ -192,13 +188,8 @@ impl Gpu {
         }
     }
 
-    pub fn present_mode(&self) -> wgpu::PresentMode {
+    pub(crate) fn present_mode(&self) -> wgpu::PresentMode {
         self.config.present_mode
-    }
-
-    /// The surface's maximum frame latency, for the stats line.
-    pub fn frame_latency(&self) -> u32 {
-        self.config.desired_maximum_frame_latency
     }
 }
 
@@ -256,15 +247,9 @@ fn luma_bicubic(uv: vec2<f32>) -> f32 {
 }
 
 // Limited range: luma and chroma (Cb, Cr), centred. Chroma is at half the
-// size and the eye resolves it less: bilinear in both scalers.
-fn planes(uv: vec2<f32>, bicubic: bool) -> vec3<f32> {
-    var luma: f32;
-    if bicubic {
-        luma = luma_bicubic(uv);
-    } else {
-        luma = textureSampleLevel(y_tex, samp, uv, 0.0).r;
-    }
-    let y = (luma - 0.0627451) * 1.1643836;
+// size and the eye resolves it less: bilinear.
+fn planes(uv: vec2<f32>) -> vec3<f32> {
+    let y = (luma_bicubic(uv) - 0.0627451) * 1.1643836;
     let c = textureSampleLevel(uv_tex, samp, uv, 0.0).rg - vec2<f32>(0.5019608, 0.5019608);
     return vec3<f32>(y, c);
 }
@@ -291,58 +276,14 @@ fn bt601(p: vec3<f32>) -> vec4<f32> {
 
 @fragment
 fn fs_bt709(in: VsOut) -> @location(0) vec4<f32> {
-    return bt709(planes(in.uv, false));
+    return bt709(planes(in.uv));
 }
 
 @fragment
 fn fs_bt601(in: VsOut) -> @location(0) vec4<f32> {
-    return bt601(planes(in.uv, false));
-}
-
-@fragment
-fn fs_bt709_bicubic(in: VsOut) -> @location(0) vec4<f32> {
-    return bt709(planes(in.uv, true));
-}
-
-@fragment
-fn fs_bt601_bicubic(in: VsOut) -> @location(0) vec4<f32> {
-    return bt601(planes(in.uv, true));
+    return bt601(planes(in.uv));
 }
 "#;
-
-/// How the stream window scales the picture to its size (P8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scaler {
-    /// One bilinear read per pixel, as before P8.
-    Bilinear,
-    /// Catmull-Rom on luma: sharper, 9 reads per pixel, no measurable cost.
-    /// The default: it looked best of the three tried (P8; AMD's FSR 1 was
-    /// tried too, looked no better, and was dropped).
-    Bicubic,
-}
-
-impl Scaler {
-    /// `COUCH_VIEWER_SCALER` (`bilinear`, `bicubic`), for comparing; the
-    /// default otherwise.
-    pub fn from_env() -> Self {
-        match std::env::var("COUCH_VIEWER_SCALER").as_deref() {
-            Ok(v) if v.eq_ignore_ascii_case("bilinear") => Self::Bilinear,
-            Ok(v) if v.eq_ignore_ascii_case("bicubic") => Self::Bicubic,
-            Ok(other) => {
-                tracing::warn!("COUCH_VIEWER_SCALER={other:?} isn't a scaler; bicubic");
-                Self::Bicubic
-            }
-            Err(_) => Self::Bicubic,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Bilinear => "bilinear",
-            Self::Bicubic => "bicubic",
-        }
-    }
-}
 
 fn render_pipeline(
     device: &wgpu::Device,
@@ -382,21 +323,18 @@ struct Planes {
     bind_group: wgpu::BindGroup,
 }
 
-pub struct VideoPass {
+pub(crate) struct VideoPass {
     bt709: wgpu::RenderPipeline,
     bt601: wgpu::RenderPipeline,
-    bt709_bicubic: wgpu::RenderPipeline,
-    bt601_bicubic: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     planes: Option<Planes>,
     /// The matrix of the frame in the planes, as its stream declares.
     pub matrix: YuvMatrix,
-    pub scaler: Scaler,
 }
 
 impl VideoPass {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("nv12"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -440,8 +378,6 @@ impl VideoPass {
             )
         };
         let (bt709, bt601) = (pipeline("fs_bt709"), pipeline("fs_bt601"));
-        let (bt709_bicubic, bt601_bicubic) =
-            (pipeline("fs_bt709_bicubic"), pipeline("fs_bt601_bicubic"));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nv12"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -451,17 +387,14 @@ impl VideoPass {
         Self {
             bt709,
             bt601,
-            bt709_bicubic,
-            bt601_bicubic,
             layout,
             sampler,
             planes: None,
             matrix: YuvMatrix::default(),
-            scaler: Scaler::from_env(),
         }
     }
 
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Nv12Frame) {
+    pub(crate) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Nv12Frame) {
         self.matrix = frame.matrix;
         let size = (frame.width, frame.height);
         let (y, uv) = self.planes(device, size);
@@ -472,7 +405,7 @@ impl VideoPass {
 
     /// The luma (R8) and chroma (RG8) textures the pass draws, made for
     /// frames of `size`, for a frame on the GPU to be copied into.
-    pub fn planes(
+    pub(crate) fn planes(
         &mut self,
         device: &wgpu::Device,
         size: (u32, u32),
@@ -541,17 +474,15 @@ impl VideoPass {
     }
 
     /// Draws the last uploaded frame into `viewport` (x, y, width, height).
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, viewport: [f32; 4]) {
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, viewport: [f32; 4]) {
         let Some(planes) = &self.planes else {
             return;
         };
         let [x, y, w, h] = viewport;
         pass.set_viewport(x, y, w, h, 0.0, 1.0);
-        pass.set_pipeline(match (self.matrix, self.scaler) {
-            (YuvMatrix::Bt601, Scaler::Bilinear) => &self.bt601,
-            (YuvMatrix::Bt709, Scaler::Bilinear) => &self.bt709,
-            (YuvMatrix::Bt601, Scaler::Bicubic) => &self.bt601_bicubic,
-            (YuvMatrix::Bt709, Scaler::Bicubic) => &self.bt709_bicubic,
+        pass.set_pipeline(match self.matrix {
+            YuvMatrix::Bt601 => &self.bt601,
+            YuvMatrix::Bt709 => &self.bt709,
         });
         pass.set_bind_group(0, &planes.bind_group, &[]);
         pass.draw(0..3, 0..1);
@@ -587,7 +518,7 @@ fn write_plane(
 }
 
 /// The largest rectangle with the frame's aspect ratio that fits the target.
-pub fn letterbox((fw, fh): (u32, u32), (tw, th): (u32, u32)) -> [f32; 4] {
+pub(crate) fn letterbox((fw, fh): (u32, u32), (tw, th): (u32, u32)) -> [f32; 4] {
     let scale = (tw as f32 / fw as f32).min(th as f32 / fh as f32);
     let (w, h) = (fw as f32 * scale, fh as f32 * scale);
     [(tw as f32 - w) / 2.0, (th as f32 - h) / 2.0, w, h]
@@ -614,20 +545,14 @@ mod tests {
 
     /// P8: the video shader has every entry point a pipeline asks for.
     #[test]
-    fn the_video_shader_is_valid_and_has_each_scaler() {
+    fn the_video_shader_is_valid_and_has_each_entry_point() {
         let module = validate(SHADER);
         let entries: Vec<&str> = module
             .entry_points
             .iter()
             .map(|e| e.name.as_str())
             .collect();
-        for name in [
-            "vs",
-            "fs_bt709",
-            "fs_bt601",
-            "fs_bt709_bicubic",
-            "fs_bt601_bicubic",
-        ] {
+        for name in ["vs", "fs_bt709", "fs_bt601"] {
             assert!(entries.contains(&name), "{name} missing: {entries:?}");
         }
     }

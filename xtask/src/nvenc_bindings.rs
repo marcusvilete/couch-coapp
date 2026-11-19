@@ -17,18 +17,20 @@ use anyhow::{Context, anyhow, bail};
 use crate::deps;
 
 /// The vendored header, relative to the repository root.
-pub const HEADER: &str = "third_party/nv-codec-headers/nvEncodeAPI.h";
+pub(crate) const HEADER: &str = "third_party/nv-codec-headers/nvEncodeAPI.h";
 /// Its SHA-256, as its README names it.
-pub const HEADER_SHA256: &str = "4fe4094541ef0f8a13249d97a8692dc5f835a6e9dd42eeadb3e2f7321d54dc7e";
+pub(crate) const HEADER_SHA256: &str =
+    "4fe4094541ef0f8a13249d97a8692dc5f835a6e9dd42eeadb3e2f7321d54dc7e";
 /// Where the bindings go.
-pub const BINDING_FILE: &str = "crates/couch-codec-nvenc/bindings/nvenc-x86_64-pc-windows-msvc.rs";
+pub(crate) const BINDING_FILE: &str =
+    "crates/couch-codec-nvenc/bindings/nvenc-x86_64-pc-windows-msvc.rs";
 
 /// The provenance line written at the top of the bindings.
-pub fn provenance(sha256: &str) -> String {
+pub(crate) fn provenance(sha256: &str) -> String {
     format!("// nvEncodeAPI.h sha256: {sha256}")
 }
 
-pub fn generate(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn generate(root: &Path) -> anyhow::Result<()> {
     let header = root.join(HEADER);
     let sha = deps::sha256_file(&header).with_context(|| format!("reading {HEADER}"))?;
     if sha != HEADER_SHA256 {

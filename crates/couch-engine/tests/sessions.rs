@@ -2500,14 +2500,6 @@ async fn gpu_frames_reach_the_encoders_and_a_new_pool_reopens_them() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
-/// Whether `COUCH_HOST_MEMORY_PACING=0` or `COUCH_HOST_PACING=0` is set, left
-/// over from measuring against the old memory path (M12a).
-fn memory_pacing_off() -> bool {
-    ["COUCH_HOST_MEMORY_PACING", "COUCH_HOST_PACING"]
-        .iter()
-        .any(|v| std::env::var(v).is_ok_and(|v| v.trim() == "0"))
-}
-
 /// M9b and M12a: when the encoder can't read GPU frames (not NVIDIA, or
 /// another GPU than the capture's), frames reach the encoders in memory.
 /// The capture stays on the GPU, paced to the stream's rate, and only the
@@ -2516,10 +2508,6 @@ fn memory_pacing_off() -> bool {
 /// two viewers.
 #[tokio::test(flavor = "multi_thread")]
 async fn encoders_that_cant_read_gpu_frames_get_paced_frames_read_back() {
-    if memory_pacing_off() {
-        eprintln!("the old memory path is switched on: skipped");
-        return;
-    }
     let (mut a, mut b, mut c, room) = three().await;
     let gpu = &a.fake.gpu;
     gpu.capture_on_gpu.store(true, Ordering::SeqCst);
@@ -2554,10 +2542,7 @@ async fn encoders_that_cant_read_gpu_frames_get_paced_frames_read_back() {
     );
     // Never captured again in memory: the GPU capture stays, paced.
     let captures = a.fake.captures.lock().unwrap().clone();
-    assert!(
-        captures.iter().all(|r| !r.in_memory && r.paced),
-        "{captures:?}"
-    );
+    assert!(captures.iter().all(|r| !r.in_memory), "{captures:?}");
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -2566,10 +2551,6 @@ async fn encoders_that_cant_read_gpu_frames_get_paced_frames_read_back() {
 /// a 30 fps stream still gives about 30.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_read_back_keeps_the_streams_rate() {
-    if memory_pacing_off() {
-        eprintln!("the old memory path is switched on: skipped");
-        return;
-    }
     let (mut a, mut b, mut c, room) = three().await;
     let gpu = &a.fake.gpu;
     gpu.capture_on_gpu.store(true, Ordering::SeqCst);
@@ -2589,10 +2570,6 @@ async fn a_slow_read_back_keeps_the_streams_rate() {
 /// capture to memory, as before, and the viewers keep watching.
 #[tokio::test(flavor = "multi_thread")]
 async fn failing_read_backs_turn_the_capture_to_memory() {
-    if memory_pacing_off() {
-        eprintln!("the old memory path is switched on: skipped");
-        return;
-    }
     let (mut a, mut b, mut c, room) = three().await;
     let gpu = &a.fake.gpu;
     gpu.capture_on_gpu.store(true, Ordering::SeqCst);
@@ -2617,11 +2594,6 @@ async fn failing_read_backs_turn_the_capture_to_memory() {
 /// stream's rate: the viewer gets about 30 frames a second, not 240.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_capture_faster_than_the_stream_is_paced_to_its_rate() {
-    // Left over from measuring against the old path: nothing to check.
-    if std::env::var("COUCH_HOST_PACING").is_ok_and(|v| v.trim() == "0") {
-        eprintln!("COUCH_HOST_PACING=0 is set: pacing is off, skipped");
-        return;
-    }
     let (mut a, mut b, mut c, room) = three().await;
     a.fake.capture_fps.store(240, Ordering::SeqCst);
     a.go_live(&room, 4).await;
@@ -2633,14 +2605,7 @@ async fn a_capture_faster_than_the_stream_is_paced_to_its_rate() {
     // Wide bounds, so a busy machine can't fail it: unpaced, it would be
     // near 240.
     assert!((15.0..=45.0).contains(&rate), "{rate:.1} frames a second");
-    assert!(
-        a.fake
-            .captures
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|r| r.paced && r.fps == 30)
-    );
+    assert!(a.fake.captures.lock().unwrap().iter().all(|r| r.fps == 30));
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
@@ -2735,7 +2700,7 @@ async fn hevc_that_wont_open_falls_back_to_h264() {
     stop_all(&mut [&mut a, &mut b, &mut c]).await;
 }
 
-/// M12c: with frames in memory (a test pattern, `COUCH_HOST_ZERO_COPY=0`),
+/// M12c: with frames in memory (a test pattern),
 /// HEVC isn't even tried: a viewer that decodes it gets H.264.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_hevc_with_frames_in_memory() {
@@ -3221,11 +3186,11 @@ async fn a_failing_gpu_encoder_falls_back_to_frames_in_memory() {
     let frames = window.frames();
     wait("frames keep coming", || window.frames() > frames + 5).await;
     // M12a: still captured on the GPU, the frames sent read back after
-    // pacing; with the old memory path, captured again in memory.
+    // pacing.
     assert_eq!(
         a.fake.captures.lock().unwrap().last().map(|r| r.in_memory),
-        Some(memory_pacing_off()),
-        "captured on the GPU, or in memory with the old path"
+        Some(false),
+        "captured on the GPU"
     );
     // Later encoders in this stream take frames in memory too.
     let c_window = watching(&room, &a, &c).await;

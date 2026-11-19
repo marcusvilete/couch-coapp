@@ -211,7 +211,7 @@ fn check_repository(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
+pub(crate) fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if cfg!(windows) {
         bail!(
             "the AppImage is built on Linux (Ubuntu 24.04, WSL's included): scripts/build-appimage.sh; on Windows, scripts/build-installer.ps1"

@@ -30,7 +30,7 @@ use couch_platform_win::{
 
 use crate::stats::Samples;
 
-pub struct Args {
+pub(crate) struct Args {
     pub window: Option<String>,
     pub monitor: bool,
     pub secs: u64,
@@ -53,7 +53,7 @@ pub struct Args {
 
 /// What happens every so often during a run (M12d).
 #[derive(Debug, Clone, Copy)]
-pub enum Events {
+pub(crate) enum Events {
     /// A keyframe forced every `every` seconds.
     Keyframe { every: f64 },
     /// The bitrate switched every `every` seconds between `--bitrate-mbps`
@@ -151,7 +151,7 @@ struct Row {
 /// Frames compared before and after each event.
 const AROUND: usize = 10;
 
-pub fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) fn run(args: Args) -> anyhow::Result<()> {
     if let Some(events) = args.events {
         let every = events.every();
         if !(every.is_finite() && every > 0.0) {
@@ -213,7 +213,6 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             // references (with LTR on, the driver would pick one).
             let continuation = Continuation {
                 ltr_frames: 2,
-                max_ref_frames: 0,
                 refs_l0: 3,
             };
             Encoder::Direct(Box::new(NvencEncoder::open_continuing(
@@ -362,7 +361,6 @@ pub fn run(args: Args) -> anyhow::Result<()> {
                 let control = FrameControl {
                     keyframe: force_keyframe,
                     mark_ltr: mark,
-                    use_ltr: None,
                 };
                 let Some((unit, report)) = direct.encode_frame(gpu, control)? else {
                     bail!("NVENC returned no frame");

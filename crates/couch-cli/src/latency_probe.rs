@@ -40,7 +40,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct Args {
+pub(crate) struct Args {
     pub secs: u64,
     pub fps: u32,
     pub max_mbps: f64,
@@ -137,7 +137,7 @@ impl Drop for CpuLoad {
 }
 
 /// `16-19` or `0,2,4-7`: logical CPU numbers.
-pub fn parse_cpus(list: &str) -> Result<Vec<u32>, String> {
+pub(crate) fn parse_cpus(list: &str) -> Result<Vec<u32>, String> {
     let mut cpus = Vec::new();
     for part in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let number = |s: &str| {
@@ -189,12 +189,12 @@ impl Echo {
 }
 
 /// Runs the probe and returns the (first) viewer's `RESULT` (see `view`).
-pub async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
+pub(crate) async fn run(args: Args) -> anyhow::Result<serde_json::Value> {
     Ok(run_all(args).await?.swap_remove(0))
 }
 
 /// Runs the probe and returns every viewer's `RESULT`, in order.
-pub async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
+pub(crate) async fn run_all(mut args: Args) -> anyhow::Result<Vec<serde_json::Value>> {
     anyhow::ensure!(
         (1..=2).contains(&args.viewers),
         "one or two viewers, not {}",

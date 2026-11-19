@@ -9,7 +9,7 @@ import type { MenuEntry } from "../ui/Menu";
 import type { RoomActions } from "./actions";
 
 export const CATCHING_UP_REASON = "Catching up with the room: once everyone has been online";
-export const ACCEPTED_REASON = "You accepted the offer of this room: wait until it is handed over or withdrawn";
+const ACCEPTED_REASON = "You accepted the offer of this room: wait until it is handed over or withdrawn";
 
 export function roomMenu(room: RoomView, a: RoomActions, place: { index: number; count: number }): MenuEntry[] {
   const entries: MenuEntry[] = [];

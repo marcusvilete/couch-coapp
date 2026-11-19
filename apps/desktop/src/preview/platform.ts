@@ -22,7 +22,7 @@ export function watchOverlay(watcher: (state: OverlayState) => void): () => void
   return () => overlayWatchers.delete(watcher);
 }
 
-export const taskbar = { flashing: false };
+const taskbar = { flashing: false };
 
 /** The title bar as Windows has it (P15), in the page alone: the preview's
  * window is the browser's, so its buttons only change how the bar looks. */

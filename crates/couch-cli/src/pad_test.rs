@@ -33,7 +33,7 @@ const BUTTONS: [PadButtons; 14] = [
     PadButtons::DPAD_LEFT,
 ];
 
-pub fn run(secs: u64, real_ids: bool, count: u8) -> anyhow::Result<()> {
+pub(crate) fn run(secs: u64, real_ids: bool, count: u8) -> anyhow::Result<()> {
     #[cfg(windows)]
     let before = controllers::count_all();
     #[cfg(windows)]

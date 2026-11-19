@@ -21,7 +21,7 @@ use couch_input::{
 };
 use couch_platform_win::vigem::VigemPadFactory;
 
-pub fn run(presses: u32) -> anyhow::Result<()> {
+pub(crate) fn run(presses: u32) -> anyhow::Result<()> {
     let reader = couch_gamepad::host_pads();
     let remappers = |list: &[couch_input::local::LocalController]| -> Vec<String> {
         list.iter()

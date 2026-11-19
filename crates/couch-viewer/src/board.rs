@@ -14,13 +14,13 @@ use couch_proto::{
     ipc::BoardNews,
 };
 
-pub const FADE_OUT: Duration = Duration::from_millis(FADE_OUT_MS);
-pub const LASER: Duration = Duration::from_millis(LASER_MS);
-pub const PING: Duration = Duration::from_millis(PING_MS);
+pub(crate) const FADE_OUT: Duration = Duration::from_millis(FADE_OUT_MS);
+pub(crate) const LASER: Duration = Duration::from_millis(LASER_MS);
+pub(crate) const PING: Duration = Duration::from_millis(PING_MS);
 
 /// One element as shown.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Shown {
+pub(crate) struct Shown {
     pub author: MemberId,
     pub element: Element,
     /// When it finished arriving here, for fading.
@@ -29,13 +29,13 @@ pub struct Shown {
 
 impl Shown {
     /// How long it stays once finished, before fading: its author's pick.
-    pub fn stay(&self) -> Duration {
+    pub(crate) fn stay(&self) -> Duration {
         Duration::from_millis(self.element.stay_ms())
     }
 
     /// How opaque it is now: 1 until a fading one has stayed its while,
     /// then down to 0 over the fade.
-    pub fn alpha(&self, now: Instant) -> f32 {
+    pub(crate) fn alpha(&self, now: Instant) -> f32 {
         let Some(done) = self.done_at.filter(|_| self.element.fades) else {
             return 1.0;
         };
@@ -56,7 +56,7 @@ impl Shown {
 
 /// A laser trail's point, and when it arrived.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LaserPoint {
+pub(crate) struct LaserPoint {
     pub at: Point,
     pub since: Instant,
     /// The first of a new trail: no line to it from the one before.
@@ -66,14 +66,14 @@ pub struct LaserPoint {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Ping {
+pub(crate) struct Ping {
     pub author: MemberId,
     pub at: Point,
     pub since: Instant,
 }
 
 #[derive(Debug, Default)]
-pub struct BoardView {
+pub(crate) struct BoardView {
     generation: u32,
     elements: Vec<Shown>,
     lasers: BTreeMap<MemberId, Vec<LaserPoint>>,
@@ -81,38 +81,43 @@ pub struct BoardView {
 }
 
 impl BoardView {
-    pub fn generation(&self) -> u32 {
+    pub(crate) fn generation(&self) -> u32 {
         self.generation
     }
 
     /// In drawing order.
-    pub fn elements(&self) -> &[Shown] {
+    pub(crate) fn elements(&self) -> &[Shown] {
         &self.elements
     }
 
-    pub fn lasers(&self) -> &BTreeMap<MemberId, Vec<LaserPoint>> {
+    pub(crate) fn lasers(&self) -> &BTreeMap<MemberId, Vec<LaserPoint>> {
         &self.lasers
     }
 
-    pub fn pings(&self) -> &[Ping] {
+    pub(crate) fn pings(&self) -> &[Ping] {
         &self.pings
     }
 
-    pub fn get(&self, author: MemberId, id: u32) -> Option<&Shown> {
+    pub(crate) fn get(&self, author: MemberId, id: u32) -> Option<&Shown> {
         self.elements
             .iter()
             .find(|s| s.author == author && s.element.id == id)
     }
 
     /// `author`'s elements, in drawing order.
-    pub fn of(&self, author: MemberId) -> impl Iterator<Item = &Shown> {
+    pub(crate) fn of(&self, author: MemberId) -> impl Iterator<Item = &Shown> {
         self.elements.iter().filter(move |s| s.author == author)
     }
 
     /// What the host said, to `me`. Returns its refusal, if that is what it
     /// was. Only a clear of our own elements or everyone's starts a new
     /// generation for us; another member's has its own.
-    pub fn news(&mut self, news: BoardNews, me: Option<MemberId>, now: Instant) -> Option<Refusal> {
+    pub(crate) fn news(
+        &mut self,
+        news: BoardNews,
+        me: Option<MemberId>,
+        now: Instant,
+    ) -> Option<Refusal> {
         match news {
             BoardNews::Snapshot(s) => {
                 if s.first {
@@ -147,7 +152,7 @@ impl BoardView {
     }
 
     /// `author`'s operations: the host's update, or our own as we send them.
-    pub fn apply(&mut self, author: MemberId, ops: &[BoardOp], now: Instant) {
+    pub(crate) fn apply(&mut self, author: MemberId, ops: &[BoardOp], now: Instant) {
         for op in ops {
             match op {
                 // A malformed element is nothing (the host checks every one
@@ -220,7 +225,7 @@ impl BoardView {
 
     /// Lets go of what has faded, the laser points past their time, and the
     /// pings that are over.
-    pub fn prune(&mut self, now: Instant) {
+    pub(crate) fn prune(&mut self, now: Instant) {
         self.elements.retain(|s| !s.faded(now));
         for trail in self.lasers.values_mut() {
             trail.retain(|p| now.saturating_duration_since(p.since) < LASER);
@@ -232,7 +237,7 @@ impl BoardView {
 
     /// Whether something changes by itself (fading, a laser, a ping): the
     /// window then paints again soon, though no video comes.
-    pub fn moving(&self, now: Instant) -> bool {
+    pub(crate) fn moving(&self, now: Instant) -> bool {
         !self.lasers.is_empty()
             || !self.pings.is_empty()
             || self.elements.iter().any(|s| {
@@ -245,7 +250,7 @@ impl BoardView {
     /// When the next fading element starts to fade, if one is still staying:
     /// nothing moves until then, and a still picture brings no frames, so
     /// the window must wake itself then (the author's run of M27b).
-    pub fn next_fade(&self, now: Instant) -> Option<Instant> {
+    pub(crate) fn next_fade(&self, now: Instant) -> Option<Instant> {
         self.elements
             .iter()
             .filter(|s| s.element.fades)

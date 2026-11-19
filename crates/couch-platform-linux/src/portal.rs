@@ -26,7 +26,7 @@ use tokio::runtime::Runtime;
 /// the app id, and takes a component name ending in `.desktop` for a desktop
 /// file's, which it then doesn't find, so the keys were never kept (seen on
 /// Plasma 6.6). Any id ending so would do the same.
-pub const APP_ID: &str = "com.couchcoapp.CouchCoApp";
+pub(crate) const APP_ID: &str = "com.couchcoapp.CouchCoApp";
 
 /// How long registering may take: a session bus that doesn't answer
 /// mustn't hold up the first portal request for long.

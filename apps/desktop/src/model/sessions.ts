@@ -77,20 +77,6 @@ export function isLive(session: SessionView): boolean {
   return session.stream.state === "live";
 }
 
-/** "Bia is playing" (the host while nobody holds the one seat and they play
- * outside it), or per seat: "Controller 1: Ana · Controller 2: free". A host
- * playing outside the seats, on whatever the game sees directly, is listed
- * beside them: "Ana: own controller". */
-export function whoPlays(room: RoomView, s: SessionView): string {
-  if (s.seats.length === 1) {
-    const holder = s.seats[0].holder ?? (s.hostOnSeats ? null : s.host);
-    return holder ? `${nameOf(room, holder)} is playing` : "Nobody is playing";
-  }
-  const seats = s.seats.map((seat) => `${seat.label}: ${seat.holder ? nameOf(room, seat.holder) : "free"}`);
-  const outside = s.hostOnSeats ? [] : [`${nameOf(room, s.host)}: own controller`];
-  return [...seats, ...outside].join(" · ");
-}
-
 export function allowsKbm(s: SessionView): boolean {
   return s.seats.some((seat) => seat.keyboardMouse);
 }
@@ -191,7 +177,7 @@ export function soundChoices(
 
 /** A controller's model: its ids, and for a remapper's pad (M22), which has
  * a real Xbox 360 controller's ids, that it is one. */
-export function padKey(c: HostController): string {
+function padKey(c: HostController): string {
   return c.kind === "otherVirtual" ? `${c.vendor}:${c.product}:remapper` : `${c.vendor}:${c.product}`;
 }
 
@@ -213,12 +199,12 @@ export function padKeys(list: HostController[]): string[] {
 }
 
 /** A `padKeys` key's model (its ids). */
-export function modelOf(key: string): string {
+function modelOf(key: string): string {
   return key.split("#")[0];
 }
 
 /** A `padKeys` key's place among controllers of its model (1 for the first). */
-export function ordinalOf(key: string): number {
+function ordinalOf(key: string): number {
   return Number(key.split("#")[1] ?? 1);
 }
 

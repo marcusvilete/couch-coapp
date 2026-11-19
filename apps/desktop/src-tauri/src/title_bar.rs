@@ -13,7 +13,7 @@ use serde::Serialize;
 use tauri::WebviewWindow;
 
 /// Whether the main window draws its own title bar.
-pub const OWN: bool = cfg!(windows);
+pub(crate) const OWN: bool = cfg!(windows);
 
 /// The bar's height and its buttons' width, in logical pixels: the page
 /// lays its bar out with these (`platform/tauri.ts`), and the snap button
@@ -35,7 +35,7 @@ struct Bar<'a> {
 
 /// The page's word on its title bar, set before any of its own scripts run
 /// (so the bar is there from the first frame): `null` without one of ours.
-pub fn script(title: &str) -> String {
+pub(crate) fn script(title: &str) -> String {
     let bar = OWN.then_some(Bar {
         title,
         height: HEIGHT,
@@ -78,7 +78,7 @@ mod snap {
         pressed: bool,
     }
 
-    pub fn attach(window: &WebviewWindow) {
+    pub(super) fn attach(window: &WebviewWindow) {
         let Ok(hwnd) = window.hwnd() else {
             return;
         };
@@ -117,7 +117,7 @@ mod snap {
     }
 
     /// Over the page's maximize button: second from the right, at the top.
-    pub fn place(window: &WebviewWindow) {
+    pub(super) fn place(window: &WebviewWindow) {
         let (Some(button), Ok(size), Ok(window_scale)) =
             (MADE.get(), window.inner_size(), window.scale_factor())
         else {
@@ -135,7 +135,7 @@ mod snap {
 }
 
 /// Lays the snap button over the main window's maximize button (Windows).
-pub fn attach(window: &WebviewWindow) {
+pub(crate) fn attach(window: &WebviewWindow) {
     #[cfg(windows)]
     snap::attach(window);
     #[cfg(not(windows))]
@@ -143,7 +143,7 @@ pub fn attach(window: &WebviewWindow) {
 }
 
 /// Follows the main window's size and scale.
-pub fn place(window: &WebviewWindow) {
+pub(crate) fn place(window: &WebviewWindow) {
     #[cfg(windows)]
     snap::place(window);
     #[cfg(not(windows))]

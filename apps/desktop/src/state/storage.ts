@@ -10,9 +10,6 @@ export const KEYS = {
   selectedRoom: "selectedRoom",
   /** Room ids in the order the user dragged them into. */
   roomOrder: "roomOrder",
-  /** The single controller chosen before M19: still read when no list (M23)
-   * is stored, so the choice stays. */
-  myPad: "couch.goLive.controller",
   /** The controllers last chosen to play on seats, as `padKeys` (M23). */
   myPads: "couch.session.controllers",
   sessionSetup: "couch.session.setup",
@@ -49,8 +46,8 @@ export function storedNumber(key: string, allowed: number[], fallback: number): 
   return allowed.includes(n) ? n : fallback;
 }
 
-/** The controllers last chosen to play on seats, as keys: the list (M23),
- * or the single choice from before it; `null` if none was ever made. */
+/** The controllers last chosen to play on seats, as keys (M23); `null` if
+ * none was ever made. */
 export function storedPads(): string[] | null {
   try {
     const list = JSON.parse(readStored(KEYS.myPads) ?? "null");
@@ -58,18 +55,16 @@ export function storedPads(): string[] | null {
   } catch {
     // Unreadable: as if none.
   }
-  const one = readStored(KEYS.myPad);
-  return one == null ? null : one === "" ? [] : [one];
+  return null;
 }
 
-/** The setup last used, or one controller. Keyboard and mouse "with
- * Controller 1", from before M24, comes back as a seat of their own. */
+/** The setup last used, or one controller. */
 export function storedSetup(): InputSetup {
   const fallback: InputSetup = { controllers: 1, keyboardMouse: "none" };
   try {
     const s = JSON.parse(readStored(KEYS.sessionSetup) ?? "null");
     const kbm: KeyboardMouseSeat[] = ["none", "ownSeat"];
-    const keyboardMouse = s?.keyboardMouse === "withController1" ? "ownSeat" : s?.keyboardMouse;
+    const keyboardMouse = s?.keyboardMouse;
     if (Number.isInteger(s?.controllers) && s.controllers >= 0 && s.controllers <= 4 && kbm.includes(keyboardMouse)) {
       return { controllers: s.controllers, keyboardMouse };
     }

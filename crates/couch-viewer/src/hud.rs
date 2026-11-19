@@ -55,7 +55,7 @@ const HOLD_UNDER_POINTER: Duration = Duration::from_secs(15);
 
 /// Something the user asked for on the bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HudAction {
+pub(crate) enum HudAction {
     Session(UserAction),
     Fullscreen,
     /// The slider or the mute button (P6).
@@ -68,7 +68,7 @@ pub enum HudAction {
 
 /// Drawing on the stream, as the bar's buttons show it (M27a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DrawBar {
+pub(crate) struct DrawBar {
     /// Drawing mode is on.
     pub on: bool,
     pub hidden: bool,
@@ -78,7 +78,7 @@ pub struct DrawBar {
 
 /// One of this window's controllers, as the bar's choice shows it (P13).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HudController {
+pub(crate) struct HudController {
     /// Its slot, which a request names.
     pub slot: u8,
     pub name: String,
@@ -86,7 +86,7 @@ pub struct HudController {
     pub seat: Option<u8>,
 }
 
-pub struct Hud {
+pub(crate) struct Hud {
     ctx: egui::Context,
     renderer: egui_wgpu::Renderer,
     started: Instant,
@@ -149,7 +149,7 @@ pub struct Hud {
 }
 
 impl Hud {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let ctx = egui::Context::default();
         let (fonts, icons) = fonts();
         ctx.set_fonts(fonts);
@@ -195,7 +195,7 @@ impl Hud {
     /// Asks for `seat` (P13): at once, unless one of two or more
     /// controllers must leave its seat for it; then the bar first asks which
     /// moves, and the request goes from there.
-    pub fn ask(&mut self, seat: u8) {
+    pub(crate) fn ask(&mut self, seat: u8) {
         // A choice only when one of ours must leave its seat for one with a
         // pad: each plays one already (P13 review). Otherwise a spare one
         // takes it, or it needs no controller.
@@ -218,7 +218,7 @@ impl Hud {
     }
 
     /// The session as the main process describes it.
-    pub fn set_session(&mut self, state: HudState) {
+    pub(crate) fn set_session(&mut self, state: HudState) {
         let now = Instant::now();
         let old = self.session.as_ref();
         if !state.note.is_empty() && old.is_none_or(|o| o.note != state.note) {
@@ -245,19 +245,19 @@ impl Hud {
         self.session = Some(state);
     }
 
-    pub fn session(&self) -> Option<&HudState> {
+    pub(crate) fn session(&self) -> Option<&HudState> {
         self.session.as_ref()
     }
 
     /// Shows `note` for a while, as if the main process had sent it.
-    pub fn note(&mut self, note: impl Into<String>) {
+    pub(crate) fn note(&mut self, note: impl Into<String>) {
         let now = Instant::now();
         self.note = Some((note.into(), now + SHOW_AFTER_CHANGE));
         self.changed_at = Some(now);
     }
 
     /// The free pointer moved to `pos` (in points).
-    pub fn pointer_moved(&mut self, pos: Pos2) {
+    pub(crate) fn pointer_moved(&mut self, pos: Pos2) {
         let now = Instant::now();
         self.pointer_at = Some(now);
         if self.bar_rect.is_some_and(|r| r.contains(pos)) {
@@ -270,14 +270,14 @@ impl Hud {
 
     /// The pointer left the window, or the mouse was captured for the game:
     /// no hover or tooltip may stay.
-    pub fn pointer_gone(&mut self) {
+    pub(crate) fn pointer_gone(&mut self) {
         self.on_bar_since = None;
         self.events.push(egui::Event::PointerGone);
     }
 
     /// The mouse was just captured for the game: with the bar off (P11), it
     /// still comes up for a while, to say which key frees the mouse.
-    pub fn mouse_captured(&mut self) {
+    pub(crate) fn mouse_captured(&mut self) {
         self.captured_at = Some(Instant::now());
         // No choice can be clicked now (P13): it would hold the bar up.
         self.picking = None;
@@ -286,14 +286,14 @@ impl Hud {
 
     /// The window lost the focus: a release that began on the bar may never
     /// come, and a held press would keep the bar up for good.
-    pub fn focus_lost(&mut self) {
+    pub(crate) fn focus_lost(&mut self) {
         self.pressed.clear();
         self.pointer_gone();
     }
 
     /// A free pointer's button; `true` if the HUD took it, in which case it
     /// must not go anywhere else.
-    pub fn pointer_button(&mut self, pos: Pos2, button: u8, pressed: bool) -> bool {
+    pub(crate) fn pointer_button(&mut self, pos: Pos2, button: u8, pressed: bool) -> bool {
         let taken = if pressed {
             (self.bar_up(Instant::now()) && self.bar_rect.is_some_and(|r| r.contains(pos)))
                 || self.toolbar_rect.is_some_and(|r| r.contains(pos))
@@ -323,13 +323,13 @@ impl Hud {
     }
 
     /// What the user clicked since the last call.
-    pub fn take_actions(&mut self) -> Vec<HudAction> {
+    pub(crate) fn take_actions(&mut self) -> Vec<HudAction> {
         std::mem::take(&mut self.actions)
     }
 
     /// The relay we reach the host through, by its server's name (M26a-2),
     /// for the stats card's Path row.
-    pub fn relay(&self) -> Option<&str> {
+    pub(crate) fn relay(&self) -> Option<&str> {
         match &self.session.as_ref()?.link {
             HudLink::Relay(host) => Some(host),
             _ => None,
@@ -337,12 +337,12 @@ impl Hud {
     }
 
     /// Whether the stats card shows, so its rows are worth building.
-    pub fn wants_stats(&self) -> bool {
+    pub(crate) fn wants_stats(&self) -> bool {
         self.visible && self.show_stats
     }
 
     /// Something changed that only a repaint shows.
-    pub fn needs_paint(&self) -> bool {
+    pub(crate) fn needs_paint(&self) -> bool {
         let now = Instant::now();
         !self.events.is_empty()
             || self.bar_up(now) != self.bar_painted
@@ -388,7 +388,7 @@ impl Hud {
         clippy::too_many_arguments,
         reason = "wgpu's handles and what the pass paints, each its own; a struct would only rename them"
     )]
-    pub fn paint(
+    pub(crate) fn paint(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1728,7 +1728,7 @@ fn playing_with(s: &HudState, mine: &[&HudSeat]) -> String {
 
 /// The seat Ctrl+Alt+Shift+C asks for: the first nobody holds, the
 /// controllers coming first; with none free, the first that isn't ours.
-pub fn seat_to_ask(s: &HudState) -> Option<u8> {
+pub(crate) fn seat_to_ask(s: &HudState) -> Option<u8> {
     let free = s
         .seats
         .iter()

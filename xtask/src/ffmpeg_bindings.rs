@@ -18,7 +18,7 @@ use crate::deps;
 /// file per system, generated on it (C's `long` is 32 bits on Windows, 64 on
 /// Linux). `.cargo/config.toml` points builds at Windows'; `scripts/dev.sh`
 /// at Linux's (ADR 0011).
-pub const BINDING_FILE: &str = if cfg!(windows) {
+pub(crate) const BINDING_FILE: &str = if cfg!(windows) {
     WINDOWS_BINDING_FILE
 } else {
     LINUX_BINDING_FILE
@@ -184,11 +184,11 @@ impl ParseCallbacks for IgnoreMathMacros {
 }
 
 /// The provenance line written at the top of the bindings, tying them to the pin.
-pub fn provenance(ffmpeg_sha256: &str) -> String {
+pub(crate) fn provenance(ffmpeg_sha256: &str) -> String {
     format!("// FFmpeg archive sha256: {ffmpeg_sha256}")
 }
 
-pub fn generate(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn generate(root: &Path) -> anyhow::Result<()> {
     let ffmpeg = deps::DEPS
         .iter()
         .find(|d| d.dir == "ffmpeg")

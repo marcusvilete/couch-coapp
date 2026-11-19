@@ -27,7 +27,7 @@ import { windowCommand } from "./StreamWindowPanel";
 import { useRun, type Notify } from "./useRun";
 import "./SessionCard.css";
 
-export function SeatIcon(props: { seat: SeatView }) {
+function SeatIcon(props: { seat: SeatView }) {
   return <span className="seat-icon" aria-hidden="true">{props.seat.pad ? <Gamepad2 /> : <Keyboard />}</span>;
 }
 

@@ -34,8 +34,8 @@ use sdl3::{
 use crate::now_us;
 
 /// Barcode position and cell size inside the clock window.
-pub const MARGIN: u32 = LATENCY_CLOCK_MARGIN;
-pub const CELL: u32 = LATENCY_CLOCK_CELL;
+pub(crate) const MARGIN: u32 = LATENCY_CLOCK_MARGIN;
+pub(crate) const CELL: u32 = LATENCY_CLOCK_CELL;
 
 const DIGIT_W: f32 = 64.0;
 const DIGIT_H: f32 = LATENCY_CLOCK_DIGIT_HEIGHT as f32;
@@ -48,7 +48,7 @@ const LOAD_SIZE: (u32, u32) = (3840, 2160);
 
 /// `clicks`: also play the click track. `fps`: paint at most this often.
 /// `gpu_load`: blended full-size rectangles drawn offscreen each frame.
-pub fn run(x: i32, y: i32, clicks: bool, fps: Option<u32>, gpu_load: u32) -> Result<()> {
+pub(crate) fn run(x: i32, y: i32, clicks: bool, fps: Option<u32>, gpu_load: u32) -> Result<()> {
     // Loaded, it paints as fast as the GPU lets it, as a demanding game
     // does; waiting for vsync would leave the GPU idle part of each frame.
     sdl3::hint::set("SDL_RENDER_VSYNC", if gpu_load > 0 { "0" } else { "1" });

@@ -254,7 +254,7 @@ fn run_one(scenario: Scenario) -> anyhow::Result<Outcome> {
     Ok(Outcome { measured, pass })
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub(crate) fn run() -> anyhow::Result<()> {
     println!("Each scenario opens a viewer window for a few seconds; leave them be.");
     let mut failed = 0;
     let mut rows = Vec::new();

@@ -19,13 +19,13 @@ use couch_platform_win::{
     foreground::WindowId,
 };
 
-pub fn parse_point(text: &str) -> Result<(u32, u32), String> {
+pub(crate) fn parse_point(text: &str) -> Result<(u32, u32), String> {
     let (x, y) = text.split_once(',').ok_or("expected X,Y")?;
     let parse = |v: &str| v.trim().parse::<u32>().map_err(|e| e.to_string());
     Ok((parse(x)?, parse(y)?))
 }
 
-pub fn run(
+pub(crate) fn run(
     window: Option<String>,
     monitor: Option<usize>,
     points: &[(u32, u32)],

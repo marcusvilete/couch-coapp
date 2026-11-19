@@ -80,8 +80,6 @@ fn news_of(message: &ControlMessage) -> Option<BoardNews> {
     })
 }
 
-/// Viewers a session takes unless its host chooses otherwise.
-pub const DEFAULT_MAX_VIEWERS: u8 = 4;
 /// The most a host may choose: everyone else in a full room of 8. Each
 /// viewer costs the host an encoder and an upload stream.
 pub const MAX_VIEWERS: u8 = 7;

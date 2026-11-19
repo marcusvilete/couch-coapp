@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, bail};
 use sha2::{Digest, Sha256};
 
-pub struct Dep {
+pub(crate) struct Dep {
     pub name: &'static str,
     /// Folder under third_party/.
     pub dir: &'static str,
@@ -27,13 +27,13 @@ pub struct Dep {
 /// years (daily builds expire after two weeks); Windows and Linux take the
 /// same build of the same source (ADR 0011). Both lists are visible on both
 /// systems, so a test checks each one's generated bindings.
-pub const DEPS: &[Dep] = if cfg!(windows) {
+pub(crate) const DEPS: &[Dep] = if cfg!(windows) {
     WINDOWS_DEPS
 } else {
     LINUX_DEPS
 };
 
-pub const WINDOWS_DEPS: &[Dep] = &[
+pub(crate) const WINDOWS_DEPS: &[Dep] = &[
     Dep {
         name: "FFmpeg 8.1.3 (LGPL, shared)",
         dir: "ffmpeg",
@@ -62,7 +62,7 @@ pub const WINDOWS_DEPS: &[Dep] = &[
 /// on Windows (M16b): keep it at the app's `lucide-react` version, and
 /// `couch-viewer`'s `hud.rs` icon code points with it (from the package's
 /// `font/codepoints.json`).
-pub const LINUX_DEPS: &[Dep] = &[
+pub(crate) const LINUX_DEPS: &[Dep] = &[
     Dep {
         name: "FFmpeg 8.1.3 (LGPL, shared)",
         dir: "ffmpeg",
@@ -108,7 +108,7 @@ fn is_runtime_library(path: &Path) -> bool {
 
 /// A driver the installer offers (M10a): its official installer, pinned like
 /// the archives above but used as it is, not extracted.
-pub struct Driver {
+pub(crate) struct Driver {
     pub name: &'static str,
     pub url: &'static str,
     pub sha256: &'static str,
@@ -120,7 +120,7 @@ pub struct Driver {
     pub license: &'static str,
 }
 
-pub const DRIVERS: &[Driver] = &[
+pub(crate) const DRIVERS: &[Driver] = &[
     Driver {
         name: "ViGEmBus 1.22.0 (BSD-3-Clause)",
         url: "https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe",
@@ -141,7 +141,7 @@ pub const DRIVERS: &[Driver] = &[
 /// exact source of the FFmpeg build we ship, and the scripts that built it.
 /// Pinned like the rest; `build-installer.ps1` puts them beside the setup
 /// file, with `SOURCES.txt`.
-pub struct Source {
+pub(crate) struct Source {
     pub name: &'static str,
     pub url: &'static str,
     pub sha256: &'static str,
@@ -151,7 +151,7 @@ pub struct Source {
 
 /// Bump these with the FFmpeg pin: the commit is the one in its build's
 /// name (`n8.1.3-9-g29e619e767`), the scripts are BtbN's at its release tag.
-pub const SOURCES: &[Source] = &[
+pub(crate) const SOURCES: &[Source] = &[
     Source {
         name: "FFmpeg source, commit 29e619e767 (the build's n8.1.3-9-g29e619e767)",
         url: "https://github.com/FFmpeg/FFmpeg/archive/29e619e767cde9045a75c29bc9a8278ae7b3a98b.tar.gz",
@@ -167,7 +167,7 @@ pub const SOURCES: &[Source] = &[
 ];
 
 /// True when the source archive is downloaded at the pinned version.
-pub fn source_fetched(root: &Path, source: &Source) -> bool {
+pub(crate) fn source_fetched(root: &Path, source: &Source) -> bool {
     let path = third_party(root).join("sources").join(source.file);
     path.exists() && sha256_file(&path).is_ok_and(|h| h == source.sha256)
 }
@@ -219,7 +219,7 @@ fn driver_licenses(root: &Path) -> PathBuf {
 }
 
 /// True when the driver's installer is downloaded at the pinned version.
-pub fn driver_fetched(root: &Path, driver: &Driver) -> bool {
+pub(crate) fn driver_fetched(root: &Path, driver: &Driver) -> bool {
     let path = third_party(root).join("drivers").join(driver.staged_as);
     path.exists() && sha256_file(&path).is_ok_and(|h| h == driver.sha256)
 }
@@ -275,18 +275,18 @@ fn stage_drivers(root: &Path, target: &Path) -> anyhow::Result<()> {
 
 const PIN_FILE: &str = ".couch-pin";
 
-pub fn third_party(root: &Path) -> PathBuf {
+pub(crate) fn third_party(root: &Path) -> PathBuf {
     root.join("third_party")
 }
 
 /// True when the dependency is extracted at the pinned version.
-pub fn is_installed(root: &Path, dep: &Dep) -> bool {
+pub(crate) fn is_installed(root: &Path, dep: &Dep) -> bool {
     let dir = third_party(root).join(dep.dir);
     let pinned = fs::read_to_string(dir.join(PIN_FILE)).unwrap_or_default();
     pinned.trim() == dep.sha256 && dep.expect.iter().all(|f| dir.join(f).exists())
 }
 
-pub fn fetch(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn fetch(root: &Path) -> anyhow::Result<()> {
     let downloads = third_party(root).join("_downloads");
     fs::create_dir_all(&downloads)?;
 
@@ -356,7 +356,7 @@ pub fn fetch(root: &Path) -> anyhow::Result<()> {
 }
 
 /// The runtime DLLs of every dependency.
-pub fn dlls(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+pub(crate) fn dlls(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut dlls = Vec::new();
     for dep in DEPS {
         let dir = third_party(root).join(dep.dir).join(dep.dll_dir);
@@ -370,13 +370,13 @@ pub fn dlls(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(dlls)
 }
 
-pub fn target_dir(root: &Path) -> PathBuf {
+pub(crate) fn target_dir(root: &Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target"))
 }
 
-pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn stage_dlls(root: &Path) -> anyhow::Result<()> {
     if !DEPS.iter().all(|dep| is_installed(root, dep)) {
         bail!("native dependencies are missing; run `cargo xtask fetch-deps` first");
     }
@@ -422,7 +422,7 @@ pub fn stage_dlls(root: &Path) -> anyhow::Result<()> {
 
 /// Puts `LICENSE` and the notices (`cargo xtask notices`) next to the built
 /// app, where the installer and Settings → About find them.
-pub fn stage_notices(root: &Path, target: &Path) -> anyhow::Result<()> {
+pub(crate) fn stage_notices(root: &Path, target: &Path) -> anyhow::Result<()> {
     let notices = crate::notices::output(root);
     for profile in ["debug", "release"] {
         let dir = target.join(profile);
@@ -450,7 +450,7 @@ fn same_file_contents_likely(a: &Path, b: &Path) -> bool {
     }
 }
 
-pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];

@@ -41,7 +41,7 @@ impl Report {
     }
 }
 
-pub async fn run(net_timeout: Duration) -> ExitCode {
+pub(crate) async fn run(net_timeout: Duration) -> ExitCode {
     let mut report = Report::default();
 
     probe_ffmpeg(&mut report).await;

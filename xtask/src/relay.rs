@@ -19,7 +19,7 @@ use crate::deps;
 
 /// Where the release configuration lives: `COUCH_RELEASE_CONFIG`, or
 /// `%USERPROFILE%\.couch-coapp\release.toml`. Never inside the repository.
-pub fn release_config_path() -> anyhow::Result<PathBuf> {
+pub(crate) fn release_config_path() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os("COUCH_RELEASE_CONFIG") {
         return Ok(PathBuf::from(path));
     }
@@ -31,7 +31,7 @@ pub fn release_config_path() -> anyhow::Result<PathBuf> {
         .join("release.toml"))
 }
 
-pub fn release_config(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn release_config(root: &Path) -> anyhow::Result<()> {
     let path = release_config_path()?;
     if path.exists() {
         bail!(
@@ -106,7 +106,7 @@ fn new_token() -> anyhow::Result<String> {
 
 /// The iroh version the workspace pins (`iroh = "=X.Y.Z"`): the relay
 /// server must be the same release.
-pub fn iroh_pin(root: &Path) -> anyhow::Result<String> {
+pub(crate) fn iroh_pin(root: &Path) -> anyhow::Result<String> {
     let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;
     manifest
         .lines()
@@ -116,7 +116,7 @@ pub fn iroh_pin(root: &Path) -> anyhow::Result<String> {
         .context("no `iroh = \"=X.Y.Z\"` pin in Cargo.toml")
 }
 
-pub fn relay_exe(root: &Path) -> PathBuf {
+pub(crate) fn relay_exe(root: &Path) -> PathBuf {
     deps::target_dir(root)
         .join("tools")
         .join("bin")
@@ -127,7 +127,7 @@ pub fn relay_exe(root: &Path) -> PathBuf {
         })
 }
 
-pub fn relay_tool(root: &Path) -> anyhow::Result<()> {
+pub(crate) fn relay_tool(root: &Path) -> anyhow::Result<()> {
     let version = iroh_pin(root)?;
     let tools = deps::target_dir(root).join("tools");
     println!(
@@ -149,7 +149,7 @@ pub fn relay_tool(root: &Path) -> anyhow::Result<()> {
 }
 
 /// For `doctor`: the relay tool matches the iroh pin.
-pub fn relay_tool_version(root: &Path) -> Result<String, String> {
+pub(crate) fn relay_tool_version(root: &Path) -> Result<String, String> {
     let exe = relay_exe(root);
     if !exe.exists() {
         return Err("not built; run `cargo xtask relay-tool` (for testing our relay here)".into());

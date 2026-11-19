@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod code;
 
-use crate::{EngineError, build_config::BuiltInRelay, store::LegacyRelaySetting};
+use crate::{EngineError, build_config::BuiltInRelay};
 
 /// At most this many relays held at once: iroh probes each one for its
 /// latency.
@@ -120,7 +120,7 @@ pub const STANDBY_FRESH_SECS: u64 = 24 * 60 * 60;
 pub const STANDBY_RECHECK_SECS: u64 = 60 * 60;
 
 impl Standby {
-    pub fn fresh(&self, now_unix: u64) -> bool {
+    pub(crate) fn fresh(&self, now_unix: u64) -> bool {
         now_unix.saturating_sub(self.got) < STANDBY_FRESH_SECS
     }
 }
@@ -180,7 +180,7 @@ impl SavedRelay {
     /// a personal code, not kept to the user; registered by the user (the
     /// build's own included) to every room, received only to the rooms it
     /// came for.
-    pub fn passable(&self) -> crate::network::Passable {
+    pub(crate) fn passable(&self) -> crate::network::Passable {
         use crate::network::Passable;
         if self.token.is_none() || self.personal || self.kept_to_me {
             return Passable::Never;
@@ -280,7 +280,7 @@ pub const ASK_LATER_SECS: u64 = 7 * 24 * 60 * 60;
 
 impl AskForRelay {
     /// Whether to ask now, `version` being this app's.
-    pub fn due(&self, now_unix: u64, version: &str) -> bool {
+    pub(crate) fn due(&self, now_unix: u64, version: &str) -> bool {
         match self {
             Self::Now => true,
             Self::Later {
@@ -301,36 +301,10 @@ pub(crate) enum Added {
 }
 
 impl SavedRelays {
-    /// The relay setting of before M26a (`network.json`), as relays: a
-    /// custom address becomes a relay without a token, `public` keeps
-    /// iroh's on. The build's own relay is added by [`Self::keep_built_in`].
-    pub fn carried_over(old: &LegacyRelaySetting, rules: &RelayRules, now_unix: u64) -> Self {
-        let mut saved = Self::default();
-        match old {
-            LegacyRelaySetting::Builtin => {}
-            LegacyRelaySetting::Public => saved.keep_public = true,
-            LegacyRelaySetting::Custom(url) => match check_url(url, rules.test_build) {
-                Ok(url) => {
-                    saved.relays.push(SavedRelay {
-                        url: url.to_string(),
-                        token: None,
-                        built_in: false,
-                        token_from_build: false,
-                        personal: false,
-                        added: now_unix,
-                        ..Default::default()
-                    });
-                }
-                Err(e) => tracing::warn!("the relay setting saved before ({url:?}): {e}; left out"),
-            },
-        }
-        saved
-    }
-
     /// Writes the build's own relay in (first), or gives it the build's
     /// token: kept by a later build without it, as a relay like any other.
     /// Whether anything changed.
-    pub fn keep_built_in(&mut self, built_in: Option<&BuiltInRelay>, now_unix: u64) -> bool {
+    pub(crate) fn keep_built_in(&mut self, built_in: Option<&BuiltInRelay>, now_unix: u64) -> bool {
         let before = self.clone();
         let url = built_in.map(|b| b.url.to_string());
         for relay in &mut self.relays {
@@ -374,7 +348,7 @@ impl SavedRelays {
     /// What the endpoint holds: our relays, and iroh's public ones while
     /// nothing is registered or the user keeps them. A saved address this
     /// build doesn't take (a LAN relay a test build saved) is left out.
-    pub fn choice(&self, rules: &RelayRules) -> RelayChoice {
+    pub(crate) fn choice(&self, rules: &RelayRules) -> RelayChoice {
         let ours: Vec<Relay> = self
             .relays
             .iter()
@@ -407,7 +381,7 @@ impl SavedRelays {
 
     /// Adds a relay the user gave (typed, or from a code), or gives one
     /// already held a new token.
-    pub fn add(
+    pub(crate) fn add(
         &mut self,
         url: RelayUrl,
         token: Option<RelayToken>,
@@ -447,7 +421,7 @@ impl SavedRelays {
     }
 
     /// Takes a relay away; the build's own stays.
-    pub fn remove(&mut self, url: &RelayUrl) -> Result<(), EngineError> {
+    pub(crate) fn remove(&mut self, url: &RelayUrl) -> Result<(), EngineError> {
         let Some(at) = self.relays.iter().position(|r| r.url == url.as_str()) else {
             return Err(EngineError::Refused("that relay isn't in your list"));
         };
@@ -468,7 +442,7 @@ impl SavedRelays {
     }
 
     /// Whether a code for `url` may be asked for and kept (M26b).
-    pub fn may_ask(&self, url: &str) -> bool {
+    pub(crate) fn may_ask(&self, url: &str) -> bool {
         !self.refuse_passed_on && !self.dont_ask.iter().any(|u| u == url)
     }
 
@@ -478,7 +452,7 @@ impl SavedRelays {
     /// code (a personal code taken back was taken back on purpose), and
     /// stays theirs.
     #[allow(clippy::too_many_arguments)]
-    pub fn receive(
+    pub(crate) fn receive(
         &mut self,
         url: &RelayUrl,
         token: &RelayToken,
@@ -576,7 +550,7 @@ impl SavedRelays {
     /// our own that isn't personal, and a received one only from its rooms
     /// (codes never move from one room to another by themselves). Whether
     /// it is a new standby (the code in use, or the standby held, isn't).
-    pub fn stand_by(
+    pub(crate) fn stand_by(
         &mut self,
         url: &RelayUrl,
         token: &RelayToken,
@@ -625,7 +599,7 @@ impl SavedRelays {
     }
 
     /// The standby `token` of `url` let us in again just now.
-    pub fn refresh_standby(&mut self, url: &str, token: &str, now_unix: u64) -> bool {
+    pub(crate) fn refresh_standby(&mut self, url: &str, token: &str, now_unix: u64) -> bool {
         let Some(standby) = self
             .relays
             .iter_mut()
@@ -640,7 +614,7 @@ impl SavedRelays {
     }
 
     /// The standby code of `url`, if it has one.
-    pub fn standby(&self, url: &str) -> Option<&Standby> {
+    pub(crate) fn standby(&self, url: &str) -> Option<&Standby> {
         self.relays
             .iter()
             .find(|r| r.url == url)
@@ -650,7 +624,7 @@ impl SavedRelays {
     /// Ours was refused and the standby `token` let us in, checked again
     /// just now: it is the code in use, credited to its giver as a renewal
     /// from a room is. Nothing if the standby changed meanwhile.
-    pub fn take_standby(&mut self, url: &str, token: &str) -> bool {
+    pub(crate) fn take_standby(&mut self, url: &str, token: &str) -> bool {
         // "Use relays my rooms pass on" turned off meanwhile.
         if !self.may_ask(url) {
             return false;
@@ -681,7 +655,7 @@ impl SavedRelays {
 
     /// The standby `token` of `url` was refused, or the relay no longer
     /// takes one from its room: it goes.
-    pub fn drop_standby(&mut self, url: &str, token: &str) -> bool {
+    pub(crate) fn drop_standby(&mut self, url: &str, token: &str) -> bool {
         self.relays
             .iter_mut()
             .find(|r| r.url == url)
@@ -691,7 +665,7 @@ impl SavedRelays {
 
     /// We left `room`, or forgot it: the relays received for it alone go.
     /// Whether anything changed.
-    pub fn drop_room(&mut self, room: &str) -> bool {
+    pub(crate) fn drop_room(&mut self, room: &str) -> bool {
         let before = self.relays.len();
         let mut changed = false;
         for relay in &mut self.relays {
@@ -715,7 +689,12 @@ impl SavedRelays {
     /// received for a room no longer `live` (a code checked after we left,
     /// say). Whether anything changed worth saving (a day's difference or
     /// more, or a relay gone).
-    pub fn needed(&mut self, needed: &[(String, String)], live: &[String], now_unix: u64) -> bool {
+    pub(crate) fn needed(
+        &mut self,
+        needed: &[(String, String)],
+        live: &[String],
+        now_unix: u64,
+    ) -> bool {
         const DAY: u64 = 24 * 60 * 60;
         let mut changed = false;
         for relay in &mut self.relays {
@@ -836,49 +815,6 @@ mod tests {
     }
 
     #[test]
-    fn the_setting_of_before_carries_over() {
-        let release = rules(Some(ours("t")), false);
-        let mut built = SavedRelays::carried_over(&LegacyRelaySetting::Builtin, &release, NOW);
-        assert!(built.keep_built_in(release.built_in.as_ref(), NOW));
-        assert_eq!(
-            held(&built.choice(&release)),
-            (
-                vec![("https://relay.couch.example/".into(), Some("t".into()))],
-                false
-            )
-        );
-
-        let mut public = SavedRelays::carried_over(&LegacyRelaySetting::Public, &release, NOW);
-        public.keep_built_in(release.built_in.as_ref(), NOW);
-        assert!(held(&public.choice(&release)).1, "the public ones kept");
-        assert_eq!(held(&public.choice(&release)).0.len(), 1);
-
-        // A custom address: a relay without a token, beside the build's.
-        let custom = LegacyRelaySetting::Custom(" https://mine.example ".into());
-        let mut mine = SavedRelays::carried_over(&custom, &release, NOW);
-        mine.keep_built_in(release.built_in.as_ref(), NOW);
-        let (relays, public) = held(&mine.choice(&release));
-        assert!(!public);
-        assert_eq!(
-            relays,
-            vec![
-                ("https://relay.couch.example/".into(), Some("t".into())),
-                ("https://mine.example/".into(), None),
-            ]
-        );
-
-        // One this build doesn't take is left out.
-        let lan = LegacyRelaySetting::Custom("http://192.168.1.10:3340".into());
-        assert!(
-            SavedRelays::carried_over(&lan, &release, NOW)
-                .relays
-                .is_empty()
-        );
-        let dev = rules(None, true);
-        assert_eq!(SavedRelays::carried_over(&lan, &dev, NOW).relays.len(), 1);
-    }
-
-    #[test]
     fn the_build_s_own_relay_stays_and_follows_the_build() {
         let mut saved = SavedRelays::default();
         assert!(saved.keep_built_in(Some(&ours("t1")), NOW));
@@ -915,8 +851,11 @@ mod tests {
     #[test]
     fn the_build_s_token_fills_its_relay_typed_without_one() {
         let release = rules(Some(ours("t")), false);
-        let custom = LegacyRelaySetting::Custom("https://relay.couch.example".into());
-        let mut saved = SavedRelays::carried_over(&custom, &release, NOW);
+        // Typed by address alone, without its token.
+        let mut saved = SavedRelays::default();
+        saved
+            .add(url("https://relay.couch.example"), None, false, NOW)
+            .unwrap();
         saved.keep_built_in(release.built_in.as_ref(), NOW);
         assert_eq!(saved.relays.len(), 1);
         assert_eq!(saved.relays[0].token.as_deref(), Some("t"));

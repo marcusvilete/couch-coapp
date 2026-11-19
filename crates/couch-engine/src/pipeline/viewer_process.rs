@@ -14,7 +14,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Starts `couch-viewer` from our own executable's folder, its stdin and
 /// stdout piped for `couch_proto::ipc`.
-pub fn launch(options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
+pub(super) fn launch(options: &ViewerOptions) -> Result<ViewerProcess, MediaError> {
     let backend = |e: std::io::Error| MediaError::Backend(e.to_string());
     let exe = std::env::current_exe()
         .map_err(backend)?

@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use couch_codec_ffmpeg::FfmpegDecoder;
-use couch_codec_nvenc::{Continuation, FrameControl, NvencEncoder};
+use couch_codec_nvenc::{CONTINUING, Continuation, FrameControl, NvencEncoder};
 use couch_media::{
     Codec, DecodedFrame, EncoderConfig, Nv12Frame, VideoDecoder, clock::ProcessClock,
     testpattern::TestPattern,
@@ -50,62 +50,25 @@ struct Case {
     continuation: Continuation,
     /// Long-term marks, two slots as ADR 0016 has them.
     marks: bool,
-    /// Name the held long-term slot on the continuing frame (`ltrUseFrames`).
-    use_held: bool,
-    /// Invalidate the dropped frames before continuing.
-    invalidate: bool,
 }
 
-const CASES: [Case; 4] = [
-    // Invalidation alone, with the driver's DPB: whatever NVENC does then.
+const CASES: [Case; 2] = [
+    // Invalidation alone, with the driver's DPB: an IDR after a long drop,
+    // nothing left to predict from (why long-term frames are needed).
     Case {
         name: "invalidate",
         continuation: Continuation {
             ltr_frames: 0,
-            max_ref_frames: 0,
             refs_l0: 0,
         },
         marks: false,
-        use_held: false,
-        invalidate: true,
     },
-    // Two long-term slots, invalidation, NVENC picking the reference.
-    Case {
-        name: "ltr",
-        continuation: Continuation {
-            ltr_frames: 2,
-            max_ref_frames: 0,
-            refs_l0: 0,
-        },
-        marks: true,
-        use_held: false,
-        invalidate: true,
-    },
-    // With LTR on, the driver predicts from one short-term frame: ask for
-    // three, its choice without LTR.
+    // What hosts open (`CONTINUING`): two long-term slots, and three
+    // references, since with LTR on the driver predicts from one.
     Case {
         name: "ltr-refs3",
-        continuation: Continuation {
-            ltr_frames: 2,
-            max_ref_frames: 0,
-            refs_l0: 3,
-        },
+        continuation: CONTINUING,
         marks: true,
-        use_held: false,
-        invalidate: true,
-    },
-    // A larger DPB, as the SDK advises for invalidation, four references,
-    // and the held slot named on the continuing frame.
-    Case {
-        name: "ltr-dpb8-refs4-use",
-        continuation: Continuation {
-            ltr_frames: 2,
-            max_ref_frames: 8,
-            refs_l0: 4,
-        },
-        marks: true,
-        use_held: true,
-        invalidate: true,
     },
 ];
 
@@ -195,10 +158,8 @@ fn continuing_after_dropped_frames() {
                 };
                 let continuing = i > 0 && !dropped(i) && dropped(i - 1);
                 if continuing {
-                    if case.invalidate {
-                        for &t in &pending_invalid {
-                            encoder.invalidate(t).unwrap();
-                        }
+                    for &t in &pending_invalid {
+                        encoder.invalidate(t).unwrap();
                     }
                     // A mark the viewer never got is invalidated with its
                     // frame: its slot is free again.
@@ -224,9 +185,6 @@ fn continuing_after_dropped_frames() {
                 let control = FrameControl {
                     keyframe: i == 0,
                     mark_ltr: if case.marks { mark } else { None },
-                    use_ltr: (continuing && case.use_held)
-                        .then(|| held.map(|h| 1 << h))
-                        .flatten(),
                 };
                 let (unit, report) = encoder.encode_frame(&on_gpu, control).unwrap().unwrap();
                 if let (true, Some(slot)) = (case.marks, control.mark_ltr) {
@@ -365,7 +323,6 @@ fn partly(i: usize) -> bool {
 /// first recovery on, the pictures must be the same, bit for bit.
 #[test]
 fn the_hosts_bookkeeping_against_nvenc() {
-    use couch_codec_nvenc::CONTINUING;
     use couch_media::{
         LongTerm,
         continuation::{Continuity, MAX_AGE},
@@ -453,7 +410,6 @@ fn the_hosts_bookkeeping_against_nvenc() {
         let control = FrameControl {
             keyframe,
             mark_ltr: c.mark(t),
-            use_ltr: None,
         };
         let (unit, report) = encoder.encode_frame(&on_gpu, control).unwrap().unwrap();
         let frame = FrameRef { epoch, seq };

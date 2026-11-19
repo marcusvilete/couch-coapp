@@ -407,15 +407,6 @@ pub struct VideoParams {
     pub fps: u32,
 }
 
-/// A frame as it arrives at the viewer side of a transport.
-#[derive(Debug, Clone)]
-pub struct ReceivedFrame {
-    pub epoch: EpochId,
-    pub seq: u32,
-    pub frame: EncodedFrame,
-    pub arrived_at: Micros,
-}
-
 /// What the rate controller knows about one viewer's path, whatever the
 /// transport. A WebRTC transport could fill the same fields from TWCC.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

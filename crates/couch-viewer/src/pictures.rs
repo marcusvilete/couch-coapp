@@ -29,7 +29,7 @@ struct Entry {
 
 /// A picture made from the clipboard or a file, ready to paste where the
 /// pointer was.
-pub struct Ready {
+pub(crate) struct Ready {
     pub prepared: Prepared,
     pub at: Option<Point>,
 }
@@ -39,7 +39,7 @@ type DecodedOne = (PictureId, Option<Arc<Decoded>>);
 /// A picture made from the clipboard or a file off the window's thread.
 type PreparedOne = Result<Ready, picture::PictureError>;
 
-pub struct Pictures {
+pub(crate) struct Pictures {
     entries: HashMap<PictureId, Entry>,
     /// Oldest first, for letting the unshown go.
     order: VecDeque<PictureId>,
@@ -79,7 +79,7 @@ impl Pictures {
     /// once the board shows it ([`Self::sync`]). `shown` are the pictures the
     /// board shows, kept, but never more than the board holds: a host
     /// naming more can't make a window keep them all.
-    pub fn add(&mut self, id: PictureId, bytes: Vec<u8>, shown: &BTreeSet<PictureId>) {
+    pub(crate) fn add(&mut self, id: PictureId, bytes: Vec<u8>, shown: &BTreeSet<PictureId>) {
         if self.entries.contains_key(&id) {
             return;
         }
@@ -99,7 +99,7 @@ impl Pictures {
 
     /// The board shows `shown` now: their images are decoded (once), the
     /// rest let go of theirs.
-    pub fn sync(&mut self, shown: &BTreeSet<PictureId>) {
+    pub(crate) fn sync(&mut self, shown: &BTreeSet<PictureId>) {
         let shown = protected(shown);
         for (id, e) in &mut self.entries {
             if !shown.contains(id) {
@@ -150,16 +150,16 @@ impl Pictures {
         self.order = kept;
     }
 
-    pub fn bytes(&self, id: &PictureId) -> Option<Arc<Vec<u8>>> {
+    pub(crate) fn bytes(&self, id: &PictureId) -> Option<Arc<Vec<u8>>> {
         self.entries.get(id).map(|e| e.bytes.clone())
     }
 
-    pub fn image(&self, id: &PictureId) -> Option<&Arc<Decoded>> {
+    pub(crate) fn image(&self, id: &PictureId) -> Option<&Arc<Decoded>> {
         self.entries.get(id).and_then(|e| e.image.as_ref())
     }
 
     /// Pictures decoded since: whether any was, to paint again.
-    pub fn poll_decoded(&mut self) -> bool {
+    pub(crate) fn poll_decoded(&mut self) -> bool {
         let mut any = false;
         while let Ok((id, image)) = self.decoded.1.try_recv() {
             // Asked and not let go meanwhile: shown.
@@ -175,7 +175,7 @@ impl Pictures {
 
     /// A picture from the clipboard or a file, made what the board takes off
     /// this thread; [`Self::poll_prepared`] hands it over. One at a time.
-    pub fn prepare(&mut self, raw: Vec<u8>, at: Option<Point>) -> bool {
+    pub(crate) fn prepare(&mut self, raw: Vec<u8>, at: Option<Point>) -> bool {
         if self.preparing {
             return false;
         }
@@ -188,7 +188,7 @@ impl Pictures {
     }
 
     /// The picture made, if one was.
-    pub fn poll_prepared(&mut self) -> Option<Result<Ready, picture::PictureError>> {
+    pub(crate) fn poll_prepared(&mut self) -> Option<Result<Ready, picture::PictureError>> {
         let ready = self.prepared.1.try_recv().ok()?;
         self.preparing = false;
         Some(ready)
@@ -203,7 +203,7 @@ fn protected(shown: &BTreeSet<PictureId>) -> BTreeSet<PictureId> {
 
 /// The clipboard's picture, if it holds one: a PNG, or a bitmap (a Windows
 /// screenshot comes as one). On the window's thread: SDL's video is there.
-pub fn clipboard_image() -> Option<Vec<u8>> {
+pub(crate) fn clipboard_image() -> Option<Vec<u8>> {
     [c"image/png", c"image/bmp", c"image/jpeg"]
         .into_iter()
         .find_map(clipboard_data)
@@ -235,7 +235,7 @@ fn clipboard_data(mime: &CStr) -> Option<Vec<u8>> {
 
 /// The first picture file copied to the clipboard (Explorer's or a file
 /// manager's Ctrl+C on a file), by its name: pasted as a dropped one is.
-pub fn clipboard_picture_file() -> Option<std::path::PathBuf> {
+pub(crate) fn clipboard_picture_file() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     let files = couch_platform_win::clipboard::copied_files();
     #[cfg(not(windows))]
@@ -286,7 +286,7 @@ fn percent_decode(s: &str) -> Option<String> {
 }
 
 /// A dropped file's bytes, if it is no larger than a picture may start.
-pub fn read_dropped(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_dropped(path: &Path) -> Option<Vec<u8>> {
     let len = std::fs::metadata(path).ok()?.len();
     if len == 0 || len > MAX_INPUT_BYTES as u64 {
         return None;

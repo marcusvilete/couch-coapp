@@ -2,8 +2,6 @@
 //! - `identity.key`: the endpoint's secret key, sealed.
 //! - `settings.json`: the display name. Nothing secret.
 //! - `shortcuts.json`: the shortcut keys the user moved off their defaults.
-//! - `network.json`: the relay setting of before M26a, read once to carry it
-//!   over into `relays.sealed`, and left as it is for older versions.
 //! - `relays.sealed`: the relays this profile holds, with their tokens,
 //!   sealed (M26a, `crate::relays`).
 //! - `audio.json`: the stream window's volume (P6).
@@ -50,31 +48,9 @@ use crate::{
     secrets::SecretStore,
 };
 
-/// `network.json`: the relay setting of before M26a.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct NetworkSettings {
-    pub relay: LegacyRelaySetting,
-}
-
-/// The one relay a profile used before M26a; [`SavedRelays::carried_over`]
-/// turns it into registered relays.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum LegacyRelaySetting {
-    /// The relay this build was made with, or iroh's public relays in a
-    /// build without one.
-    #[default]
-    Builtin,
-    /// iroh's public relays.
-    Public,
-    /// One relay server by URL, without a token.
-    Custom(String),
-}
-
 const IDENTITY_FILE: &str = "identity.key";
 const SETTINGS_FILE: &str = "settings.json";
 const SHORTCUTS_FILE: &str = "shortcuts.json";
-const NETWORK_FILE: &str = "network.json";
 const AUDIO_FILE: &str = "audio.json";
 const HOST_AUDIO_FILE: &str = "host-audio.json";
 const STREAM_WINDOW_FILE: &str = "stream-window.json";
@@ -88,11 +64,9 @@ const RELAYS_FILE: &str = "relays.sealed";
 const RELAYS_MAGIC: &[u8] = b"CCL1";
 const ROOMS_DIR: &str = "rooms";
 /// Leads every room file, before the postcard body, so a format change is
-/// recognized rather than misread. `CCR3` (M13) adds the chain of
-/// handovers; `CCR2` files are read through [`legacy`] and written back as
-/// `CCR3` the next time the room is saved.
+/// recognized rather than misread: `CCR3` since M13 (the chain of
+/// handovers). Earlier files aren't read: profiles start fresh at 1.0.
 const ROOM_MAGIC: &[u8] = b"CCR3";
-const ROOM_MAGIC_2: &[u8] = b"CCR2";
 /// A restored room's mark once its owner stopped waiting (M13).
 const STOPPED_MARK: &[u8] = b"stopped";
 
@@ -110,10 +84,9 @@ pub enum StoreError {
 
 /// The settings files a backup carries, as they are (`crate::backup`).
 /// Not the webview's own storage (the room order, the last session setup).
-const BACKED_UP_FILES: [&str; 9] = [
+const BACKED_UP_FILES: [&str; 8] = [
     SETTINGS_FILE,
     SHORTCUTS_FILE,
-    NETWORK_FILE,
     AUDIO_FILE,
     HOST_AUDIO_FILE,
     STREAM_WINDOW_FILE,
@@ -123,7 +96,7 @@ const BACKED_UP_FILES: [&str; 9] = [
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Settings {
+pub(crate) struct Settings {
     pub display_name: Option<String>,
 }
 
@@ -143,7 +116,7 @@ impl std::fmt::Debug for RememberedRoom {
     }
 }
 
-pub struct Store {
+pub(crate) struct Store {
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
 }
@@ -156,7 +129,7 @@ struct Undo {
 }
 
 impl Store {
-    pub fn new(dir: impl Into<PathBuf>, secrets: Arc<dyn SecretStore>) -> Self {
+    pub(crate) fn new(dir: impl Into<PathBuf>, secrets: Arc<dyn SecretStore>) -> Self {
         Self {
             dir: dir.into(),
             secrets,
@@ -166,7 +139,7 @@ impl Store {
     /// This profile's key, created on first use. A key that can't be read
     /// is an error rather than a silent new identity, which would orphan
     /// every room.
-    pub fn identity(&self) -> Result<SecretKey, StoreError> {
+    pub(crate) fn identity(&self) -> Result<SecretKey, StoreError> {
         let path = self.dir.join(IDENTITY_FILE);
         match fs::read(&path) {
             Ok(sealed) => {
@@ -196,13 +169,13 @@ impl Store {
         }
     }
 
-    /// The relays this profile holds (M26a): read, or carried over from
-    /// `network.json` the first time, the build's own relay written in, and
-    /// saved when that changed anything. A file that can't be read (sealed
+    /// The relays this profile holds (M26a): read, or none the first time,
+    /// the build's own relay written in, and saved when that changed
+    /// anything. A file that can't be read (sealed
     /// by another Windows user, damaged) is set aside as
     /// `relays.sealed.unreadable`, never overwritten, and the relays start
     /// again from the build's.
-    pub fn relays(&self, rules: &RelayRules, now_unix: u64) -> SavedRelays {
+    pub(crate) fn relays(&self, rules: &RelayRules, now_unix: u64) -> SavedRelays {
         let path = self.dir.join(RELAYS_FILE);
         let (mut saved, mut changed) = match fs::read(&path) {
             Ok(sealed) => match self.read_relays(&sealed) {
@@ -219,10 +192,7 @@ impl Store {
                     (SavedRelays::default(), true)
                 }
             },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let old = network(&self.dir).relay;
-                (SavedRelays::carried_over(&old, rules, now_unix), true)
-            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (SavedRelays::default(), true),
             Err(e) => {
                 // Not written over: it may be there, unreadable for now.
                 tracing::error!("{}: {e}", path.display());
@@ -243,7 +213,7 @@ impl Store {
         serde_json::from_slice(bytes.strip_prefix(RELAYS_MAGIC)?).ok()
     }
 
-    pub fn save_relays(&self, relays: &SavedRelays) -> Result<(), StoreError> {
+    pub(crate) fn save_relays(&self, relays: &SavedRelays) -> Result<(), StoreError> {
         let path = self.dir.join(RELAYS_FILE);
         let mut bytes = RELAYS_MAGIC.to_vec();
         bytes.extend(serde_json::to_vec(relays).expect("relays serialize"));
@@ -257,7 +227,7 @@ impl Store {
         write_atomic(&path, &sealed)
     }
 
-    pub fn settings(&self) -> Settings {
+    pub(crate) fn settings(&self) -> Settings {
         let path = self.dir.join(SETTINGS_FILE);
         match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
@@ -268,14 +238,14 @@ impl Store {
         }
     }
 
-    pub fn save_settings(&self, settings: &Settings) -> Result<(), StoreError> {
+    pub(crate) fn save_settings(&self, settings: &Settings) -> Result<(), StoreError> {
         let bytes = serde_json::to_vec_pretty(settings).expect("settings serialize");
         write_atomic(&self.dir.join(SETTINGS_FILE), &bytes)
     }
 
     /// Every remembered room that can be read. Unreadable files are logged
     /// and left alone.
-    pub fn rooms(&self) -> Vec<RememberedRoom> {
+    pub(crate) fn rooms(&self) -> Vec<RememberedRoom> {
         let Ok(entries) = fs::read_dir(self.dir.join(ROOMS_DIR)) else {
             return Vec::new();
         };
@@ -300,17 +270,20 @@ impl Store {
             source,
         })?;
         let bytes = self.secrets.unprotect(&sealed).map_err(|_| unreadable())?;
-        if let Some(body) = bytes.strip_prefix(ROOM_MAGIC) {
-            return whole(body).ok_or_else(unreadable);
-        }
-        // From before M13: the same room, its founder as its owner.
-        let body = bytes.strip_prefix(ROOM_MAGIC_2).ok_or_else(unreadable)?;
-        whole::<legacy::RememberedRoom>(body)
-            .map(Into::into)
-            .ok_or_else(unreadable)
+        let Some(body) = bytes.strip_prefix(ROOM_MAGIC) else {
+            // Ours, but from before 1.0 (`CCR2`): profiles start fresh at
+            // 1.0. Set aside, so it no longer counts as a room
+            // (`has_rooms`, which a restore checks) though none is shown.
+            let aside = path.with_extension("room.old");
+            if let Err(e) = fs::rename(path, &aside) {
+                tracing::warn!("{}: {e}", aside.display());
+            }
+            return Err(unreadable());
+        };
+        whole(body).ok_or_else(unreadable)
     }
 
-    pub fn save_room(&self, id: RoomId, room: &RememberedRoom) -> Result<(), StoreError> {
+    pub(crate) fn save_room(&self, id: RoomId, room: &RememberedRoom) -> Result<(), StoreError> {
         let path = self.room_path(id);
         let mut bytes = ROOM_MAGIC.to_vec();
         bytes.extend(postcard::to_stdvec(room).expect("room serializes"));
@@ -324,7 +297,7 @@ impl Store {
         write_atomic(&path, &sealed)
     }
 
-    pub fn forget_room(&self, id: RoomId) -> Result<(), StoreError> {
+    pub(crate) fn forget_room(&self, id: RoomId) -> Result<(), StoreError> {
         let path = self.room_path(id);
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -353,7 +326,7 @@ impl Store {
     /// (the mark is empty), or its owner stopped waiting and it hasn't heard
     /// everyone yet (the mark says `stopped`, M13). Anything else in it
     /// reads as catching up, the safer of the two.
-    pub fn restore_mark(&self, id: RoomId) -> Option<RestoreMark> {
+    pub(crate) fn restore_mark(&self, id: RoomId) -> Option<RestoreMark> {
         let bytes = fs::read(self.restored_path(id)).ok()?;
         Some(if bytes == STOPPED_MARK {
             RestoreMark::Unconfirmed
@@ -364,7 +337,7 @@ impl Store {
 
     /// Where the restored room stands now; [`RestoreMark::Done`] takes the
     /// mark away.
-    pub fn set_restore_mark(&self, id: RoomId, mark: RestoreMark) {
+    pub(crate) fn set_restore_mark(&self, id: RoomId, mark: RestoreMark) {
         let body: &[u8] = match mark {
             RestoreMark::Done => return self.clear_restored(id),
             RestoreMark::CatchingUp => b"",
@@ -377,12 +350,12 @@ impl Store {
 
     /// The room came from a backup and hasn't caught up with its members.
     #[cfg(test)]
-    pub fn is_restored(&self, id: RoomId) -> bool {
+    pub(crate) fn is_restored(&self, id: RoomId) -> bool {
         self.restored_path(id).exists()
     }
 
     /// The room has caught up: it may sign again after a restart too.
-    pub fn clear_restored(&self, id: RoomId) {
+    pub(crate) fn clear_restored(&self, id: RoomId) {
         let path = self.restored_path(id);
         if let Err(e) = fs::remove_file(&path)
             && e.kind() != io::ErrorKind::NotFound
@@ -393,7 +366,7 @@ impl Store {
 
     /// Removes marks whose room isn't there: what a restore cut short, or a
     /// room forgotten between the two, leaves.
-    pub fn sweep_restored(&self) {
+    pub(crate) fn sweep_restored(&self) {
         let Ok(entries) = fs::read_dir(self.dir.join(ROOMS_DIR)) else {
             return;
         };
@@ -412,7 +385,7 @@ impl Store {
 
     /// Whether this profile remembers any room, even one it can't read or
     /// one it is leaving: a backup restores only into a profile with none.
-    pub fn has_rooms(&self) -> bool {
+    pub(crate) fn has_rooms(&self) -> bool {
         fs::read_dir(self.dir.join(ROOMS_DIR)).is_ok_and(|entries| {
             entries
                 .flatten()
@@ -424,7 +397,7 @@ impl Store {
     /// (not those on their way out), and the settings files. An owned
     /// room's password key and invites stay out: an old backup must never
     /// bring back an invite revoked or a password changed since.
-    pub fn backup_contents(&self) -> Result<backup::Contents, StoreError> {
+    pub(crate) fn backup_contents(&self) -> Result<backup::Contents, StoreError> {
         let identity = self.identity()?.to_bytes();
         let rooms = self
             .rooms()
@@ -462,7 +435,7 @@ impl Store {
     /// room is marked to catch up before it signs anything, and the settings
     /// files are written. The engine must start again to use it. A restore
     /// that fails partway is undone: the profile is left as it was.
-    pub fn restore(&self, contents: &backup::Contents) -> Result<(), StoreError> {
+    pub(crate) fn restore(&self, contents: &backup::Contents) -> Result<(), StoreError> {
         if self.has_rooms() {
             return Err(StoreError::HasRooms);
         }
@@ -582,25 +555,6 @@ pub(crate) fn shortcuts(dir: &Path) -> Shortcuts {
 pub(crate) fn save_shortcuts(dir: &Path, shortcuts: &Shortcuts) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(&shortcuts.changed()).expect("keys serialize");
     write_atomic(&dir.join(SHORTCUTS_FILE), &bytes)
-}
-
-/// The network settings (`network.json`); the defaults if there are none or
-/// they can't be read. Only the engine writes it.
-pub(crate) fn network(dir: &Path) -> NetworkSettings {
-    let path = dir.join(NETWORK_FILE);
-    match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            tracing::warn!("ignoring {}: {e}", path.display());
-            NetworkSettings::default()
-        }),
-        Err(_) => NetworkSettings::default(),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn save_network(dir: &Path, network: &NetworkSettings) -> Result<(), StoreError> {
-    let bytes = serde_json::to_vec_pretty(network).expect("settings serialize");
-    write_atomic(&dir.join(NETWORK_FILE), &bytes)
 }
 
 /// The stream window's volume (`audio.json`, P6); full volume if there is
@@ -739,7 +693,8 @@ pub(crate) fn save_streaming(dir: &Path, settings: StreamingSettings) -> Result<
 }
 
 /// `app.json` (M25c): the app's own behaviour on this PC. A field missing
-/// (a file from before it) takes its default.
+/// takes its default (`serde(default)`), so a field added in a later version
+/// keeps the user's other settings instead of resetting the whole file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct AppSettings {
@@ -834,69 +789,6 @@ fn whole<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     }
 }
 
-/// What rooms were saved as before M13 (room files `CCR2`, backups of
-/// format 1): no chain of handovers, the founder named the owner.
-pub(crate) mod legacy {
-    use couch_proto::{
-        ids::{MemberId, RoomNonce},
-        room::{MemberRecord, RoomPolicy, Signed},
-    };
-    use couch_room::room::{Leaving, SavedInvite, SavedRoom};
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize)]
-    pub(crate) struct Room {
-        owner: MemberId,
-        nonce: RoomNonce,
-        policy: Signed<RoomPolicy>,
-        records: Vec<Signed<MemberRecord>>,
-        invites: Vec<SavedInvite>,
-        leaving: Option<Leaving>,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    pub(crate) struct RememberedRoom {
-        saved: Room,
-        password: Option<[u8; 32]>,
-    }
-
-    impl From<RememberedRoom> for super::RememberedRoom {
-        fn from(old: RememberedRoom) -> Self {
-            let room = old.saved;
-            Self {
-                saved: SavedRoom {
-                    founder: room.owner,
-                    nonce: room.nonce,
-                    policy: room.policy,
-                    handovers: Vec::new(),
-                    records: room.records,
-                    invites: room.invites,
-                    leaving: room.leaving,
-                },
-                password: old.password,
-            }
-        }
-    }
-
-    #[cfg(test)]
-    impl RememberedRoom {
-        pub(crate) fn from_new(new: &super::RememberedRoom) -> Self {
-            let s = new.saved.clone();
-            Self {
-                saved: Room {
-                    owner: s.founder,
-                    nonce: s.nonce,
-                    policy: s.policy,
-                    records: s.records,
-                    invites: s.invites,
-                    leaving: s.leaving,
-                },
-                password: new.password,
-            }
-        }
-    }
-}
-
 /// Whether a backup carries the settings file `name`.
 #[cfg(test)]
 pub(crate) fn backed_up(name: &str) -> bool {
@@ -987,7 +879,7 @@ mod tests {
     }
 
     /// M29: converting HDR is on unless the user turned it off, and a file
-    /// from before it, or a damaged one, leaves it on.
+    /// without the field, or a damaged one, leaves it on.
     #[test]
     fn hdr_conversion_is_on_unless_turned_off() {
         let dir = tempfile::tempdir().unwrap();
@@ -1279,10 +1171,10 @@ mod tests {
         assert_eq!(fs::read(to.path().join(SHORTCUTS_FILE)).unwrap(), b"mine");
     }
 
-    /// M13: a room saved before handovers existed (`CCR2`) still reads, its
-    /// founder as owner, and is saved as `CCR3` from then on.
+    /// A room file from before 1.0 (`CCR2`, before M13) is skipped, never
+    /// misread: profiles start fresh at 1.0. The rooms saved now still read.
     #[test]
-    fn a_room_saved_before_handovers_still_reads() {
+    fn a_room_file_from_before_1_0_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let room = owned_room(1);
@@ -1290,17 +1182,19 @@ mod tests {
             saved: room.saved(),
             password: Some([4; 32]),
         };
-        let mut bytes = ROOM_MAGIC_2.to_vec();
-        bytes.extend(postcard::to_stdvec(&legacy::RememberedRoom::from_new(&remembered)).unwrap());
-        let sealed = Unprotected.protect(&bytes).unwrap();
+        let mut old = b"CCR2".to_vec();
+        old.extend(postcard::to_stdvec(&remembered).unwrap());
         fs::create_dir_all(dir.path().join(ROOMS_DIR)).unwrap();
-        fs::write(store.room_path(room.id()), sealed).unwrap();
-        assert_eq!(store.rooms(), vec![remembered.clone()]);
+        fs::write(
+            dir.path().join(ROOMS_DIR).join("old.room"),
+            Unprotected.protect(&old).unwrap(),
+        )
+        .unwrap();
+        assert!(store.rooms().is_empty());
+        // Set aside: no longer a room, so a backup can be restored here.
+        assert!(!store.has_rooms());
+        assert!(dir.path().join(ROOMS_DIR).join("old.room.old").exists());
         store.save_room(room.id(), &remembered).unwrap();
-        let saved = Unprotected
-            .unprotect(&fs::read(store.room_path(room.id())).unwrap())
-            .unwrap();
-        assert!(saved.starts_with(ROOM_MAGIC));
         assert_eq!(store.rooms(), vec![remembered]);
     }
 
@@ -1458,27 +1352,6 @@ mod tests {
         assert_eq!(shortcuts(dir.path()), Shortcuts::default());
     }
 
-    #[test]
-    fn network_settings_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(network(dir.path()).relay, LegacyRelaySetting::Builtin);
-        // A choice saved before M7 keeps applying.
-        fs::write(dir.path().join(NETWORK_FILE), br#"{"relay": "public"}"#).unwrap();
-        assert_eq!(network(dir.path()).relay, LegacyRelaySetting::Public);
-        let custom = NetworkSettings {
-            relay: LegacyRelaySetting::Custom("https://relay.example.com".into()),
-        };
-        save_network(dir.path(), &custom).unwrap();
-        assert_eq!(network(dir.path()), custom);
-        let text = fs::read_to_string(dir.path().join(NETWORK_FILE)).unwrap();
-        assert!(
-            text.contains(r#""custom": "https://relay.example.com""#),
-            "{text}"
-        );
-        fs::write(dir.path().join(NETWORK_FILE), b"{}").unwrap();
-        assert_eq!(network(dir.path()), NetworkSettings::default());
-    }
-
     /// A store whose seal is a fixed byte flip, so a file sealed by "another
     /// user" fails to open as it would with DPAPI.
     struct Flip(u8);
@@ -1494,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn relays_carry_over_once_and_stay_sealed() {
+    fn relays_start_with_the_build_s_and_stay_sealed() {
         use couch_net::endpoint::RelayToken;
 
         use crate::build_config::BuiltInRelay;
@@ -1508,25 +1381,15 @@ mod tests {
             test_build: false,
             public_relays: true,
         };
-        let custom = NetworkSettings {
-            relay: LegacyRelaySetting::Custom("https://mine.example".into()),
-        };
-        save_network(dir.path(), &custom).unwrap();
         let store = Store::new(dir.path(), Arc::new(Flip(0x5a)));
 
         let first = store.relays(&rules, 1);
         let urls: Vec<&str> = first.relays.iter().map(|r| r.url.as_str()).collect();
-        assert_eq!(
-            urls,
-            ["https://relay.couch.example/", "https://mine.example/"]
-        );
-        // network.json stays for the version before.
-        assert_eq!(network(dir.path()), custom);
+        assert_eq!(urls, ["https://relay.couch.example/"]);
         let sealed = fs::read(dir.path().join(RELAYS_FILE)).unwrap();
         assert!(!sealed.windows(11).any(|w| w == b"build-token"), "sealed");
 
-        // Carried over once: a later change of network.json is ignored.
-        save_network(dir.path(), &NetworkSettings::default()).unwrap();
+        // Read back as saved.
         let mut again = store.relays(&rules, 2);
         assert_eq!(again, first);
         again.keep_public = true;

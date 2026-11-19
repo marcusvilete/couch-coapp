@@ -41,7 +41,7 @@ import {
 import { type BoardView, cloneElement } from "./board";
 
 /** Batches go out at most this often: the host takes 40 a second. */
-export const BATCH_EVERY_MS = 30;
+const BATCH_EVERY_MS = 30;
 /** Laser points at most this often (the host takes 60 marks a second). */
 const LASER_EVERY_MS = 20;
 /** Pings at most this often. */
@@ -58,11 +58,11 @@ const PASTE_STEP = 1300;
 const FULL = 65535;
 /** Where pasted text lands without a pointer over the picture. */
 const TEXT_AT: BoardPoint = { x: 6554, y: 6554 };
-export const TOO_MANY = "You've drawn all you may: erase some first";
+const TOO_MANY = "You've drawn all you may: erase some first";
 export const TOO_LONG = "A text box holds at most 500 characters and 50 lines";
 /** A picture's resize handles: how near a corner a press takes it, in
  * picture heights (M27e). */
-export const HANDLE = 0.018;
+const HANDLE = 0.018;
 /** A picture pasted fits this share of the picture's height and width. */
 const PICTURE_FITS = 0.4;
 /** A picture resized is at least this tall and wide, in picture heights. */
@@ -72,7 +72,7 @@ const PICTURE_LEAST = 0.03;
  * its size wide. The page measures with its own font; until it says, and in
  * the shared cases, an estimate (half an em a character). */
 export type Measure = (line: string) => number;
-export const estimate: Measure = (line) => chars(line).length * 0.5;
+const estimate: Measure = (line) => chars(line).length * 0.5;
 
 /** A key while typing in a text box: the page's keys go here, never to the
  * drawing keys, until the box is finished. `finish`: Esc or Ctrl+Enter;
@@ -129,7 +129,7 @@ function moveTo(t: Typing, to: number, extend: boolean) {
 /** The text box being typed in, for painting it: its corners, the caret's
  * top and bottom, the selection's boxes, one per line (picture
  * coordinates), and its size (picture heights). */
-export interface TextCursor {
+interface TextCursor {
   corners: [BoardPoint, BoardPoint];
   caret: [BoardPoint, BoardPoint];
   selection: [BoardPoint, BoardPoint][];
@@ -203,10 +203,10 @@ function load(e: BoardElement): number {
 
 /** How the toolbar's one fade button steps: a click goes round, the
  * wheel goes longer or shorter. */
-export type FadeStep = "next" | "longer" | "shorter";
+type FadeStep = "next" | "longer" | "shorter";
 
 /** What a key did. */
-export type Keyed = "done" | "leaveDrawing" | "toggleToolbar";
+type Keyed = "done" | "leaveDrawing" | "toggleToolbar";
 
 /** One change to one of our elements: what it was and what it became. */
 interface Change {
@@ -244,7 +244,7 @@ export function lineWidth(kind: BoardElementKind, width: number): number {
   return kind === "highlighter" ? HIGHLIGHTER_WIDTHS[i] : LINE_WIDTHS[i];
 }
 
-export function isStroke(kind: BoardElementKind) {
+function isStroke(kind: BoardElementKind) {
   return kind === "pen" || kind === "highlighter";
 }
 
@@ -300,7 +300,7 @@ export function validBatch(ops: BoardOpView[]): boolean {
 }
 
 /** `ops` in batches the checks allow, in order (`couch_proto::board::batches`). */
-export function batches(ops: BoardOpView[]): BoardOpView[][] {
+function batches(ops: BoardOpView[]): BoardOpView[][] {
   const out: BoardOpView[][] = [];
   let count = 0;
   for (const op of ops) {

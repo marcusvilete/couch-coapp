@@ -14,13 +14,13 @@ use couch_platform_win::{
     fake_game::{self, Action, Event},
 };
 
-pub struct Args {
+pub(crate) struct Args {
     pub swap_after: Option<f64>,
     pub close_after: Option<f64>,
     pub exit_after: Option<f64>,
 }
 
-pub fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) fn run(args: Args) -> anyhow::Result<()> {
     let (tx, commands) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {

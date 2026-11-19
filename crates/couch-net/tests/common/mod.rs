@@ -5,7 +5,7 @@ use couch_net::{
     endpoint::{self, EndpointOptions},
 };
 
-pub async fn bind(options: EndpointOptions) -> Endpoint {
+pub(crate) async fn bind(options: EndpointOptions) -> Endpoint {
     // Timers (netem's included) are otherwise as coarse as 15.6 ms.
     #[cfg(windows)]
     couch_platform_win::timer::request_1ms_resolution();
@@ -16,7 +16,7 @@ pub async fn bind(options: EndpointOptions) -> Endpoint {
 /// Returns (host side, viewer side). (`liveness` keeps the control streams,
 /// so it connects by itself.)
 #[allow(dead_code)]
-pub async fn connect(
+pub(crate) async fn connect(
     host: &Endpoint,
     viewer: &Endpoint,
     addr: EndpointAddr,

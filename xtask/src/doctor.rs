@@ -30,7 +30,7 @@ impl Checks {
     }
 }
 
-pub fn run(root: &Path) -> ExitCode {
+pub(crate) fn run(root: &Path) -> ExitCode {
     let mut checks = Checks::default();
 
     checks.require("Rust toolchain", rust_toolchain(root));

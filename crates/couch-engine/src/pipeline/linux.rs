@@ -46,7 +46,7 @@ use crate::{DriverName, DriverState, HostCapabilities, NoticeView, ScreenArea};
 /// The one source a Linux host lists: whatever the user shares through the
 /// desktop's dialog, a window or a screen. A screen to the pipeline (no
 /// window to keep in front, the PC's sound).
-pub const SHARED: NativeId = 1;
+pub(super) const SHARED: NativeId = 1;
 
 /// Why a Linux app may not start at sign-in.
 const NOT_AN_APPIMAGE: &str = "only the AppImage starts at sign-in";

@@ -12,7 +12,7 @@ use couch_net::{
 
 /// QUIC congestion controller: `media` (ours, the default) or one of noq's.
 #[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum CongestionArg {
+pub(crate) enum CongestionArg {
     Media,
     Bbr3,
     Cubic,
@@ -20,7 +20,7 @@ pub enum CongestionArg {
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct NetArgs {
+pub(crate) struct NetArgs {
     /// Relays: `n0` (iroh's public relays, development only), `none`, or a relay URL.
     #[arg(long, default_value = "n0")]
     pub relay: String,
@@ -45,7 +45,7 @@ pub struct NetArgs {
 
 impl NetArgs {
     /// Options for binding, plus the netem transport if one is in use.
-    pub fn options(&self) -> anyhow::Result<(EndpointOptions, Option<Arc<NetemTransport>>)> {
+    pub(crate) fn options(&self) -> anyhow::Result<(EndpointOptions, Option<Arc<NetemTransport>>)> {
         let relays = match self.relay.as_str() {
             "n0" | "none" if self.relay_token.is_some() => {
                 bail!("--relay-token goes with a relay URL in --relay")
@@ -85,7 +85,7 @@ impl NetArgs {
     /// The flags to pass on to a child `host` or `view` process (for
     /// `latency-probe`, Windows only).
     #[cfg(windows)]
-    pub fn to_args(&self) -> Vec<String> {
+    pub(crate) fn to_args(&self) -> Vec<String> {
         let mut args = vec!["--relay".into(), self.relay.clone()];
         if let Some(token) = &self.relay_token {
             args.push("--relay-token".into());
@@ -113,7 +113,7 @@ fn parse_token(text: &str) -> Result<RelayToken, String> {
 }
 
 /// The address viewers should dial to reach this endpoint.
-pub async fn dial_addr(
+pub(crate) async fn dial_addr(
     endpoint: &couch_net::Endpoint,
     netem: Option<&NetemTransport>,
     uses_relays: bool,
@@ -130,7 +130,7 @@ pub async fn dial_addr(
 }
 
 impl NetArgs {
-    pub fn uses_relays(&self) -> bool {
+    pub(crate) fn uses_relays(&self) -> bool {
         self.relay != "none" && self.netem.is_none()
     }
 }

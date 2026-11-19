@@ -19,9 +19,9 @@ export type Notice = { id: number; text: string; tone: "info" | "warn" };
 
 /** An invite link the app was opened with. `seq` tells two openings of the
  * same link apart. */
-export type OpenedInvite = { link: string; seq: number };
+type OpenedInvite = { link: string; seq: number };
 
-export type Lobby = {
+type Lobby = {
   info: EngineInfo | null;
   profile: ProfileView | null;
   /** By name. */

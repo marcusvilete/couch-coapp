@@ -27,7 +27,7 @@ use crate::stats::Samples;
 /// Clicks come every 500 ms; anything later than this isn't the same click.
 const MAX_LATENCY_US: u64 = 400_000;
 
-pub struct AudioProbe {
+pub(crate) struct AudioProbe {
     stop: StopOnDrop,
     reference: JoinHandle<anyhow::Result<Vec<u64>>>,
     output: JoinHandle<anyhow::Result<Vec<u64>>>,
@@ -42,7 +42,7 @@ impl Drop for StopOnDrop {
     }
 }
 
-pub struct AudioResult {
+pub(crate) struct AudioResult {
     /// Click to playback, milliseconds.
     pub latency: Samples,
     pub clicks: usize,
@@ -51,7 +51,7 @@ pub struct AudioResult {
 impl AudioProbe {
     /// Listens to `clock_pid` (the latency clock) and `viewer_pid` (the
     /// `view` process, whose child plays the stream).
-    pub fn start(clock_pid: u32, viewer_pid: u32) -> anyhow::Result<Self> {
+    pub(crate) fn start(clock_pid: u32, viewer_pid: u32) -> anyhow::Result<Self> {
         let stop = StopOnDrop(Arc::new(AtomicBool::new(false)));
         let spawn = |pid: u32, name: &str| {
             let stop = stop.0.clone();
@@ -67,7 +67,7 @@ impl AudioProbe {
         })
     }
 
-    pub fn finish(self) -> anyhow::Result<AudioResult> {
+    pub(crate) fn finish(self) -> anyhow::Result<AudioResult> {
         self.stop.0.store(true, Ordering::SeqCst);
         let join = |h: JoinHandle<anyhow::Result<Vec<u64>>>| {
             h.join()
