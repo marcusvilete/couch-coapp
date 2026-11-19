@@ -9,6 +9,14 @@ import type { ReactNode } from "react";
 import { popupPadding } from "./popper";
 import "./Controls.css";
 
+/** Radix gives back a choice as text: calls `onChange` with the option it names. */
+function picked<T extends string | number>(options: { value: T }[], onChange: (value: T) => void) {
+  return (v: string) => {
+    const found = options.find((o) => String(o.value) === v);
+    if (found) onChange(found.value);
+  };
+}
+
 /** One of a few, side by side. */
 export function Segmented<T extends string | number>(props: {
   value: T;
@@ -24,10 +32,7 @@ export function Segmented<T extends string | number>(props: {
       aria-label={props.label}
       value={String(props.value)}
       disabled={props.disabled}
-      onValueChange={(v) => {
-        const found = props.options.find((o) => String(o.value) === v);
-        if (found) props.onChange(found.value);
-      }}
+      onValueChange={picked(props.options, props.onChange)}
     >
       {props.options.map((o) => (
         <RToggle.Item
@@ -58,10 +63,7 @@ export function Select<T extends string | number>(props: {
     <RSelect.Root
       value={String(props.value)}
       disabled={props.disabled}
-      onValueChange={(v) => {
-        const found = props.options.find((o) => String(o.value) === v);
-        if (found) props.onChange(found.value);
-      }}
+      onValueChange={picked(props.options, props.onChange)}
     >
       <RSelect.Trigger className="select" id={props.id} aria-label={props.label}>
         <RSelect.Value>{current?.label}</RSelect.Value>

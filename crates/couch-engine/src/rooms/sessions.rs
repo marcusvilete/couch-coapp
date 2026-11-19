@@ -338,6 +338,18 @@ impl Actor {
             .map(|(_, conn, _)| conn)
     }
 
+    /// Who speaks on `conn`, if a message from it counts in `room`: a member
+    /// of the room (which we aren't leaving), on its current connection. The
+    /// gate for every session, remote play and relay-passing message.
+    pub(super) fn member_speaking(&self, room: RoomId, conn: ConnId) -> Option<MemberId> {
+        let peer = self.conns.get(&conn)?.peer;
+        let member = self
+            .rooms
+            .get(&room)
+            .is_some_and(|e| !e.room.is_leaving() && e.room.is_member(peer));
+        (member && self.current_conn(room, peer) == Some(conn)).then_some(peer)
+    }
+
     fn send_to(&self, room: RoomId, member: MemberId, message: ControlMessage) {
         if let Some(conn) = self.current_conn(room, member) {
             self.send(conn, Outgoing::Message(message));
@@ -605,16 +617,9 @@ impl Actor {
         message: ControlMessage,
         now: Instant,
     ) {
-        let Some(peer) = self.conns.get(&conn).map(|c| c.peer) else {
+        let Some(peer) = self.member_speaking(room, conn) else {
             return;
         };
-        let member = self
-            .rooms
-            .get(&room)
-            .is_some_and(|e| !e.room.is_leaving() && e.room.is_member(peer));
-        if !member || self.current_conn(room, peer) != Some(conn) {
-            return;
-        }
         let ours = |s: &Sessions, session: SessionId| {
             s.hosting.as_ref().is_some_and(|h| {
                 h.room == room && h.session.id() == session && h.pipeline.is_some()

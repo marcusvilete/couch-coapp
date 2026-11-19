@@ -72,7 +72,7 @@ type Capture = (Box<dyn Capturer>, Option<NativeId>);
 /// GPU frames go to NVENC directly (M12d, `couch-codec-nvenc`) unless
 /// `COUCH_HOST_NVENC_DIRECT=0`, a switch for measuring against FFmpeg's NVENC.
 fn direct_nvenc() -> bool {
-    std::env::var("COUCH_HOST_NVENC_DIRECT").map_or(true, |v| v.trim() != "0")
+    !super::switched_off("COUCH_HOST_NVENC_DIRECT")
 }
 
 /// NVENC directly (M12d), with FFmpeg's NVENC behind it: if ours fails to
@@ -623,7 +623,7 @@ impl Backend for WindowsBackend {
     fn decodes(&self) -> u8 {
         let h264 = Codec::H264.bit();
         // `COUCH_VIEWER_HEVC=0`: H.264 only, for measuring.
-        let refused = std::env::var("COUCH_VIEWER_HEVC").is_ok_and(|v| v.trim() == "0");
+        let refused = super::switched_off("COUCH_VIEWER_HEVC");
         if !refused && couch_platform_win::video_caps::hevc_decode() {
             h264 | Codec::Hevc.bit()
         } else {

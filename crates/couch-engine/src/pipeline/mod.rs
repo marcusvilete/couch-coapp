@@ -784,6 +784,13 @@ fn unsupported() -> MediaError {
     MediaError::Unsupported("streaming on this platform".into())
 }
 
+/// Whether the measuring switch `name` (`COUCH_HOST_CONTINUE`,
+/// `COUCH_HOST_NVENC_DIRECT`, `COUCH_VIEWER_HEVC`) is set to `0`, turning
+/// off what it names: each is on unless so.
+pub(crate) fn switched_off(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v.trim() == "0")
+}
+
 /// Keyboard and mouse that go nowhere: a session's until its first grant of
 /// either (nothing is made before: on Linux, no keyboard appears to the
 /// desktop), or a system without them.

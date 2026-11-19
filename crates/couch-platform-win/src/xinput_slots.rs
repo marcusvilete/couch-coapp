@@ -14,16 +14,12 @@ use windows::{
             CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_Get_Device_Interface_List_SizeW,
             CM_Get_Device_Interface_ListW, CR_BUFFER_SMALL, CR_SUCCESS,
         },
-        Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE},
-        Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        },
-        System::IO::DeviceIoControl,
+        Foundation::{GENERIC_READ, GENERIC_WRITE},
     },
     core::{GUID, HSTRING, PCWSTR},
 };
 
-use crate::device_tree;
+use crate::{device_file::DeviceFile, device_tree};
 
 /// The Xbox 360 driver's device interface (`GUID_DEVINTERFACE_XUSB`).
 const XUSB_INTERFACE: GUID = GUID::from_u128(0xEC87F1E3_C13B_4100_B5F7_8B84D54260CB);
@@ -70,8 +66,8 @@ pub fn xusb_pads() -> Vec<XusbPad> {
                 instance_id: device_tree::instance_for_path(&path),
                 ..XusbPad::default()
             };
-            match Device::open(&path) {
-                Ok(device) => device.read(&mut pad),
+            match open(&path) {
+                Ok(device) => read(&device, &mut pad),
                 Err(e) => pad.error = Some(e.to_string()),
             }
             pad.path = path;
@@ -80,90 +76,49 @@ pub fn xusb_pads() -> Vec<XusbPad> {
         .collect()
 }
 
-struct Device(HANDLE);
-
-impl Drop for Device {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from `CreateFileW` and is closed once.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
+/// Opens an interface as XInput does: opening changes nothing on the pad.
+fn open(path: &str) -> windows::core::Result<DeviceFile> {
+    DeviceFile::open(&HSTRING::from(path), (GENERIC_READ | GENERIC_WRITE).0)
 }
 
-impl Device {
-    fn open(path: &str) -> windows::core::Result<Self> {
-        let path = HSTRING::from(path);
-        // SAFETY: `path` is a NUL-terminated wide string that outlives the
-        // call; no security attributes or template. XInput opens these the
-        // same way; opening changes nothing on the pad.
-        let handle = unsafe {
-            CreateFileW(
-                &path,
-                (GENERIC_READ | GENERIC_WRITE).0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )
-        }?;
-        Ok(Self(handle))
+/// What `device` answers: its information, and each pad's light.
+fn read(device: &DeviceFile, pad: &mut XusbPad) {
+    let mut info = [0u8; 64];
+    let count = match device.ioctl(GET_INFORMATION, &[], &mut info) {
+        Ok(n) => {
+            let n = n.min(info.len());
+            pad.information = info[..n].to_vec();
+            // Its version, then how many pads it carries.
+            if n >= 3 { info[2] } else { 1 }
+        }
+        Err(e) => {
+            pad.error = Some(format!("information: {e}"));
+            1
+        }
+    };
+    // 1.1 first: the driver reports 1.3 on the dev PC, but answers the
+    // light request only at 1.1. Then the version it reports, then 1.0.
+    let told = (pad.information.len() >= 2)
+        .then(|| u16::from_le_bytes([pad.information[0], pad.information[1]]));
+    let mut versions = vec![0x0101];
+    for v in told.into_iter().chain([0x0100]) {
+        if !versions.contains(&v) {
+            versions.push(v);
+        }
     }
-
-    fn ioctl(&self, code: u32, input: &[u8], output: &mut [u8]) -> windows::core::Result<usize> {
-        let mut returned = 0u32;
-        // SAFETY: the buffers are valid for the lengths passed, and the call
-        // is synchronous (no OVERLAPPED), so they outlive it.
-        unsafe {
-            DeviceIoControl(
-                self.0,
-                code,
-                (!input.is_empty()).then_some(input.as_ptr().cast()),
-                input.len() as u32,
-                (!output.is_empty()).then_some(output.as_mut_ptr().cast()),
-                output.len() as u32,
-                Some(&mut returned),
-                None,
-            )
-        }?;
-        Ok((returned as usize).min(output.len()))
-    }
-
-    fn read(&self, pad: &mut XusbPad) {
-        let mut info = [0u8; 64];
-        let count = match self.ioctl(GET_INFORMATION, &[], &mut info) {
-            Ok(n) => {
-                pad.information = info[..n].to_vec();
-                // Its version, then how many pads it carries.
-                if n >= 3 { info[2] } else { 1 }
-            }
-            Err(e) => {
-                pad.error = Some(format!("information: {e}"));
-                1
-            }
-        };
-        // 1.1 first: the driver reports 1.3 on the dev PC, but answers the
-        // light request only at 1.1. Then the version it reports, then 1.0.
-        let told = (pad.information.len() >= 2)
-            .then(|| u16::from_le_bytes([pad.information[0], pad.information[1]]));
-        let mut versions = vec![0x0101];
-        for v in told.into_iter().chain([0x0100]) {
-            if !versions.contains(&v) {
-                versions.push(v);
+    for index in 0..count.clamp(1, 4) {
+        let mut light = None;
+        for &version in &versions {
+            let [lo, hi] = version.to_le_bytes();
+            let mut out = [0u8; 3];
+            let answered = device.ioctl(GET_LED_STATE, &[lo, hi, index], &mut out);
+            if answered.is_ok_and(|n| n >= out.len()) {
+                light = Some(out[2]);
+                pad.version = Some(version);
+                break;
             }
         }
-        for index in 0..count.clamp(1, 4) {
-            let mut light = None;
-            for &version in &versions {
-                let [lo, hi] = version.to_le_bytes();
-                let mut out = [0u8; 3];
-                if let Ok(3) = self.ioctl(GET_LED_STATE, &[lo, hi, index], &mut out) {
-                    light = Some(out[2]);
-                    pad.version = Some(version);
-                    break;
-                }
-            }
-            pad.lights.push(light);
-        }
+        pad.lights.push(light);
     }
 }
 

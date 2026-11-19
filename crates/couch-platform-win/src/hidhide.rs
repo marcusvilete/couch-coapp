@@ -41,21 +41,17 @@ use couch_input::local::ControllerIds;
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ACCESS_DENIED, ERROR_BUSY, ERROR_FILE_NOT_FOUND,
-            ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND,
-            ERROR_SHARING_VIOLATION, GENERIC_READ, HANDLE,
+            ERROR_ACCESS_DENIED, ERROR_BUSY, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION,
+            ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION, GENERIC_READ,
         },
-        Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-            QueryDosDeviceW,
-        },
-        System::IO::DeviceIoControl,
+        Storage::FileSystem::QueryDosDeviceW,
     },
-    core::{HRESULT, HSTRING, w},
+    core::{HRESULT, HSTRING},
 };
 
 use crate::{
     controllers::{self, Device},
+    device_file::DeviceFile,
     device_tree::{self, Node},
     markers::{self, own_start_time, process_state},
     pad_origin::{self, Origin},
@@ -385,31 +381,12 @@ const CLR_SESSION_BLACKLIST: u32 = ctl(2057);
 struct Unsupported;
 
 /// The open control device; closed on drop.
-struct Control(HANDLE);
-
-impl Drop for Control {
-    fn drop(&mut self) {
-        // SAFETY: opened by `CreateFileW` and closed once.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
-}
+struct Control(DeviceFile);
 
 impl Control {
     fn open() -> Result<Self, HideError> {
-        // SAFETY: a static path, no security attributes or template.
-        let handle = unsafe {
-            CreateFileW(
-                w!(r"\\.\HidHide"),
-                GENERIC_READ.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )
-        };
-        match handle {
-            Ok(handle) => Ok(Self(handle)),
+        match DeviceFile::open(&HSTRING::from(r"\\.\HidHide"), GENERIC_READ.0) {
+            Ok(device) => Ok(Self(device)),
             Err(e) if is(&e, &[ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND]) => {
                 Err(HideError::NotInstalled)
             }
@@ -437,33 +414,18 @@ impl Control {
         Self::open()
     }
 
-    fn ioctl(&self, code: u32, input: &[u8], output: &mut [u8]) -> windows::core::Result<u32> {
-        let mut returned = 0u32;
-        // SAFETY: both buffers are valid for the lengths passed (null when
-        // empty), and the call is synchronous (no OVERLAPPED).
-        unsafe {
-            DeviceIoControl(
-                self.0,
-                code,
-                (!input.is_empty()).then_some(input.as_ptr().cast()),
-                input.len() as u32,
-                (!output.is_empty()).then_some(output.as_mut_ptr().cast()),
-                output.len() as u32,
-                Some(&mut returned),
-                None,
-            )
-        }?;
-        Ok(returned)
+    fn ioctl(&self, code: u32, input: &[u8], output: &mut [u8]) -> windows::core::Result<usize> {
+        self.0.ioctl(code, input, output)
     }
 
     fn list(&self, code: u32) -> Result<Vec<String>, HideError> {
         // Without a buffer, the driver says how many bytes the list takes.
-        let needed = self.ioctl(code, &[], &mut []).map_err(failed)? as usize;
+        let needed = self.ioctl(code, &[], &mut []).map_err(failed)?;
         if needed == 0 {
             return Ok(Vec::new());
         }
         let mut buf = vec![0u8; needed];
-        let got = self.ioctl(code, &[], &mut buf).map_err(failed)? as usize;
+        let got = self.ioctl(code, &[], &mut buf).map_err(failed)?;
         Ok(decode_multi_sz(&wide(&buf[..got.min(buf.len())])))
     }
 
@@ -501,7 +463,7 @@ impl Control {
         }
     }
 
-    fn clear_session(&self) -> windows::core::Result<u32> {
+    fn clear_session(&self) -> windows::core::Result<usize> {
         self.ioctl(CLR_SESSION_BLACKLIST, &[], &mut [])
     }
 }

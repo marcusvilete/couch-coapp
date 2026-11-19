@@ -160,12 +160,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_back_what_was_drawn() {
-        let frame = frame_with(123_456_789, 16);
-        assert_eq!(read(&frame, 5, 3, 16), Some(123_456_789));
-    }
-
-    #[test]
     fn luma_plane_reads_and_locates() {
         let frame = frame_with(987_654_321, 8);
         // Build a luma plane from the BGRA frame, as a decoder would produce.

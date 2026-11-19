@@ -17,8 +17,7 @@ describe("the last session setup", () => {
   it("falls back to one controller for anything else", () => {
     stored({ [KEYS.sessionSetup]: JSON.stringify({ controllers: 5, keyboardMouse: "none" }) });
     expect(storedSetup()).toEqual({ controllers: 1, keyboardMouse: "none" });
-    // A value from before 1.0 (keyboard and mouse "with Controller 1").
-    stored({ [KEYS.sessionSetup]: JSON.stringify({ controllers: 2, keyboardMouse: "withController1" }) });
+    stored({ [KEYS.sessionSetup]: JSON.stringify({ controllers: 2, keyboardMouse: "everything" }) });
     expect(storedSetup()).toEqual({ controllers: 1, keyboardMouse: "none" });
     stored({});
     expect(storedSetup()).toEqual({ controllers: 1, keyboardMouse: "none" });

@@ -386,15 +386,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_relays_never_print() {
-        assert!(!format!("{:?}", contents()).contains("keep_public"));
-    }
-
+    /// Neither the identity's bytes nor the relays (with their tokens) show.
     #[test]
     fn its_debug_shows_no_secret() {
         let shown = format!("{:?}", contents());
         assert!(!shown.contains("7, 7"), "{shown}");
+        assert!(!shown.contains("keep_public"), "{shown}");
         assert!(shown.contains("settings.json"));
     }
 }

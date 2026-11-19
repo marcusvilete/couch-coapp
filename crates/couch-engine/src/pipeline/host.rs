@@ -128,7 +128,7 @@ pub fn choose_codec(codecs: u8, gpu_input_off: bool, forced_h264: bool) -> Codec
 /// (M12d-2, ADR 0016), unless `COUCH_HOST_CONTINUE=0`, the switch for
 /// measuring against keyframes. Read once a viewer's encoder opens.
 fn continuations() -> bool {
-    std::env::var("COUCH_HOST_CONTINUE").map_or(true, |v| v.trim() != "0")
+    !super::switched_off("COUCH_HOST_CONTINUE")
 }
 
 /// Read-backs that fail in a row before the capture starts again with
