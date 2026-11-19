@@ -69,12 +69,6 @@ impl GameProcess for WatchedGame {
 
 type Capture = (Box<dyn Capturer>, Option<NativeId>);
 
-/// Captured frames stay on the GPU (M9b) unless `COUCH_HOST_ZERO_COPY=0`, a
-/// switch for measuring against the copy through memory from before.
-fn zero_copy() -> bool {
-    std::env::var("COUCH_HOST_ZERO_COPY").map_or(true, |v| v.trim() != "0")
-}
-
 /// GPU frames go to NVENC directly (M12d, `couch-codec-nvenc`) unless
 /// `COUCH_HOST_NVENC_DIRECT=0`, a switch for measuring against FFmpeg's NVENC.
 fn direct_nvenc() -> bool {
@@ -269,7 +263,7 @@ impl Backend for WindowsBackend {
 
     fn capture(&self, source: &Source, request: CaptureRequest) -> Result<Capture, MediaError> {
         let fps = request.fps.max(1);
-        let output = if zero_copy() && !request.in_memory {
+        let output = if !request.in_memory {
             FrameOutput::Gpu
         } else {
             FrameOutput::Cpu
@@ -277,25 +271,20 @@ impl Backend for WindowsBackend {
         // Faster than the stream only on the GPU: frames in memory cost a
         // copy each, so those hosts keep Windows' own limit (see
         // `CaptureOptions::min_interval` for what that costs).
-        let min_interval = if request.paced && output == FrameOutput::Gpu {
+        let min_interval = if output == FrameOutput::Gpu {
             PACED_INTERVAL
         } else {
             Duration::from_secs(1) / fps
         };
         if !matches!(source, Source::TestPattern { .. }) {
             tracing::info!(
-                "capturing at {fps} fps: frames {}, at most every {:.1} ms{}",
+                "capturing at {fps} fps: frames {}, at most every {:.1} ms",
                 if output == FrameOutput::Gpu {
                     "on the GPU"
                 } else {
                     "in memory"
                 },
                 min_interval.as_secs_f64() * 1e3,
-                if request.paced {
-                    ", paced by the stream"
-                } else {
-                    ", not paced (COUCH_HOST_PACING=0)"
-                },
             );
         }
         let options = CaptureOptions {
@@ -334,14 +323,6 @@ impl Backend for WindowsBackend {
         }
         if let Some(frame) = gpu {
             if direct_nvenc() {
-                // P8's measuring switches tune FFmpeg's NVENC only.
-                let (_, measuring) = couch_codec_ffmpeg::options::nvenc_overrides();
-                if !measuring.is_empty() {
-                    tracing::warn!(
-                        "{measuring} apply to FFmpeg's NVENC only; set \
-                         COUCH_HOST_NVENC_DIRECT=0 to measure them"
-                    );
-                }
                 // Continuing (M12d-2): long-term frames and three references.
                 // One that won't open with them opens without: in-place
                 // bitrate changes are worth keeping without continuing.

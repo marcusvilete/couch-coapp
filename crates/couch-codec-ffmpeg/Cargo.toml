@@ -16,7 +16,6 @@ gpu-tests = []
 bytes.workspace = true
 couch-media.workspace = true
 rsmpeg.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]

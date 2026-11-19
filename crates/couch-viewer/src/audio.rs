@@ -79,13 +79,13 @@ impl Shared {
 /// main process sends before them, so the first sound already plays at the
 /// profile's level.
 #[derive(Clone)]
-pub struct AudioFeed {
+pub(crate) struct AudioFeed {
     shared: Arc<Mutex<Shared>>,
     gain: Arc<AtomicU32>,
 }
 
 impl AudioFeed {
-    pub fn push(&self, packet: AudioPacket) {
+    pub(crate) fn push(&self, packet: AudioPacket) {
         let entry = Entry {
             packet: packet.packet,
             capture_us: packet.capture_us,
@@ -97,7 +97,7 @@ impl AudioFeed {
 
     /// How loud to play from now on (P6); the audio thread ramps to it over
     /// its next buffer.
-    pub fn set_volume(&self, volume: StreamVolume) {
+    pub(crate) fn set_volume(&self, volume: StreamVolume) {
         self.gain.store(volume.gain().to_bits(), Ordering::Relaxed);
     }
 }
@@ -109,7 +109,7 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-pub struct AudioOut {
+pub(crate) struct AudioOut {
     stream: AudioStreamWithCallback<Player>,
     shared: Arc<Mutex<Shared>>,
     /// The stream volume's gain (P6), an `f32`'s bits: the audio thread reads
@@ -125,7 +125,7 @@ const LEVEL_WINDOW_MS: u32 = 250;
 impl AudioOut {
     /// Opens the default playback device. SDL moves playback to the new
     /// default device when it changes.
-    pub fn open(sdl: &sdl3::Sdl) -> Result<(Self, AudioFeed)> {
+    pub(crate) fn open(sdl: &sdl3::Sdl) -> Result<(Self, AudioFeed)> {
         let audio = sdl.audio().map_err(|e| anyhow!("SDL audio: {e}"))?;
         let shared = Arc::new(Mutex::new(Shared {
             jitter: JitterBuffer::new(JitterConfig::default()),
@@ -172,17 +172,17 @@ impl AudioOut {
     }
 
     /// The sound's level as it arrives, before this window's volume (P7).
-    pub fn heard(&self) -> Level {
+    pub(crate) fn heard(&self) -> Level {
         unpack(self.heard.load(Ordering::Relaxed))
     }
 
     /// How loud to play from now on (P6); the audio thread ramps to it over
     /// its next buffer.
-    pub fn set_volume(&self, volume: StreamVolume) {
+    pub(crate) fn set_volume(&self, volume: StreamVolume) {
         self.gain.store(volume.gain().to_bits(), Ordering::Relaxed);
     }
 
-    pub fn stats(&self) -> AudioStats {
+    pub(crate) fn stats(&self) -> AudioStats {
         let shared = lock(&self.shared);
         let counts = shared.jitter.stats();
         let mut recent: Vec<u64> = shared.recent.iter().copied().collect();
@@ -202,7 +202,7 @@ impl AudioOut {
 
     /// The stats card's Audio row (built only while the card shows: it takes
     /// the audio thread's lock).
-    pub fn hud_line(&self) -> String {
+    pub(crate) fn hud_line(&self) -> String {
         let s = self.stats();
         let total = (s.played + s.concealed).max(1);
         let heard = self.heard();

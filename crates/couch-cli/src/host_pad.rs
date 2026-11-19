@@ -26,7 +26,7 @@ use couch_input::{
 use couch_platform_win::{hidhide, vigem::VigemPadFactory};
 use couch_proto::input::PadDatagram;
 
-pub fn run(feed: Option<usize>, secs: u64, hide: bool) -> anyhow::Result<()> {
+pub(crate) fn run(feed: Option<usize>, secs: u64, hide: bool) -> anyhow::Result<()> {
     let restored = hidhide::restore_stale();
     if restored > 0 {
         println!("showed {restored} controller(s) a crashed host had left hidden");

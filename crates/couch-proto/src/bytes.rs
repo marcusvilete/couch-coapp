@@ -3,19 +3,19 @@
 pub(crate) struct Writer<'a>(pub &'a mut Vec<u8>);
 
 impl Writer<'_> {
-    pub fn u8(&mut self, v: u8) -> &mut Self {
+    pub(crate) fn u8(&mut self, v: u8) -> &mut Self {
         self.0.push(v);
         self
     }
-    pub fn u16(&mut self, v: u16) -> &mut Self {
+    pub(crate) fn u16(&mut self, v: u16) -> &mut Self {
         self.0.extend_from_slice(&v.to_be_bytes());
         self
     }
-    pub fn u32(&mut self, v: u32) -> &mut Self {
+    pub(crate) fn u32(&mut self, v: u32) -> &mut Self {
         self.0.extend_from_slice(&v.to_be_bytes());
         self
     }
-    pub fn u64(&mut self, v: u64) -> &mut Self {
+    pub(crate) fn u64(&mut self, v: u64) -> &mut Self {
         self.0.extend_from_slice(&v.to_be_bytes());
         self
     }
@@ -29,19 +29,19 @@ impl<'a> Reader<'a> {
         self.0 = rest;
         Some(*head)
     }
-    pub fn u8(&mut self) -> Option<u8> {
+    pub(crate) fn u8(&mut self) -> Option<u8> {
         self.take::<1>().map(|b| b[0])
     }
-    pub fn u16(&mut self) -> Option<u16> {
+    pub(crate) fn u16(&mut self) -> Option<u16> {
         self.take().map(u16::from_be_bytes)
     }
-    pub fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         self.take().map(u32::from_be_bytes)
     }
-    pub fn u64(&mut self) -> Option<u64> {
+    pub(crate) fn u64(&mut self) -> Option<u64> {
         self.take().map(u64::from_be_bytes)
     }
-    pub fn rest(self) -> &'a [u8] {
+    pub(crate) fn rest(self) -> &'a [u8] {
         self.0
     }
 }

@@ -16,13 +16,13 @@ use couch_proto::ipc::{
 use crate::audio::AudioFeed;
 
 /// What the main process sends for the decoder.
-pub enum Incoming {
+pub(crate) enum Incoming {
     Video(VideoFrameHeader, Vec<u8>),
     Shutdown,
 }
 
 /// What the main process sends for the window's thread.
-pub enum ForWindow {
+pub(crate) enum ForWindow {
     Seat(SeatState),
     Rumble(RumbleState),
     Hud(HudState),
@@ -38,7 +38,7 @@ pub enum ForWindow {
 }
 
 /// What the viewer sends back.
-pub enum Outgoing {
+pub(crate) enum Outgoing {
     /// The user's own drawing (M27a).
     Draw(Draw),
     /// The user's picture (M27e).
@@ -64,7 +64,7 @@ pub enum Outgoing {
 /// Reads stdin until the main process closes it; then the channel closes too.
 /// Network stats only feed the HUD, so they go straight to `net`; audio goes
 /// straight to the player's buffer (dropped if there is no audio device).
-pub fn spawn_reader(
+pub(crate) fn spawn_reader(
     tx: mpsc::Sender<Incoming>,
     window_tx: mpsc::Sender<ForWindow>,
     net: Arc<Mutex<Option<NetStats>>>,
@@ -190,7 +190,7 @@ pub fn spawn_reader(
 /// GPU's libraries load, and fd 1 points at stderr (M16b): a native library
 /// printing (a VAAPI driver's log, say) can't then corrupt the pipe, which
 /// `clippy::print_stdout` can't see.
-pub fn ipc_output() -> Box<dyn Write + Send> {
+pub(crate) fn ipc_output() -> Box<dyn Write + Send> {
     #[cfg(target_os = "linux")]
     match couch_platform_linux::stdio::take_stdout() {
         Ok(file) => return Box::new(file),
@@ -200,7 +200,10 @@ pub fn ipc_output() -> Box<dyn Write + Send> {
 }
 
 /// Writes replies to `out` ([`ipc_output`]).
-pub fn spawn_writer(rx: mpsc::Receiver<Outgoing>, out: Box<dyn Write + Send>) -> JoinHandle<()> {
+pub(crate) fn spawn_writer(
+    rx: mpsc::Receiver<Outgoing>,
+    out: Box<dyn Write + Send>,
+) -> JoinHandle<()> {
     thread::Builder::new()
         .name("ipc-write".into())
         .spawn(move || {

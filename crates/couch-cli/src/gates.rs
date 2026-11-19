@@ -23,7 +23,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Gate {
+pub(crate) enum Gate {
     G1,
     G3,
     G4,
@@ -32,7 +32,7 @@ pub enum Gate {
 }
 
 #[derive(Debug, Clone)]
-pub struct Args {
+pub(crate) struct Args {
     /// Run only these; empty runs all.
     pub only: Vec<Gate>,
     /// G3 for 2 minutes instead of 10.
@@ -162,7 +162,7 @@ impl Report {
     }
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.out)
         .with_context(|| format!("creating {}", args.out.display()))?;
     let mut checks = Vec::new();

@@ -116,7 +116,7 @@ fn hash(pin: &str, salt: &[u8; 16]) -> [u8; 32] {
 
 impl PinHash {
     /// `pin`'s hash with a fresh `salt`. Slow: off the actor's thread.
-    pub fn new(pin: &str, salt: [u8; 16]) -> Self {
+    pub(crate) fn new(pin: &str, salt: [u8; 16]) -> Self {
         Self {
             hash: hash(pin, &salt),
             salt,
@@ -124,7 +124,7 @@ impl PinHash {
     }
 
     /// Whether `pin` is this one. Slow: off the actor's thread.
-    pub fn matches(&self, pin: &str) -> bool {
+    pub(crate) fn matches(&self, pin: &str) -> bool {
         let other = hash(pin, &self.salt);
         // Constant time: every byte compared, whatever the first differing.
         other
@@ -138,21 +138,21 @@ impl PinHash {
 impl RemotePlay {
     /// Whether `id` may unlock: remote play on, a PIN set, and `id` one of
     /// the devices.
-    pub fn trusts(&self, id: MemberId) -> bool {
+    pub(crate) fn trusts(&self, id: MemberId) -> bool {
         let hex = id.to_hex();
         self.on && self.pin.is_some() && self.devices.iter().any(|d| d.id == hex)
     }
 
     /// How long until a PIN may be tried, at `now` (Unix seconds); `None`
     /// if it may be now.
-    pub fn wait_secs(&self, now: u64) -> Option<u32> {
+    pub(crate) fn wait_secs(&self, now: u64) -> Option<u32> {
         (self.wait_until > now).then(|| u32::try_from(self.wait_until - now).unwrap_or(u32::MAX))
     }
 
     /// Notes a PIN tried at `now`: a right one clears the count, a wrong one
     /// adds to it and, past [`FREE_TRIES`], sets a wait that doubles each
     /// time, up to [`MAX_WAIT_SECS`].
-    pub fn tried(&mut self, right: bool, now: u64) {
+    pub(crate) fn tried(&mut self, right: bool, now: u64) {
         if right {
             self.failures = 0;
             self.wait_until = 0;

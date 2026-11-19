@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 /// Environment variable naming the profile. Defaults to `default`.
-pub const PROFILE_ENV: &str = "COUCH_PROFILE";
+pub(crate) const PROFILE_ENV: &str = "COUCH_PROFILE";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {

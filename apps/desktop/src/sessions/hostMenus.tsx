@@ -65,7 +65,7 @@ export function viewerEntries(room: RoomView, s: SessionView, member: string, ru
 
 /** Stop a member's drawing (clearing what they drew), or let them draw
  * again: while drawing is on, for those watching and those stopped. */
-export function drawingEntries(room: RoomView, s: SessionView, member: string, run: Run): MenuEntry[] {
+function drawingEntries(room: RoomView, s: SessionView, member: string, run: Run): MenuEntry[] {
   const stopped = drawingStopped(s, member);
   if (stopped) {
     return [

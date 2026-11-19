@@ -11,7 +11,7 @@ import type { BoardPoint } from "../bindings/BoardPoint";
 import { FADE_OUT_MS, LASER_MS, PING_MS } from "../bindings/boardRules";
 
 /** One element as shown. */
-export interface Shown {
+interface Shown {
   author: string;
   element: BoardElement;
   /** When it finished arriving here, for fading. */
@@ -20,7 +20,7 @@ export interface Shown {
 
 /** How long `e` stays once finished, before fading: its author's pick (wire
  * revision 16). */
-export function stayMs(e: BoardElement): number {
+function stayMs(e: BoardElement): number {
   return e.stay * 1000;
 }
 
@@ -35,7 +35,7 @@ export function alpha(s: Shown, now: number): number {
 }
 
 /** A laser trail's point, and when it arrived. */
-export interface LaserPoint {
+interface LaserPoint {
   at: BoardPoint;
   since: number;
   /** The first of a new trail: no line to it from the one before. */
@@ -43,7 +43,7 @@ export interface LaserPoint {
   colour: number;
 }
 
-export interface Ping {
+interface Ping {
   author: string;
   at: BoardPoint;
   since: number;

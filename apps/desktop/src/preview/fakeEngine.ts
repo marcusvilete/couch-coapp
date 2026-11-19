@@ -128,7 +128,7 @@ function jitter(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
-export function emit(event: EngineEvent) {
+function emit(event: EngineEvent) {
   later(jitter(10, 250), () => listeners.forEach((l) => l(event)));
 }
 
@@ -447,17 +447,6 @@ function streamLevels() {
 
 // ---- Network (M26a) ----
 
-/** A relay code as the engine writes it: `couch-relay-1.` then the address,
- * the token and the flags, base64url, then a checksum (the preview doesn't
- * check it). */
-export function fakeRelayCode(url: string, token: string | null, personal = false): string {
-  const payload = btoa(`${url}\n${token ?? ""}\n${personal ? "personal" : ""}`)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-  return `couch-relay-1.${payload}.5eed1e55`;
-}
-
 type ReadCode = { url: string; host: string; token: string | null; personal: boolean };
 
 function readCode(text: string): ReadCode {
@@ -692,7 +681,7 @@ function networkCommand(cmd: NetworkCommand): Response | Promise<Response> {
 // ---- Remote play (M25) ----
 
 /** The PIN every PC in the preview unlocks with. */
-export const REMOTE_PIN = "246810";
+const REMOTE_PIN = "246810";
 
 type RemoteCommand = Extract<
   Command,
@@ -1467,7 +1456,7 @@ const DEFAULT_KEYS: Record<string, string> = {
 };
 
 /** The drawing editor's keys, as the engine lists them (M27a). */
-export const DRAWING_KEYS: DrawingKeyView[] = [
+const DRAWING_KEYS: DrawingKeyView[] = [
   { keys: "Ctrl+Z", action: "Undo what you drew last" },
   { keys: "Ctrl+Shift+Z, Ctrl+Y", action: "Redo" },
   { keys: "Ctrl+C", action: "Copy what you selected" },

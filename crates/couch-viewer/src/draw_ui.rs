@@ -35,7 +35,7 @@ const HANDLE: egui::Vec2 = egui::Vec2::new(44.0, 16.0);
 
 /// While something on the board moves by itself, the window paints at most
 /// this often for it.
-pub const MOVING_EVERY: Duration = Duration::from_millis(33);
+pub(crate) const MOVING_EVERY: Duration = Duration::from_millis(33);
 
 /// Something picked on the toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +53,7 @@ enum Click {
 
 /// The board in this window, and drawing on it.
 #[derive(Default)]
-pub struct Drawing {
+pub(crate) struct Drawing {
     pub board: BoardView,
     /// Ours, once the main process has said who we are.
     pub editor: Option<Editor>,
@@ -95,7 +95,7 @@ pub struct Drawing {
 impl Drawing {
     /// A window position in the picture's own coordinates; `None` outside
     /// it, unless `clamp`.
-    pub fn to_picture(&self, at: Pos2, clamp: bool) -> Option<Point> {
+    pub(crate) fn to_picture(&self, at: Pos2, clamp: bool) -> Option<Point> {
         let r = self.picture?;
         if !clamp && !r.contains(at) {
             return None;
@@ -110,7 +110,7 @@ impl Drawing {
 
     /// Paints the board (unless hidden) and, in drawing mode, the toolbar,
     /// in a window `size` points large.
-    pub fn paint(&mut self, ctx: &egui::Context, now: Instant, size: egui::Vec2) {
+    pub(crate) fn paint(&mut self, ctx: &egui::Context, now: Instant, size: egui::Vec2) {
         self.board.prune(now);
         self.toolbar = None;
         self.fade_button = None;
@@ -367,7 +367,7 @@ impl Drawing {
     }
 
     /// What the toolbar was asked; `true` if drawing mode must end.
-    pub fn apply_clicks(&mut self, now: Instant) -> bool {
+    pub(crate) fn apply_clicks(&mut self, now: Instant) -> bool {
         let Some(editor) = &mut self.editor else {
             return false;
         };
@@ -395,7 +395,7 @@ impl Drawing {
     /// A key the board takes; `true` if drawing mode must end.
     /// The mouse wheel at `at` (the HUD's points), `up` away from the user:
     /// over the fade button it steps how long drawings stay. Whether it did.
-    pub fn wheel(&mut self, at: Pos2, up: bool, now: Instant) -> bool {
+    pub(crate) fn wheel(&mut self, at: Pos2, up: bool, now: Instant) -> bool {
         let over = self.fade_button.is_some_and(|r| r.contains(at));
         match &mut self.editor {
             Some(editor) if over => {
@@ -411,7 +411,7 @@ impl Drawing {
         }
     }
 
-    pub fn key(&mut self, action: DrawAction, shift: bool, now: Instant) -> bool {
+    pub(crate) fn key(&mut self, action: DrawAction, shift: bool, now: Instant) -> bool {
         match &mut self.editor {
             Some(editor) => match editor.key(action, shift, &mut self.board, now) {
                 Keyed::LeaveDrawing => true,
@@ -426,20 +426,20 @@ impl Drawing {
     }
 
     /// A text box is being typed in: keys and text are its.
-    pub fn typing(&self) -> bool {
+    pub(crate) fn typing(&self) -> bool {
         self.editor.as_ref().is_some_and(Editor::typing)
     }
 
     /// Text typed into the box (SDL's text input: accents, dead keys and
     /// input methods composed); what was being composed is done.
-    pub fn type_text(&mut self, text: &str, now: Instant) {
+    pub(crate) fn type_text(&mut self, text: &str, now: Instant) {
         self.preedit.clear();
         if let Some(editor) = &mut self.editor {
             editor.type_text(text, &mut self.board, now);
         }
     }
 
-    pub fn text_key(&mut self, key: TextKey, shift: bool, word: bool, now: Instant) {
+    pub(crate) fn text_key(&mut self, key: TextKey, shift: bool, word: bool, now: Instant) {
         if let Some(editor) = &mut self.editor {
             editor.text_key(key, shift, word, &mut self.board, now);
         }
@@ -450,7 +450,7 @@ impl Drawing {
 
     /// Ctrl+C or Ctrl+X in the text box: its selected text, for the system
     /// clipboard (taken out for Ctrl+X).
-    pub fn copy_text(&mut self, cut: bool, now: Instant) -> Option<String> {
+    pub(crate) fn copy_text(&mut self, cut: bool, now: Instant) -> Option<String> {
         let editor = self.editor.as_mut()?;
         if cut {
             editor.cut_text(&mut self.board, now)
@@ -460,12 +460,14 @@ impl Drawing {
     }
 
     /// Ctrl+C: what goes on the system clipboard.
-    pub fn copy(&mut self) -> Option<String> {
+    pub(crate) fn copy(&mut self) -> Option<String> {
         self.editor.as_mut().and_then(|e| e.copy(&self.board))
     }
 
     /// The pictures the board shows, by id (M27e).
-    pub fn shown_pictures(&self) -> std::collections::BTreeSet<couch_proto::board::PictureId> {
+    pub(crate) fn shown_pictures(
+        &self,
+    ) -> std::collections::BTreeSet<couch_proto::board::PictureId> {
         self.board
             .elements()
             .iter()
@@ -475,7 +477,7 @@ impl Drawing {
 
     /// A picture made from the clipboard or a file, pasted as ours (M27e):
     /// kept, so it goes to the host with its bytes, and shown at once.
-    pub fn paste_picture(&mut self, ready: crate::pictures::Ready, now: Instant) {
+    pub(crate) fn paste_picture(&mut self, ready: crate::pictures::Ready, now: Instant) {
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -492,7 +494,7 @@ impl Drawing {
 
     /// Ctrl+V, with the system clipboard's text, at the pointer if over the
     /// picture.
-    pub fn paste(&mut self, system: Option<&str>, at: Option<Point>, now: Instant) {
+    pub(crate) fn paste(&mut self, system: Option<&str>, at: Option<Point>, now: Instant) {
         if let Some(editor) = &mut self.editor {
             editor.paste(system, at, &mut self.board, now);
         }
@@ -501,7 +503,7 @@ impl Drawing {
     /// The box being typed in, in the window's points: where an input
     /// method's candidates go. Its top-left, and the caret's top and
     /// bottom.
-    pub fn text_area(&self) -> Option<(Pos2, Pos2, Pos2)> {
+    pub(crate) fn text_area(&self) -> Option<(Pos2, Pos2, Pos2)> {
         let picture = self.picture?;
         let cursor = self.editor.as_ref()?.text_cursor()?;
         let place = |p: Point| {
@@ -518,14 +520,14 @@ impl Drawing {
     }
 
     /// Whether something on the board moves by itself.
-    pub fn moving(&self, now: Instant) -> bool {
+    pub(crate) fn moving(&self, now: Instant) -> bool {
         !self.hidden && self.picture.is_some() && self.board.moving(now)
     }
 
     /// Whether a fading element has started to fade since the board was
     /// last painted at `painted`: nothing moved while it stayed, and a
     /// still picture brings no frames (the author's run of M27b).
-    pub fn fade_due(&self, painted: Option<Instant>, now: Instant) -> bool {
+    pub(crate) fn fade_due(&self, painted: Option<Instant>, now: Instant) -> bool {
         !self.hidden
             && self.picture.is_some()
             && painted

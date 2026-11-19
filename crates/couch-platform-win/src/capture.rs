@@ -6,9 +6,7 @@
 //! [`TexturePool`] for an encoder that reads textures) or in memory
 //! ([`FrameOutput::Cpu`], for tools that read pixels).
 //!
-//! `COUCH_CAPTURE_BUFFERS` sets the frame pool's buffers (2;
-//! 1 as before M9f). `COUCH_CAPTURE_TRACE=<file>` appends each GPU frame's
-//! timings: `entry_us,windows_us,lock_us,copy_us,flush_us,total_us,outcome`.
+//! `COUCH_CAPTURE_TRACE=<file>` appends each GPU frame's timings: `entry_us,windows_us,lock_us,copy_us,flush_us,total_us,outcome`.
 
 use std::{
     ffi::c_void,
@@ -76,8 +74,7 @@ pub struct CaptureOptions {
     pub cursor: bool,
     pub output: FrameOutput,
     /// A monitor in HDR is captured in FP16 and converted to SDR (M29:
-    /// Settings → Streaming, on by default); `COUCH_HOST_HDR=0` turns it off
-    /// whatever this says.
+    /// Settings → Streaming, on by default).
     pub hdr: bool,
 }
 
@@ -177,15 +174,9 @@ const SOURCE_CHECK: Duration = Duration::from_millis(100);
 const MIN_FRAME: (u32, u32) = (160, 64);
 
 /// The frame pool's buffers: two, so Windows can write the next frame while
-/// the GPU still has to copy the last (M9f); `COUCH_CAPTURE_BUFFERS` (1 to 4)
-/// for measuring.
-fn buffers() -> i32 {
-    std::env::var("COUCH_CAPTURE_BUFFERS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|n| (1..=4).contains(n))
-        .unwrap_or(2)
-}
+/// the GPU still has to copy the last (M9f: under Witcher 3, one buffer gave
+/// about 72 frames a second, two about 107).
+const BUFFERS: i32 = 2;
 
 struct Shared {
     frames: Mailbox<VideoFrame>,
@@ -485,15 +476,6 @@ pub struct WgcCapturer {
     colour_watch: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
 
-/// Whether a monitor in HDR is captured in FP16 and converted to SDR on
-/// the GPU (M29); `COUCH_HOST_HDR=0` captures it in 8-bit as before, which
-/// Windows clips at 80 nits for HDR content: the switch for measuring.
-/// Read once.
-pub fn hdr_capture() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("COUCH_HOST_HDR").map_or(true, |v| v.trim() != "0"))
-}
-
 /// How often the captured monitor's HDR state is looked at: a look costs
 /// about half a millisecond (DXGI and the display configuration), so on a
 /// thread of its own.
@@ -509,16 +491,9 @@ fn colour_of(target: Target) -> Option<monitor::Colour> {
 /// Why a monitor in HDR isn't converted: `None` when it is.
 type HdrOff = Option<&'static str>;
 
-/// Whether HDR is converted, as [`CaptureOptions::hdr`] and
-/// `COUCH_HOST_HDR` say.
+/// Whether HDR is converted, as [`CaptureOptions::hdr`] says.
 fn hdr_off(asked: bool) -> HdrOff {
-    if !hdr_capture() {
-        Some("COUCH_HOST_HDR=0")
-    } else if !asked {
-        Some("turned off in Settings")
-    } else {
-        None
-    }
+    (!asked).then_some("turned off in Settings")
 }
 
 /// The format to capture a monitor of `colour` in, and the SDR white (scRGB)
@@ -667,7 +642,7 @@ impl WgcCapturer {
             trace,
         };
         let wgc_options = wgc::Options {
-            buffers: buffers(),
+            buffers: BUFFERS,
             min_interval: options.min_interval,
             cursor: options.cursor,
             format: choice.0,

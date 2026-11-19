@@ -5,7 +5,7 @@ import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { Tooltip } from "./Tooltip";
 import "./Button.css";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "danger-ghost";
+type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "danger-ghost";
 
 type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: ButtonVariant;

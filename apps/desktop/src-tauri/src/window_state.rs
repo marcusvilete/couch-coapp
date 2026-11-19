@@ -18,7 +18,7 @@ const FIRST_HEIGHT: f64 = 760.0;
 const VISIBLE: i64 = 120;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
-pub struct Placement {
+pub(crate) struct Placement {
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -26,7 +26,7 @@ pub struct Placement {
     pub maximized: bool,
 }
 
-pub fn path(profile_dir: &Path) -> PathBuf {
+pub(crate) fn path(profile_dir: &Path) -> PathBuf {
     profile_dir.join(FILE)
 }
 
@@ -35,7 +35,7 @@ fn load(file: &Path) -> Option<Placement> {
 }
 
 /// Puts the hidden window back where it was, then shows it.
-pub fn restore(window: &WebviewWindow, file: &Path) {
+pub(crate) fn restore(window: &WebviewWindow, file: &Path) {
     let monitors = window.available_monitors().unwrap_or_default();
     match load(file).filter(|p| on_screen(p, &monitors)) {
         Some(p) => {
@@ -83,7 +83,7 @@ fn on_screen(p: &Placement, monitors: &[Monitor]) -> bool {
 
 /// Remembers where the window is. A minimized window keeps what was saved;
 /// a maximized one keeps its last normal size, maximized.
-pub fn save(window: &WebviewWindow, file: &Path) {
+pub(crate) fn save(window: &WebviewWindow, file: &Path) {
     if window.is_minimized().unwrap_or(true) {
         return;
     }

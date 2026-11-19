@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::{net_args::NetArgs, stats::Samples};
 
 #[derive(Debug, Clone)]
-pub struct Args {
+pub(crate) struct Args {
     pub ticket: String,
     pub measure_secs: Option<u64>,
     pub viewer_pos: Option<(i32, i32)>,
@@ -116,7 +116,7 @@ fn percentiles(s: &Samples) -> serde_json::Value {
     })
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     let ticket: EndpointTicket = args.ticket.parse().context("parsing the ticket")?;
     let (options, _netem) = args.net.options()?;
     let endpoint = endpoint::bind(options).await?;

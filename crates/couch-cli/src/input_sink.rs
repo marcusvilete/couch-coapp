@@ -76,7 +76,7 @@ impl Drop for Sink {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub(crate) fn run() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let viewer = exe.with_file_name(format!("couch-viewer{}", std::env::consts::EXE_SUFFIX));
     let file = std::env::temp_dir().join(format!("couch-input-sink-{}.txt", std::process::id()));

@@ -4,7 +4,7 @@ use couch_proto::media::FrameRef;
 
 use crate::{
     AudioChunk, CaptureEvent, DecodedFrame, EncodedFrame, EncoderCaps, EncoderInput, EpochId,
-    FeedbackSnapshot, MediaError, Micros, ReceivedFrame, VideoParams,
+    FeedbackSnapshot, MediaError, Micros, VideoParams,
 };
 
 /// What an encoder that continues (M12d-2) says of one frame it encoded.
@@ -106,17 +106,7 @@ pub trait VideoSender: Send {
     fn feedback(&self) -> FeedbackSnapshot;
 }
 
-/// The viewer side of a media transport.
-pub trait VideoReceiver: Send {
-    /// Waits up to `timeout` for the next complete frame, in decode order.
-    fn next_frame(&mut self, timeout: Duration) -> Result<Option<ReceivedFrame>, MediaError>;
-}
-
 pub trait AudioSource: Send {
     /// Waits up to `timeout` for the next chunk of captured audio.
     fn next_chunk(&mut self, timeout: Duration) -> Result<Option<AudioChunk>, MediaError>;
-}
-
-pub trait AudioSink: Send {
-    fn play(&mut self, chunk: &AudioChunk) -> Result<(), MediaError>;
 }

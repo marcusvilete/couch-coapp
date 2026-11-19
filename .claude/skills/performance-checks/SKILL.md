@@ -23,7 +23,7 @@ description: Measure whether a Couch Co-App change made streaming faster or ligh
 | One viewer's latency (G1) | `couch-cli latency-probe --secs 30 --relay none --fps 60`, and `--fps 120`. `--fps 100` checks pacing on this 239 Hz screen (a rate that isn't a divisor of its refresh: 80 fps without pacing) | 45 s each |
 | A game near the stream's rate (pacing's hard case) | `latency-probe ... --fps 60 --clock-fps 61` (or 66): the clock paints like a game capped at that rate. Every frame should go as it arrives: clock to present like an uncapped run's | 45 s each |
 | Under a game's CPU load, or on a weaker PC | `latency-probe ... --cpu-load` (busy threads on every core; reports `cpu_load_work`, the game's share), plus `--cpus 16-19` (4 efficiency cores; the whole run is confined) | 45 s each |
-| Several viewers' load | `.\scripts\viewers.ps1 -Screen` (4) and `-Viewers 7`; `-Fps 120` for 120 fps; `-CopyThroughMemory` for the host's path from before M9b, `-CopyFrames` for the viewers' path from before M9c. `-Clock` (with `-Screen`) for a busy screen independent of the stream, `-Clock -ClockFps 61` for a game near its rate; `-Trace` for the pacing trace (below). It also prints the stream windows' CPU, and the host's lines count the frames the pacer held and replaced | 40 s each |
+| Several viewers' load | `.\scripts\viewers.ps1 -Screen` (4) and `-Viewers 7`; `-Fps 120` for 120 fps; `-CopyFrames` for the viewers' path from before M9c. `-Clock` (with `-Screen`) for a busy screen independent of the stream, `-Clock -ClockFps 61` for a game near its rate; `-Trace` for the pacing trace (below). It also prints the stream windows' CPU, and the host's lines count the frames the pacer held and replaced | 40 s each |
 | What pacing did, frame by frame | `viewers.ps1 -Screen -Trace` (or `couch-cli host --pacing-trace <csv>`) writes `pacing.csv` (each captured frame: `sent`, `held`, or `released` after its wait) and each viewer's presented frames (`view<N>.csv`, with `seq`) to `%TEMP%\couch-viewers-<N>`; copy them out before the next run, which clears the folder. Read from them: arrival gaps (stalls, bunching), the gaps between sends, how old released frames were, and whether a viewer skipped frames (`seq` gaps) or the host sent fewer. Skip the first few seconds: the windows are still opening | 40 s |
 | Picture quality at one bitrate (a codec or encoder change) | `couch-cli capture-test --window couch-psnr --secs 8 --bitrate-mbps 5 --codec hevc --psnr` (and `--codec h264`), on a borderless ffplay window started afresh for each run so every run sees the same frames: `third_party\ffmpeg\bin\ffplay -noborder -window_title couch-psnr -f lavfi -i mandelbrot=s=1280x720:rate=60` (or `life=...:seed=7`, `testsrc2`). Luma PSNR and SSIM, decoded against captured; `--monitor` for a game on screen. NVENC's settings: the `COUCH_NVENC_*` switches (below) | 10 s each |
 | The stream window's drawing (a scaler, a shader pass) | `couch-cli host --source testpattern --pattern-size 1280 720 --fps 60 --relay none --max-viewers 1`, then `couch-cli view <ticket> --relay none --viewer-pos 0 0 --viewer-size 1920 1080 --no-hud --measure-secs 15` per setting, so the window upscales: arrive to present, and fps. By eye: the same with `--source window --title <game>` and beeps between settings | 20 s each |
@@ -46,25 +46,18 @@ description: Measure whether a Couch Co-App change made streaming faster or ligh
 
 ## Before and after: the switches
 
-Each performance change keeps a switch that restores the old path, so the comparison runs on one build:
+Each performance change keeps a switch that restores the old path, so the comparison runs on one build, for as long as the comparison matters. The switches of settled comparisons (M9's capture and pacing, M12a's memory path, P8's scaler and NVENC settings, M29's HDR) were stripped before 1.0; their results pages keep the numbers.
 
 | Switch | Old path | Since |
 |---|---|---|
-| `COUCH_HOST_ZERO_COPY=0` | the host copies captured frames through memory | M9b |
 | `COUCH_VIEWER_ZERO_COPY=0` | the viewer decodes with D3D11VA and copies frames through memory, on wgpu's default backend (Vulkan on NVIDIA) | M9c |
 | `WGPU_BACKEND=dx12` (or `vulkan`) | wgpu's backend alone, e.g. DX12's presentation without zero-copy (about 0.5 ms slower than Vulkan here) | M9c |
-| `COUCH_VIEWER_FRAME_LATENCY=1..3` | the viewer's swap-chain frame latency (1 is the default) | M9a |
-| `COUCH_HOST_PACING=0` | the capture at Windows' one-frame interval, unpaced (loses frames when the screen's refresh isn't a multiple of the rate) | M9d |
-| `COUCH_CAPTURE_BUFFERS=1` | the capture's frame pool with one buffer, like `windows-capture`'s before M9f (the rest of our capture stays: the lock taken first, the cached staging texture); 2 by default | M9f |
 | `COUCH_HOST_CODEC=h264` | every viewer in H.264 (HEVC goes to viewers that decode it, from an NVIDIA host taking GPU frames); `COUCH_VIEWER_HEVC=0` on the watcher's side does the same for one viewer | M12c |
 | `COUCH_HOST_ENCODER=<name>` | not an old path: one FFmpeg encoder taking frames in memory, e.g. `libopenh264`, the software fallback of a host without a hardware encoder; `h264_nvenc` stands in for an AMD or Intel host's encoder at realistic speed (M12a) | M9d |
-| `COUCH_HOST_MEMORY_PACING=0` | with encoders taking frames in memory: the capture in memory at Windows' one-frame interval, unpaced (before M12a: 100 fps on a 240 Hz screen gave 80) | M12a |
-| `COUCH_HOST_MAPPED_FRAMES=0` | frames read back after pacing copied out by memcpy, not handed out as the staging texture's mapped memory (at 1080p with 4 viewers: 5.0 ms a read-back against 1.8) | M12a |
-| `COUCH_VIEWER_SCALER=bilinear` | the stream window's one bilinear read per pixel (bicubic on luma by default) | P8 |
-| `COUCH_HOST_HDR=0` | a monitor in HDR captured in 8-bit by Windows, as before M29, not in FP16 and converted (Settings → Streaming does the same for the app). Only a monitor in HDR takes the new path, so measure there: the Virtual Display Driver gives one (CLAUDE.md), `hdr-probe --bench` times the conversion on the GPU (0.12 ms against the copy's 0.10 at 4K, M29) | M29 |
-| `COUCH_NVENC_PRESET=p1..p7`, `COUCH_NVENC_SPATIAL_AQ=1` (`COUCH_NVENC_AQ_STRENGTH=1..15`), `COUCH_NVENC_MULTIPASS=0..2` | not an old path: NVENC settings laid over whichever option set opens, for measuring one before it goes into an option set; the caps line says "measuring …" | P8 |
+| `COUCH_HOST_NVENC_DIRECT=0` | FFmpeg's NVENC on GPU frames, as before M12d: a bitrate change resets with a keyframe | M12d |
+| `COUCH_HOST_CONTINUE=0` | recoveries send a keyframe, as before M12d-2, instead of continuing from a frame the viewer holds (HEVC) | M12d-2 |
 
-Add a row here, and to CLAUDE.md's commands, when a new change gets one. Set it in the shell that starts the runs; `couch-cli` passes its environment to the host and viewer it starts. `viewers.ps1 -CopyThroughMemory` and `-CopyFrames` set the M9b and M9c ones themselves. Alternate the runs (new, old, new, old) rather than all of one then all of the other, so a drift in the machine shows as noise, not as a difference.
+Add a row here, and to CLAUDE.md's commands, when a new change gets one. Set it in the shell that starts the runs; `couch-cli` passes its environment to the host and viewer it starts. `viewers.ps1 -CopyFrames` sets the M9c one itself. Alternate the runs (new, old, new, old) rather than all of one then all of the other, so a drift in the machine shows as noise, not as a difference.
 
 ## Keep the output
 
@@ -73,12 +66,12 @@ Write each run's whole output to a file in the scratchpad, then read it; don't f
 ```powershell
 $log = "<scratchpad>\perf.txt"
 foreach ($run in @(@(60,'new'),@(60,'old'),@(60,'new'),@(60,'old'),@(120,'new'),@(120,'old'))) {
-    if ($run[1] -eq 'old') { $env:COUCH_HOST_ZERO_COPY = '0' } else { Remove-Item Env:COUCH_HOST_ZERO_COPY -ErrorAction SilentlyContinue }
+    if ($run[1] -eq 'old') { $env:COUCH_HOST_NVENC_DIRECT = '0' } else { Remove-Item Env:COUCH_HOST_NVENC_DIRECT -ErrorAction SilentlyContinue }
     "== $($run[0]) fps, $($run[1])" | Out-File $log -Append -Encoding utf8
     .\target\release\couch-cli.exe latency-probe --secs 30 --relay none --fps $run[0] 2>$null |
         Where-Object { $_ -notmatch '^\[(view|host)\]' -and $_.Trim() -ne '' } | Out-File $log -Append -Encoding utf8
 }
-Remove-Item Env:COUCH_HOST_ZERO_COPY -ErrorAction SilentlyContinue
+Remove-Item Env:COUCH_HOST_NVENC_DIRECT -ErrorAction SilentlyContinue
 ```
 
 `viewers.ps1` prints its own summary; send it to a file the same way. Its numbers use the pt-BR decimal comma.
@@ -94,7 +87,7 @@ Remove-Item Env:COUCH_HOST_ZERO_COPY -ErrorAction SilentlyContinue
 - **With many viewers on one PC,** the GPU also decodes every stream, so the numbers overstate a real host's load. Compare like with like.
 - **A change that shows no gain is dropped,** not kept as insurance (M9d dropped MMCSS and process priority after `--cpu-load` and `--cpus` runs showed nothing either way).
 - **Reference numbers** (this PC):
-  - `docs/m12a-results.md`: a host whose encoders take frames in memory (`COUCH_HOST_ENCODER=h264_nvenc`). 1080p screen at 100 fps (`viewers.ps1 -Screen -Clock`): 4 viewers 98 fps, capture to present p50 15.4 / p95 20.2 ms (before M12a 85 fps, 17.3 / 23.5); 1 viewer 99.9 fps, 7.0 / 10.9 (before 80 fps, 8.4 / 13.7); a read-back 1.8 ms with 4 viewers, 0.9 with 1. The latency clock at 61 into 60 fps: p95 10.8 ms (before 22.3). A read-back's GPU copy and wait about 1.9 ms with 4 viewers busy; with `COUCH_HOST_MAPPED_FRAMES=0` its memcpy adds 2.9.
+  - `docs/m12a-results.md`: a host whose encoders take frames in memory (`COUCH_HOST_ENCODER=h264_nvenc`). 1080p screen at 100 fps (`viewers.ps1 -Screen -Clock`): 4 viewers 98 fps, capture to present p50 15.4 / p95 20.2 ms (before M12a 85 fps, 17.3 / 23.5); 1 viewer 99.9 fps, 7.0 / 10.9 (before 80 fps, 8.4 / 13.7); a read-back 1.8 ms with 4 viewers, 0.9 with 1. The latency clock at 61 into 60 fps: p95 10.8 ms (before 22.3). A read-back's GPU copy and wait about 1.9 ms with 4 viewers busy (a memcpy, before the mapped frames, added 2.9).
   - `docs/p8-results.md`: picture quality. Mandelbrot at 1280x720, 10 Mbit/s: H.264 PSNR p50 about 34.7 dB, SSIM 0.975; HEVC 35.5 dB, 0.979. The stream window upscaling 1280x720 into 1920x1080: arrive to present p50 0.88 ms, bilinear or bicubic.
   - `docs/m9f-results.md`: our capture, two buffers. Witcher 3 (about 100 fps) into a 120 fps stream, watched on this PC: 107 frames captured and about 101 shown, capture to present p50 17 ms, p95 33–39 ms; one buffer 72 and 70, p50 24, p95 41. Without a game the two are the same (latency-probe 60/100/120 fps at 60.0/100.1/120.0, clock to present p50 11.2–11.5/10.9/10.8 ms).
   - `docs/m9e-results.md`: the held frame's wait. 4 viewers at 60 fps: `-Screen -Clock` 60.0–60.1 fps, p95 10.1–10.2 ms (paced or not); `-Screen` alone 56.9–57.3 fps, p95 21.6–24.7 ms (unpaced 59.5–59.9, 10.3–10.6); `-Clock -ClockFps 61` 59.0–59.2 fps, p95 10.3; at 120 fps (`-Screen`) 113–116 fps, p95 6.8–7.0 ms (unpaced 117.7–118.5, 6.7–6.8).

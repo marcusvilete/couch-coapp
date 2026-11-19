@@ -131,24 +131,6 @@ fn continuations() -> bool {
     std::env::var("COUCH_HOST_CONTINUE").map_or(true, |v| v.trim() != "0")
 }
 
-/// Captured frames are paced to the stream's rate (M9d) unless
-/// `COUCH_HOST_PACING=0`, a switch for measuring against Windows' own limit
-/// from before.
-fn pacing() -> bool {
-    std::env::var("COUCH_HOST_PACING").map_or(true, |v| v.trim() != "0")
-}
-
-/// When no encoder reads GPU frames (an AMD or Intel host, a software
-/// encoder), the capture still keeps them on the GPU, paced as for NVENC,
-/// and each frame sent is read back to memory once, after pacing (M12a):
-/// unless `COUCH_HOST_MEMORY_PACING=0`, the switch for measuring against
-/// the capture in memory from before, at Windows' one-frame interval. Read
-/// once: it is asked about on every frame.
-fn memory_pacing() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("COUCH_HOST_MEMORY_PACING").map_or(true, |v| v.trim() != "0"))
-}
-
 /// Read-backs that fail in a row before the capture starts again with
 /// frames in memory.
 const READ_BACK_FAILURES: u32 = 3;
@@ -421,8 +403,7 @@ struct Stream {
     /// No encoder reads GPU frames in this stream (M9b): one opened for a
     /// GPU frame couldn't take it (not NVIDIA, or another GPU than the
     /// capture's), or one reading them failed. Encoders opened from then on
-    /// take frames in memory: read back after pacing (M12a), or, with
-    /// `COUCH_HOST_MEMORY_PACING=0` or unpaced, captured in memory again.
+    /// take frames in memory, read back after pacing (M12a).
     /// Also set when the capture can't keep frames on the GPU.
     gpu_input_off: AtomicBool,
     /// The capture itself can't keep frames on the GPU, or reading them
@@ -1593,7 +1574,6 @@ fn start_capture(shared: &Arc<Shared>, stream: &Arc<Stream>) -> Running {
 
 fn capture_loop(shared: &Shared, stream: &Arc<Stream>, stop: &AtomicBool) {
     let options = &stream.options;
-    let paced = pacing();
     // A window found earlier (or followed while nobody watched) wins over
     // the source as first given.
     let mut source = match stream.window.load(Ordering::Acquire) {
@@ -1627,8 +1607,7 @@ fn capture_loop(shared: &Shared, stream: &Arc<Stream>, stop: &AtomicBool) {
         }
         let request = CaptureRequest {
             fps: options.fps,
-            in_memory: in_memory(stream, paced),
-            paced,
+            in_memory: in_memory(stream),
             unattended: stream.options.unattended,
             hdr: stream.options.hdr,
         };
@@ -1662,12 +1641,11 @@ fn capture_loop(shared: &Shared, stream: &Arc<Stream>, stop: &AtomicBool) {
     }
 }
 
-/// Whether the capture takes frames to memory itself: when it can't keep
-/// them on the GPU, or no encoder reads them there and frames aren't read
-/// back after pacing (M12a: unpaced, or `COUCH_HOST_MEMORY_PACING=0`).
-fn in_memory(stream: &Stream, paced: bool) -> bool {
+/// Whether the capture takes frames to memory itself: only when it can't
+/// keep them on the GPU. Frames no encoder reads on the GPU are read back
+/// after pacing (M12a).
+fn in_memory(stream: &Stream) -> bool {
     stream.capture_in_memory.load(Ordering::SeqCst)
-        || (stream.gpu_input_off.load(Ordering::SeqCst) && !(paced && memory_pacing()))
 }
 
 /// Why [`capture_frames`] returned.
@@ -1675,9 +1653,8 @@ enum Next {
     /// The game showed a new window: capture that.
     Follow(NativeId),
     /// Capture again with frames in memory ([`in_memory`]): the capture
-    /// can't keep them on the GPU, three read-backs after pacing failed in a
-    /// row, or no encoder reads GPU frames and they aren't read back (M12a:
-    /// unpaced, or `COUCH_HOST_MEMORY_PACING=0`). Windows can't change a
+    /// can't keep them on the GPU, or three read-backs after pacing failed
+    /// in a row. Windows can't change a
     /// running capture's interval, and a paced one runs faster than the
     /// stream, which on the GPU costs little but in memory a copy each.
     InMemory,
@@ -1713,36 +1690,27 @@ fn pace_frames(
     stop: &AtomicBool,
     request: CaptureRequest,
 ) -> Next {
-    let mut pacer = request.paced.then(|| Pacer::new(stream.options.fps));
+    let mut pacer = Pacer::new(stream.options.fps);
     let mut counted = (0, 0);
     let mut failures = 0;
     while !stop.load(Ordering::SeqCst) {
         // A held frame goes at its time if nothing newer comes first (the
         // pacer's times are on our clock, the one frames arrive by).
-        let wait = pacer
-            .as_ref()
-            .and_then(Pacer::due)
-            .map_or(CAPTURE_WAIT, |due| {
-                Duration::from_micros(due.saturating_sub(shared.now())).min(CAPTURE_WAIT)
-            });
+        let wait = pacer.due().map_or(CAPTURE_WAIT, |due| {
+            Duration::from_micros(due.saturating_sub(shared.now())).min(CAPTURE_WAIT)
+        });
         match capturer.next_event(wait) {
             Ok(Some(CaptureEvent::Frame(frame))) => {
                 // (Once only: a capture asked for memory that still gives
                 // GPU frames has them read back by `send` instead.)
-                if matches!(frame, VideoFrame::Gpu(_))
-                    && in_memory(stream, request.paced)
-                    && !request.in_memory
-                {
+                if matches!(frame, VideoFrame::Gpu(_)) && in_memory(stream) && !request.in_memory {
                     return Next::InMemory;
                 }
                 // (A GPU frame is already even, and the copies share it.)
                 let frame = frame.cropped_to_even();
                 let at = frame.captured_at();
                 let arrived = shared.now();
-                let frame = match pacer.as_mut() {
-                    Some(pacer) => pacer.offer(frame, at, arrived),
-                    None => Some(frame),
-                };
+                let frame = pacer.offer(frame, at, arrived);
                 if let Some(trace) = lock(&stream.pacing_trace).as_mut() {
                     let event = if frame.is_some() { "sent" } else { "held" };
                     trace.row(arrived, at, event);
@@ -1774,7 +1742,7 @@ fn pace_frames(
                 return Next::Stop;
             }
         }
-        if let Some(pacer) = pacer.as_mut() {
+        {
             let now = shared.now();
             if let Some(frame) = pacer.take_due(now) {
                 if let Some(trace) = lock(&stream.pacing_trace).as_mut() {
@@ -2219,8 +2187,7 @@ fn encode(
             if gpu.is_some() && !enc.caps().gpu_input {
                 // This machine's encoder can't read them: from now on each
                 // frame sent is read back once, after pacing, before it
-                // reaches the encoders (M12a), or with
-                // `COUCH_HOST_MEMORY_PACING=0` captured in memory.
+                // reaches the encoders (M12a).
                 stream.gpu_input_off.store(true, Ordering::SeqCst);
             }
             shared.note(format!(
@@ -2614,8 +2581,8 @@ struct RcTrace(LineWriter<File>);
 /// host's clock: `at_us` is when the frame arrived (`sent` at once, or
 /// `held`) or when a held frame went after its wait (`released`). A held
 /// frame followed by another frame before a `released` row was replaced by
-/// it (or dropped, if the capture started again between them). Unpaced,
-/// every frame is `sent`. One per stream, across capture restarts. Written
+/// it (or dropped, if the capture started again between them). One per
+/// stream, across capture restarts. Written
 /// line by line, as `RcTrace`.
 struct PacingTrace(LineWriter<File>);
 

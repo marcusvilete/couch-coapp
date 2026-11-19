@@ -1,21 +1,21 @@
 //! Percentiles for latency reports.
 
 #[derive(Debug, Default, Clone)]
-pub struct Samples {
+pub(crate) struct Samples {
     values: Vec<f64>,
 }
 
 impl Samples {
-    pub fn push(&mut self, v: f64) {
+    pub(crate) fn push(&mut self, v: f64) {
         self.values.push(v);
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.values.len()
     }
 
     /// The `p`th percentile (0 to 100), nearest-rank.
-    pub fn percentile(&self, p: f64) -> Option<f64> {
+    pub(crate) fn percentile(&self, p: f64) -> Option<f64> {
         if self.values.is_empty() {
             return None;
         }
@@ -26,7 +26,7 @@ impl Samples {
     }
 
     /// `p50 / p95 / max` in milliseconds, or "no samples".
-    pub fn summary_ms(&self) -> String {
+    pub(crate) fn summary_ms(&self) -> String {
         match (
             self.percentile(50.0),
             self.percentile(95.0),

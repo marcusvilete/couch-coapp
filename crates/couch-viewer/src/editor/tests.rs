@@ -107,12 +107,12 @@ mod couch_room_like {
     use super::*;
 
     #[derive(Default)]
-    pub struct Replica {
+    pub(super) struct Replica {
         pub elements: Vec<Element>,
     }
 
     impl Replica {
-        pub fn heard(&mut self, ops: &[BoardOp]) {
+        pub(super) fn heard(&mut self, ops: &[BoardOp]) {
             for op in ops {
                 match op {
                     BoardOp::Put(e) => match self.elements.iter_mut().find(|x| x.id == e.id) {

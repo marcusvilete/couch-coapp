@@ -12,7 +12,7 @@ import { Dialog } from "../ui/Dialog";
 import { AddRelayForm } from "./AddRelayForm";
 
 /** Where the guide to running a relay lives, in the app's repository. */
-export function relayGuide(repository: string | null): string | null {
+function relayGuide(repository: string | null): string | null {
   return repository ? `${repository}/blob/main/docs/self-hosting.md` : null;
 }
 

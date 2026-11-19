@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { Why } from "./Why";
 import "./Callout.css";
 
-export type Tone = "info" | "warn" | "danger" | "accent";
+type Tone = "info" | "warn" | "danger" | "accent";
 
 const ICONS: Record<Tone, ReactNode> = {
   info: <Info />,

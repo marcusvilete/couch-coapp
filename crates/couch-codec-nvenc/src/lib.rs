@@ -22,6 +22,7 @@ mod encoder;
     unnecessary_transmutes,
     unsafe_op_in_unsafe_fn,
     unused_imports,
+    unreachable_pub,
     clippy::all
 )]
 mod ffi {

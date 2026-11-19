@@ -27,9 +27,9 @@ use sdl3::{
     mouse::MouseButton,
 };
 
-pub const TITLE: &str = "Couch Input Sink";
+pub(crate) const TITLE: &str = "Couch Input Sink";
 
-pub fn run(path: &Path, grab: bool) -> Result<()> {
+pub(crate) fn run(path: &Path, grab: bool) -> Result<()> {
     let mut out = LineWriter::new(File::create(path)?);
     if grab {
         // As the stream window does while the keyboard goes to the host:

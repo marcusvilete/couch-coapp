@@ -27,9 +27,6 @@ use crate::{
 pub struct Continuation {
     /// Long-term frames NVENC keeps (`ltrNumFrames`); 0 leaves LTR off.
     pub ltr_frames: u32,
-    /// The DPB's size (`maxNumRefFrames`, HEVC's `maxNumRefFramesInDPB`);
-    /// 0 is the driver's choice.
-    pub max_ref_frames: u32,
     /// The references a frame may predict from (`numRefL0`, 1 to 7); 0 is
     /// the driver's choice.
     pub refs_l0: u32,
@@ -41,8 +38,6 @@ pub struct FrameControl {
     pub keyframe: bool,
     /// Mark this frame long-term, in this slot.
     pub mark_ltr: Option<u32>,
-    /// Let it predict from the long-term frames in this bitmap of slots.
-    pub use_ltr: Option<u32>,
 }
 
 /// What NVENC says it did with a frame.
@@ -99,7 +94,7 @@ pub struct NvencEncoder {
 unsafe impl Send for NvencEncoder {}
 
 /// The name it goes by in logs and the stats line.
-pub fn name(codec: Codec) -> &'static str {
+pub(crate) fn name(codec: Codec) -> &'static str {
     match codec {
         Codec::Hevc => "hevc_nvenc_direct",
         _ => "h264_nvenc_direct",
@@ -446,10 +441,6 @@ impl NvencEncoder {
                         p.set_ltrMarkFrame(1);
                         p.ltrMarkFrameIdx = slot;
                     }
-                    if let Some(bitmap) = control.use_ltr {
-                        p.set_ltrUseFrames(1);
-                        p.ltrUseFrameBitmap = bitmap;
-                    }
                 }
                 _ => {
                     let p = &mut pic.codecPicParams.h264PicParams;
@@ -458,10 +449,6 @@ impl NvencEncoder {
                     if let Some(slot) = control.mark_ltr {
                         p.set_ltrMarkFrame(1);
                         p.ltrMarkFrameIdx = slot;
-                    }
-                    if let Some(bitmap) = control.use_ltr {
-                        p.set_ltrUseFrames(1);
-                        p.ltrUseFrameBitmap = bitmap;
                     }
                 }
             }
@@ -559,7 +546,6 @@ impl VideoEncoder for NvencEncoder {
         let control = FrameControl {
             keyframe: force_keyframe,
             mark_ltr: mark.filter(|_| self.long_term),
-            use_ltr: None,
         };
         Ok(self
             .encode_frame(frame, control)?
@@ -585,7 +571,6 @@ impl VideoEncoder for NvencEncoder {
 /// 1 dB over the driver's choice).
 pub const CONTINUING: Continuation = Continuation {
     ltr_frames: 2,
-    max_ref_frames: 0,
     refs_l0: 3,
 };
 
@@ -714,7 +699,6 @@ fn continue_with(c: &mut NV_ENC_CONFIG, codec: Codec, continuation: Continuation
                 hevc.set_enableLTR(ltr);
                 hevc.ltrTrustMode = 0;
                 hevc.ltrNumFrames = continuation.ltr_frames;
-                hevc.maxNumRefFramesInDPB = continuation.max_ref_frames;
                 hevc.numRefL0 = refs;
             }
             _ => {
@@ -722,7 +706,6 @@ fn continue_with(c: &mut NV_ENC_CONFIG, codec: Codec, continuation: Continuation
                 h264.set_enableLTR(ltr);
                 h264.ltrTrustMode = 0;
                 h264.ltrNumFrames = continuation.ltr_frames;
-                h264.maxNumRefFrames = continuation.max_ref_frames;
                 h264.numRefL0 = refs;
             }
         }

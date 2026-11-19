@@ -31,7 +31,7 @@ function rgba(index: number, a: number): string {
   return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, a))})`;
 }
 
-export interface Painting {
+interface Painting {
   board: BoardView;
   /** Ours, while drawing: the selection and the marquee show. */
   editor: Editor | null;

@@ -180,7 +180,7 @@ function homeName(network: NetworkView | null): string | null {
 }
 
 /** "couchrelay.duckdns.org" from its URL. */
-export function hostOf(url: string): string {
+function hostOf(url: string): string {
   try {
     return new URL(url).host.replace(/\.$/, "");
   } catch {

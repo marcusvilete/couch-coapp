@@ -29,7 +29,7 @@ const NOTE_MS = 3000;
  * rate itself). */
 const SEND_EVERY_MS = 15;
 
-export interface BoardSurfaceProps {
+interface BoardSurfaceProps {
   state: BoardState | null;
   /** The board's news as it comes; returns the unsubscribe. */
   subscribe: (handler: (news: BoardNewsView) => void) => () => void;
@@ -47,7 +47,7 @@ export interface BoardSurfaceProps {
 
 /** What a key does while drawing, if anything: Ctrl and Shift as held (an
  * arrow nudges whether Shift is held or not; Alt is never part of one). */
-export function drawingKey(code: string, ctrl: boolean, shift: boolean): DrawAction | null {
+function drawingKey(code: string, ctrl: boolean, shift: boolean): DrawAction | null {
   const exact = DRAWING_KEYS.find((k) => k.code === code && k.ctrl === ctrl && k.shift === shift);
   const nudge = DRAWING_KEYS.find((k) => k.code === code && !ctrl && k.action.type === "nudge");
   return (exact ?? nudge)?.action ?? null;
@@ -58,7 +58,7 @@ const TOOLS_HIDDEN = "couch.board.toolsHidden";
 
 /** What a key does in a text box, by `KeyboardEvent.key`, if anything (its
  * letters come as text). The stream window's `text_key`. */
-export function textKey(key: string, ctrl: boolean): TextKey | null {
+function textKey(key: string, ctrl: boolean): TextKey | null {
   switch (key) {
     case "Escape":
       return "finish";

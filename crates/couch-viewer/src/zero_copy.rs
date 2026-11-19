@@ -36,11 +36,11 @@ use windows::{
 /// reference of its own, for the decoder thread. Released if never used.
 /// A clone is another reference (for a decoder reopened for another codec).
 #[derive(Clone)]
-pub struct DecoderDevice(ID3D12Device);
+pub(crate) struct DecoderDevice(ID3D12Device);
 
 impl DecoderDevice {
     /// `None` on another backend.
-    pub fn of(device: &wgpu::Device) -> Option<Self> {
+    pub(crate) fn of(device: &wgpu::Device) -> Option<Self> {
         // SAFETY: the hal device is only borrowed to clone its COM pointer
         // (AddRef); nothing is done with it through wgpu's back.
         let hal = unsafe { device.as_hal::<Dx12>() }?;
@@ -49,7 +49,7 @@ impl DecoderDevice {
 
     /// The pointer, with its reference handed to the caller (FFmpeg, which
     /// releases it).
-    pub fn into_raw(self) -> *mut c_void {
+    pub(crate) fn into_raw(self) -> *mut c_void {
         self.0.into_raw()
     }
 }
@@ -59,7 +59,7 @@ unsafe impl Send for DecoderDevice {}
 
 /// Brings decoded frames into the video pass's textures and gives them back
 /// to the decoder once the GPU is done with them.
-pub struct FrameImporter {
+pub(crate) struct FrameImporter {
     /// Frames copied in submits not yet known finished, with their submit's
     /// number.
     in_flight: VecDeque<(u64, GpuNv12Frame)>,
@@ -78,7 +78,7 @@ impl Default for FrameImporter {
 }
 
 impl FrameImporter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             in_flight: VecDeque::new(),
             submitted: 0,
@@ -91,7 +91,7 @@ impl FrameImporter {
     /// (Rg8Unorm), both the frame's size (chroma halved), and stages the wait
     /// for the decoder. The next `queue.submit` must carry `encoder`; call
     /// [`Self::submitted`] right after it.
-    pub fn copy(
+    pub(crate) fn copy(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -211,7 +211,7 @@ impl FrameImporter {
 
     /// After the submit that carried the last [`Self::copy`]: the frame is
     /// kept until the GPU has finished that submit.
-    pub fn submitted(&mut self, queue: &wgpu::Queue) {
+    pub(crate) fn submitted(&mut self, queue: &wgpu::Queue) {
         let Some(frame) = self.pending.take() else {
             return;
         };
@@ -227,7 +227,7 @@ impl FrameImporter {
     /// Gives back to the decoder every frame whose submit has finished, as
     /// far as the last `device.poll` knows (it runs the callbacks). Never
     /// waits.
-    pub fn release_finished(&mut self) {
+    pub(crate) fn release_finished(&mut self) {
         let finished = self.finished.load(Ordering::Acquire);
         while self.in_flight.front().is_some_and(|(n, _)| *n <= finished) {
             self.in_flight.pop_front();
@@ -235,7 +235,7 @@ impl FrameImporter {
     }
 
     /// Frames still held for the GPU.
-    pub fn held(&self) -> usize {
+    pub(crate) fn held(&self) -> usize {
         self.in_flight.len() + usize::from(self.pending.is_some())
     }
 }
@@ -251,7 +251,7 @@ const STRIP_ROW: u32 = STRIP.0.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNME
 const STRIP_SLOTS: usize = 3;
 
 /// A frame's barcode strip, read back from the GPU.
-pub struct Strip<T> {
+pub(crate) struct Strip<T> {
     /// Tightly packed luma rows.
     pub luma: Vec<u8>,
     pub size: (u32, u32),
@@ -263,7 +263,7 @@ pub struct Strip<T> {
 /// waiting: a frame's strip is copied out in the submit that brings it in,
 /// mapped once that is done, and handed back with the value attached to it
 /// once both have happened.
-pub struct BarcodeStrips<T> {
+pub(crate) struct BarcodeStrips<T> {
     slots: Vec<StripSlot<T>>,
 }
 
@@ -291,7 +291,7 @@ impl<T> Default for BarcodeStrips<T> {
 impl<T> BarcodeStrips<T> {
     /// Records copying `luma`'s strip, or `None` with every slot in use. Call
     /// [`Self::submitted`] after the submit that carries `encoder`.
-    pub fn record(
+    pub(crate) fn record(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -344,7 +344,7 @@ impl<T> BarcodeStrips<T> {
     }
 
     /// After the submit carrying `slot`'s copy.
-    pub fn submitted(&mut self, slot: usize) {
+    pub(crate) fn submitted(&mut self, slot: usize) {
         let s = &self.slots[slot];
         let mapped = s.mapped.clone();
         s.buffer
@@ -356,24 +356,24 @@ impl<T> BarcodeStrips<T> {
     }
 
     /// The frame was shown: hand `value` back with its strip.
-    pub fn attach(&mut self, slot: usize, value: T) {
+    pub(crate) fn attach(&mut self, slot: usize, value: T) {
         self.slots[slot].value = Some(value);
     }
 
     /// The frame was never shown: drop its strip.
-    pub fn forget(&mut self, slot: usize) {
+    pub(crate) fn forget(&mut self, slot: usize) {
         self.slots[slot].orphan = true;
     }
 
     /// Readings in flight.
-    pub fn busy(&self) -> bool {
+    pub(crate) fn busy(&self) -> bool {
         self.slots.iter().any(|s| s.busy)
     }
 
     /// Every strip that is both read back (or failed to be: then with no
     /// pixels, size 0) and attached, as far as the last `device.poll` knows.
     /// Never waits.
-    pub fn take_ready(&mut self) -> Vec<Strip<T>> {
+    pub(crate) fn take_ready(&mut self) -> Vec<Strip<T>> {
         let mut ready = Vec::new();
         for s in &mut self.slots {
             let state = s.mapped.load(Ordering::Acquire);

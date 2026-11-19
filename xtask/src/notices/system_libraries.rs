@@ -20,7 +20,7 @@ use crate::deps;
 
 /// What Tauri's bundler made: the AppImage's folder, and the AppImage
 /// packed from it (whose runtime the notices name).
-pub struct Bundle<'a> {
+pub(crate) struct Bundle<'a> {
     pub appdir: &'a Path,
     pub appimage: &'a Path,
 }
@@ -58,7 +58,7 @@ const RUNTIME_PARTS: &[(&str, &str)] = &[
     ("zlib", "zlib.LICENSE"),
 ];
 
-pub fn sections(root: &Path, bundle: Option<&Bundle>) -> anyhow::Result<String> {
+pub(super) fn sections(root: &Path, bundle: Option<&Bundle>) -> anyhow::Result<String> {
     let mut out = String::new();
     let Some(bundle) = bundle else {
         section(&mut out, "System libraries");
@@ -146,7 +146,7 @@ fn tooling(root: &Path, appimage: &Path) -> anyhow::Result<String> {
 }
 
 /// The runtime's commit, as it prints it.
-pub fn runtime_version(appimage: &Path) -> anyhow::Result<String> {
+pub(crate) fn runtime_version(appimage: &Path) -> anyhow::Result<String> {
     let output = Command::new(appimage)
         .arg("--appimage-version")
         .output()
@@ -208,7 +208,10 @@ struct Traced {
 /// Each of Ubuntu's source packages the AppImage carries something of, with
 /// its version: what `cargo xtask appimage` fetches from Launchpad to go
 /// beside it (the LGPL's source, from the same place as the binary).
-pub fn source_packages(root: &Path, appdir: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+pub(crate) fn source_packages(
+    root: &Path,
+    appdir: &Path,
+) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(trace(root, appdir)?
         .sources
         .into_iter()

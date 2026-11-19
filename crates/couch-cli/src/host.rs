@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use crate::net_args::{NetArgs, dial_addr};
 
 #[derive(Debug, Clone)]
-pub struct Args {
+pub(crate) struct Args {
     pub source: Source,
     pub fps: u32,
     pub start_mbps: f64,
@@ -86,7 +86,7 @@ struct Viewer {
     _channels: (Datagrams, Streams),
 }
 
-pub async fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) async fn run(args: Args) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.min_mbps <= args.max_mbps,
         "--min-mbps ({}) is above --max-mbps ({})",
@@ -181,7 +181,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         audio: args.audio,
         pacing_trace: args.pacing_trace.clone(),
         unattended: false,
-        // `COUCH_HOST_HDR=0` turns it off for measuring.
         hdr: true,
     };
     stream.set_sound_level(args.audio_level);
@@ -580,6 +579,6 @@ async fn stop_requested() {
 }
 
 /// Default title for `--source window`.
-pub fn default_window() -> String {
+pub(crate) fn default_window() -> String {
     LATENCY_CLOCK_TITLE.to_string()
 }

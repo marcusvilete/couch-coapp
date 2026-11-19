@@ -285,15 +285,6 @@ const MAX_MAPPED: usize = 16;
 /// 8 at 4K (33 MB each). They stay made while the pool lives.
 const MAX_MAPPED_BYTES: usize = 256 << 20;
 
-/// A frame read back is handed out as its staging texture's own mapped
-/// memory, with no memcpy (M12a: at 1080p with 4 encoders busy, the memcpy
-/// was 2.9 ms of a 4.8 ms read-back), unless `COUCH_HOST_MAPPED_FRAMES=0`,
-/// the switch for measuring against the memcpy. Read once.
-fn mapped_frames() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("COUCH_HOST_MAPPED_FRAMES").map_or(true, |v| v.trim() != "0"))
-}
-
 /// A pool's staging textures for frames handed out mapped.
 struct StagingSet {
     free: Mutex<Vec<ID3D11Texture2D>>,
@@ -414,9 +405,10 @@ impl GpuTexture for PooledTexture {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: fills a local description of a live texture.
         unsafe { self.texture.GetDesc(&mut desc) };
-        if mapped_frames()
-            && let Some(staging) = self.mapped.take(&self.device, &desc)
-        {
+        // A frame read back is handed out as its staging texture's own mapped
+        // memory, with no memcpy (M12a: at 1080p with 4 encoders busy, the
+        // memcpy was 2.9 ms of a 4.8 ms read-back).
+        if let Some(staging) = self.mapped.take(&self.device, &desc) {
             return self.download_mapped(staging);
         }
         let mut staging = self.staging.lock().unwrap_or_else(PoisonError::into_inner);
@@ -657,10 +649,6 @@ mod tests {
     #[test]
     #[ignore = "needs a D3D11 device"]
     fn frames_read_back_mapped_give_their_staging_back() {
-        if !mapped_frames() {
-            eprintln!("COUCH_HOST_MAPPED_FRAMES=0 is set: skipped");
-            return;
-        }
         let mut uploader = Uploader::new(64, 32).unwrap();
         let set = uploader.pool.mapped.clone();
         let free = || set.free.lock().unwrap().len();

@@ -10,7 +10,7 @@
 import { MAX_BOARD_PICTURES, MAX_PICTURE_BYTES, MAX_PICTURE_SIDE } from "../bindings/boardRules";
 
 /** A picture made for the board: its id (SHA-256 in hex), bytes in base64. */
-export interface Prepared {
+interface Prepared {
   id: string;
   data: string;
   width: number;

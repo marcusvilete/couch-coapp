@@ -786,10 +786,11 @@ fn said(ctx: &mut Ctx, forwarder: &mut Forwarder, frame: IpcFrame) -> bool {
             }
         }
         ipc::kinds::KEYFRAME_REQUEST => {
+            let Some(reason) = ipc::from_payload::<KeyframeReason>(&frame.payload) else {
+                tracing::warn!("a keyframe request without its reason; ignored");
+                return false;
+            };
             if let Some(link) = &ctx.link {
-                // Why (M12d-2); a window that says nothing lost its decoder.
-                let reason = ipc::from_payload::<KeyframeReason>(&frame.payload)
-                    .unwrap_or(KeyframeReason::DecoderError);
                 link.video.note_decode_error();
                 let epoch = link.video.latest_epoch();
                 ctx.event(WatchEvent::KeyframeNeeded { epoch, reason });

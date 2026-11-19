@@ -14,9 +14,9 @@ use crate::appimage::{git, one_version, workspace_repository};
 
 /// The first line of a release's notes, which the update notice reads
 /// (`couch_proto::RELEASE_WIRE_MARKER`).
-pub use couch_proto::RELEASE_WIRE_MARKER as WIRE_MARKER;
+pub(crate) use couch_proto::RELEASE_WIRE_MARKER as WIRE_MARKER;
 
-pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
+pub(crate) fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut tag = None;
     let mut out = None;
     let mut args = args.iter();

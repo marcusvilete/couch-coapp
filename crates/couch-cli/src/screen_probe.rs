@@ -17,14 +17,14 @@ use couch_platform_win::capture::{CaptureOptions, CaptureSource, FrameOutput, Wg
 
 use crate::stats::Samples;
 
-pub struct ScreenProbe {
+pub(crate) struct ScreenProbe {
     samples: Arc<Mutex<Samples>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl ScreenProbe {
-    pub fn start() -> anyhow::Result<Self> {
+    pub(crate) fn start() -> anyhow::Result<Self> {
         let mut capturer = WgcCapturer::start(
             &CaptureSource::PrimaryMonitor,
             CaptureOptions {
@@ -62,7 +62,7 @@ impl ScreenProbe {
         })
     }
 
-    pub fn finish(mut self) -> Samples {
+    pub(crate) fn finish(mut self) -> Samples {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -98,7 +98,7 @@ fn measure(frame: &BgraFrame, found: &mut Vec<(u32, u32)>) -> Option<f64> {
 
 /// `couch-cli screen-scan`: one screen capture, every barcode on it, and
 /// optionally the raw BGRA frame for inspection.
-pub fn scan_once(out: Option<&std::path::Path>) -> anyhow::Result<()> {
+pub(crate) fn scan_once(out: Option<&std::path::Path>) -> anyhow::Result<()> {
     let mut capturer = WgcCapturer::start(
         &CaptureSource::PrimaryMonitor,
         CaptureOptions {

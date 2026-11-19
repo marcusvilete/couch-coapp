@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use couch_platform_linux::front;
 
-pub fn run(secs: u64) -> anyhow::Result<()> {
+pub(crate) fn run(secs: u64) -> anyhow::Result<()> {
     match front::available() {
         Some(helper) => println!("helper: {helper:?}"),
         None => anyhow::bail!(

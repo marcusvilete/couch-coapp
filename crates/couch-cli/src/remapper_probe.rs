@@ -48,7 +48,13 @@ struct Pad {
     hidden: Option<Hidden>,
 }
 
-pub fn run(secs: u64, hide: bool, sticky: bool, rumble: bool, unmarked: u8) -> anyhow::Result<()> {
+pub(crate) fn run(
+    secs: u64,
+    hide: bool,
+    sticky: bool,
+    rumble: bool,
+    unmarked: u8,
+) -> anyhow::Result<()> {
     let mut stand_ins = Vec::new();
     if unmarked > 0 {
         let factory = VigemPadFactory::connect_unmarked(None).context("connecting to ViGEmBus")?;

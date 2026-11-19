@@ -107,22 +107,17 @@ pub struct ScreenSource {
 pub struct CaptureRequest {
     /// The stream's frame rate.
     pub fps: u32,
-    /// Frames in memory: the capture can't keep them on the GPU, or no
-    /// encoder in this stream reads them there and they aren't read back
-    /// after pacing (M12a: unpaced, or `COUCH_HOST_MEMORY_PACING=0`).
+    /// Frames in memory: the capture can't keep them on the GPU. Otherwise
+    /// frames stay there, paced by the stream (M9d, `couch_media::pacing`),
+    /// so they may come faster than `fps`; those no encoder reads on the GPU
+    /// are read back after pacing (M12a).
     pub in_memory: bool,
-    /// The stream paces frames itself (M9d, `couch_media::pacing`), so
-    /// frames on the GPU may come faster than `fps`. Frames in memory never
-    /// do: each costs a copy. (Since M12a a host whose encoders take frames
-    /// in memory still captures on the GPU, paced, and reads back only the
-    /// frames sent.)
-    pub paced: bool,
     /// Nobody may be at the PC (a stream started from afar): a dialog the
     /// capture brings up is given up after [`UNANSWERED_AFTER`] (M16c).
     pub unattended: bool,
     /// A monitor in HDR is captured in FP16 and converted to SDR with its
-    /// SDR white level (M29; Windows, unless `COUCH_HOST_HDR=0`). Off,
-    /// Windows' own 8-bit capture, which clips HDR content at 80 nits.
+    /// SDR white level (M29; Windows). Off, Windows' own 8-bit capture,
+    /// which clips HDR content at 80 nits.
     pub hdr: bool,
 }
 

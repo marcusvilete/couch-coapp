@@ -31,7 +31,7 @@ function Svg({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function PenIcon() {
+function PenIcon() {
   return (
     <Svg>
       <path

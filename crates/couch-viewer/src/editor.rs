@@ -34,7 +34,7 @@ use couch_proto::{
 use crate::board::BoardView;
 
 /// Batches go out at most this often: the host takes 40 a second.
-pub const BATCH_EVERY: Duration = Duration::from_millis(30);
+pub(crate) const BATCH_EVERY: Duration = Duration::from_millis(30);
 /// Laser points at most this often (the host takes 60 marks a second).
 const LASER_EVERY: Duration = Duration::from_millis(20);
 /// Pings at most this often.
@@ -50,11 +50,11 @@ const NUDGE: i32 = 131;
 const PASTE_STEP: i32 = 1_300;
 /// Where pasted text lands without a pointer over the picture.
 const TEXT_AT: Point = Point::new(6_554, 6_554);
-pub const TOO_MANY: &str = "You've drawn all you may: erase some first";
-pub const TOO_LONG: &str = "A text box holds at most 500 characters and 50 lines";
+pub(crate) const TOO_MANY: &str = "You've drawn all you may: erase some first";
+pub(crate) const TOO_LONG: &str = "A text box holds at most 500 characters and 50 lines";
 /// A picture's resize handles: how near a corner a press takes it, in
 /// picture heights (M27e).
-pub const HANDLE: f32 = 0.018;
+pub(crate) const HANDLE: f32 = 0.018;
 /// A picture pasted fits this share of the picture's height and width.
 const PICTURE_FITS: f32 = 0.4;
 /// A picture resized is at least this tall and wide, in picture heights.
@@ -63,14 +63,14 @@ const PICTURE_LEAST: f32 = 0.03;
 /// How wide a line of text is, in ems of its font: a text box is that times
 /// its size wide. The window measures with its own font; until it says, and
 /// in the shared cases, [`Measure::estimate`] (half an em a character).
-pub struct Measure(Box<dyn Fn(&str) -> f32>);
+pub(crate) struct Measure(Box<dyn Fn(&str) -> f32>);
 
 impl Measure {
-    pub fn new(measure: impl Fn(&str) -> f32 + 'static) -> Self {
+    pub(crate) fn new(measure: impl Fn(&str) -> f32 + 'static) -> Self {
         Self(Box::new(measure))
     }
 
-    pub fn estimate() -> Self {
+    pub(crate) fn estimate() -> Self {
         Self::new(|line| line.chars().count() as f32 * 0.5)
     }
 
@@ -90,7 +90,7 @@ impl fmt::Debug for Measure {
 /// the selection; with Ctrl (`word`), as text fields do: Left and Right by
 /// word, Backspace and Delete a word, Home and End the box's start and end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextKey {
+pub(crate) enum TextKey {
     Backspace,
     Delete,
     Left,
@@ -156,7 +156,7 @@ impl Typing {
 /// top and bottom, the selection's boxes, one per line (picture
 /// coordinates), and its size (picture heights).
 #[derive(Debug, Clone, PartialEq)]
-pub struct TextCursor {
+pub(crate) struct TextCursor {
     pub corners: (Point, Point),
     pub caret: (Point, Point),
     pub selection: Vec<(Point, Point)>,
@@ -167,7 +167,7 @@ pub struct TextCursor {
 /// How the toolbar's one fade button steps (the author's choice, M27b):
 /// through "stays", then each fade time offered, shortest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FadeStep {
+pub(crate) enum FadeStep {
     /// A click: on round, from the longest back to "stays".
     Next,
     /// The wheel up: longer, stopping at the longest.
@@ -178,7 +178,7 @@ pub enum FadeStep {
 
 /// What a key did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Keyed {
+pub(crate) enum Keyed {
     Done,
     /// Esc with nothing left to leave: drawing mode ends.
     LeaveDrawing,
@@ -245,7 +245,7 @@ enum Out {
 }
 
 #[derive(Debug)]
-pub struct Editor {
+pub(crate) struct Editor {
     me: MemberId,
     pub tool: DrawTool,
     /// The tool before Esc went to Select: drawing mode starts with it.
@@ -283,7 +283,7 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(me: MemberId) -> Self {
+    pub(crate) fn new(me: MemberId) -> Self {
         Self {
             me,
             tool: DrawTool::Pen,
@@ -312,23 +312,23 @@ impl Editor {
         }
     }
 
-    pub fn me(&self) -> MemberId {
+    pub(crate) fn me(&self) -> MemberId {
         self.me
     }
 
     /// The picture's shape, as shown.
-    pub fn set_aspect(&mut self, width: u32, height: u32) {
+    pub(crate) fn set_aspect(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             self.aspect = width as f32 / height as f32;
         }
     }
 
-    pub fn selection(&self) -> &BTreeSet<u32> {
+    pub(crate) fn selection(&self) -> &BTreeSet<u32> {
         &self.selection
     }
 
     /// The marquee being dragged, corner to corner.
-    pub fn marquee(&self) -> Option<(Point, Point)> {
+    pub(crate) fn marquee(&self) -> Option<(Point, Point)> {
         match &self.gesture {
             Some(Gesture::Marquee { from, to, .. }) => Some((*from, *to)),
             _ => None,
@@ -336,22 +336,22 @@ impl Editor {
     }
 
     /// Something to tell the user, once.
-    pub fn take_note(&mut self) -> Option<&'static str> {
+    pub(crate) fn take_note(&mut self) -> Option<&'static str> {
         self.note.take()
     }
 
     /// How the window's font measures text, from now on.
-    pub fn set_measure(&mut self, measure: Measure) {
+    pub(crate) fn set_measure(&mut self, measure: Measure) {
         self.measure = measure;
     }
 
     /// A text box is being typed in: the window's keys and text are its.
-    pub fn typing(&self) -> bool {
+    pub(crate) fn typing(&self) -> bool {
         self.typing.is_some()
     }
 
     /// The text box being typed in, for painting its frame and caret.
-    pub fn text_cursor(&self) -> Option<TextCursor> {
+    pub(crate) fn text_cursor(&self) -> Option<TextCursor> {
         let t = self.typing.as_ref()?;
         let size = text_size(t.look.width);
         let (line, col) = line_col(&t.text, t.caret);
@@ -404,20 +404,20 @@ impl Editor {
     }
 
     /// Drawing mode begins: with the tool it last drew with.
-    pub fn begin(&mut self) {
+    pub(crate) fn begin(&mut self) {
         if self.tool == DrawTool::Select && self.selection.is_empty() {
             self.tool = self.last_tool;
         }
     }
 
     /// Drawing mode ends: whatever was half done is finished or dropped.
-    pub fn end(&mut self, board: &mut BoardView, now: Instant) {
+    pub(crate) fn end(&mut self, board: &mut BoardView, now: Instant) {
         self.release(None, false, board, now);
         self.finish_typing(board, now);
         self.selection.clear();
     }
 
-    pub fn set_tool(&mut self, tool: DrawTool, board: &mut BoardView, now: Instant) {
+    pub(crate) fn set_tool(&mut self, tool: DrawTool, board: &mut BoardView, now: Instant) {
         self.release(None, false, board, now);
         self.finish_typing(board, now);
         if tool != DrawTool::Select {
@@ -428,7 +428,7 @@ impl Editor {
     }
 
     /// A colour, width or fading picked: what is selected takes it too.
-    pub fn set_style(
+    pub(crate) fn set_style(
         &mut self,
         colour: Option<u8>,
         width: Option<u8>,
@@ -481,7 +481,7 @@ impl Editor {
     /// The fade button stepped: "stays", or one of `FADE_STAYS`, as
     /// [`Self::set_style`] and [`Self::set_stay`] would make it (what is
     /// selected takes it too).
-    pub fn step_fade(&mut self, step: FadeStep, board: &mut BoardView, now: Instant) {
+    pub(crate) fn step_fade(&mut self, step: FadeStep, board: &mut BoardView, now: Instant) {
         // 0 stays; 1.. the stays offered, in order.
         let at = if self.fades {
             FADE_STAYS
@@ -509,7 +509,7 @@ impl Editor {
 
     /// How long fading elements stay before they fade (one of
     /// `FADE_STAYS`): fading turns on, and what is selected takes both.
-    pub fn set_stay(&mut self, stay: u8, board: &mut BoardView, now: Instant) {
+    pub(crate) fn set_stay(&mut self, stay: u8, board: &mut BoardView, now: Instant) {
         if !FADE_STAYS.contains(&stay) {
             return;
         }
@@ -535,7 +535,7 @@ impl Editor {
     // ---- The pointer ----
 
     /// A press of the main button at `at` (Shift held or not).
-    pub fn press(&mut self, at: Point, shift: bool, board: &mut BoardView, now: Instant) {
+    pub(crate) fn press(&mut self, at: Point, shift: bool, board: &mut BoardView, now: Instant) {
         self.release(None, false, board, now);
         if self.tool == DrawTool::Text {
             self.press_text(at, shift, board, now);
@@ -631,7 +631,7 @@ impl Editor {
     }
 
     /// The pointer moved to `at` with the main button down.
-    pub fn drag(&mut self, at: Point, shift: bool, board: &mut BoardView, now: Instant) {
+    pub(crate) fn drag(&mut self, at: Point, shift: bool, board: &mut BoardView, now: Instant) {
         let Some(mut gesture) = self.gesture.take() else {
             return;
         };
@@ -730,7 +730,13 @@ impl Editor {
 
     /// The main button let go (at `at`, if known), or the gesture ended
     /// another way (`None`: drawing mode ending, a tool picked).
-    pub fn release(&mut self, at: Option<Point>, shift: bool, board: &mut BoardView, now: Instant) {
+    pub(crate) fn release(
+        &mut self,
+        at: Option<Point>,
+        shift: bool,
+        board: &mut BoardView,
+        now: Instant,
+    ) {
         let Some(gesture) = self.gesture.take() else {
             return;
         };
@@ -847,7 +853,7 @@ impl Editor {
     /// typed in, the word there is selected; with Select, on our text box,
     /// typing in it, the caret where it was. Other tools drew with the
     /// clicks; the Text tool edits on one.
-    pub fn double_click(&mut self, at: Point, board: &mut BoardView, now: Instant) {
+    pub(crate) fn double_click(&mut self, at: Point, board: &mut BoardView, now: Instant) {
         if let Some(cursor) = self.text_cursor()
             && self.near_box(cursor.corners, at)
             && let Some(caret) = self.typing.as_ref().map(|t| self.caret_at(t, at))
@@ -877,7 +883,7 @@ impl Editor {
     /// Text typed (or composed by an input method) into the box being typed
     /// in, at the caret: no control characters but line breaks, a tab as
     /// spaces, and only as much as the box holds (characters and lines).
-    pub fn type_text(&mut self, text: &str, board: &mut BoardView, now: Instant) {
+    pub(crate) fn type_text(&mut self, text: &str, board: &mut BoardView, now: Instant) {
         let Some(t) = &mut self.typing else {
             return;
         };
@@ -922,7 +928,7 @@ impl Editor {
 
     /// A key while typing: with `shift` a move extends the selection, with
     /// `word` (Ctrl) it goes by word or to the box's ends.
-    pub fn text_key(
+    pub(crate) fn text_key(
         &mut self,
         key: TextKey,
         shift: bool,
@@ -1035,14 +1041,14 @@ impl Editor {
     }
 
     /// The selected text of the box being typed in, for Ctrl+C there.
-    pub fn copy_text(&self) -> Option<String> {
+    pub(crate) fn copy_text(&self) -> Option<String> {
         let t = self.typing.as_ref()?;
         let (lo, hi) = t.range()?;
         Some(t.text.chars().skip(lo).take(hi - lo).collect())
     }
 
     /// Ctrl+X in the box being typed in: its selected text, taken out.
-    pub fn cut_text(&mut self, board: &mut BoardView, now: Instant) -> Option<String> {
+    pub(crate) fn cut_text(&mut self, board: &mut BoardView, now: Instant) -> Option<String> {
         let text = self.copy_text()?;
         self.text_key(TextKey::Delete, false, false, board, now);
         Some(text)
@@ -1053,7 +1059,7 @@ impl Editor {
     /// so a paste can tell our copy from text copied elsewhere since.
     /// Nothing selected, nothing is copied (`None`): the clipboard keeps
     /// what it had.
-    pub fn copy(&mut self, board: &BoardView) -> Option<String> {
+    pub(crate) fn copy(&mut self, board: &BoardView) -> Option<String> {
         if self.selection.is_empty() {
             return None;
         }
@@ -1073,7 +1079,7 @@ impl Editor {
     /// (if over the picture). While typing, the text goes into the box.
     /// Otherwise text copied elsewhere since our last copy becomes a new
     /// text box there; else what we copied is pasted, as ever.
-    pub fn paste(
+    pub(crate) fn paste(
         &mut self,
         system: Option<&str>,
         at: Option<Point>,
@@ -1096,7 +1102,7 @@ impl Editor {
     }
 
     /// A middle click: a ping where it was.
-    pub fn ping(&mut self, at: Point, board: &mut BoardView, now: Instant) {
+    pub(crate) fn ping(&mut self, at: Point, board: &mut BoardView, now: Instant) {
         if self
             .pinged_at
             .is_some_and(|t| now.saturating_duration_since(t) < PING_EVERY)
@@ -1109,7 +1115,7 @@ impl Editor {
 
     // ---- Keys ----
 
-    pub fn key(
+    pub(crate) fn key(
         &mut self,
         action: DrawAction,
         shift: bool,
@@ -1192,7 +1198,7 @@ impl Editor {
 
     /// The host cleared our elements, or everyone's: what it cleared is
     /// gone from the history, and anything half drawn stops.
-    pub fn cleared(&mut self, board: &BoardView) {
+    pub(crate) fn cleared(&mut self, board: &BoardView) {
         self.undo.clear();
         self.redo.clear();
         // Made before the clear: the host drops it, and the clear took it
@@ -1212,7 +1218,7 @@ impl Editor {
     /// started again after a crash mid-stroke gets that stroke back open,
     /// and nobody else would ever finish it (a fading one would never fade).
     /// After a clear of ours (a snapshot among them).
-    pub fn finish_strays(&mut self, board: &mut BoardView, now: Instant) {
+    pub(crate) fn finish_strays(&mut self, board: &mut BoardView, now: Instant) {
         let drawing = match &self.gesture {
             Some(Gesture::Stroke { id, .. }) => Some(*id),
             _ => self.typing.as_ref().map(|t| t.id),
@@ -1240,7 +1246,7 @@ impl Editor {
 
     /// After any news: our numbers stay new, and the selection and a
     /// gesture forget what is gone.
-    pub fn sync(&mut self, board: &BoardView) {
+    pub(crate) fn sync(&mut self, board: &BoardView) {
         self.generation = board.generation();
         let most = board.of(self.me).map(|s| s.element.id).max().unwrap_or(0);
         self.next_id = self.next_id.max(most.saturating_add(1));
@@ -1266,7 +1272,7 @@ impl Editor {
 
     /// The next batch to send, if one is due (at most every
     /// [`BATCH_EVERY`]), with the generation it was made in.
-    pub fn take_batch(&mut self, now: Instant) -> Option<(u32, Vec<BoardOp>)> {
+    pub(crate) fn take_batch(&mut self, now: Instant) -> Option<(u32, Vec<BoardOp>)> {
         let early = self
             .sent_at
             .is_some_and(|t| now.saturating_duration_since(t) < BATCH_EVERY);
@@ -1298,7 +1304,7 @@ impl Editor {
     /// The next picture to send (M27e), with the generation it was made in,
     /// once every operation before it has gone: its bytes are the window's,
     /// by its id.
-    pub fn take_picture(&mut self) -> Option<(u32, Element)> {
+    pub(crate) fn take_picture(&mut self) -> Option<(u32, Element)> {
         if !matches!(self.outbox.first(), Some(Out::Picture(_))) {
             return None;
         }
@@ -1310,7 +1316,7 @@ impl Editor {
 
     /// Whether operations wait to go out.
     #[cfg(test)]
-    pub fn pending(&self) -> bool {
+    pub(crate) fn pending(&self) -> bool {
         !self.outbox.is_empty()
     }
 
@@ -1832,7 +1838,7 @@ impl Editor {
 
     /// Whether `at` touches `e`: near its line, or, picking, inside a box or
     /// an ellipse.
-    pub fn touches(&self, e: &Element, at: Point, picking: bool) -> bool {
+    pub(crate) fn touches(&self, e: &Element, at: Point, picking: bool) -> bool {
         let reach = TOUCH + line_width(e.kind, e.width) / 2.0;
         let p = self.uniform(at);
         let pts: Vec<(f32, f32)> = e.points.iter().map(|q| self.uniform(*q)).collect();
@@ -1887,7 +1893,7 @@ impl Editor {
     /// fitting [`PICTURE_FITS`] of the picture each way, finished and
     /// selected. Its bytes are the window's, by `picture`.
     #[allow(clippy::too_many_arguments)]
-    pub fn paste_picture(
+    pub(crate) fn paste_picture(
         &mut self,
         picture: PictureId,
         width: u32,
@@ -1940,7 +1946,7 @@ impl Editor {
     /// rectangle's or an ellipse's corners (top-left, top-right, bottom-left,
     /// bottom-right), a line's or an arrow's two ends; none for anything else
     /// (a stroke, a text box) or a selection of several.
-    pub fn handles(&self, board: &BoardView) -> Vec<Point> {
+    pub(crate) fn handles(&self, board: &BoardView) -> Vec<Point> {
         if self.selection.len() != 1 {
             return Vec::new();
         }
@@ -2204,7 +2210,7 @@ fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
 }
 
 /// An element's box, corner to corner, in picture coordinates.
-pub fn bounds(e: &Element) -> (Point, Point) {
+pub(crate) fn bounds(e: &Element) -> (Point, Point) {
     let xs = e.points.iter().map(|p| p.x);
     let ys = e.points.iter().map(|p| p.y);
     (

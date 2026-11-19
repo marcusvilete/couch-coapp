@@ -16,13 +16,13 @@ use couch_proto::media::FrameRef;
 const KEPT: usize = 1024;
 
 #[derive(Debug, Default)]
-pub struct Chain {
+pub(crate) struct Chain {
     decoded: VecDeque<FrameRef>,
 }
 
 impl Chain {
     /// The decoder decoded `frame` cleanly.
-    pub fn decoded(&mut self, frame: FrameRef, keyframe: bool) {
+    pub(crate) fn decoded(&mut self, frame: FrameRef, keyframe: bool) {
         if keyframe {
             self.decoded.clear();
         }
@@ -34,18 +34,18 @@ impl Chain {
 
     /// The decoder broke, or was replaced: it holds nothing an epoch could
     /// continue from.
-    pub fn broke(&mut self) {
+    pub(crate) fn broke(&mut self) {
         self.decoded.clear();
     }
 
     /// Whether an epoch may continue from `frame` here.
-    pub fn holds(&self, frame: FrameRef) -> bool {
+    pub(crate) fn holds(&self, frame: FrameRef) -> bool {
         self.decoded.contains(&frame)
     }
 
     /// The last frame decoded, which a window that fell behind asks to
     /// continue from.
-    pub fn last(&self) -> Option<FrameRef> {
+    pub(crate) fn last(&self) -> Option<FrameRef> {
         self.decoded.back().copied()
     }
 }

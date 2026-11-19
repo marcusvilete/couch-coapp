@@ -22,7 +22,7 @@ use couch_platform_win::{
     virtual_pads, xinput_slots,
 };
 
-pub fn run(ours: u8, unmarked: u8, settle: u64, hold: u64) -> anyhow::Result<()> {
+pub(crate) fn run(ours: u8, unmarked: u8, settle: u64, hold: u64) -> anyhow::Result<()> {
     let mut pads = Vec::new();
     if ours > 0 {
         let factory = VigemPadFactory::connect(None).context("connecting to ViGEmBus")?;

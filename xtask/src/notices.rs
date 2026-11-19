@@ -28,12 +28,12 @@ use crate::deps;
 
 mod system_libraries;
 
-pub use system_libraries::{Bundle, runtime_version, source_packages};
+pub(crate) use system_libraries::{Bundle, runtime_version, source_packages};
 
-pub const FILE_NAME: &str = "THIRD-PARTY-NOTICES.txt";
+pub(crate) const FILE_NAME: &str = "THIRD-PARTY-NOTICES.txt";
 
 /// Where `notices` writes; `stage-dlls` copies it next to the built app.
-pub fn output(root: &Path) -> PathBuf {
+pub(crate) fn output(root: &Path) -> PathBuf {
     deps::target_dir(root).join(FILE_NAME)
 }
 
@@ -101,7 +101,7 @@ struct Group {
 }
 
 /// What the app is handed out as: the notices and SOURCES.txt say so.
-pub const PACKAGE: &str = if cfg!(windows) {
+pub(crate) const PACKAGE: &str = if cfg!(windows) {
     "installer"
 } else {
     "AppImage"
@@ -111,7 +111,7 @@ pub const PACKAGE: &str = if cfg!(windows) {
 /// runtime and system libraries the notices then list (`cargo xtask
 /// appimage`). Without it (a build for this PC alone) they say none is
 /// bundled.
-pub fn generate(root: &Path, bundle: Option<&Bundle>) -> anyhow::Result<()> {
+pub(crate) fn generate(root: &Path, bundle: Option<&Bundle>) -> anyhow::Result<()> {
     let crates = crate_licences(root)?;
     let packages = npm_licences(root)?;
     let mut out = header(root)?;
