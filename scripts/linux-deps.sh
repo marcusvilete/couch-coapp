@@ -44,6 +44,12 @@ packages=(
   libpipewire-0.3-dev libpulse-dev libasound2-dev
   libudev-dev libdbus-1-dev libibus-1.0-dev libusb-1.0-0-dev
 )
+# Fetched first, showing each package, then installed from what was
+# fetched: a log then tells a slow mirror from a slow install (CI timed out
+# here three times in a row on 2026-11-19, saying neither). A try cut short
+# leaves its partial downloads, which the next one resumes.
+attempt 300 "downloading the packages" \
+  apt-get "${apt_options[@]}" install -y -q --download-only --no-install-recommends "${packages[@]}"
 attempt 300 "installing the packages" \
   apt-get "${apt_options[@]}" install -y -qq --no-install-recommends "${packages[@]}"
 echo "linux-deps: $(date -u +%T) done"
